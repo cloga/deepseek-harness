@@ -86,4 +86,6 @@ export interface DiscoveredModelView {
   contextWindow?: number
   /** Maximum output tokens, when disclosed. */
   maxTokens?: number
+  /** Selectable reasoning levels with the values sent on the provider wire. */
+  reasoningEfforts?: Record<string, string | null>
 }

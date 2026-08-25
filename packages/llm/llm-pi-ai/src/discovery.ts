@@ -26,6 +26,7 @@ import { INVALID_CREDENTIAL_CODE, LlmError, normalizeApiKey } from '@deepseek-ai
 import type { LlmDiscoveredModel, LlmModelDiscoveryRequest } from '@deepseek-ai/dsh-llm'
 import { attributionHeaders } from '@deepseek-ai/dsh-llm'
 import { catalogModels } from './catalog.ts'
+import type { PiAiReasoningEfforts } from './catalog.ts'
 
 /**
  * Protocols whose model listing this module can read: the two that speak
@@ -55,10 +56,26 @@ interface ListingEntry {
   /** Common gateway extensions; absent from the official listings. */
   name?: unknown
   display_name?: unknown
+  model_picker_enabled?: unknown
+  policy?: {
+    state?: unknown
+  } | null
+  supported_endpoints?: unknown
   context_window?: unknown
   context_length?: unknown
   max_tokens?: unknown
   max_output_tokens?: unknown
+  capabilities?: {
+    type?: unknown
+    limits?: {
+      max_context_window_tokens?: unknown
+      max_output_tokens?: unknown
+    } | null
+    supports?: {
+      reasoning_effort?: unknown
+      tool_calls?: unknown
+    } | null
+  } | null
 }
 
 /** A positive integer field of a listing entry, or `undefined` when absent or unusable. */
@@ -75,6 +92,47 @@ function label(...candidates: readonly unknown[]): string | undefined {
     if (typeof candidate === 'string' && candidate.length > 0) return candidate
   }
   return undefined
+}
+
+/** Whether optional gateway metadata explicitly rules an entry out for this protocol. */
+function excluded(entry: ListingEntry, api: string): boolean {
+  const capabilities = entry.capabilities
+  if (entry.model_picker_enabled === false || entry.policy?.state === 'disabled') return true
+  if (capabilities?.type !== undefined && capabilities.type !== 'chat') return true
+  if (capabilities?.supports?.tool_calls === false) return true
+  if (entry.supported_endpoints !== undefined) {
+    if (!Array.isArray(entry.supported_endpoints)) return false
+    const endpoint = api === 'openai-responses' ? '/responses' : '/chat/completions'
+    if (!entry.supported_endpoints.includes(endpoint)) return true
+  }
+  return false
+}
+
+/**
+ * Copilot-style effort ids become pi-ai profile keys with the same wire
+ * spelling. `none` is the provider spelling for the Harness `off` level.
+ */
+function reasoningEfforts(entry: ListingEntry): PiAiReasoningEfforts | undefined {
+  const advertised = entry.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(advertised)) return undefined
+  const resolved: PiAiReasoningEfforts = {}
+  for (const effort of advertised) {
+    if (typeof effort !== 'string') continue
+    if (effort === 'none') {
+      resolved.off = effort
+    } else if (
+      effort === 'off'
+      || effort === 'minimal'
+      || effort === 'low'
+      || effort === 'medium'
+      || effort === 'high'
+      || effort === 'xhigh'
+      || effort === 'max'
+    ) {
+      resolved[effort] = effort
+    }
+  }
+  return Object.keys(resolved).some(effort => effort !== 'off') ? resolved : undefined
 }
 
 /**
@@ -135,7 +193,7 @@ async function readBounded(response: Response, url: string): Promise<string> {
  * skipped rather than failing the whole interrogation: a single malformed row
  * should not deny the user the rest of a working endpoint's catalog.
  */
-function readListing(body: unknown): LlmDiscoveredModel[] {
+function readListing(body: unknown, api: string): LlmDiscoveredModel[] {
   const data = (body as { data?: unknown } | null)?.data
   if (!Array.isArray(data)) {
     throw new LlmError(
@@ -147,15 +205,25 @@ function readListing(body: unknown): LlmDiscoveredModel[] {
   for (const raw of data) {
     const entry = raw as ListingEntry | null
     const id = label(entry?.id)
-    if (id === undefined) continue
-    const name = label(entry?.name, entry?.display_name)
-    const contextWindow = capacity(entry?.context_window, entry?.context_length)
-    const maxTokens = capacity(entry?.max_output_tokens, entry?.max_tokens)
+    if (id === undefined || entry === null || excluded(entry, api)) continue
+    const name = label(entry.name, entry.display_name)
+    const contextWindow = capacity(
+      entry.capabilities?.limits?.max_context_window_tokens,
+      entry.context_window,
+      entry.context_length,
+    )
+    const maxTokens = capacity(
+      entry.capabilities?.limits?.max_output_tokens,
+      entry.max_output_tokens,
+      entry.max_tokens,
+    )
+    const discoveredReasoningEfforts = reasoningEfforts(entry)
     models.push({
       id,
       ...name === undefined ? {} : { name },
       ...contextWindow === undefined ? {} : { contextWindow },
       ...maxTokens === undefined ? {} : { maxTokens },
+      ...discoveredReasoningEfforts === undefined ? {} : { reasoningEfforts: discoveredReasoningEfforts },
     })
   }
   return models
@@ -280,5 +348,5 @@ export async function discoverModels(
   } catch (error: unknown) {
     throw new LlmError(`${url} did not answer with JSON`, 'DISCOVERY_FAILED', { cause: error })
   }
-  return readListing(body)
+  return readListing(body, api)
 }
