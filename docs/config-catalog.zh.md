@@ -3166,6 +3166,30 @@ export interface Config {
 
 来源：[`packages/web/web-search-exa/src/index.ts:38`](../packages/web/web-search-exa/src/index.ts)
 
+<a id="deepseek-aidsh-web-search-openai-responses"></a>
+
+## `@deepseek-ai/dsh-web-search-openai-responses`
+
+需要：`web`
+
+```ts config-catalog
+/** Plugin configuration; defaults are resolved by the schema and by direct programmatic use. */
+export interface Config {
+  /** Literal API key; prefer {@link apiKeyEnv} so no secret enters configuration files. */
+  apiKey?: string
+  /** Credential reference resolved for each search. */
+  apiKeyEnv?: string
+  /** Absolute HTTP(S) endpoint base without userinfo, query, or fragment; `/responses` is appended. */
+  baseURL?: string
+  /** Responses-compatible model name. */
+  model?: string
+  /** Positive generated-output token bound sent as `max_output_tokens`. */
+  maxOutputTokens?: number
+}
+```
+
+来源：[`packages/web/web-search-openai-responses/src/index.ts:47`](../packages/web/web-search-openai-responses/src/index.ts)
+
 <a id="deepseek-aidsh-web-search-perplexity"></a>
 
 ## `@deepseek-ai/dsh-web-search-perplexity`
