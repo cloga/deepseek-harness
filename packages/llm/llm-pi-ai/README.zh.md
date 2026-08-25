@@ -81,7 +81,7 @@
 
 ## Catalog 解析
 
-profile 的 `models` 列表是*替换*该路由已安装 catalog，而不是扩充它；省略它（或留空）则原样服务该 catalog。每个条目都会从同 `id` 的已安装模型继承自身未设置的字段，因此把 catalog 路由收窄到两个模型、更正某个容量，或加入一个比已安装 catalog 更新的模型，都是一行编辑——但一旦声明了 `models` 列表，该路由要继续服务的每个模型就都必须出现在其中，条目哪怕只写一个 `id` 也足够。可配置的条目字段是 `id`、`name`、`contextWindow`、`maxTokens`、`reasoningEfforts` 与 `compat`。定价与输入模态没有 harness 消费方，因此沿用已安装条目或直接缺席。
+profile 的 `models` 列表是*替换*该路由已安装 catalog，而不是扩充它；省略它（或留空）则原样服务该 catalog。每个条目都会从同 `id` 的已安装模型继承自身未设置的字段，因此把 catalog 路由收窄到两个模型、更正某个容量，或加入一个比已安装 catalog 更新的模型，都是一行编辑——但一旦声明了 `models` 列表，该路由要继续服务的每个模型就都必须出现在其中，条目哪怕只写一个 `id` 也足够。可配置的条目字段是 `id`、`name`、`contextWindow`、`maxTokens`、`input`、`reasoningEfforts` 与 `compat`。定价没有 harness 消费方，因此沿用已安装条目或直接缺席。
 
 `modelOverrides` 无需这份代价就能就地重塑单个已安装 catalog 模型：每个键是一个 catalog 模型 id，每个值可写 `models` 条目接受的同一批字段，只是 id 落在键上，而 catalog 的其余部分原样继续服务——「改一个模型、其余三十七个原样保留」只是一次三行编辑。一条覆盖会成为该 catalog 条目的配置，因此容量、档位与 compat 沿与 `models` 条目相同的路径解析，携带相同的诊断与相同的请求默认值语义。覆盖只在正服务自身 catalog 的 catalog 路由上才有意义：与 `models` 列表并存的一份（该列表本就替换了 catalog）、落在手工声明路由上的一份（其模型已在 `models` 中完整写出），或点名了 catalog 未描述模型的一份，都会被拒绝而非跳过，因为一个静默保持原样的模型，就是一个否则要有人费力追查的笔误。
 
@@ -103,7 +103,7 @@ pi-ai 依据提供方 id 与 baseURL 决定每个请求的形状：系统提示�
 
 请求模态的解析顺序是：条目的 `input` → 已安装 catalog 条目 → 路由的 `defaultInput`（默认 `[text]`），与上面两个容量字段的顺序和「回退值」定位完全一致。因此 catalog 模型保留 catalog 为它记录的模态，更窄的路由默认值也绝不会把它剥掉；而**未被 catalog 描述的**模型全都接受图片的网关，只需在路由上写一次 `[text, image]`，不必逐条目写。条目的空列表与缺省同义——它描述的是一个什么都不接受的模型，因此不作答，解析继续往下走——这正是当 `models` 条目点到某个 catalog 模型却不声明模态时，该模型仍保留 catalog 自有模态的原因。路由的那个则不得为空，因为它下面已经没有可以代为作答的层级。
 
-`[text]` 是「尚未声明」，而不是对端点的猜测——这也是为什么这里的回退值取保守值，而两个容量回退值只是取一个说得过去的值。这里没有任何环节会去询问网关实际接受什么，而两种猜错的代价并不对等：模态中不含图片时，Harness 会在图片被附加之前就拒绝，因此少声明的代价是一次点名该模型的拒绝；而多声明会接纳一张图片、再由提供方在轮次中途拒绝——此时消息已经持久化，会话便会不断重复一个不可能成功的请求。
+`[text]` 是「尚未声明」，而不是对端点的猜测——这也是为什么这里的回退值取保守值，而两个容量回退值只是取一个说得过去的值。发现只在可选网关元数据明确报告 `capabilities.supports.vision: true` 或非空的 `capabilities.limits.vision` 对象时采纳图片输入；false 或缺失元数据不产生 `input`，继续使用该回退值。两种猜错的代价并不对等：模态中不含图片时，Harness 会在图片被附加之前就拒绝，因此少声明的代价是一次点名该模型的拒绝；而多声明会接纳一张图片、再由提供方在轮次中途拒绝——此时消息已经持久化，会话便会不断重复一个不可能成功的请求。
 
 路由完全无法服务时解析仍会失败得响亮，并点名出问题的路由与模型：catalog 未提供的路由需要 `api`、`baseURL`，以及一个由唯一标识的模型组成的非空 `models` 列表。该解析在分节 schema 内部运行，因此无法服务的 profile 会在**写入之处**被拒绝——`settings.mutate` 以 `settings-rejected` 点名路由与模型——而不是先存下来、再悄悄让该 namespace 下每条路由失效。对于已经存下的、在此失败的分节，settings seam 会保留该 namespace 上一份可用值，因此这不会把部署卡死。`api` 接受 `supportedProtocols()` 中的协议，且仅在 catalog 无法提供协议时才需要：catalog 中不存在的模型会继承其同门模型一致同意的协议，因此向单协议 catalog 路由添加模型无需重述任何内容。
 
@@ -138,7 +138,7 @@ pi-ai 依据提供方 id 与 baseURL 决定每个请求的形状：系统提示�
 
 询问只读 `openai-completions` 与 `openai-responses`，它们「`GET /models` + bearer 认证」的形状是网关、自建服务与官方端点三方一致认可的那一种。Azure 尽管出身 OpenAI 也被排除——它用 `api-key` 标头认证并要求 `api-version` 查询参数——Codex 则走 OAuth；其余协议一律以 `DISCOVERY_UNSUPPORTED` 回答，让界面回退到手工填写，而不是把认证失败报成一个没有模型的提供方。`baseURL` 按前缀而非待解析 URL 处理，因此 `https://gateway.example/openai/v1` 这类部署路径会保留其路径段。
 
-标准列表可以只公布 id；网关提供 `context_window`/`context_length` 与 `max_output_tokens`/`max_tokens` 时会被读取。Copilot 风格元数据会补充更严格的事实，但绝不成为必填项：显式的 `model_picker_enabled: false`、`policy.state: disabled`、非 `chat` 的 `capabilities.type`、`capabilities.supports.tool_calls: false`，或排除了所选 OpenAI 协议的 `supported_endpoints` 列表都会移除该条目；字段缺席则条目仍可被发现。`capabilities.limits.max_context_window_tokens` 与 `max_output_tokens` 优先于平铺别名，可识别的 `capabilities.supports.reasoning_effort` 值会成为同名映射的 `reasoningEfforts`（`none` 映射到 Harness 的 `off` 键）。没有可用 id 的条目会被跳过，而不会让整份列表失败。回复在四兆字节上限下读取，且上限落在实际收到的字节上——端点是用户自己填的 URL，因此会先看声明长度，但绝不把它当作边界。端点不可达、凭据被拒、响应非 JSON、以及响应没有 `data` 数组，都会以 `DISCOVERY_FAILED` 失败，消息点名端点；仅当 401 或 403 时才点名凭据。读取响应体期间被取消会呈现为 `ABORTED`，与请求发出之前被取消一致。
+标准列表可以只公布 id；网关提供 `context_window`/`context_length` 与 `max_output_tokens`/`max_tokens` 时会被读取。Copilot 风格元数据会补充更严格的事实，但绝不成为必填项：显式的 `model_picker_enabled: false`、`policy.state: disabled`、非 `chat` 的 `capabilities.type`、`capabilities.supports.tool_calls: false`，或排除了所选 OpenAI 协议的 `supported_endpoints` 列表都会移除该条目；字段缺席则条目仍可被发现。`capabilities.limits.max_context_window_tokens` 与 `max_output_tokens` 优先于平铺别名，可识别的 `capabilities.supports.reasoning_effort` 值会成为同名映射的 `reasoningEfforts`（`none` 映射到 Harness 的 `off` 键），`capabilities.supports.vision: true` 或非空的 `capabilities.limits.vision` 对象则产生 `input: [text, image]`。false 或缺失的视觉元数据不产生 `input`，继续使用纯文本回退值。没有可用 id 的条目会被跳过，而不会让整份列表失败。回复在四兆字节上限下读取，且上限落在实际收到的字节上——端点是用户自己填的 URL，因此会先看声明长度，但绝不把它当作边界。端点不可达、凭据被拒、响应非 JSON、以及响应没有 `data` 数组，都会以 `DISCOVERY_FAILED` 失败，消息点名端点；仅当 401 或 403 时才点名凭据。读取响应体期间被取消会呈现为 `ABORTED`，与请求发出之前被取消一致。
 
 ## 提供方／模型路由与回放
 

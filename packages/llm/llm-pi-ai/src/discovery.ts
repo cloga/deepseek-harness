@@ -70,10 +70,12 @@ interface ListingEntry {
     limits?: {
       max_context_window_tokens?: unknown
       max_output_tokens?: unknown
+      vision?: unknown
     } | null
     supports?: {
       reasoning_effort?: unknown
       tool_calls?: unknown
+      vision?: unknown
     } | null
   } | null
 }
@@ -133,6 +135,15 @@ function reasoningEfforts(entry: ListingEntry): PiAiReasoningEfforts | undefined
     }
   }
   return Object.keys(resolved).some(effort => effort !== 'off') ? resolved : undefined
+}
+
+/** Image input declared by optional gateway capability metadata. */
+function input(entry: ListingEntry): LlmDiscoveredModel['input'] {
+  const visionLimits = entry.capabilities?.limits?.vision
+  const hasVisionLimits = typeof visionLimits === 'object' && visionLimits !== null
+  return entry.capabilities?.supports?.vision === true || hasVisionLimits
+    ? ['text', 'image']
+    : undefined
 }
 
 /**
@@ -218,12 +229,14 @@ function readListing(body: unknown, api: string): LlmDiscoveredModel[] {
       entry.max_tokens,
     )
     const discoveredReasoningEfforts = reasoningEfforts(entry)
+    const discoveredInput = input(entry)
     models.push({
       id,
       ...name === undefined ? {} : { name },
       ...contextWindow === undefined ? {} : { contextWindow },
       ...maxTokens === undefined ? {} : { maxTokens },
       ...discoveredReasoningEfforts === undefined ? {} : { reasoningEfforts: discoveredReasoningEfforts },
+      ...discoveredInput === undefined ? {} : { input: discoveredInput },
     })
   }
   return models
