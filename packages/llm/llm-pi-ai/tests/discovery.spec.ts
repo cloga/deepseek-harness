@@ -168,6 +168,41 @@ describe('draft-provider model discovery', () => {
     }])
   })
 
+  it('normalizes optional gateway vision metadata without inventing image support', async () => {
+    const server = await listingServer({
+      body: JSON.stringify({
+        data: [
+          {
+            id: 'vision-true',
+            capabilities: { supports: { vision: true } },
+          },
+          {
+            id: 'vision-false',
+            capabilities: { supports: { vision: false } },
+          },
+          {
+            id: 'vision-absent',
+            capabilities: { supports: {} },
+          },
+          {
+            id: 'vision-limits',
+            capabilities: {
+              limits: { vision: { supported_media_types: ['image/png'] } },
+            },
+          },
+        ],
+      }),
+    })
+    const ctx = await harness()
+
+    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })).toEqual([
+      { id: 'vision-true', input: ['text', 'image'] },
+      { id: 'vision-false' },
+      { id: 'vision-absent' },
+      { id: 'vision-limits', input: ['text', 'image'] },
+    ])
+  })
+
   it('filters only entries whose optional metadata rules them out', async () => {
     const server = await listingServer({
       body: JSON.stringify({

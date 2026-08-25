@@ -583,6 +583,7 @@ export class LlmRuntime extends Service {
         ...model.reasoningEfforts === undefined
           ? {}
           : { reasoningEfforts: { ...model.reasoningEfforts } },
+        ...model.input === undefined ? {} : { input: [...model.input] },
       })
     }
     return models

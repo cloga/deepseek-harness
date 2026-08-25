@@ -718,6 +718,7 @@ describe('llm.discoverModels', () => {
           contextWindow: 65_536,
           maxTokens: 4096,
           reasoningEfforts: { off: 'none', high: 'high' },
+          input: ['text', 'image'],
         },
         { id: 'acme-small' },
       ])
@@ -738,6 +739,7 @@ describe('llm.discoverModels', () => {
         contextWindow: 65_536,
         maxTokens: 4096,
         reasoningEfforts: { off: 'none', high: 'high' },
+        input: ['text', 'image'],
       },
       { id: 'acme-small' },
     ])

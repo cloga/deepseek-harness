@@ -477,6 +477,7 @@ describe('endpoint interrogation', () => {
         contextWindow: 4096,
         name: 'Fresh',
         reasoningEfforts: { off: 'none', high: 'high' },
+        input: ['text', 'image'],
       }],
     })))
     const { mutate } = await mountSection({
@@ -501,6 +502,7 @@ describe('endpoint interrogation', () => {
         contextWindow: 4096,
         name: 'Fresh',
         reasoningEfforts: { off: 'none', high: 'high' },
+        input: ['text', 'image'],
       },
     ])
   })

@@ -623,6 +623,8 @@ interface LlmDiscoveredModel {
   maxTokens?: number
   /** Selectable reasoning levels keyed by adapter effort id, with their wire spellings. */
   reasoningEfforts?: Readonly<Record<string, string | null>>
+  /** Accepted request modalities in the adopting adapter's configuration vocabulary. */
+  input?: readonly ModelModality[]
 }
 ```
 

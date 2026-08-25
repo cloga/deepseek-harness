@@ -238,8 +238,9 @@ describe('model discovery registry', () => {
   it('normalizes and detaches what an interrogation returns without inventing metadata', async () => {
     const ctx = await setup()
     const reasoningEfforts = { off: 'none', high: 'high' } as const
+    const input = ['text', 'image'] as const
     ctx.llm.registerModelDiscovery('llm-example', () => Promise.resolve([
-      { id: 'keep', name: 'Keep', contextWindow: 1024, maxTokens: 256, reasoningEfforts },
+      { id: 'keep', name: 'Keep', contextWindow: 1024, maxTokens: 256, reasoningEfforts, input },
       { id: '' },
       { id: 'keep' },
       { id: 'bare' },
@@ -253,10 +254,12 @@ describe('model discovery registry', () => {
         contextWindow: 1024,
         maxTokens: 256,
         reasoningEfforts: { off: 'none', high: 'high' },
+        input: ['text', 'image'],
       },
       { id: 'bare' },
     ])
     expect(discovered[0]?.reasoningEfforts).not.toBe(reasoningEfforts)
+    expect(discovered[0]?.input).not.toBe(input)
   })
 
   it('refuses a namespace nothing serves and a draft with no endpoint', async () => {

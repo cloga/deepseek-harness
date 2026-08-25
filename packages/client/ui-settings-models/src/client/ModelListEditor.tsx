@@ -153,6 +153,7 @@ function adopt(candidate: DiscoveredModelView): ModelDraft {
     ...candidate.reasoningEfforts === undefined
       ? {}
       : { reasoningEfforts: { ...candidate.reasoningEfforts } },
+    ...candidate.input === undefined ? {} : { input: [...candidate.input] },
   }
 }
 
