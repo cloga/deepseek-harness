@@ -257,14 +257,13 @@ describe('ModelsSection', () => {
     expect(configured.getAttribute('title')).toBe(en.credentialConfigured)
     expect(configured.className).toContain('credentialDotConfigured')
     expect(configured.closest('li')?.textContent).toContain('openai')
-    const missing = screen.getByRole('img', { name: en.credentialMissing })
-    expect(missing.closest('li')?.textContent).toContain('DeepSeek')
+    expect(screen.queryByRole('img', { name: en.credentialMissing })).toBeNull()
     // The card is still one click away.
     fireEvent.click(screen.getByRole('button', { name: deepSeekCopy(en.editProvider) }))
     expect(screen.getByLabelText(en.keyInput)).toBeTruthy()
   })
 
-  it('marks only a confirmed missing reference and leaves native or unavailable state unmarked', async () => {
+  it('marks only a blocking confirmed missing reference and leaves native or unavailable state unmarked', async () => {
     const { face } = scriptedFace()
     face.credentials.describe.mockImplementation((payload: { refs: string[] }) => Promise.resolve(ok({
       credentials: Object.fromEntries(payload.refs.map(ref => [ref, { configured: false, writable: true }])),

@@ -118,6 +118,7 @@ describe.skipIf(MODE === 'record')('web e2e: another usable provider ends first-
     await settings.getByRole('button', { name: '模型' }).click()
     await settings.getByRole('button', { name: '编辑 DeepSeek (deepseek-official)' }).waitFor({ timeout: 10_000 })
     expect(await settings.getByRole('textbox', { name: 'API 密钥', exact: true }).count()).toBe(0)
+    expect(await settings.getByRole('img', { name: 'API 密钥缺失' }).count()).toBe(0)
 
     expect((await page.content()).includes('sk-e2e-minimax')).toBe(false)
     expect(tripwire.pageErrors).toEqual([])
