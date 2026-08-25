@@ -73,6 +73,7 @@ flowchart TD
     pkg_web_fetch_http["web-fetch-http"]
     pkg_web_search_deepseek["web-search-deepseek"]
     pkg_web_search_exa["web-search-exa"]
+    pkg_web_search_openai_responses["web-search-openai-responses"]
     pkg_web_search_perplexity["web-search-perplexity"]
   end
   subgraph group_spill["packages/spill"]
@@ -521,6 +522,13 @@ flowchart TD
   pkg_web_search_deepseek --> pkg_session
   pkg_web_search_deepseek --> pkg_settings
   pkg_web_search_deepseek --> pkg_web
+  pkg_web_search_openai_responses --> pkg_agent
+  pkg_web_search_openai_responses --> pkg_credentials
+  pkg_web_search_openai_responses --> pkg_invariants
+  pkg_web_search_openai_responses --> pkg_launch_environment
+  pkg_web_search_openai_responses --> pkg_session
+  pkg_web_search_openai_responses --> pkg_settings
+  pkg_web_search_openai_responses --> pkg_web
   pkg_spill_local --> pkg_invariants
   pkg_spill_local --> pkg_spill
   pkg_file_reference --> pkg_agent
@@ -1535,6 +1543,7 @@ flowchart TD
 | [`goal`](../packages/goal/goal) | `goal` | [`agent`](../packages/core/agent), [`brand`](../packages/util/brand), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`scope`](../packages/core/scope), [`session`](../packages/core/session), [`session-projection`](../packages/session/session-projection), [`typert-protocol`](../packages/typert/protocol) |
 | [`fs`](../packages/fs/fs) | `fs` | [`brand`](../packages/util/brand), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`sandbox`](../packages/sandbox/sandbox) |
 | [`web-search-deepseek`](../packages/web/web-search-deepseek) | `web` | [`agent`](../packages/core/agent), [`credentials`](../packages/credentials/credentials), [`invariants`](../packages/runtime-diagnostics/invariants), [`launch-environment`](../packages/util/launch-environment), [`session`](../packages/core/session), [`settings`](../packages/settings/settings), [`web`](../packages/web/web) |
+| [`web-search-openai-responses`](../packages/web/web-search-openai-responses) | `web` | [`agent`](../packages/core/agent), [`credentials`](../packages/credentials/credentials), [`invariants`](../packages/runtime-diagnostics/invariants), [`launch-environment`](../packages/util/launch-environment), [`session`](../packages/core/session), [`settings`](../packages/settings/settings), [`web`](../packages/web/web) |
 | [`spill-local`](../packages/spill/spill-local) | `spill` | [`invariants`](../packages/runtime-diagnostics/invariants), [`spill`](../packages/spill/spill) |
 | [`file-reference`](../packages/context/file-reference) | `context` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`typert-protocol`](../packages/typert/protocol) |
 | [`time-context`](../packages/context/time-context) | `context` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`session`](../packages/core/session) |

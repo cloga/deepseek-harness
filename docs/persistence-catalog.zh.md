@@ -1007,3 +1007,14 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 ```
 
 来源：[`packages/web/web-search-deepseek/src/provider.ts:83`](../packages/web/web-search-deepseek/src/provider.ts)
+
+<a id="webopenai-responses-search-request--log-only"></a>
+
+#### `web/openai-responses-search-request` — log-only
+
+```ts persistence-catalog
+/** Secret-free auxiliary OpenAI Responses search request recorded before dispatch. */
+'web/openai-responses-search-request': OpenAiResponsesSearchRequest
+```
+
+来源：[`packages/web/web-search-openai-responses/src/provider.ts:77`](../packages/web/web-search-openai-responses/src/provider.ts)

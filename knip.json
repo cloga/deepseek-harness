@@ -446,6 +446,15 @@
         "tests/**/*.ts"
       ]
     },
+    "packages/web/web-search-openai-responses": {
+      "entry": [
+        "tests/**/*.spec.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
+      ]
+    },
     "packages/web/web-search-perplexity": {
       "entry": [
         "tests/**/*.spec.ts",
