@@ -5,8 +5,10 @@
  * solid configured or missing dots. A whole-section provider without a
  * configured key renders as its open setup card instead of a row, but only in
  * the first-run posture — no provider on the page can serve requests yet — and
- * only until the user closes that card; the add flow is a card carrying the
- * dormant-provider select. Each card kind owns its own open state, so closing
+ * only until the user closes that card. A confirmed missing reference is red
+ * only in that posture; once another provider is usable, the optional route is
+ * unmarked rather than presented as a product error. The add flow is a card
+ * carrying the dormant-provider select. Each card kind owns its own open state, so closing
  * one never discards a draft in another. Every mutation writes through the
  * wire, while a provider removal first requires confirmation; the page
  * re-renders from pushed invalidations or the post-apply reload.
@@ -127,7 +129,7 @@ export async function removeProviderProfile(
  * Whether a whole-section provider still needs its first key: an unconfigured
  * credential opens the setup card instead of showing a row. This is the
  * first-run posture alone — a user who can already reach some provider gets an
- * ordinary row with the missing-key dot, since nothing here is blocking them.
+ * ordinary unmarked row, since nothing here is blocking them.
  * @param row - the joined provider row.
  * @param anyUsable - whether any joined row can already serve requests.
  * @returns whether to render the setup card.
@@ -319,6 +321,7 @@ function Loaded({ injected }: { injected: ModelsSectionFace }): ReactNode {
           const open = !adding && editing?.provider === row.entry.provider
           const credentialConfigured = row.credential?.configured === true
           const credentialMissing = !credentialConfigured
+            && !anyUsable
             && row.apiKeyEnv !== undefined
             && row.credential?.configured === false
           return (

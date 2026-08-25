@@ -214,12 +214,15 @@ export class ModelsSettingsStore {
  * profile names is stored. A profile naming no reference authenticates through
  * the provider's own path (the Bedrock chain, Vertex ADC, a gateway that needs
  * nothing), as does a live route with no settings address at all, so neither
- * owes this page a key.
+ * owes this page a key. A route with a settings address must also resolve its
+ * profile: directory membership alone describes something the user may
+ * configure, not something the adapter can serve from the joined snapshot.
  * @param row - one joined provider row.
  * @returns whether the user already has this provider to talk to.
  */
 export function providerUsable(row: ProviderRow): boolean {
   if (!row.entry.active) return false
+  if (row.entry.settingsNs !== '' && !row.configured) return false
   if (row.apiKeyEnv === undefined) return true
   return row.credential?.configured === true
 }
@@ -245,12 +248,17 @@ export type OnboardingReadiness =
  * by the Models page. The step exists to leave the user with a model to talk
  * to, so ANY usable provider ends it; only when none exists does the official
  * DeepSeek route — the one route the prompt can offer a key field for — decide
- * whether prompting can help. A missing official configurable-provider
- * declaration means the adapter is not repairable by navigating to Models.
+ * whether prompting can help. The caller identifies the provider this
+ * onboarding step can repair; its settings namespace and path come from the
+ * directory rather than a second provider-specific lookup.
  * @param state - current shared Models join snapshot.
+ * @param targetProvider - provider route this onboarding step can configure.
  * @returns the onboarding state without reading a parallel fact source.
  */
-export function onboardingReadiness(state: ModelsSettingsState): OnboardingReadiness {
+export function onboardingReadiness(
+  state: ModelsSettingsState,
+  targetProvider: string,
+): OnboardingReadiness {
   if ((state.status === 'idle' || state.status === 'loading') && state.rows.length === 0) {
     return { kind: 'loading' }
   }
@@ -261,11 +269,10 @@ export function onboardingReadiness(state: ModelsSettingsState): OnboardingReadi
     }
   }
   if (state.rows.some(providerUsable)) return { kind: 'provider-ready' }
-  const row = state.rows.find(candidate =>
-    candidate.entry.provider === 'deepseek-official'
-    && candidate.entry.settingsNs === 'llm-deepseek'
-    && candidate.entry.settingsPath.length === 0)
-  if (row === undefined) return { kind: 'adapter-absent' }
+  const row = state.rows.find(candidate => candidate.entry.provider === targetProvider)
+  if (row === undefined || row.entry.settingsNs === '' || !row.configured) {
+    return { kind: 'adapter-absent' }
+  }
   if (!row.entry.active) {
     return {
       kind: 'unavailable',

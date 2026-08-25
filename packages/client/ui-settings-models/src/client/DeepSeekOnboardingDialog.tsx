@@ -51,9 +51,9 @@ function assertNever(_value: never): never {
  * @returns the onboarding modal or null when onboarding needs no intervention.
  */
 export function DeepSeekOnboardingDialog(props: DeepSeekOnboardingDialogProps): ReactNode {
-  const { complete, controller, useModels, api, schema, t } = props
+  const { stepId, complete, controller, useModels, api, schema, t } = props
   const state = useModels(snapshot => snapshot)
-  const readiness = onboardingReadiness(state)
+  const readiness = onboardingReadiness(state, stepId)
 
   useEffect(() => {
     if (state.status === 'idle') void controller.load()
@@ -80,12 +80,9 @@ export function DeepSeekOnboardingDialog(props: DeepSeekOnboardingDialogProps): 
       return assertNever(readiness)
   }
 
-  const row = state.rows.find(candidate =>
-    candidate.entry.provider === 'deepseek-official'
-    && candidate.entry.settingsNs === 'llm-deepseek'
-    && candidate.entry.settingsPath.length === 0)
-  const namespace = state.namespaces.get('llm-deepseek')
-  /* v8 ignore next 2 -- credential-missing is derived only from this exact joined row. */
+  const row = state.rows.find(candidate => candidate.entry.provider === stepId)
+  const namespace = row === undefined ? undefined : state.namespaces.get(row.entry.settingsNs)
+  /* v8 ignore next 2 -- credential-missing is derived only from this target's joined row. */
   if (row === undefined || namespace === undefined) return null
 
   const finishCredential = (changed: boolean): void => {
