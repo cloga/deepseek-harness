@@ -128,6 +128,84 @@ describe('draft-provider model discovery', () => {
     expect(server.headers[0]?.['user-agent']).toBe(userAgent())
   })
 
+  it('maps optional gateway metadata into provider-profile fields', async () => {
+    const server = await listingServer({
+      body: JSON.stringify({
+        data: [{
+          id: 'gateway-rich',
+          name: 'Gateway Rich',
+          model_picker_enabled: true,
+          policy: { state: 'enabled' },
+          supported_endpoints: ['/chat/completions', '/responses'],
+          capabilities: {
+            type: 'chat',
+            limits: {
+              max_context_window_tokens: 264_000,
+              max_output_tokens: 64_000,
+            },
+            supports: {
+              tool_calls: true,
+              reasoning_effort: ['none', 'low', 'medium', 'high', 'max', 'vendor-only', 42],
+            },
+          },
+        }],
+      }),
+    })
+    const ctx = await harness()
+
+    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })).toEqual([{
+      id: 'gateway-rich',
+      name: 'Gateway Rich',
+      contextWindow: 264_000,
+      maxTokens: 64_000,
+      reasoningEfforts: {
+        off: 'none',
+        low: 'low',
+        medium: 'medium',
+        high: 'high',
+        max: 'max',
+      },
+    }])
+  })
+
+  it('filters only entries whose optional metadata rules them out', async () => {
+    const server = await listingServer({
+      body: JSON.stringify({
+        data: [
+          { id: 'minimal-standard-entry' },
+          { id: 'policy-unconfigured', policy: { state: 'unconfigured' } },
+          { id: 'picker-hidden', model_picker_enabled: false },
+          { id: 'policy-disabled', policy: { state: 'disabled' } },
+          { id: 'embedding', capabilities: { type: 'embeddings' } },
+          { id: 'no-tools', capabilities: { supports: { tool_calls: false } } },
+          { id: 'messages-only', supported_endpoints: ['/v1/messages'] },
+          {
+            id: 'responses-only',
+            supported_endpoints: ['/responses'],
+            capabilities: { type: 'chat', supports: { tool_calls: true } },
+          },
+        ],
+      }),
+    })
+    const ctx = await harness()
+
+    await expect(ctx.llm.discoverModels('llm-pi-ai', {
+      baseURL: server.url,
+      api: 'openai-completions',
+    })).resolves.toEqual([
+      { id: 'minimal-standard-entry' },
+      { id: 'policy-unconfigured' },
+    ])
+    await expect(ctx.llm.discoverModels('llm-pi-ai', {
+      baseURL: server.url,
+      api: 'openai-responses',
+    })).resolves.toEqual([
+      { id: 'minimal-standard-entry' },
+      { id: 'policy-unconfigured' },
+      { id: 'responses-only' },
+    ])
+  })
+
   it('keeps a deployment path instead of resolving it away', async () => {
     const server = await listingServer({ body: JSON.stringify({ data: [{ id: 'm' }] }) })
     const ctx = await harness()

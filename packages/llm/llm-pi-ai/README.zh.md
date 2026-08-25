@@ -138,7 +138,7 @@ pi-ai 依据提供方 id 与 baseURL 决定每个请求的形状：系统提示�
 
 询问只读 `openai-completions` 与 `openai-responses`，它们「`GET /models` + bearer 认证」的形状是网关、自建服务与官方端点三方一致认可的那一种。Azure 尽管出身 OpenAI 也被排除——它用 `api-key` 标头认证并要求 `api-version` 查询参数——Codex 则走 OAuth；其余协议一律以 `DISCOVERY_UNSUPPORTED` 回答，让界面回退到手工填写，而不是把认证失败报成一个没有模型的提供方。`baseURL` 按前缀而非待解析 URL 处理，因此 `https://gateway.example/openai/v1` 这类部署路径会保留其路径段。
 
-多数列表只公布 id；`context_window`/`context_length` 与 `max_output_tokens`/`max_tokens` 在网关提供时会被读取，没有可用 id 的条目会被跳过而不是让整份列表失败，其余仍由采纳方补齐。回复在四兆字节上限下读取，且上限落在实际收到的字节上——端点是用户自己填的 URL，因此会先看声明长度，但绝不把它当作边界。端点不可达、凭据被拒、响应非 JSON、以及响应没有 `data` 数组，都会以 `DISCOVERY_FAILED` 失败，消息点名端点；仅当 401 或 403 时才点名凭据。读取响应体期间被取消会呈现为 `ABORTED`，与请求发出之前被取消一致。
+标准列表可以只公布 id；网关提供 `context_window`/`context_length` 与 `max_output_tokens`/`max_tokens` 时会被读取。Copilot 风格元数据会补充更严格的事实，但绝不成为必填项：显式的 `model_picker_enabled: false`、`policy.state: disabled`、非 `chat` 的 `capabilities.type`、`capabilities.supports.tool_calls: false`，或排除了所选 OpenAI 协议的 `supported_endpoints` 列表都会移除该条目；字段缺席则条目仍可被发现。`capabilities.limits.max_context_window_tokens` 与 `max_output_tokens` 优先于平铺别名，可识别的 `capabilities.supports.reasoning_effort` 值会成为同名映射的 `reasoningEfforts`（`none` 映射到 Harness 的 `off` 键）。没有可用 id 的条目会被跳过，而不会让整份列表失败。回复在四兆字节上限下读取，且上限落在实际收到的字节上——端点是用户自己填的 URL，因此会先看声明长度，但绝不把它当作边界。端点不可达、凭据被拒、响应非 JSON、以及响应没有 `data` 数组，都会以 `DISCOVERY_FAILED` 失败，消息点名端点；仅当 401 或 403 时才点名凭据。读取响应体期间被取消会呈现为 `ABORTED`，与请求发出之前被取消一致。
 
 ## 提供方／模型路由与回放
 
