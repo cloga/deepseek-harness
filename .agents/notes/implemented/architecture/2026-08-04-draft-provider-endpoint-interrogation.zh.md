@@ -18,10 +18,10 @@ Status: implemented
 
 - `ctx.llm.registerModelDiscovery(settingsNs, discover)` 让适配器插件为自己拥有的 namespace 提供「询问端点」的能力，`ctx.llm.discoverModels(settingsNs, request)` 发起询问。没有任何办法枚举哪些 namespace 注册过：询问不了的界面会从那句拒绝里知道，而一份无人消费的列表只会变成一个什么都不做的必填协议字段。以 namespace 为键是对的，因为配置界面已经从可配置提供方目录里拿到了它，也因为正在新增的提供方没有路由可点名。
 - `LlmModelDiscoveryRequest` 携带草稿——可选的 `provider`、可选的 `baseURL`、可选的 `api`、可选的 `apiKey`，以及一个 signal——且 `provider` 与 `baseURL` 至少要有一个，才有东西可答。`provider` 之所以存在，是因为适配器已经描述过的路由直接由它自己的注册表作答、完全不联网；只有它未描述的路由才会抵达某个端点。这条路径不写 settings 与 credentials。唯一的读取是请求所点名路由的凭据：配置界面拿到的是脱敏描述符而非已存的机密，因此草稿里的 `apiKey` 只在用户正键入时才存在；没有这次读取，已配置好的路由就会被不带认证地询问，只换回一个 401。键入的密钥优先，因为那正是被测试的那一把。
-- `LlmDiscoveredModel` 除 `id` 外每个字段都可选，因为大多数列表只公布 id。回复是候选而非 catalog：采纳其中一条的界面仍要补上适配器所需的容量。
+- `LlmDiscoveredModel` 除 `id` 外每个字段都可选，因为标准列表可以只公布 id。信息更丰富的网关可以补充可直接写入 settings 的容量、输入模态和推理档位映射，而这些字段不会因此成为所有 OpenAI 兼容端点的要求。
 - `llm.discoverModels` 把同一份草稿送过协议层。它的 `apiKey` 是可承载机密的第三个、也是最后一个载荷（另两个是 `settings.update`/`mutate` 与 `credentials.set`），且绝不被存储或回显。它确实会像其他承载机密的载荷一样随客户端外发信封同行，`subscribeEnvelopes()` 观察者看得到；把那个抽头脱敏是整个配置面的改动，不该由这一个方法独自决定。除密钥之外，将它限制为仅可通过回环访问还有第二个理由：它让宿主向调用方选定的 URL 发起 GET 并回报结果，这是匿名 LAN 调用者不该拥有的探测能力。每一种拒绝都折叠为 `model-discovery-failed`，其消息是适配器自己的文本，details 点名被询问的端点，绝不点名所提供的凭据。
 
-`dsh-llm-pi-ai` 的实现只是一次朴素的 `GET {baseURL}/models`，且仅限 OpenAI 兼容协议。它们的列表形状是网关、自建服务与官方端点三方一致认可的那一种，而这正是该动作存在的场景。其余协议一律以 `DISCOVERY_UNSUPPORTED` 回答，让界面回退到手工填写，而不是把猜错的响应形状报成一个空提供方。`baseURL` 按前缀而非待解析 URL 处理，因此 `https://gateway.example/openai/v1` 这类部署路径会保留其路径段。回复在四兆字节上限下读取，且上限落在实际收到的字节上——端点是用户自己填的 URL，因此会先看声明的 `content-length` 作为善意提示，但绝不把它当作边界；这与 `dsh-web-fetch` 面对自己的调用方提供 URL 时所用的两段式形状一致。
+`dsh-llm-pi-ai` 的实现只是一次朴素的 `GET {baseURL}/models`，读取 `openai-completions` 与 `openai-responses`：它们「`GET /models` + bearer 认证」的形状是网关、自建服务与官方端点三方一致认可的那一种。Azure 尽管出身 OpenAI 也被排除——它用 `api-key` 标头认证并要求 `api-version` 查询——Codex 则走 OAuth；两者都会把认证失败误报成没有模型。其余协议一律以 `DISCOVERY_UNSUPPORTED` 回答，让界面回退到手工填写，而不是把猜错的响应形状报成一个空提供方。最简标准响应始终足够。可选的 Copilot 风格元数据只在明确标出模型不可由 picker 选择、被 policy 禁用、不是 chat、不能调用工具，或与所选端点不兼容时过滤条目；其嵌套容量、视觉声明与推理档位列表会成为对应的 profile 字段。`baseURL` 按前缀而非待解析 URL 处理，因此 `https://gateway.example/openai/v1` 这类部署路径会保留其路径段。回复在四兆字节上限下读取，且上限落在实际收到的字节上——端点是用户自己填的 URL，因此会先看声明的 `content-length` 作为善意提示，但绝不把它当作边界；这与 `dsh-web-fetch` 面对自己的调用方提供 URL 时所用的两段式形状一致。
 
 ### 为什么不用 pi-ai 自己的 refresh 机制
 
@@ -41,10 +41,10 @@ pi-ai 提供了 `createProvider({ fetchModels })` 加上 `Models.refresh()` 与 
 
 ## Consequences
 
-接入网关的人可以直接问它服务什么，而不必去翻它的文档；答案以候选形式抵达，由用户自己挑选，而不是被背着写进配置。seam 因此多了一个刻意保持很小的注册表：每个 namespace 一份、不存储、生命周期不超出 fiber。
+接入网关的人可以直接问它服务什么，而不必去翻它的文档；答案以候选形式抵达，由用户自己挑选，而不是被背着写进配置。发布能力元数据的网关可以让被采纳的图片模型立即具备图片能力，并保留可选推理档位；未标注的 OpenAI 列表保持原有行为。seam 因此多了一个刻意保持很小的注册表：每个 namespace 一份、不存储、生命周期不超出 fiber。
 
 代价是：协议层多了第三个承载机密的载荷，配置面的只写接口从两个方法变成三个。发现覆盖范围按协议而非按提供方划分——一个 Anthropic 兼容网关即便其列表能被解析，也仍须手工填写。而且由于没有任何环节会重跑该询问，模型列表的新鲜度依旧只到最近一次编辑为止；这与下层刻意做出的取舍是同一个。
 
 ## Testing
 
-`packages/llm/llm/tests/topology.spec.ts` 覆盖注册表：每个 namespace 一份、随 fiber dispose（资源释放）、丢弃重复与不可用 id 且不凭空补容量的归一化，以及 `NO_DISCOVERY`/`INVALID_DISCOVERY` 两种拒绝。`packages/llm/llm-pi-ai/tests/discovery.spec.ts` 针对本地 HTTP 服务器驱动探测——含与不含公布容量的列表、被保留的部署路径、无凭据、草稿没带密钥时已配置路由自行取用凭据且键入的密钥压过它、catalog 路由完全不解析凭据即作答、被丢弃的行、401/403 与服务器故障之别、非列表与非 JSON 响应、不可达端点、调用方取消、不支持的协议，以及尺寸上限的「声明长度」与「流式」两种形态。`packages/host/apiproxy/tests/api-proxy-config.spec.ts` 在真实 proxy 上覆盖该 RPC：草稿完整抵达其 namespace、缺席字段保持缺席、没有 namespace 或凭据被写入，以及失败以 `model-discovery-failed` 呈现且序列化后的错误里不含凭据。
+`packages/llm/llm/tests/topology.spec.ts` 覆盖注册表：每个 namespace 一份、随 fiber dispose（资源释放）、丢弃重复与不可用 id 且不凭空补元数据的脱离式归一化，以及 `NO_DISCOVERY`/`INVALID_DISCOVERY` 两种拒绝。`packages/llm/llm-pi-ai/tests/discovery.spec.ts` 针对本地 HTTP 服务器驱动探测——含最简列表、平铺容量、Copilot 嵌套容量、两种视觉声明、可识别的推理档位、包括所选端点在内的每项元数据过滤、被保留的部署路径、凭据解析、格式错误的条目与响应、传输失败、取消、不支持的协议，以及尺寸上限的两条路径。`packages/host/apiproxy/tests/api-proxy-config.spec.ts` 经真实 proxy 传递更丰富的候选字段，`packages/client/ui-settings-models/tests/provider-form.client.spec.tsx` 则证明采纳会把它们写入 profile，同时保住已调校的既有行。

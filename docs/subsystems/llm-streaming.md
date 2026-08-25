@@ -609,8 +609,8 @@ interface LlmModelDiscoveryRequest {
 ```ts type-equiv
 /**
  * One model an endpoint reports about itself. Every field but the id is
- * optional because most provider listings disclose an id and nothing else;
- * a surface adopting one of these still owes the capacities its adapter needs.
+ * optional because a standard listing may disclose only an id; richer gateway
+ * metadata can become adapter configuration when the surface adopts it.
  */
 interface LlmDiscoveredModel {
   /** Model id the endpoint accepts. */
@@ -621,6 +621,10 @@ interface LlmDiscoveredModel {
   contextWindow?: number
   /** Maximum output tokens, when disclosed. */
   maxTokens?: number
+  /** Accepted request modalities in the adopting adapter's configuration vocabulary. */
+  input?: readonly ModelModality[]
+  /** Selectable reasoning levels keyed by adapter effort id, with their wire spellings. */
+  reasoningEfforts?: Readonly<Record<string, string | null>>
 }
 ```
 

@@ -712,7 +712,14 @@ describe('llm.discoverModels', () => {
     ctx.llm.registerModelDiscovery('llm-pi-ai', (probe) => {
       seen.push({ baseURL: probe.baseURL, api: probe.api, apiKey: probe.apiKey })
       return Promise.resolve([
-        { id: 'acme-large', name: 'Acme Large', contextWindow: 65_536, maxTokens: 4096 },
+        {
+          id: 'acme-large',
+          name: 'Acme Large',
+          contextWindow: 65_536,
+          maxTokens: 4096,
+          input: ['text', 'image'],
+          reasoningEfforts: { off: 'none', high: 'high' },
+        },
         { id: 'acme-small' },
       ])
     })
@@ -726,7 +733,14 @@ describe('llm.discoverModels', () => {
     })))
 
     expect(value.models).toEqual([
-      { id: 'acme-large', name: 'Acme Large', contextWindow: 65_536, maxTokens: 4096 },
+      {
+        id: 'acme-large',
+        name: 'Acme Large',
+        contextWindow: 65_536,
+        maxTokens: 4096,
+        input: ['text', 'image'],
+        reasoningEfforts: { off: 'none', high: 'high' },
+      },
       { id: 'acme-small' },
     ])
     expect(seen).toEqual([{
