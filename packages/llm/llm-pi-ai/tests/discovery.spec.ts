@@ -128,6 +128,41 @@ describe('draft-provider model discovery', () => {
     expect(server.headers[0]?.['user-agent']).toBe(userAgent())
   })
 
+  it('normalizes optional gateway vision metadata without inventing image support', async () => {
+    const server = await listingServer({
+      body: JSON.stringify({
+        data: [
+          {
+            id: 'vision-true',
+            capabilities: { supports: { vision: true } },
+          },
+          {
+            id: 'vision-false',
+            capabilities: { supports: { vision: false } },
+          },
+          {
+            id: 'vision-absent',
+            capabilities: { supports: {} },
+          },
+          {
+            id: 'vision-limits',
+            capabilities: {
+              limits: { vision: { supported_media_types: ['image/png'] } },
+            },
+          },
+        ],
+      }),
+    })
+    const ctx = await harness()
+
+    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })).toEqual([
+      { id: 'vision-true', input: ['text', 'image'] },
+      { id: 'vision-false' },
+      { id: 'vision-absent' },
+      { id: 'vision-limits', input: ['text', 'image'] },
+    ])
+  })
+
   it('keeps a deployment path instead of resolving it away', async () => {
     const server = await listingServer({ body: JSON.stringify({ data: [{ id: 'm' }] }) })
     const ctx = await harness()

@@ -8,6 +8,7 @@
  * `settings/document-updated` owner events.
  */
 
+import type { ModelModality } from '@deepseek-ai/dsh-llm'
 import type { RpcRequest, RpcResponse } from './rpc.ts'
 import type { ModelCatalogFailure, ModelProviderGroup } from './sessions.ts'
 
@@ -86,4 +87,6 @@ export interface DiscoveredModelView {
   contextWindow?: number
   /** Maximum output tokens, when disclosed. */
   maxTokens?: number
+  /** Accepted request modalities ready for the provider profile. */
+  input?: readonly ModelModality[]
 }

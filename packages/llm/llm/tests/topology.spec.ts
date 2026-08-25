@@ -235,19 +235,22 @@ describe('model discovery registry', () => {
       .resolves.toEqual([])
   })
 
-  it('normalizes what an interrogation returns without inventing capacities', async () => {
+  it('normalizes and detaches what an interrogation returns without inventing metadata', async () => {
     const ctx = await setup()
+    const input = ['text', 'image'] as const
     ctx.llm.registerModelDiscovery('llm-example', () => Promise.resolve([
-      { id: 'keep', name: 'Keep', contextWindow: 1024, maxTokens: 256 },
+      { id: 'keep', name: 'Keep', contextWindow: 1024, maxTokens: 256, input },
       { id: '' },
       { id: 'keep' },
       { id: 'bare' },
     ] as never))
 
-    expect(await ctx.llm.discoverModels('llm-example', { baseURL: 'https://gateway.example/v1' })).toEqual([
-      { id: 'keep', name: 'Keep', contextWindow: 1024, maxTokens: 256 },
+    const discovered = await ctx.llm.discoverModels('llm-example', { baseURL: 'https://gateway.example/v1' })
+    expect(discovered).toEqual([
+      { id: 'keep', name: 'Keep', contextWindow: 1024, maxTokens: 256, input: ['text', 'image'] },
       { id: 'bare' },
     ])
+    expect(discovered[0]?.input).not.toBe(input)
   })
 
   it('refuses a namespace nothing serves and a draft with no endpoint', async () => {

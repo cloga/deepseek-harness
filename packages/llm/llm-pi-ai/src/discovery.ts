@@ -59,6 +59,14 @@ interface ListingEntry {
   context_length?: unknown
   max_tokens?: unknown
   max_output_tokens?: unknown
+  capabilities?: {
+    limits?: {
+      vision?: unknown
+    } | null
+    supports?: {
+      vision?: unknown
+    } | null
+  } | null
 }
 
 /** A positive integer field of a listing entry, or `undefined` when absent or unusable. */
@@ -75,6 +83,15 @@ function label(...candidates: readonly unknown[]): string | undefined {
     if (typeof candidate === 'string' && candidate.length > 0) return candidate
   }
   return undefined
+}
+
+/** Image input declared by optional gateway capability metadata. */
+function input(entry: ListingEntry): LlmDiscoveredModel['input'] {
+  const visionLimits = entry.capabilities?.limits?.vision
+  const hasVisionLimits = typeof visionLimits === 'object' && visionLimits !== null
+  return entry.capabilities?.supports?.vision === true || hasVisionLimits
+    ? ['text', 'image']
+    : undefined
 }
 
 /**
@@ -147,15 +164,17 @@ function readListing(body: unknown): LlmDiscoveredModel[] {
   for (const raw of data) {
     const entry = raw as ListingEntry | null
     const id = label(entry?.id)
-    if (id === undefined) continue
-    const name = label(entry?.name, entry?.display_name)
-    const contextWindow = capacity(entry?.context_window, entry?.context_length)
-    const maxTokens = capacity(entry?.max_output_tokens, entry?.max_tokens)
+    if (id === undefined || entry === null) continue
+    const name = label(entry.name, entry.display_name)
+    const contextWindow = capacity(entry.context_window, entry.context_length)
+    const maxTokens = capacity(entry.max_output_tokens, entry.max_tokens)
+    const discoveredInput = input(entry)
     models.push({
       id,
       ...name === undefined ? {} : { name },
       ...contextWindow === undefined ? {} : { contextWindow },
       ...maxTokens === undefined ? {} : { maxTokens },
+      ...discoveredInput === undefined ? {} : { input: discoveredInput },
     })
   }
   return models
