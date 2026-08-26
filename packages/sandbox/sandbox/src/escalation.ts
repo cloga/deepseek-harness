@@ -40,6 +40,13 @@ export const WIDER_MODES: Record<string, readonly SandboxMode[]> = {
  */
 export const ESCALATION_TARGETS: readonly SandboxMode[] = ['workspace-write', 'danger-full-access']
 
+/** Relative authority of each sandbox mode. */
+const MODE_RANK: Readonly<Record<SandboxMode, number>> = {
+  'read-only': 0,
+  'workspace-write': 1,
+  'danger-full-access': 2,
+}
+
 /**
  * Validate the escalation argument pairing a tool schema cannot express:
  * `sandbox_permissions` and `justification` travel together — an approval
@@ -134,34 +141,32 @@ export interface EscalationRequest {
   requestedMode: string
   /** The model's one-sentence reason, shown verbatim to the user inside the audit reason. */
   justification: string
-  /** The call's effective mode (session override ?? composition default) the request must strictly widen. */
+  /** The call's effective mode (session override ?? composition default). */
   effectiveMode: SandboxMode
   /** The family's noun for the escalated action in user-facing texts (`command` for bash, `operation` for fs). */
   subject: string
 }
 
 /**
- * Resolve a sandbox-escalation request BEFORE anything executes: check strict
- * widening against the call's effective mode, then resolve the approval
- * channel, then map every outcome — the ordered fail-closed sequence both
- * enforcing families share. Returns the granted mode to stamp onto exactly
- * this call; throws the distinct verbatim text for every other path (a
- * non-widening request, a missing approval service, an agent-less execution,
- * a rejection, a cancellation, an unanswerable ask) — the tool registry turns
- * the throw into the call's isError result, and nothing has run. A
- * non-widening request never prompts a human.
+ * Resolve a sandbox-escalation request BEFORE anything executes. A valid target
+ * equal to or narrower than the standing mode is redundant: it returns the
+ * standing mode without approval and never reduces the call's authority. A
+ * wider target resolves the approval channel and maps every outcome through the
+ * ordered fail-closed sequence both enforcing families share. Unknown targets,
+ * missing approval composition, agent-less execution, rejection, cancellation,
+ * and unavailable approval all fail before the operation runs.
  * @param request - the escalation to judge (see {@link EscalationRequest}).
  * @param approval - the approval ingredients the tool holds (see {@link EscalationApproval}).
  * @returns the granted mode, consumed by the one call that asked.
  */
 export async function approveEscalation<A, C>(request: EscalationRequest, approval: EscalationApproval<A, C>): Promise<SandboxMode> {
   const { requestedMode: mode, effectiveMode, justification, subject } = request
-  // Strict widening is an EXECUTION check against the call's effective mode —
-  // deliberately not a schema constraint (the enum is the closed target
-  // vocabulary; the effective mode is per-call truth).
-  if (!(WIDER_MODES[effectiveMode] ?? []).includes(mode as SandboxMode)) {
-    throw new Error(`sandbox escalation to "${mode}" is not strictly wider than this call's current "${effectiveMode}" mode`)
+  if (!ESCALATION_TARGETS.includes(mode as SandboxMode)) {
+    throw new Error(`invalid sandbox escalation target "${mode}"`)
   }
+  if (!(effectiveMode in MODE_RANK)) throw new Error(`invalid effective sandbox mode "${effectiveMode}"`)
+  const requestedMode = mode as SandboxMode
+  if (MODE_RANK[requestedMode] <= MODE_RANK[effectiveMode]) return effectiveMode
   if (approval.approver === undefined) {
     throw new Error(`sandbox escalation to "${mode}" requires approval, but no approval service is composed`)
   }
@@ -180,7 +185,7 @@ export async function approveEscalation<A, C>(request: EscalationRequest, approv
   switch (outcome) {
     // The schema enum already pinned `mode` to the closed target vocabulary;
     // the check above proved it is strictly wider.
-    case 'allowed-once': return mode as SandboxMode
+    case 'allowed-once': return requestedMode
     case 'rejected': throw new Error(`the user rejected escalating this ${subject} to "${mode}"`)
     case 'cancelled': throw new Error(`approval for escalating to "${mode}" was cancelled`)
     case 'unavailable': throw new Error(`sandbox escalation to "${mode}" requires approval, but no approval channel is available`)

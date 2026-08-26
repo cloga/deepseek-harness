@@ -788,11 +788,14 @@ describe('sandbox escalation API (write/edit)', () => {
     }
   }
 
-  async function setupConfining(opts: { approval?: boolean } = {}) {
+  async function setupConfining(opts: {
+    approval?: boolean
+    mode?: 'read-only' | 'workspace-write' | 'danger-full-access'
+  } = {}) {
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
-    await ctx.plugin(SandboxPolicyService, { mode: 'workspace-write' })
+    await ctx.plugin(SandboxPolicyService, { mode: opts.mode ?? 'workspace-write' })
     await ctx.plugin(SandboxingFakeFs)
     await ctx.plugin(FsPolicy)
     if (opts.approval === true) await ctx.plugin(ApprovalService)
@@ -888,6 +891,36 @@ describe('sandbox escalation API (write/edit)', () => {
       signal: new AbortController().signal,
     })
     expect(fs.stamped).toEqual([{ mode: 'danger-full-access', workspaceRoot: resolve('/session-project') }])
+  })
+
+  it('same and narrower requests retain the standing policy without approval', async () => {
+    const same = await setupConfining({ approval: true })
+    const samePrompted = vi.fn()
+    same.ctx.on('approval/request', () => { samePrompted(); return Promise.resolve('allowed-once' as const) })
+    await call(same.ctx, 'write', {
+      file_path: 'a.txt',
+      content: 'x',
+      sandbox_permissions: 'workspace-write',
+      justification: 'the model repeated the current mode',
+    }, escalationAgent())
+    expect(same.fs.stamped).toEqual([{ mode: 'workspace-write', workspaceRoot: resolve('/session-project') }])
+    expect(samePrompted).not.toHaveBeenCalled()
+
+    const narrower = await setupConfining({ approval: true, mode: 'danger-full-access' })
+    const narrowerPrompted = vi.fn()
+    narrower.ctx.on('approval/request', () => { narrowerPrompted(); return Promise.resolve('allowed-once' as const) })
+    const narrowerAgent = escalationAgent()
+    narrower.fs.files.set('key:a.txt', 'x')
+    await call(narrower.ctx, 'read', { file_path: 'a.txt' }, narrowerAgent)
+    await call(narrower.ctx, 'edit', {
+      file_path: 'a.txt',
+      old_string: 'x',
+      new_string: 'y',
+      sandbox_permissions: 'workspace-write',
+      justification: 'the model requested less than the current mode',
+    }, narrowerAgent)
+    expect(narrower.fs.stamped).toEqual([{ mode: 'danger-full-access', workspaceRoot: resolve('/session-project') }])
+    expect(narrowerPrompted).not.toHaveBeenCalled()
   })
 
   it('a rejected escalation fails closed with its own text and never mutates', async () => {

@@ -7,6 +7,36 @@ import { spawnSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
+/** Package-manager commands that Windows exposes through command shims. */
+const WINDOWS_COMMAND_SHIMS = new Set(['npm', 'pnpm'])
+
+/** A command and arguments ready for direct child-process execution. */
+export interface CommandInvocation {
+  /** Executable passed to `spawnSync`. */
+  readonly command: string
+  /** Arguments passed to `spawnSync`. */
+  readonly args: readonly string[]
+}
+
+/**
+ * Resolve a portable command for direct child-process execution.
+ * @param command - Portable command name.
+ * @param args - Portable command arguments.
+ * @param platform - Node platform identifier.
+ * @param comspec - Windows command processor.
+ * @returns An executable and argument list accepted by `spawnSync`.
+ */
+export function commandInvocation(
+  command: string,
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+  comspec: string | undefined = process.env.ComSpec,
+): CommandInvocation {
+  if (platform !== 'win32' || !WINDOWS_COMMAND_SHIMS.has(command)) return { command, args }
+  if (comspec === undefined || comspec === '') throw new Error(`ComSpec is required to run ${command} on Windows`)
+  return { command: comspec, args: ['/d', '/s', '/c', `${command}.cmd`, ...args] }
+}
+
 /** Where and with what environment a release step runs a command. */
 export interface RunOptions {
   /** Working directory; defaults to the current one. */
@@ -33,7 +63,12 @@ export interface CommandResult {
  * @returns The exit status and captured streams.
  */
 export function attempt(command: string, args: readonly string[], options: RunOptions = {}): CommandResult {
-  const result = spawnSync(command, [...args], { cwd: options.cwd, env: options.env, encoding: 'utf8' })
+  const invocation = commandInvocation(command, args)
+  const result = spawnSync(invocation.command, [...invocation.args], {
+    cwd: options.cwd,
+    env: options.env,
+    encoding: 'utf8',
+  })
   if (result.error !== undefined) throw result.error
   return { status: result.status, stdout: result.stdout, stderr: result.stderr }
 }
@@ -58,7 +93,8 @@ export function attempt(command: string, args: readonly string[], options: RunOp
  * @returns The exit status and captured streams.
  */
 export function attemptEchoed(command: string, args: readonly string[], options: RunOptions = {}): CommandResult {
-  const result = spawnSync(command, [...args], {
+  const invocation = commandInvocation(command, args)
+  const result = spawnSync(invocation.command, [...invocation.args], {
     cwd: options.cwd,
     env: options.env,
     encoding: 'utf8',
@@ -95,7 +131,12 @@ export function capture(command: string, args: readonly string[], options: RunOp
  * @param options - working directory and environment.
  */
 export function run(command: string, args: readonly string[], options: RunOptions = {}): void {
-  const result = spawnSync(command, [...args], { cwd: options.cwd, env: options.env, stdio: 'inherit' })
+  const invocation = commandInvocation(command, args)
+  const result = spawnSync(invocation.command, [...invocation.args], {
+    cwd: options.cwd,
+    env: options.env,
+    stdio: 'inherit',
+  })
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} exited with ${String(result.status)}`)
 }
