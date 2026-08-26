@@ -38,12 +38,12 @@ pnpm run release:install-local -- `
 
 The default prefix is `$HOME/.dsh/local-cli/<commit>`. Pass `--prefix <directory>` to select another isolated or global npm prefix.
 
-The installer fails before npm runs when an ordered tarball is absent or the supplied packages omit a fork-owned runtime dependency or peer. It verifies every DSH payload, selects the recursive dependency/peer closure rooted at `@deepseek-ai/dsh`, installs that closure in dependency order, and writes `dsh-local-install.json` with the repository URL, commit SHA, CLI package/version, release-manifest SHA-256, and individual installed-tarball hashes. Test-support and build-only family members remain verified pack inputs but do not become runtime roots.
+The installer fails before npm runs when an ordered tarball is absent or the supplied packages omit a fork-owned runtime dependency or peer. It verifies every DSH payload, selects the recursive dependency/peer closure rooted at `@deepseek-ai/dsh`, installs that closure in dependency order, and writes `dsh-local-install.json` with the repository URL, commit SHA, CLI package/version, release-manifest SHA-256, Desktop-compatible root `cliPath`, and individual installed-tarball hashes. Test-support and build-only family members remain verified pack inputs but do not become runtime roots.
 
 The npm install has a five-minute default limit and the Web probe has a 30-second default limit. Override them with `--install-timeout-ms` and `--boot-timeout-ms`; a timeout fails with the bounded output tail. The Web probe clears `NODE_PATH` and `NODE_OPTIONS` and waits for `dsh --profile web --port 0 --no-open` to report its URL.
 
 ## Select the CLI in Desktop
 
-Set `DSH_CLI_PATH` to the final path printed by the installer. On Windows this is `<prefix>\node_modules\.bin\dsh.cmd`; on macOS and Linux it is `<prefix>/node_modules/.bin/dsh`.
+Set `DSH_CLI_PATH` to the final path printed by the installer. On Windows this is `<prefix>\dsh.cmd`; on macOS and Linux it is `<prefix>/dsh`. The root shim delegates to npm's internal `node_modules/.bin` shim, so Desktop can derive the installed package root from the selected prefix.
 
 Re-running the command for the same commit replaces the prefix only after the staged installation passes all checks. A failed installation leaves the previously selected prefix unchanged.

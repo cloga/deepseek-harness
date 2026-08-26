@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/cookbook/installing-a-local-release-family.md
-installing-a-local-release-family.md: f4586a21d2ce4c59890b8695ee8005e89a2b7c93
-installing-a-local-release-family.zh.md: 331e4c01f0d1a4b1b1094729b70517ae7bb2e8f6
+installing-a-local-release-family.md: eee4392ef6e6a9c6647908ae7088968acfa5b598
+installing-a-local-release-family.zh.md: 78e3140832462f77273f9310468a5e857e9cf285

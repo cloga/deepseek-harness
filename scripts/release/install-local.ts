@@ -7,9 +7,10 @@
  * fork packages, and records the exact checkout and tarball hashes installed.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -48,7 +49,7 @@ export interface LocalPackedPackage {
   readonly sha256?: string
 }
 
-interface InstallReceipt {
+export interface InstallReceipt {
   readonly schemaVersion: 1
   readonly repositoryUrl: string
   readonly commitSha: string
@@ -196,10 +197,78 @@ export function runtimeClosure(
  * @param platform - Node platform identifier.
  * @returns Absolute executable shim path.
  */
-export function cliShimPath(prefix: string, platform: NodeJS.Platform = process.platform): string {
+export function npmCliShimPath(prefix: string, platform: NodeJS.Platform = process.platform): string {
   return platform === 'win32'
     ? win32.join(prefix, 'node_modules', '.bin', 'dsh.cmd')
     : posix.join(prefix, 'node_modules', '.bin', 'dsh')
+}
+
+/**
+ * Resolve the stable Desktop-facing `dsh` shim for a prefix and platform.
+ * @param prefix - npm installation prefix.
+ * @param platform - Node platform identifier.
+ * @returns Absolute executable shim path.
+ */
+export function cliShimPath(prefix: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? win32.join(prefix, 'dsh.cmd') : posix.join(prefix, 'dsh')
+}
+
+/**
+ * Build a root shim that delegates to npm's platform shim through a relative path.
+ * @param platform - Node platform identifier.
+ * @returns Platform-native shim content.
+ */
+export function cliShimContent(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32'
+    ? '@ECHO off\r\n@CALL "%~dp0node_modules\\.bin\\dsh.cmd" %*\r\n'
+    : '#!/bin/sh\nexec "$(dirname "$0")/node_modules/.bin/dsh" "$@"\n'
+}
+
+/**
+ * Atomically create or replace the stable root shim inside an installation prefix.
+ * Repeating the write with identical content leaves the existing shim untouched.
+ * @param prefix - npm installation prefix.
+ * @param platform - Node platform identifier.
+ * @returns Absolute stable shim path.
+ */
+export function writeCliShim(prefix: string, platform: NodeJS.Platform = process.platform): string {
+  const destination = cliShimPath(prefix, platform)
+  const content = cliShimContent(platform)
+  if (existsSync(destination) && readFileSync(destination, 'utf8') === content) return destination
+
+  const temporary = `${destination}.${randomUUID()}.tmp`
+  try {
+    writeFileSync(temporary, content)
+    if (platform !== 'win32') chmodSync(temporary, 0o755)
+    renameSync(temporary, destination)
+  } finally {
+    rmSync(temporary, { force: true })
+  }
+  return destination
+}
+
+/**
+ * Publish a verified staging prefix while retaining the selected installation
+ * until the replacement directory is in place.
+ * @param staging - Verified staging prefix.
+ * @param prefix - Selected installation prefix.
+ * @param move - Directory move operation, injectable for rollback tests.
+ */
+export function replaceInstallPrefix(
+  staging: string,
+  prefix: string,
+  move: (source: string, destination: string) => void = renameSync,
+): void {
+  const backup = join(dirname(prefix), `.${basename(prefix)}-rollback-${randomUUID()}`)
+  const hadPrevious = existsSync(prefix)
+  if (hadPrevious) move(prefix, backup)
+  try {
+    move(staging, prefix)
+  } catch (error) {
+    if (hadPrevious) move(backup, prefix)
+    throw error
+  }
+  if (hadPrevious) rmSync(backup, { recursive: true, force: true })
 }
 
 /**
@@ -210,7 +279,7 @@ export function cliShimPath(prefix: string, platform: NodeJS.Platform = process.
  * @param cliPath - Final executable shim path.
  * @returns Receipt content.
  */
-function installReceipt(
+export function installReceipt(
   packages: readonly LocalPackedPackage[],
   repositoryUrl: string,
   commit: string,
@@ -295,7 +364,7 @@ function terminateProcessTree(child: ChildProcess): void {
  * @param cwd - Isolated installation prefix.
  * @returns The reported local URL.
  */
-async function verifyWebBoot(bin: string, cwd: string, timeoutMs: number): Promise<string> {
+async function verifyWebBoot(cli: string, cwd: string, timeoutMs: number): Promise<string> {
   const environment = { ...process.env }
   delete environment.NODE_OPTIONS
   delete environment.NODE_PATH
@@ -303,7 +372,8 @@ async function verifyWebBoot(bin: string, cwd: string, timeoutMs: number): Promi
   environment.DSH_AGENTS_HOME = join(environment.DSH_HOME, '.agents')
   environment.DSH_TELEMETRY_DISABLED = '1'
 
-  const child = spawn(process.execPath, [bin, '--profile', 'web', '--port', '0', '--no-open'], {
+  const invocation = commandInvocation(cli, ['--profile', 'web', '--port', '0', '--no-open'])
+  const child = spawn(invocation.command, [...invocation.args], {
     cwd,
     env: environment,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -442,15 +512,17 @@ async function main(): Promise<void> {
       '--fetch-retries=2',
     ], staging, installTimeoutMs)
 
-    const bin = join(staging, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
-    const version = capture(process.execPath, [bin, '--version'], { cwd: staging, env: {
+    const internalCliPath = npmCliShimPath(staging)
+    if (!existsSync(internalCliPath)) throw new Error(`npm created no dsh shim at ${internalCliPath}`)
+    const stagedCliPath = writeCliShim(staging)
+    const version = capture(stagedCliPath, ['--version'], { cwd: staging, env: {
       ...process.env,
       NODE_OPTIONS: undefined,
       NODE_PATH: undefined,
     } })
     if (version !== cli.version) throw new Error(`installed dsh reports ${version}, expected ${cli.version}`)
     console.log('release install-local: verifying isolated Web boot')
-    const readyUrl = await verifyWebBoot(bin, staging, bootTimeoutMs)
+    const readyUrl = await verifyWebBoot(stagedCliPath, staging, bootTimeoutMs)
 
     const finalCliPath = cliShimPath(prefix)
     writeFileSync(join(staging, RECEIPT_FILE), `${JSON.stringify(
@@ -458,9 +530,8 @@ async function main(): Promise<void> {
       null,
       2,
     )}\n`)
-    rmSync(prefix, { recursive: true, force: true })
-    renameSync(staging, prefix)
-    if (!existsSync(finalCliPath)) throw new Error(`npm created no dsh shim at ${finalCliPath}`)
+    replaceInstallPrefix(staging, prefix)
+    if (!existsSync(finalCliPath)) throw new Error(`installed dsh root shim is absent at ${finalCliPath}`)
 
     console.log(`release install-local: ${cli.version} from ${commit}`)
     console.log(

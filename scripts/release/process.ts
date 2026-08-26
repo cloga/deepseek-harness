@@ -32,9 +32,14 @@ export function commandInvocation(
   platform: NodeJS.Platform = process.platform,
   comspec: string | undefined = process.env.ComSpec,
 ): CommandInvocation {
-  if (platform !== 'win32' || !WINDOWS_COMMAND_SHIMS.has(command)) return { command, args }
+  if (platform !== 'win32') return { command, args }
+  const isCommandShim = WINDOWS_COMMAND_SHIMS.has(command) || command.toLowerCase().endsWith('.cmd')
+  if (!isCommandShim) return { command, args }
   if (comspec === undefined || comspec === '') throw new Error(`ComSpec is required to run ${command} on Windows`)
-  return { command: comspec, args: ['/d', '/s', '/c', `${command}.cmd`, ...args] }
+  const windowsCommand = command.toLowerCase().endsWith('.cmd') ? command : `${command}.cmd`
+  return command.toLowerCase().endsWith('.cmd')
+    ? { command: comspec, args: ['/d', '/s', '/c', 'call', windowsCommand, ...args] }
+    : { command: comspec, args: ['/d', '/s', '/c', windowsCommand, ...args] }
 }
 
 /** Where and with what environment a release step runs a command. */
