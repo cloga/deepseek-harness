@@ -25,4 +25,11 @@ describe('release process commands', () => {
       args: ['pack'],
     })
   })
+
+  it('runs an absolute Windows command shim through ComSpec', () => {
+    expect(commandInvocation('C:\\local dsh\\dsh.cmd', ['--version'], 'win32', 'cmd.exe')).toEqual({
+      command: 'cmd.exe',
+      args: ['/d', '/s', '/c', 'call', 'C:\\local dsh\\dsh.cmd', '--version'],
+    })
+  })
 })
