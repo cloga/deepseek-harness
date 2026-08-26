@@ -201,8 +201,8 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   /**
    * Resolve a sandbox-escalation request through `ctx.approval` BEFORE
-   * anything executes, delegating the shared fail-closed sequence (strict
-   * widening, channel resolution, outcome mapping) to
+   * anything executes, delegating standing-mode normalization plus the shared
+   * wider-request fail-closed sequence (channel resolution, outcome mapping) to
    * {@link approveEscalation}. This tool contributes only the composition
    * guard (the fields are unadvertised without a sandboxing executor, yet
    * schema validation checks advertised keys only, so an unadvertised
