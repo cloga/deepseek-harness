@@ -13,7 +13,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
-import { ESCALATION_TARGETS, approveEscalation, escalationHintMarker, sandboxDenialMarker, validateEscalationArgs } from '@deepseek-ai/dsh-sandbox'
+import { SANDBOX_MODES, approveEscalation, escalationHintMarker, sandboxDenialMarker, validateEscalationArgs } from '@deepseek-ai/dsh-sandbox'
 import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import { FsError } from '@deepseek-ai/dsh-fs'
 
@@ -42,7 +42,7 @@ export class FsSandboxController {
 
   constructor(private readonly ctx: Context) {
     const defaultMode = ctx.fs.sandboxMode
-    this.escalationModes = defaultMode === undefined ? [] : ESCALATION_TARGETS
+    this.escalationModes = defaultMode === undefined ? [] : SANDBOX_MODES
     this.policy = defaultMode === undefined ? undefined : ctx.get('sandboxPolicy')
     if (defaultMode !== undefined && this.policy === undefined) {
       throw new Error('tool-fs: the mounted filesystem confines but ctx.sandboxPolicy is missing')
@@ -52,7 +52,7 @@ export class FsSandboxController {
   /**
    * The escalation schema fields for a mutating tool's `parameters`. Call it
    * only under a confining backend (guard on {@link escalationModes}); the
-   * enum pins the closed target vocabulary, the strict-wider check happens per
+   * enum pins the closed mode vocabulary, the strict-wider check happens per
    * call at execution.
    * @returns the two escalation parameter specs.
    */
@@ -61,8 +61,8 @@ export class FsSandboxController {
       sandbox_permissions: {
         type: 'string',
         enum: [...this.escalationModes],
-        description: 'The wider sandbox mode this file operation needs. Only valid as a one-shot retry '
-          + 'of an operation the sandbox just denied; requires justification and user approval.',
+        description: 'The sandbox mode this file operation requests. A strictly wider mode is only valid as a one-shot retry '
+          + 'of an operation the sandbox just denied and requires justification and user approval.',
       },
       justification: {
         type: 'string',
@@ -77,7 +77,8 @@ export class FsSandboxController {
    * or the unchanged standing policy when the request is same or narrower.
    * Wider requests resolve through `ctx.approval` before anything executes.
    * The calling session's cwd is always carried as the workspace root.
-   * Validates the escalation argument pairing first.
+   * A justification without a target is invalid. A target's justification is
+   * validated only when the requested mode is strictly wider.
    * @param toolName - the mutating tool's name, for the approval audit trail.
    * @param args - the call's escalation arguments.
    * @param exec - the tool-execution context (agent, callId, signal).
@@ -87,7 +88,7 @@ export class FsSandboxController {
   async resolvePolicy(toolName: string, args: FsEscalationArgs, exec: ToolExecution): Promise<SandboxExecutionPolicy | undefined> {
     validateEscalationArgs(args.sandbox_permissions, args.justification)
     const standingPolicy = this.policy?.resolve({ ...exec.agent ? { session: exec.agent.session } : {} })
-    if (args.sandbox_permissions === undefined || args.justification === undefined) {
+    if (args.sandbox_permissions === undefined) {
       return standingPolicy
     }
     if (this.escalationModes.length === 0) {
