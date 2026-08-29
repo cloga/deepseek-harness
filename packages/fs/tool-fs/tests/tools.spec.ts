@@ -839,11 +839,11 @@ describe('sandbox escalation API (write/edit)', () => {
     }
   })
 
-  it('advertises the closed target vocabulary on write and edit under a confining backend', async () => {
+  it('advertises the closed sandbox-mode vocabulary on write and edit under a confining backend', async () => {
     const { ctx } = await setupConfining()
     for (const name of ['write', 'edit'] as const) {
       const props = fsSchema(ctx, name).parameters.properties
-      expect(props['sandbox_permissions']?.enum).toEqual(['workspace-write', 'danger-full-access'])
+      expect(props['sandbox_permissions']?.enum).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
       expect(props['justification']).toBeDefined()
     }
   })
@@ -901,9 +901,19 @@ describe('sandbox escalation API (write/edit)', () => {
       file_path: 'a.txt',
       content: 'x',
       sandbox_permissions: 'workspace-write',
-      justification: 'the model repeated the current mode',
     }, escalationAgent())
     expect(same.fs.stamped).toEqual([{ mode: 'workspace-write', workspaceRoot: resolve('/session-project') }])
+    expect(samePrompted).not.toHaveBeenCalled()
+
+    await call(same.ctx, 'write', {
+      file_path: 'b.txt',
+      content: 'x',
+      sandbox_permissions: 'read-only',
+    }, escalationAgent())
+    expect(same.fs.stamped).toEqual([
+      { mode: 'workspace-write', workspaceRoot: resolve('/session-project') },
+      { mode: 'workspace-write', workspaceRoot: resolve('/session-project') },
+    ])
     expect(samePrompted).not.toHaveBeenCalled()
 
     const narrower = await setupConfining({ approval: true, mode: 'danger-full-access' })
@@ -917,7 +927,7 @@ describe('sandbox escalation API (write/edit)', () => {
       old_string: 'x',
       new_string: 'y',
       sandbox_permissions: 'workspace-write',
-      justification: 'the model requested less than the current mode',
+      justification: '   ',
     }, narrowerAgent)
     expect(narrower.fs.stamped).toEqual([{ mode: 'danger-full-access', workspaceRoot: resolve('/session-project') }])
     expect(narrowerPrompted).not.toHaveBeenCalled()
@@ -946,11 +956,19 @@ describe('sandbox escalation API (write/edit)', () => {
     expect(text(result)).toContain('no agent to route it through')
   })
 
-  it('rejects the escalation argument pairing (one field without the other)', async () => {
+  it('requires a non-empty justification for an actual wider escalation', async () => {
     const { ctx } = await setupConfining()
-    const missing = await call(ctx, 'write', { file_path: 'a.txt', content: 'x', sandbox_permissions: 'workspace-write' }, escalationAgent())
+    const missing = await call(ctx, 'write', { file_path: 'a.txt', content: 'x', sandbox_permissions: 'danger-full-access' }, escalationAgent())
     expect(missing.isError).toBe(true)
     expect(text(missing)).toContain('sandbox_permissions requires a justification')
+    const blank = await call(ctx, 'write', {
+      file_path: 'a.txt',
+      content: 'x',
+      sandbox_permissions: 'danger-full-access',
+      justification: '   ',
+    }, escalationAgent())
+    expect(blank.isError).toBe(true)
+    expect(text(blank)).toContain('expected a non-empty sentence')
   })
 
   it('sandbox_permissions under a non-confining backend fails closed (unadvertised field still reaches execute)', async () => {

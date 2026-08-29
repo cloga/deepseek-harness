@@ -19,7 +19,7 @@
  */
 
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
+import { SANDBOX_MODES, type SandboxMode } from '@deepseek-ai/dsh-sandbox'
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
@@ -38,8 +38,7 @@ declare module '@deepseek-ai/dsh-session/types' {
   }
 }
 
-/** Every {@link SandboxMode}, for option advertisement and runtime validation of untrusted mode strings. */
-export const SANDBOX_MODES: readonly SandboxMode[] = ['read-only', 'workspace-write', 'danger-full-access']
+export { SANDBOX_MODES }
 
 /**
  * The session's sandbox-mode override: the last `sandbox/mode` event in the

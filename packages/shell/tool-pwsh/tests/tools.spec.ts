@@ -556,7 +556,7 @@ describe('sandbox escalation through ctx.approval', () => {
     const { ctx } = await setupSandboxed()
     const schema = ctx.tools.schemas().find(item => item.name === 'pwsh')!
     const properties = schema.parameters.properties as Record<string, { enum?: string[] }>
-    expect(properties['sandbox_permissions']?.enum).toEqual(['workspace-write', 'danger-full-access'])
+    expect(properties['sandbox_permissions']?.enum).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
     expect(schema.description).toContain('approval prompt')
     expect(schema.description).toContain('ConstrainedLanguage')
     expect(schema.description).toContain('workspace-write stays in FullLanguage')
@@ -588,11 +588,26 @@ describe('sandbox escalation through ctx.approval', () => {
     const { ctx, bash } = await setupSandboxed(true)
     const prompted = vi.fn()
     ctx.on('approval/request', () => { prompted(); return Promise.resolve<ApprovalOutcome>('allowed-once') })
-    const same = await call(ctx, 'pwsh', { ...escalate, sandbox_permissions: 'workspace-write' }, sandboxAgent('workspace-write'))
-    const narrower = await call(ctx, 'pwsh', { ...escalate, sandbox_permissions: 'workspace-write' }, sandboxAgent('danger-full-access'))
+    const same = await call(ctx, 'pwsh', {
+      command: 'Write-Output ok',
+      description: 'same mode',
+      sandbox_permissions: 'danger-full-access',
+    }, sandboxAgent('danger-full-access'))
+    const narrower = await call(ctx, 'pwsh', {
+      command: 'Write-Output ok',
+      description: 'narrower mode',
+      sandbox_permissions: 'workspace-write',
+      justification: '   ',
+    }, sandboxAgent('danger-full-access'))
+    const floor = await call(ctx, 'pwsh', {
+      command: 'Write-Output ok',
+      description: 'narrowest mode',
+      sandbox_permissions: 'read-only',
+    }, sandboxAgent('workspace-write'))
     expect(same.isError).toBe(false)
     expect(narrower.isError).toBe(false)
-    expect(bash.modes).toEqual(['workspace-write', 'danger-full-access'])
+    expect(floor.isError).toBe(false)
+    expect(bash.modes).toEqual(['danger-full-access', 'danger-full-access', 'workspace-write'])
     expect(prompted).not.toHaveBeenCalled()
 
     const malformed = sandboxAgent()
