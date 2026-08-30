@@ -76,6 +76,7 @@ export class TeamService extends TypertRemoteService {
   private readonly roster: TeamRoster
   private readonly mailbox: TeamMailbox
   private readonly tasks: TeamTaskBoard
+  private readonly recoveries = new Set<Promise<void>>()
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'agentTeams')
@@ -278,13 +279,20 @@ export class TeamService extends TypertRemoteService {
 
   /** Queue one contained recovery pass after publication has unwound. */
   private scheduleRecovery(agent: Agent): void {
-    queueMicrotask(() => {
-      if (this.lifecycle.disposed) return
-      void this.recoverFor(agent).catch((error: unknown) => {
+    if (this.lifecycle.disposed) return
+    const recovery = Promise.resolve().then(async () => {
+      try {
+        await this.recoverFor(agent)
+      } catch (error: unknown) {
         if (this.lifecycle.disposed) return
         this.ctx.logger.warn(`Agent Teams recovery for "${agent.id}" failed: ${errorMessage(error)}`)
-      })
+      }
     })
+    this.recoveries.add(recovery)
+    const forget = (): void => {
+      this.recoveries.delete(recovery)
+    }
+    void recovery.then(forget, forget)
   }
 
   /** Reconcile roster provisioning before retrying that member's pending mailbox. */
@@ -299,6 +307,7 @@ export class TeamService extends TypertRemoteService {
     this.activity.close()
 
     const failures: unknown[] = []
+    await this.lifecycle.settle([...this.recoveries], failures)
     await this.lifecycle.settle(this.roster.pendingCreations(), failures)
     await this.lifecycle.settle(this.mailbox.pendingDispatches(), failures)
     for (const [root, childIds] of this.roster.liveChildrenByRoot()) {
