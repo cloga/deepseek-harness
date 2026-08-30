@@ -23,7 +23,7 @@
   gap: 10px;
   width: 100%;
   max-width: calc(var(--dsh-composer-card-max-width) - 4 * var(--dsh-composer-dock-inset));
-  height: 36px;
+  min-height: 36px;
   margin: 0 auto;
   padding: 4px 5px 4px 12px;
   border: 1px solid var(--dsw-alias-border-l1);
@@ -72,17 +72,21 @@
 /* ---- Inline edit form ---- */
 
 .objectiveInput {
+  box-sizing: border-box;
   flex: 1;
   min-width: 0;
-  height: 26px;
-  padding: 0 8px;
+  min-height: 66px;
+  max-height: 160px;
+  padding: 5px 8px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 6px;
   background: var(--dsw-alias-bg-base);
+  font: inherit;
   font-size: 13px;
-  line-height: 20px;
+  line-height: 18px;
   color: var(--dsw-alias-label-primary);
   outline: none;
+  resize: vertical;
 }
 
 .objectiveInput:focus {

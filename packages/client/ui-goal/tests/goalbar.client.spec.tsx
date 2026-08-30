@@ -78,19 +78,22 @@ describe('GoalBar', () => {
     expect(screen.getByText('Next goal')).toBeTruthy()
   })
 
-  it('edit swaps the strip for a prefilled form; Enter saves, empty stays disabled', async () => {
+  it('edit swaps the strip for a prefilled multiline form; Ctrl+Enter saves, empty stays disabled', async () => {
     const actions = makeActions()
     render(<GoalBar goal={makeGoal()} {...actions} t={t} />)
     fireEvent.click(screen.getByRole('button', { name: '编辑目标' }))
     const box = screen.getByRole('textbox', { name: '目标内容' })
+    expect(box.tagName).toBe('TEXTAREA')
     expect(box).toHaveProperty('value', 'Ship the redesign')
 
     fireEvent.change(box, { target: { value: '   ' } })
     expect(screen.getByRole('button', { name: '保存目标' })).toHaveProperty('disabled', true)
 
-    fireEvent.change(box, { target: { value: 'Ship v2' } })
+    fireEvent.change(box, { target: { value: 'Ship v2\nwith tests' } })
     fireEvent.keyDown(box, { key: 'Enter' })
-    expect(actions.onEdit).toHaveBeenCalledWith('Ship v2')
+    expect(actions.onEdit).not.toHaveBeenCalled()
+    fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true })
+    expect(actions.onEdit).toHaveBeenCalledWith('Ship v2\nwith tests')
     await waitFor(() => { expect(screen.getByText('进行中的目标')).toBeTruthy() })
   })
 
@@ -116,13 +119,13 @@ describe('GoalBar', () => {
     expect(screen.getByRole('textbox', { name: '目标内容' })).toHaveProperty('value', 'Ship the redesign')
   })
 
-  it('Enter with a blank draft neither saves nor closes the form', () => {
+  it('Ctrl+Enter with a blank draft neither saves nor closes the form', () => {
     const actions = makeActions()
     render(<GoalBar goal={makeGoal()} {...actions} t={t} />)
     fireEvent.click(screen.getByRole('button', { name: '编辑目标' }))
     const box = screen.getByRole('textbox', { name: '目标内容' })
     fireEvent.change(box, { target: { value: '   ' } })
-    fireEvent.keyDown(box, { key: 'Enter' })
+    fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true })
     expect(actions.onEdit).not.toHaveBeenCalled()
     expect(screen.getByRole('textbox', { name: '目标内容' })).toBeTruthy()
   })

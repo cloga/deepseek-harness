@@ -81,14 +81,14 @@ export function GoalBar({ goal, onEdit, onPause, onResume, onClear, t }: GoalBar
     return (
       <div className={css.dock} data-goal-bar>
         <div className={css.bar}>
-          <input
+          <textarea
             className={css.objectiveInput}
-            type="text"
             aria-label={t('objective.aria')}
             value={draft}
+            rows={3}
             onChange={(e) => { setDraft(e.target.value) }}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') void handleEdit()
+              if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') void handleEdit()
               if (e.key === 'Escape') setEditing(false)
             }}
             autoFocus
