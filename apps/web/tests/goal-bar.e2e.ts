@@ -1,8 +1,7 @@
 // Keyless assembled-browser coverage for the goal bar over the shipped Web
-// bundles and the fixture Connection RPC. The command creates a real projected
-// goal in the fixture session; the golden pins the active strip, while the
-// clear gesture proves the acknowledged tombstone leaves neither stale chrome
-// nor a duplicate-mutation error.
+// bundles and the fixture Connection RPC. The command creates a projected goal;
+// edit round-trips multiline text through the Remote and projection, while
+// clear proves the acknowledged tombstone leaves no stale chrome.
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import type { Browser, Page } from 'playwright'
@@ -18,6 +17,7 @@ const SNAPSHOT_DIR = fileURLToPath(new URL('./expected/goal-bar', import.meta.ur
 const ACTIVE_EXPECTED = join(SNAPSHOT_DIR, 'active.expected.md')
 const OVERLAY = fileURLToPath(new URL('./goal-bar.overlay.yml', import.meta.url))
 const MODE = webSnapshotMode()
+const MULTILINE_OBJECTIVE = 'Guard rapid clear clicks\nPreserve requirement order'
 
 describe('web e2e: goal bar clear convergence', () => {
   let scaffold: WebScaffold
@@ -41,7 +41,7 @@ describe('web e2e: goal bar clear convergence', () => {
     await scaffold?.close()
   })
 
-  it('renders one active goal and clears it without exposing a stale error', async () => {
+  it('round-trips a multiline edit and clears it without exposing a stale error', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-goal-bar-clear'))
     // Startup reuses the fixture workspace's blank session, keeping this
     // command independent of alpha's running replay and pending question.
@@ -54,6 +54,21 @@ describe('web e2e: goal bar clear convergence', () => {
     await bar.waitFor({ timeout: 10_000 })
     const snapshot = await captureStableAria(page, '[data-goal-bar]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(ACTIVE_EXPECTED, snapshot, MODE)
+
+    await bar.getByRole('button', { name: 'Edit goal' }).click()
+    const editor = bar.getByRole('textbox', { name: 'Goal objective' })
+    await editor.fill(MULTILINE_OBJECTIVE)
+    await editor.press('Control+Enter')
+    await expect.poll(() => bar.textContent(), { timeout: 10_000 }).toContain(MULTILINE_OBJECTIVE)
+
+    await bar.getByRole('button', { name: 'Edit goal' }).click()
+    const projectedEditor = bar.getByRole('textbox', { name: 'Goal objective' })
+    expect(await projectedEditor.inputValue()).toBe(MULTILINE_OBJECTIVE)
+    await projectedEditor.fill('Discarded draft')
+    await projectedEditor.press('Escape')
+    await bar.getByRole('button', { name: 'Edit goal' }).click()
+    expect(await bar.getByRole('textbox', { name: 'Goal objective' }).inputValue()).toBe(MULTILINE_OBJECTIVE)
+    await bar.getByRole('button', { name: 'Cancel edit' }).click()
 
     const clear = bar.getByRole('button', { name: 'Clear goal' })
     await clear.evaluate((button) => {

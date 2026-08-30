@@ -149,7 +149,8 @@ describe('GoalService creation and replay', () => {
 
   it('restores a seeded goal and rounds with activation disarmed', async () => {
     const first = await harness()
-    const created = first.ctx.goals.create(first.agent, { objective: 'seed me', maxGoalRounds: 9 })
+    const objective = 'ship the editor\npreserve requirement order'
+    const created = first.ctx.goals.create(first.agent, { objective, maxGoalRounds: 9 })
     appendRound(first.session, created, 1)
     appendRound(first.session, created, 2)
 
@@ -160,6 +161,7 @@ describe('GoalService creation and replay', () => {
     ctx.agents.register(resumed.agent)
     expect(ctx.goals.get(resumed.agent)).toMatchObject({
       id: created.id,
+      objective,
       roundsStarted: 2,
       activation: 'disarmed',
     })
