@@ -12,7 +12,7 @@ A monotonic projection also cannot return an automation-owned Issue from `In rev
 
 ## Decision
 
-The Issue lifecycle workflow treats review webhooks as commands. `pull_request.review_requested`, including a repeated request, targets `In review`. `pull_request_review.submitted` targets `In progress` only when `review.state` is `changes_requested`; the submitted event remains necessary because a reviewer can request changes without an earlier review-request event. Approved and commented submissions run their lifecycle job but no-op (they never reach the Project token step), while dismissed reviews are not subscribed.
+The Issue lifecycle workflow treats review webhooks as commands in `deepseek-harness/deepseek-harness`. `pull_request.review_requested`, including a repeated request, targets `In review`. `pull_request_review.submitted` targets `In progress` only when `review.state` is `changes_requested`; the submitted event remains necessary because a reviewer can request changes without an earlier review-request event. Approved and commented submissions run their lifecycle job but no-op (they never reach the Project token step), while dismissed reviews are not subscribed. Fork copies run the job as a successful no-op because they neither own the upstream Project App credentials nor share upstream PR and Issue identities.
 
 Ordinary subscribed pull-request events remain forward-only implementation signals: they can move `Inbox`, `Backlog`, or `Ready` to `In progress`, but they cannot move `In review` backward. Review-request commands can move any earlier active status to `In review`. Changes-requested commands can move earlier active statuses forward to `In progress` and can move `In review` back only when the latest status event for the target Project was written by the configured lifecycle actor. A human or unknown latest actor preserves the current status.
 
@@ -22,7 +22,7 @@ The handler resolves only exact same-repository `Fixes`, `Closes`, or `Resolves`
 
 ## Verification
 
-[Issue-management tests](../../../../.github/issue-management/policy.test.mjs) pin the event-to-command mapping, the repeated-review-request transition after a changes-requested command, the changes-requested regression, terminal protection, and human override preservation. [Workflow tests](../../../../scripts/ci-workflow.spec.ts) pin the subscribed events, the job-level absence of `if` plus the step-level gate on the token/board steps (so approved/commented reviews pass without minting a token), and the separate `ready_for_review` policy trigger.
+[Issue-management tests](../../../../.github/issue-management/policy.test.mjs) pin the event-to-command mapping, the repeated-review-request transition after a changes-requested command, the changes-requested regression, terminal protection, and human override preservation. [Workflow tests](../../../../scripts/ci-workflow.spec.ts) pin the subscribed events, the job-level absence of `if`, the upstream-repository and review-state gates on the token/board steps, the upstream-repository gate on PR validation, and the separate `ready_for_review` policy trigger.
 
 ## Alternatives considered
 
