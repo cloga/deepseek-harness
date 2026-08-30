@@ -119,10 +119,10 @@ describe('CI workflow', () => {
     ))
     expect(buildCommands.map(step => step.run)).toContain('pnpm run check:ci:windows-blocking')
 
-    // windows-coverage keeps the upstream 4-partition profile and serializes forks.
+    // windows-coverage uses the lower 4-partition profile.
     expect(windowsCoverage.name).toBe('windows node 24 / coverage')
     expect(jobEnv(windowsCoverage)['DSH_COVERAGE_PARTITIONS'])
-      .toContain("github.repository == 'deepseek-harness/deepseek-harness' && '4' || ''")
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '4'")
     const coverageSteps = windowsCoverage.steps as unknown[]
     const coverageCommands = coverageSteps.filter((step): step is Record<string, unknown> & { run: string } => (
       isRecord(step) && typeof step.run === 'string'
@@ -200,14 +200,10 @@ describe('CI workflow', () => {
       .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '4'")
     const linuxCoverage = workflowJob(workflow, 'node-24-coverage')
     expect(jobEnv(linuxCoverage)['DSH_COVERAGE_MAX_WORKERS'])
-      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '1' || '6'")
-    expect(jobEnv(linuxCoverage)['DSH_COVERAGE_PARTITIONS'])
-      .toContain("github.repository == 'deepseek-harness/deepseek-harness' && '4' || ''")
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '6'")
     const windowsCoverage = workflowJob(workflow, 'windows-coverage')
     expect(jobEnv(windowsCoverage)['DSH_COVERAGE_MAX_WORKERS'])
-      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '1' || '6'")
-    expect(jobEnv(windowsCoverage)['DSH_COVERAGE_PARTITIONS'])
-      .toContain("github.repository == 'deepseek-harness/deepseek-harness' && '4' || ''")
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '6'")
     const preview = workflowJob(loadWorkflow('.github/workflows/build-preview-cloudflare.yml'), 'preview')
     expect(preview.if).toBe("github.repository == 'deepseek-harness/deepseek-harness'")
   })
