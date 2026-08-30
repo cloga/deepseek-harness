@@ -645,10 +645,10 @@ describe('sandbox escalation through the generic task producer', () => {
 
   it('preserves non-text finalized content when no escalation is available', async () => {
     const ctx = await setup()
-    const finalize = ctx.tools.get('bash')?.finalizeContent
-    if (finalize === undefined) throw new Error('bash finalizer is missing')
+    const tool = ctx.tools.get('bash')
+    if (tool?.finalizeContent === undefined) throw new Error('bash finalizer is missing')
     const content = [{ type: 'image' as const, data: 'aW1hZ2U=', mimeType: 'image/png' as const }]
-    expect(finalize(
+    expect(tool.finalizeContent(
       { name: 'bash', arguments: {}, callId: ToolCallId('non-text'), signal: testToolSignal } as never,
       { content, isError: false } as never,
     )).toEqual(content)

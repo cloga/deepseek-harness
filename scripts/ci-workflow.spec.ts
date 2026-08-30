@@ -121,7 +121,8 @@ describe('CI workflow', () => {
 
     // windows-coverage uses the lower 4-partition profile.
     expect(windowsCoverage.name).toBe('windows node 24 / coverage')
-    expect(windowsCoverage.env).toMatchObject({ DSH_COVERAGE_PARTITIONS: '4' })
+    expect(windowsCoverage.env?.DSH_COVERAGE_PARTITIONS)
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '4'")
     const coverageSteps = windowsCoverage.steps as unknown[]
     const coverageCommands = coverageSteps.filter((step): step is Record<string, unknown> & { run: string } => (
       isRecord(step) && typeof step.run === 'string'
@@ -188,6 +189,21 @@ describe('CI workflow', () => {
     const aggregateRunsOn = workflowJob(workflow, 'all-checks-passed')['runs-on']
     expect(aggregateRunsOn).toContain("github.repository != 'deepseek-harness/deepseek-harness'")
     expect(aggregateRunsOn).toContain('ubuntu-latest')
+    expect(workflowJob(workflow, 'node-24').env?.DSH_GATE_CONCURRENCY)
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '3' || '8'")
+    const consumers = workflowJob(workflow, 'node-24-consumers')
+    expect(consumers.env?.DSH_GATE_CONCURRENCY)
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '10'")
+    expect(consumers.env?.DSH_WEB_SNAPSHOT_WORKERS)
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '1' || '6'")
+    expect(consumers.env?.DSH_SNAPSHOT_MAX_CONCURRENCY)
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '4'")
+    const linuxCoverage = workflowJob(workflow, 'node-24-coverage')
+    expect(linuxCoverage.env?.DSH_COVERAGE_MAX_WORKERS)
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '6'")
+    const windowsCoverage = workflowJob(workflow, 'windows-coverage')
+    expect(windowsCoverage.env?.DSH_COVERAGE_MAX_WORKERS)
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '6'")
     const preview = workflowJob(loadWorkflow('.github/workflows/build-preview-cloudflare.yml'), 'preview')
     expect(preview.if).toBe("github.repository == 'deepseek-harness/deepseek-harness'")
   })

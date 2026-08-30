@@ -10,7 +10,7 @@ The pull-request workflow selected repository-restricted larger-runner labels fo
 
 ## Decision
 
-Pull-request runner selection checks `github.repository`. `deepseek-harness/deepseek-harness` retains its measured larger-runner and self-hosted failover choices. A repository fork runs primary Linux jobs and the aggregate on `ubuntu-latest`, and native Windows jobs on `windows-2025`. The Cloudflare preview is an upstream-only job because a fork cannot publish to the upstream deployment project.
+Pull-request runner selection checks `github.repository`. `deepseek-harness/deepseek-harness` retains its measured larger-runner and self-hosted failover choices. A repository fork runs primary Linux jobs and the aggregate on `ubuntu-latest`, and native Windows jobs on `windows-2025`. Fork jobs also lower outer gate, snapshot, browser, coverage-partition, lint, and package-validation concurrency to the standard runners' capacity; retaining 16-core fan-out causes bounded lifecycle and persistence tests to time out or contend on filesystem publication. The Cloudflare preview is an upstream-only job because a fork cannot publish to the upstream deployment project.
 
 The workflow preserves every required job and command in forks; only runner capacity changes. Forks therefore execute the complete required evidence instead of skipping checks or depending on repository-external runner configuration.
 
@@ -26,4 +26,4 @@ This decision partially supersedes the no-automatic-fallback clause in [the port
 
 ## Consequences
 
-Fork pull requests can complete required CI on portable GitHub-hosted capacity, with slower execution than the upstream larger-runner path. Upstream pull requests retain their existing performance and failover behavior. Workflow tests pin both branches of each runner selector and the upstream-only preview condition.
+Fork pull requests can complete required CI on portable GitHub-hosted capacity, with slower execution than the upstream larger-runner path. Upstream pull requests retain their existing performance, measured concurrency, and failover behavior. Workflow tests pin both branches of each runner selector, the fork concurrency bounds, and the upstream-only preview condition.
