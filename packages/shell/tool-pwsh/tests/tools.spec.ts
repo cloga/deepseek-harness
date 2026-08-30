@@ -15,7 +15,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH } from '@deepseek-ai/dsh-tools'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
@@ -271,7 +271,7 @@ let callCounter = 0
 function call(ctx: Context, name: string, args: unknown, agent?: Agent) {
   return ctx.tools.execute({
     signal: testToolSignal,
-    callId: CallId(`call-${++callCounter}`),
+    callId: ToolCallId(`call-${++callCounter}`),
     name,
     arguments: args,
     ...agent ? { agent } : {},
@@ -403,7 +403,7 @@ describe('execution through the bash seam', () => {
     bash.handler = () => runResult('ok\n')
     await ctx.tools.execute({
       signal: controller.signal,
-      callId: CallId('call-signal'),
+      callId: ToolCallId('call-signal'),
       name: 'pwsh',
       arguments: { command: 'Write-Output ok', description: 'ok' },
     })
@@ -556,7 +556,7 @@ describe('sandbox escalation through ctx.approval', () => {
     const { ctx } = await setupSandboxed()
     const schema = ctx.tools.schemas().find(item => item.name === 'pwsh')!
     const properties = schema.parameters.properties as Record<string, { enum?: string[] }>
-    expect(properties['sandbox_permissions']?.enum).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
+    expect(properties['sandbox_permissions']?.enum).toEqual(['workspace-write', 'danger-full-access'])
     expect(schema.description).toContain('approval prompt')
     expect(schema.description).toContain('ConstrainedLanguage')
     expect(schema.description).toContain('workspace-write stays in FullLanguage')
@@ -581,33 +581,15 @@ describe('sandbox escalation through ctx.approval', () => {
     expect(schema.parameters.properties).not.toHaveProperty('sandbox_permissions')
   })
 
-  it('rejects injected escalation without a sandbox and normalizes non-wider requests without prompting', async () => {
+  it('rejects injected escalation without a sandbox and non-widening escalation without prompting', async () => {
     const plain = await setup()
     expect(text(await call(plain.ctx, 'pwsh', escalate))).toContain('not available in this composition')
 
-    const { ctx, bash } = await setupSandboxed(true)
+    const { ctx } = await setupSandboxed(true)
     const prompted = vi.fn()
     ctx.on('approval/request', () => { prompted(); return Promise.resolve<ApprovalOutcome>('allowed-once') })
-    const same = await call(ctx, 'pwsh', {
-      command: 'Write-Output ok',
-      description: 'same mode',
-      sandbox_permissions: 'danger-full-access',
-    }, sandboxAgent('danger-full-access'))
-    const narrower = await call(ctx, 'pwsh', {
-      command: 'Write-Output ok',
-      description: 'narrower mode',
-      sandbox_permissions: 'workspace-write',
-      justification: '   ',
-    }, sandboxAgent('danger-full-access'))
-    const floor = await call(ctx, 'pwsh', {
-      command: 'Write-Output ok',
-      description: 'narrowest mode',
-      sandbox_permissions: 'read-only',
-    }, sandboxAgent('workspace-write'))
-    expect(same.isError).toBe(false)
-    expect(narrower.isError).toBe(false)
-    expect(floor.isError).toBe(false)
-    expect(bash.modes).toEqual(['danger-full-access', 'danger-full-access', 'workspace-write'])
+    const result = await call(ctx, 'pwsh', { ...escalate, sandbox_permissions: 'workspace-write' }, sandboxAgent('workspace-write'))
+    expect(text(result)).toContain('not strictly wider')
     expect(prompted).not.toHaveBeenCalled()
 
     const malformed = sandboxAgent()
@@ -615,7 +597,7 @@ describe('sandbox escalation through ctx.approval', () => {
       type: 'sandbox/mode',
       data: { mode: 'unknown-mode' },
     })
-    expect(text(await call(ctx, 'pwsh', escalate, malformed))).toContain('invalid effective sandbox mode')
+    expect(text(await call(ctx, 'pwsh', escalate, malformed))).toContain('not strictly wider')
   })
 
   it('fails closed when approval cannot be routed', async () => {
@@ -644,7 +626,7 @@ describe('sandbox escalation through ctx.approval', () => {
     const agent = sandboxAgent(undefined, ctx)
     ctx.agents.register(agent)
     const foreground = await ctx.tools.execute({
-      callId: CallId('sandbox-signal'),
+      callId: ToolCallId('sandbox-signal'),
       name: 'pwsh',
       arguments: escalate,
       agent,
@@ -667,7 +649,7 @@ describe('sandbox escalation through ctx.approval', () => {
     const start = vi.spyOn(bash, 'start')
 
     const result = await ctx.tools.execute({
-      callId: CallId('cancelled-escalation-background'),
+      callId: ToolCallId('cancelled-escalation-background'),
       name: 'pwsh',
       arguments: { ...escalate, run_in_background: true },
       agent,
@@ -770,7 +752,7 @@ describe('background execution through the job runtime', () => {
     const controller = new AbortController()
     controller.abort()
     const result = await ctx.tools.execute({
-      callId: CallId('call-pre-aborted'),
+      callId: ToolCallId('call-pre-aborted'),
       name: 'pwsh',
       arguments: { command: 'Start-Sleep -Seconds 60', description: 'test command', run_in_background: true },
       signal: controller.signal,

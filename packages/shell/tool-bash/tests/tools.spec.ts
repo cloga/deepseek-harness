@@ -3,10 +3,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import type { ShellExecRequest, ShellExecSpec, ShellProcess, ShellProcessRead, ShellRunResult } from '@deepseek-ai/dsh-shell'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import SystemPrompt, { FIRST_PARTY_SECTION_ORDER } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH } from '@deepseek-ai/dsh-tools'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -76,7 +76,7 @@ function registerFakeAgent(ctx: Context, sessionId: string, inject: (...args: un
 }
 let callCounter = 0
 function call(ctx: Context, name: string, args: unknown, agent?: Agent) {
-  return ctx.tools.execute({ signal: testToolSignal, callId: CallId(`call-${++callCounter}`), name, arguments: args, ...agent ? { agent } : {} })
+  return ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId(`call-${++callCounter}`), name, arguments: args, ...agent ? { agent } : {} })
 }
 
 function text(result: { content: { type: string; text?: string }[] }): string {
@@ -309,7 +309,7 @@ describe('bash tool', () => {
     const ctx = await setup()
     const controller = new AbortController()
     const pending = ctx.tools.execute({
-      callId: CallId('call-abort'),
+      callId: ToolCallId('call-abort'),
       name: 'bash',
       arguments: { command: 'sleep 60', description: 'test command' },
       signal: controller.signal,
@@ -377,8 +377,16 @@ describe('bash tool', () => {
 
   it('contributes the exit-code habit as its prompt section (guidance the descriptions cannot carry)', async () => {
     const ctx = await setup()
-    ctx.systemPrompt.section({ name: 'test:before-bash', order: 104, text: 'before' })
-    ctx.systemPrompt.section({ name: 'test:after-bash', order: 106, text: 'after' })
+    ctx.systemPrompt.section({
+      name: 'test:before-bash',
+      order: FIRST_PARTY_SECTION_ORDER.TOOL_BASH - 10,
+      text: 'before',
+    })
+    ctx.systemPrompt.section({
+      name: 'test:after-bash',
+      order: FIRST_PARTY_SECTION_ORDER.TOOL_BASH + 10,
+      text: 'after',
+    })
     const assembly = await ctx.systemPrompt.assemble()
     const section = assembly.sections.find(s => s.name === 'tool:bash')
     expect(assembly.sections.map(s => s.name)).toEqual([
@@ -509,7 +517,7 @@ describe('background execution through the job runtime', () => {
     const controller = new AbortController()
     controller.abort()
     const result = await ctx.tools.execute({
-      callId: CallId('call-pre-aborted'),
+      callId: ToolCallId('call-pre-aborted'),
       name: 'bash',
       arguments: { command: 'sleep 60', description: 'test command', run_in_background: true },
       signal: controller.signal,
@@ -589,7 +597,7 @@ describe('sandbox escalation through the generic task producer', () => {
     const { ctx } = await setupSandboxed()
     const schema = ctx.tools.schemas().find(item => item.name === 'bash')!
     const properties = schema.parameters.properties as Record<string, { enum?: string[] }>
-    expect(properties['sandbox_permissions']?.enum).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
+    expect(properties['sandbox_permissions']?.enum).toEqual(['workspace-write', 'danger-full-access'])
     expect(schema.description).toContain('approval prompt')
 
     for (const args of [
@@ -601,33 +609,15 @@ describe('sandbox escalation through the generic task producer', () => {
     }
   })
 
-  it('rejects injected escalation without a sandbox and normalizes non-wider requests without prompting', async () => {
+  it('rejects injected escalation without a sandbox and non-widening escalation without prompting', async () => {
     const plain = await setup()
     expect(text(await call(plain, 'bash', escalate))).toContain('not available in this composition')
 
-    const { ctx, bash } = await setupSandboxed(true)
+    const { ctx } = await setupSandboxed(true)
     const prompted = vi.fn()
     ctx.on('approval/request', () => { prompted(); return Promise.resolve<ApprovalOutcome>('allowed-once') })
-    const same = await call(ctx, 'bash', {
-      command: 'true',
-      description: 'same mode',
-      sandbox_permissions: 'danger-full-access',
-    }, sandboxAgent('danger-full-access'))
-    const narrower = await call(ctx, 'bash', {
-      command: 'true',
-      description: 'narrower mode',
-      sandbox_permissions: 'workspace-write',
-      justification: '   ',
-    }, sandboxAgent('danger-full-access'))
-    const floor = await call(ctx, 'bash', {
-      command: 'true',
-      description: 'narrowest mode',
-      sandbox_permissions: 'read-only',
-    }, sandboxAgent('workspace-write'))
-    expect(same.isError).toBe(false)
-    expect(narrower.isError).toBe(false)
-    expect(floor.isError).toBe(false)
-    expect(bash.modes).toEqual(['danger-full-access', 'danger-full-access', 'workspace-write'])
+    const result = await call(ctx, 'bash', { ...escalate, sandbox_permissions: 'workspace-write' }, sandboxAgent('workspace-write'))
+    expect(text(result)).toContain('not strictly wider')
     expect(prompted).not.toHaveBeenCalled()
 
     const malformed = sandboxAgent()
@@ -635,7 +625,7 @@ describe('sandbox escalation through the generic task producer', () => {
       type: 'sandbox/mode',
       data: { mode: 'unknown-mode' },
     })
-    expect(text(await call(ctx, 'bash', escalate, malformed))).toContain('invalid effective sandbox mode')
+    expect(text(await call(ctx, 'bash', escalate, malformed))).toContain('not strictly wider')
   })
 
   it('fails closed when approval cannot be routed', async () => {
@@ -664,7 +654,7 @@ describe('sandbox escalation through the generic task producer', () => {
     const agent = sandboxAgent(undefined, ctx)
     ctx.agents.register(agent)
     const foreground = await ctx.tools.execute({
-      callId: CallId('sandbox-signal'),
+      callId: ToolCallId('sandbox-signal'),
       name: 'bash',
       arguments: escalate,
       agent,
@@ -687,7 +677,7 @@ describe('sandbox escalation through the generic task producer', () => {
     const start = vi.spyOn(bash, 'start')
 
     const result = await ctx.tools.execute({
-      callId: CallId('cancelled-escalation-background'),
+      callId: ToolCallId('cancelled-escalation-background'),
       name: 'bash',
       arguments: { ...escalate, run_in_background: true },
       agent,
@@ -851,7 +841,7 @@ describe('session-cwd routing (per-session workdir)', () => {
   it('falls back to the executor default when the agent has no session cwd', async () => {
     const ctx = await setup()
     // No exec.agent at all → executor uses its config/process.cwd() default.
-    const result = await ctx.tools.execute({ signal: testToolSignal, callId: CallId('cwd-noagent'), name: 'bash', arguments: { command: 'pwd', description: 'pwd' } })
+    const result = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('cwd-noagent'), name: 'bash', arguments: { command: 'pwd', description: 'pwd' } })
     expect(result.isError).toBe(false)
     expect(text(result).trim().length).toBeGreaterThan(0)
   })
@@ -1149,7 +1139,7 @@ describe('the model-facing bash tool builds its request from named args only (no
 
     await ctx.tools.execute({
       signal: testToolSignal,
-      callId: CallId('session-env-fg'),
+      callId: ToolCallId('session-env-fg'),
       name: 'bash',
       arguments: { command: 'true', description: 'run command' },
       agent,
@@ -1170,7 +1160,7 @@ describe('the model-facing bash tool builds its request from named args only (no
 
     await ctx.tools.execute({
       signal: testToolSignal,
-      callId: CallId('session-env-bg'),
+      callId: ToolCallId('session-env-bg'),
       name: 'bash',
       arguments: {
         command: 'sleep 1',
@@ -1197,7 +1187,7 @@ describe('the model-facing bash tool builds its request from named args only (no
 
     await ctx.tools.execute({
       signal: testToolSignal,
-      callId: CallId('session-env-id-only'),
+      callId: ToolCallId('session-env-id-only'),
       name: 'bash',
       arguments: { command: 'true', description: 'run command' },
       agent,
@@ -1219,7 +1209,7 @@ describe('the model-facing bash tool builds its request from named args only (no
     for (const [callId, agent] of [['parent', parent], ['child', child]] as const) {
       await ctx.tools.execute({
         signal: testToolSignal,
-        callId: CallId(`session-env-${callId}`),
+        callId: ToolCallId(`session-env-${callId}`),
         name: 'bash',
         arguments: { command: 'true', description: 'run command' },
         agent,
@@ -1250,7 +1240,7 @@ describe('the model-facing bash tool builds its request from named args only (no
     // already set environment variables or feed stdin.
     await ctx.tools.execute({
       signal: testToolSignal,
-      callId: CallId('no-forward-1'),
+      callId: ToolCallId('no-forward-1'),
       name: 'bash',
       arguments: {
         command: 'echo hi',
@@ -1272,7 +1262,7 @@ describe('the model-facing bash tool builds its request from named args only (no
     const { ctx, bash } = await setupRecording()
     const result = await ctx.tools.execute({
       signal: testToolSignal,
-      callId: CallId('no-forward-2'),
+      callId: ToolCallId('no-forward-2'),
       name: 'bash',
       arguments: {
         command: 'sleep 1',

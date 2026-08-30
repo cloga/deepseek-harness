@@ -15,12 +15,12 @@ import { defineTool, TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView, TerminalCallView, ToolExecution, ToolResult, ToolResultView } from '@deepseek-ai/dsh-tools'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-system-prompt'
+import { FIRST_PARTY_SECTION_ORDER } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-shell-env'
 import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
-import { SANDBOX_MODES, approveEscalation, canonicalPath, validateEscalationArgs } from '@deepseek-ai/dsh-sandbox'
+import { ESCALATION_TARGETS, approveEscalation, canonicalPath, validateEscalationArgs } from '@deepseek-ai/dsh-sandbox'
 import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import { DSH_ENV_PREFIX } from '@deepseek-ai/dsh-shell'
 import type { ShellRunResult } from '@deepseek-ai/dsh-shell'
@@ -62,8 +62,8 @@ function validateBashArgs(args: BashToolArgs): void {
   if (args.timeoutMs !== undefined && (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0)) {
     throw new Error(`invalid timeoutMs: expected a positive number, got ${JSON.stringify(args.timeoutMs)}`)
   }
-  // Shared validation rejects a justification without a target. The rank-aware
-  // helper validates justification only for an actual widening request.
+  // The escalation pairing (sandbox_permissions ⇔ justification, non-empty) is
+  // the shared rule both enforcing families validate identically.
   validateEscalationArgs(args.sandbox_permissions, args.justification)
 }
 
@@ -190,7 +190,7 @@ const BACKGROUND_OUTPUT_PROPERTIES = {
 export function apply(ctx: Context, config: Config = {}): void {
   const backgroundEnabled = config.enableRunInBackground ?? true
   const defaultMode = ctx.shell.sandboxMode
-  const escalationModes: readonly SandboxMode[] = defaultMode === undefined ? [] : SANDBOX_MODES
+  const escalationModes: readonly SandboxMode[] = defaultMode === undefined ? [] : ESCALATION_TARGETS
   const sandboxPolicy: SandboxPolicyService | undefined = defaultMode === undefined ? undefined : ctx.get('sandboxPolicy')
   if (defaultMode !== undefined && sandboxPolicy === undefined) {
     throw new Error('tool-bash: the mounted bash executor confines but ctx.sandboxPolicy is missing')
@@ -201,8 +201,8 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   /**
    * Resolve a sandbox-escalation request through `ctx.approval` BEFORE
-   * anything executes, delegating standing-mode normalization plus the shared
-   * wider-request fail-closed sequence (channel resolution, outcome mapping) to
+   * anything executes, delegating the shared fail-closed sequence (strict
+   * widening, channel resolution, outcome mapping) to
    * {@link approveEscalation}. This tool contributes only the composition
    * guard (the fields are unadvertised without a sandboxing executor, yet
    * schema validation checks advertised keys only, so an unadvertised
@@ -212,7 +212,7 @@ export function apply(ctx: Context, config: Config = {}): void {
    */
   const approveBashEscalation = (
     mode: string,
-    justification: string | undefined,
+    justification: string,
     exec: ToolExecution,
     standingPolicy: SandboxExecutionPolicy | undefined,
   ): Promise<SandboxMode> => {
@@ -235,7 +235,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // Cross-call guidance belongs in the prompt rather than one-call schema prose.
   ctx.systemPrompt.section({
     name: 'tool:bash',
-    order: 105,
+    order: FIRST_PARTY_SECTION_ORDER.TOOL_BASH,
     text: 'Check the [exit code: N] marker on every bash result; investigate failures before moving on.',
   })
 
@@ -260,7 +260,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         sandbox_permissions: {
           type: 'string' as const,
           enum: [...escalationModes],
-          description: 'The sandbox mode this command requests. A strictly wider mode is only valid as a one-shot retry of a command the sandbox just denied and requires justification and user approval.',
+          description: 'The wider sandbox mode this command needs. Only valid as a one-shot retry of a command the sandbox just denied; requires justification and user approval.',
         },
         justification: {
           type: 'string' as const,
@@ -331,7 +331,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       validateBashArgs(args)
       // Description is display metadata; workdir defaults to the caller's session.
       const standingPolicy = resolveSandboxPolicy(exec)
-      const approvedMode = args.sandbox_permissions !== undefined
+      const approvedMode = args.sandbox_permissions !== undefined && args.justification !== undefined
         ? await approveBashEscalation(args.sandbox_permissions, args.justification, exec, standingPolicy)
         : undefined
       const policy = approvedMode === undefined

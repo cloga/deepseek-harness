@@ -43,9 +43,9 @@ Status: implemented
 
 `dsh-tool-fs` 把当前会话解析成完整策略，并传给每次变更，同时将 `FS_SANDBOX_DENIED` 映射为模型已从 bash 认识的标记：`[sandbox: file access denied under <mode> mode]`。当 `ctx.fs.sandboxMode` 在注册时报告一个受限模式，`write` 与 `edit` 宣告相同的 `sandbox_permissions` + `justification` 字段，向模型说明同样的同一轮次重试方式，并在执行前处理同样的 `ctx.approval` 请求——四种结果及其逐字的 fail-closed 文案沿用自[沙箱 Agent Note](2026-07-06-sandbox.zh.md) § 升级（执行时根据调用的生效模式检查是否严格加宽；授权只改变当前调用的模式，并保留其会话根目录；不产生任何新会话事件）。
 
-共享部分住在 `dsh-sandbox`，它拥有模式类型：`SANDBOX_MODES`、`WIDER_MODES`、升级目标枚举、参数校验、拒绝/提示标记构造器，以及 `approveEscalation`——先比较模式级别再失败关闭的编排。它接受每个有效沙箱模式用于比较，立即拒绝未知模式和没有目标的理由，把同模式和更窄请求视为无操作，并且只在证明请求严格更宽后才要求非空理由。`approveEscalation` 接收一个最小的结构式 approver（`EscalationApprover`，对 agent 与 call-id 类型泛型化），而非审批服务类型，所以 `dsh-sandbox` 不获得对 approval 或 agent 包的依赖：每个工具把自己的 `ctx.approval`、agent、call id 与工具名作为原料传入。`dsh-tool-bash` 与 `dsh-tool-fs` 都使用它们；跨文件重复检测门禁确保单一来源不走样。
+共享部分住在 `dsh-sandbox`，它拥有模式类型：`WIDER_MODES`、升级目标枚举、参数配对校验、拒绝/提示标记构造器，以及 `approveEscalation`——有序的 fail-closed 编排。`approveEscalation` 接收一个最小的结构式 approver（`EscalationApprover`，对 agent 与 call-id 类型泛型化），而非审批服务类型，所以 `dsh-sandbox` 不获得对 approval 或 agent 包的依赖：每个工具把自己的 `ctx.approval`、agent、call id 与工具名作为原料传入。`dsh-tool-bash` 与 `dsh-tool-fs` 都使用它们；跨文件重复检测门禁确保单一来源不走样。
 
-[`examples/acp-agent`](../../../../examples/acp-agent/cordis.yml) 组合加载 `dsh-sandbox-policy` 与 `dsh-fs-sandbox`，把 `mode`/`workspaceRoot` 配置移到策略条目，并去掉在受限模式下禁用整个 fs 栈的旧门控；`fs-observation-policy`（read-before-edit）正交地叠加其上。系统提示仍然不陈述沙箱模式——标记会在真正重要的那一刻教会模型边界，遵循沙箱 Agent Note 所述的实时证据原则。
+[base profile 组合](../../../../packages/bundle/base/cordis.patch.yml)加载 `dsh-sandbox-policy` 与 `dsh-fs-sandbox`，把 `mode`/`workspaceRoot` 配置留在策略条目，并让 `fs-observation-policy`（read-before-edit）正交地叠加其上。系统提示仍然不陈述沙箱模式——标记会在真正重要的那一刻教会模型边界，遵循沙箱 Agent Note 所述的实时证据原则。
 
 ### 强制执行点：提供方，而非 intent gate
 
@@ -69,7 +69,7 @@ Status: implemented
 - **把覆盖事件留在 `dsh-shell` 里作 `shell/sandbox-mode`**——否决：该事件是被两个家族消费的策略状态；保留 bash 命名会迫使 `dsh-fs-sandbox` 依赖 bash 词汇。预发布阶段，该改名是同一变更内的迁移，附带快照重录，无任何 shim。
 - **把升级编排从 approval/agent 包导入 `dsh-sandbox`**——否决：那会倒置分层（一个基础词汇包依赖 UI/agent 包）。结构式 approver 让逻辑单一来源于 `dsh-sandbox`，而依赖留在本就持有它们的工具层。
 - **fs seam 上一个合并的 mutation-options 对象**（per-call 载体最初草拟的形状）——因摩擦被否决：它会把 `signal` 拆进变更专用的选项包，而读取仍保持位置参数。一个末尾可选的 `SandboxExecutionPolicy` 匹配 bash 的携带并忽略模式，并使 `signal` 在整个 seam 上保持对称。
-- **现在就在 `SandboxPolicy` 上加额外的可写根授权**——照旧延后：`writableRoots()` 如今由模式含义推导；临时授权是沙箱 RFC 留下的升级作用域问题。
+- **在 `SandboxPolicy` 上增加额外的可写根授权**——照旧延后：`writableRoots()` 由既定模式含义推导；临时授权是沙箱 RFC 留下的升级作用域问题。
 
 ## 后果
 
@@ -93,6 +93,6 @@ Status: implemented
 
 ## 测试
 
-- 单元：`dsh-sandbox` 钉住升级阶梯、标记构造器、先比较模式级别的参数校验，以及 `approveEscalation` 的有序 fail-closed 序列（非加宽、加宽时理由缺失或为空、一次批准、无 approval、无 agent、各结果），外加 `writableRoots`/`canonicalPath`。`dsh-sandbox-policy` 钉住部署回退、会话模式/根目录解析、显式模式优先级、折叠/setter、加载期模式拒绝，以及 HMR（热模块替换）安全。`dsh-fs-sandbox` 在真实文件系统上钉住按策略执行的围栏与包含矩阵（内部、临时目录、绝对路径-外部、`..`、指向外部的符号链接目录、其下的新建文件、路径等于根、文件系统根、以分隔符结尾的根、等价别名形式），外加 per-call 覆盖与 HMR 安全。`dsh-tool-fs` 钉住宣告门控、完整策略解析、拒绝标记映射，以及完整的升级矩阵（授权、拒绝、无服务、无 agent、理由、非受限守卫）。`dsh-tool-bash`、`dsh-bash-sandbox` 与 `dsh-permission-presets` 使用同一套策略工具集。
+- 单元：`dsh-sandbox` 钉住升级阶梯、标记构造器、参数配对校验，以及 `approveEscalation` 的有序 fail-closed 序列（非加宽、无 approval、无 agent、各结果），外加 `writableRoots`/`canonicalPath`。`dsh-sandbox-policy` 钉住部署回退、会话模式/根目录解析、显式模式优先级、折叠/setter、加载期模式拒绝，以及 HMR（热模块替换）安全。`dsh-fs-sandbox` 在真实文件系统上钉住按策略执行的围栏与包含矩阵（内部、临时目录、绝对路径-外部、`..`、指向外部的符号链接目录、其下的新建文件、路径等于根、文件系统根、以分隔符结尾的根、等价别名形式），外加 per-call 覆盖与 HMR 安全。`dsh-tool-fs` 钉住宣告门控、完整策略解析、拒绝标记映射，以及完整的升级矩阵（授权、拒绝、无服务、无 agent、配对、非受限守卫）。`dsh-tool-bash`、`dsh-bash-sandbox` 与 `dsh-permission-presets` 使用同一套策略工具集。
 - 无密钥 e2e：一个真实 Cordis 上下文创建两个 agent，其会话的 cwd 根目录各不相同；系统并发运行正式发布的 bash 与 fs 工具，再通过外部可观察结果验证各自在所属项目中的写入成功，而两次跨项目写入都被拒绝。
 - 快照：acp-agent 示例组合 `dsh-sandbox-policy` + `dsh-fs-sandbox`；被钉住的 header 携带 fs 升级字段与 `sandbox/mode` 事件名，一次性重录。

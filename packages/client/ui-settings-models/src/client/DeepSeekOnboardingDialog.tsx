@@ -8,10 +8,9 @@
 
 import { useEffect } from 'react'
 import type { ReactNode } from 'react'
-import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { ModelsSettingsState, ModelsSettingsStore } from './store.ts'
+import type { ModelsSettingsState, ModelsSettingsStore, ModelsWire } from './store.ts'
 import { onboardingReadiness } from './store.ts'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
 import { ProviderEditor } from './ProviderEditor.tsx'
@@ -28,7 +27,7 @@ export interface DeepSeekOnboardingInjected {
   /** Shared Models-page join controller. */
   controller: ModelsSettingsStore
   /** Existing wire face reused by the Models credential editor. */
-  api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
+  api: ModelsWire
   /** Settings schema and immutable path callbacks. */
   schema: SettingsSchemaOperations
   /** Feature copy. */
@@ -51,9 +50,9 @@ function assertNever(_value: never): never {
  * @returns the onboarding modal or null when onboarding needs no intervention.
  */
 export function DeepSeekOnboardingDialog(props: DeepSeekOnboardingDialogProps): ReactNode {
-  const { stepId, complete, controller, useModels, api, schema, t } = props
+  const { complete, controller, useModels, api, schema, t } = props
   const state = useModels(snapshot => snapshot)
-  const readiness = onboardingReadiness(state, stepId)
+  const readiness = onboardingReadiness(state)
 
   useEffect(() => {
     if (state.status === 'idle') void controller.load()
@@ -80,9 +79,12 @@ export function DeepSeekOnboardingDialog(props: DeepSeekOnboardingDialogProps): 
       return assertNever(readiness)
   }
 
-  const row = state.rows.find(candidate => candidate.entry.provider === stepId)
-  const namespace = row === undefined ? undefined : state.namespaces.get(row.entry.settingsNs)
-  /* v8 ignore next 2 -- credential-missing is derived only from this target's joined row. */
+  const row = state.rows.find(candidate =>
+    candidate.entry.provider === 'deepseek-official'
+    && candidate.entry.settingsNs === 'llm-deepseek'
+    && candidate.entry.settingsPath.length === 0)
+  const namespace = state.namespaces.get('llm-deepseek')
+  /* v8 ignore next 2 -- credential-missing is derived only from this exact joined row. */
   if (row === undefined || namespace === undefined) return null
 
   const finishCredential = (changed: boolean): void => {
@@ -110,9 +112,9 @@ export function DeepSeekOnboardingDialog(props: DeepSeekOnboardingDialogProps): 
           credentialOnly
           credentialRequired
           autoFocusCredential
-          cancelLabel="onboardingLater"
-          submitLabel="onboardingSave"
-          submitBusyLabel="onboardingSaving"
+          cancelLabelKey="onboardingLater"
+          submitLabelKey="onboardingSave"
+          submitBusyLabelKey="onboardingSaving"
           onClose={finishCredential}
         />
       </div>

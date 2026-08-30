@@ -8,7 +8,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolResult } from '@deepseek-ai/dsh-tools'
 import { FileSystem, FsError, FsTargetKey, FsVersion } from '@deepseek-ai/dsh-fs'
@@ -113,7 +113,7 @@ let callCounter = 0
 function call(ctx: Context, name: string, args: unknown, agent?: object) {
   return ctx.tools.execute({
     signal: testToolSignal,
-    callId: CallId(`call-${++callCounter}`),
+    callId: ToolCallId(`call-${++callCounter}`),
     name,
     arguments: args,
     ...agent ? { agent: agent as never } : {},
@@ -158,11 +158,11 @@ describe('registration', () => {
 
   it('declares read parallel-safe while write/edit remain exclusive', async () => {
     const { ctx } = await setup()
-    expect(ctx.tools.executionMode({ signal: testToolSignal, callId: CallId('read-safe'), name: 'read', arguments: { file_path: 'a.txt' } }))
+    expect(ctx.tools.executionMode({ signal: testToolSignal, callId: ToolCallId('read-safe'), name: 'read', arguments: { file_path: 'a.txt' } }))
       .toEqual({ kind: 'parallel' })
-    expect(ctx.tools.executionMode({ signal: testToolSignal, callId: CallId('write-exclusive'), name: 'write', arguments: { file_path: 'a.txt', content: 'x' } }))
+    expect(ctx.tools.executionMode({ signal: testToolSignal, callId: ToolCallId('write-exclusive'), name: 'write', arguments: { file_path: 'a.txt', content: 'x' } }))
       .toEqual({ kind: 'exclusive' })
-    expect(ctx.tools.executionMode({ signal: testToolSignal, callId: CallId('edit-exclusive'), name: 'edit', arguments: { file_path: 'a.txt', old_string: 'x', new_string: 'y' } }))
+    expect(ctx.tools.executionMode({ signal: testToolSignal, callId: ToolCallId('edit-exclusive'), name: 'edit', arguments: { file_path: 'a.txt', old_string: 'x', new_string: 'y' } }))
       .toEqual({ kind: 'exclusive' })
   })
 
@@ -788,14 +788,11 @@ describe('sandbox escalation API (write/edit)', () => {
     }
   }
 
-  async function setupConfining(opts: {
-    approval?: boolean
-    mode?: 'read-only' | 'workspace-write' | 'danger-full-access'
-  } = {}) {
+  async function setupConfining(opts: { approval?: boolean } = {}) {
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
-    await ctx.plugin(SandboxPolicyService, { mode: opts.mode ?? 'workspace-write' })
+    await ctx.plugin(SandboxPolicyService, { mode: 'workspace-write' })
     await ctx.plugin(SandboxingFakeFs)
     await ctx.plugin(FsPolicy)
     if (opts.approval === true) await ctx.plugin(ApprovalService)
@@ -839,11 +836,11 @@ describe('sandbox escalation API (write/edit)', () => {
     }
   })
 
-  it('advertises the closed sandbox-mode vocabulary on write and edit under a confining backend', async () => {
+  it('advertises the closed target vocabulary on write and edit under a confining backend', async () => {
     const { ctx } = await setupConfining()
     for (const name of ['write', 'edit'] as const) {
       const props = fsSchema(ctx, name).parameters.properties
-      expect(props['sandbox_permissions']?.enum).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
+      expect(props['sandbox_permissions']?.enum).toEqual(['workspace-write', 'danger-full-access'])
       expect(props['justification']).toBeDefined()
     }
   })
@@ -884,53 +881,13 @@ describe('sandbox escalation API (write/edit)', () => {
     // Pass a signal so the escalation ask forwards it to the approval request
     // (the request rides the tool-execution abort signal).
     await ctx.tools.execute({
-      callId: CallId('call-fs-esc-grant'),
+      callId: ToolCallId('call-fs-esc-grant'),
       name: 'write',
       arguments: { file_path: 'a.txt', content: 'x', sandbox_permissions: 'danger-full-access', justification: 'the test needs it' },
       agent: escalationAgent() as never,
       signal: new AbortController().signal,
     })
     expect(fs.stamped).toEqual([{ mode: 'danger-full-access', workspaceRoot: resolve('/session-project') }])
-  })
-
-  it('same and narrower requests retain the standing policy without approval', async () => {
-    const same = await setupConfining({ approval: true })
-    const samePrompted = vi.fn()
-    same.ctx.on('approval/request', () => { samePrompted(); return Promise.resolve('allowed-once' as const) })
-    await call(same.ctx, 'write', {
-      file_path: 'a.txt',
-      content: 'x',
-      sandbox_permissions: 'workspace-write',
-    }, escalationAgent())
-    expect(same.fs.stamped).toEqual([{ mode: 'workspace-write', workspaceRoot: resolve('/session-project') }])
-    expect(samePrompted).not.toHaveBeenCalled()
-
-    await call(same.ctx, 'write', {
-      file_path: 'b.txt',
-      content: 'x',
-      sandbox_permissions: 'read-only',
-    }, escalationAgent())
-    expect(same.fs.stamped).toEqual([
-      { mode: 'workspace-write', workspaceRoot: resolve('/session-project') },
-      { mode: 'workspace-write', workspaceRoot: resolve('/session-project') },
-    ])
-    expect(samePrompted).not.toHaveBeenCalled()
-
-    const narrower = await setupConfining({ approval: true, mode: 'danger-full-access' })
-    const narrowerPrompted = vi.fn()
-    narrower.ctx.on('approval/request', () => { narrowerPrompted(); return Promise.resolve('allowed-once' as const) })
-    const narrowerAgent = escalationAgent()
-    narrower.fs.files.set('key:a.txt', 'x')
-    await call(narrower.ctx, 'read', { file_path: 'a.txt' }, narrowerAgent)
-    await call(narrower.ctx, 'edit', {
-      file_path: 'a.txt',
-      old_string: 'x',
-      new_string: 'y',
-      sandbox_permissions: 'workspace-write',
-      justification: '   ',
-    }, narrowerAgent)
-    expect(narrower.fs.stamped).toEqual([{ mode: 'danger-full-access', workspaceRoot: resolve('/session-project') }])
-    expect(narrowerPrompted).not.toHaveBeenCalled()
   })
 
   it('a rejected escalation fails closed with its own text and never mutates', async () => {
@@ -956,19 +913,11 @@ describe('sandbox escalation API (write/edit)', () => {
     expect(text(result)).toContain('no agent to route it through')
   })
 
-  it('requires a non-empty justification for an actual wider escalation', async () => {
+  it('rejects the escalation argument pairing (one field without the other)', async () => {
     const { ctx } = await setupConfining()
-    const missing = await call(ctx, 'write', { file_path: 'a.txt', content: 'x', sandbox_permissions: 'danger-full-access' }, escalationAgent())
+    const missing = await call(ctx, 'write', { file_path: 'a.txt', content: 'x', sandbox_permissions: 'workspace-write' }, escalationAgent())
     expect(missing.isError).toBe(true)
     expect(text(missing)).toContain('sandbox_permissions requires a justification')
-    const blank = await call(ctx, 'write', {
-      file_path: 'a.txt',
-      content: 'x',
-      sandbox_permissions: 'danger-full-access',
-      justification: '   ',
-    }, escalationAgent())
-    expect(blank.isError).toBe(true)
-    expect(text(blank)).toContain('expected a non-empty sentence')
   })
 
   it('sandbox_permissions under a non-confining backend fails closed (unadvertised field still reaches execute)', async () => {

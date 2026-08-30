@@ -26,12 +26,12 @@ import { defineTool, TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView, TerminalCallView, ToolExecution, ToolResult, ToolResultView } from '@deepseek-ai/dsh-tools'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-system-prompt'
+import { FIRST_PARTY_SECTION_ORDER } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-shell-env'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
-import { SANDBOX_MODES, approveEscalation, validateEscalationArgs } from '@deepseek-ai/dsh-sandbox'
+import { ESCALATION_TARGETS, approveEscalation, validateEscalationArgs } from '@deepseek-ai/dsh-sandbox'
 import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import type { ShellRunResult } from '@deepseek-ai/dsh-shell'
 import { parseExitStatus } from '@deepseek-ai/dsh-shell'
@@ -94,8 +94,8 @@ function validatePwshArgs(args: PwshToolArgs): void {
   if (args.timeoutMs !== undefined && (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0)) {
     throw new Error(`invalid timeoutMs: expected a positive number, got ${JSON.stringify(args.timeoutMs)}`)
   }
-  // Shared validation rejects a justification without a target. The rank-aware
-  // helper validates justification only for an actual widening request.
+  // The escalation pairing (sandbox_permissions ⇔ justification, non-empty) is
+  // the shared rule both enforcing families validate identically.
   validateEscalationArgs(args.sandbox_permissions, args.justification)
 }
 /* jscpd:ignore-end */
@@ -116,11 +116,10 @@ function pwshDescription(backgroundEnabled: boolean, escalationModes: readonly S
   if (escalationModes.length === 0) return base
   // The language-mode and named-pipe contracts below are Windows-restricted-token
   // behavior, but the gate is 'any confining executor is mounted'
-  // (escalationModes non-empty). The conflation is safe today because every
-  // shipped composition pairing tool-pwsh with a confining executor is
-  // win32-only; a future POSIX pwsh-sandbox composition must gate both
-  // sentences on the platform instead (tracked in the pwsh-tool-and-executor
-  // Agent Note).
+  // (escalationModes non-empty). Every shipped composition pairing tool-pwsh
+  // with a confining executor is win32-only, so the gate is equivalent. A POSIX
+  // pwsh-sandbox composition must gate both sentences on the platform instead
+  // (tracked in the pwsh-tool-and-executor Agent Note).
   return base + ' Under the Windows sandbox, read-only pwsh runs in PowerShell ConstrainedLanguage mode, while '
     + 'workspace-write stays in FullLanguage unless host policy says otherwise. In read-only, prefer cmdlets and core types (`[string]`, `[datetime]`, `[regex]`, `[guid]`); '
     + '.NET static calls (`[System.IO.*]::`, `[math]::`), `Add-Type`, COM objects, and reflection fail '
@@ -196,7 +195,7 @@ const BACKGROUND_OUTPUT_PROPERTIES = {
 export function apply(ctx: Context, config: Config = {}): void {
   const backgroundEnabled = config.enableRunInBackground ?? true
   const defaultMode = ctx.shell.sandboxMode
-  const escalationModes: readonly SandboxMode[] = defaultMode === undefined ? [] : SANDBOX_MODES
+  const escalationModes: readonly SandboxMode[] = defaultMode === undefined ? [] : ESCALATION_TARGETS
   const sandboxPolicy: SandboxPolicyService | undefined = defaultMode === undefined ? undefined : ctx.get('sandboxPolicy')
   if (defaultMode !== undefined && sandboxPolicy === undefined) {
     throw new Error('tool-pwsh: the mounted bash executor confines but ctx.sandboxPolicy is missing')
@@ -209,8 +208,8 @@ export function apply(ctx: Context, config: Config = {}): void {
   /* jscpd:ignore-start -- deliberate mirror of dsh-tool-bash's escalation resolver (pwsh-tool-and-executor Agent Note). */
   /**
    * Resolve a sandbox-escalation request through `ctx.approval` BEFORE
-   * anything executes, delegating standing-mode normalization plus the shared
-   * wider-request fail-closed sequence (channel resolution, outcome mapping) to
+   * anything executes, delegating the shared fail-closed sequence (strict
+   * widening, channel resolution, outcome mapping) to
    * {@link approveEscalation}. This tool contributes only the composition
    * guard (the fields are unadvertised without a sandboxing executor, yet
    * schema validation checks advertised keys only, so an unadvertised
@@ -221,7 +220,7 @@ export function apply(ctx: Context, config: Config = {}): void {
    */
   const approvePwshEscalation = (
     mode: string,
-    justification: string | undefined,
+    justification: string,
     exec: ToolExecution,
     standingPolicy: SandboxExecutionPolicy | undefined,
   ): Promise<SandboxMode> => {
@@ -244,7 +243,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.systemPrompt.section({
     name: 'tool:pwsh',
-    order: 105,
+    order: FIRST_PARTY_SECTION_ORDER.TOOL_PWSH,
     text: 'Non-zero exits are reported as `[exit code: N]` markers; investigate failures before moving on. '
       + 'On Windows a killed process settles as `[exit code: 1]` without a signal marker; treat a bare exit 1 after an interruption as a termination, not a command failure.',
   })
@@ -271,7 +270,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         sandbox_permissions: {
           type: 'string' as const,
           enum: [...escalationModes],
-          description: 'The sandbox mode this command requests. A strictly wider mode is only valid as a one-shot retry of a command the sandbox just denied and requires justification and user approval.',
+          description: 'The wider sandbox mode this command needs. Only valid as a one-shot retry of a command the sandbox just denied; requires justification and user approval.',
         },
         justification: {
           type: 'string' as const,
@@ -349,7 +348,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       validatePwshArgs(args)
       // Description is display metadata; workdir defaults to the caller's session.
       const standingPolicy = resolveSandboxPolicy(exec)
-      const approvedMode = args.sandbox_permissions !== undefined
+      const approvedMode = args.sandbox_permissions !== undefined && args.justification !== undefined
         ? await approvePwshEscalation(args.sandbox_permissions, args.justification, exec, standingPolicy)
         : undefined
       const policy = approvedMode === undefined
