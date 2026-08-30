@@ -649,7 +649,7 @@ describe('sandbox escalation through the generic task producer', () => {
     if (finalize === undefined) throw new Error('bash finalizer is missing')
     const content = [{ type: 'image' as const, data: 'aW1hZ2U=', mimeType: 'image/png' as const }]
     expect(finalize(
-      { name: 'bash', arguments: {}, callId: ToolCallId('non-text'), signal: testToolSignal },
+      { name: 'bash', arguments: {}, callId: ToolCallId('non-text'), signal: testToolSignal } as never,
       { content, isError: false } as never,
     )).toEqual(content)
   })

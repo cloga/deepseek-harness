@@ -624,7 +624,7 @@ describe('sandbox escalation through ctx.approval', () => {
     if (finalize === undefined) throw new Error('pwsh finalizer is missing')
     const content = [{ type: 'image' as const, data: 'aW1hZ2U=', mimeType: 'image/png' as const }]
     expect(finalize(
-      { name: 'pwsh', arguments: {}, callId: ToolCallId('non-text'), signal: testToolSignal },
+      { name: 'pwsh', arguments: {}, callId: ToolCallId('non-text'), signal: testToolSignal } as never,
       { content, isError: false } as never,
     )).toEqual(content)
   })
