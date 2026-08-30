@@ -69,6 +69,10 @@ export function GoalBar({ goal, onEdit, onPause, onResume, onClear, t }: GoalBar
     if (result?.ok) setEditing(false)
   }, [draft, onEdit, runAction])
 
+  const handleCancelEdit = useCallback(() => {
+    if (!pendingRef.current) setEditing(false)
+  }, [])
+
   const handleClear = useCallback(async (clearedId: GoalSnapshot['id']) => {
     const result = await runAction(onClear)
     if (result?.ok) setClearedGoalId(clearedId)
@@ -88,8 +92,12 @@ export function GoalBar({ goal, onEdit, onPause, onResume, onClear, t }: GoalBar
             rows={3}
             onChange={(e) => { setDraft(e.target.value) }}
             onKeyDown={(e) => {
-              if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') void handleEdit()
-              if (e.key === 'Escape') setEditing(false)
+              if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault()
+                void handleEdit()
+                return
+              }
+              if (e.key === 'Escape') handleCancelEdit()
             }}
             autoFocus
           />
@@ -110,7 +118,7 @@ export function GoalBar({ goal, onEdit, onPause, onResume, onClear, t }: GoalBar
               <button
                 type="button"
                 className={css.iconBtn}
-                onClick={() => { setEditing(false) }}
+                onClick={handleCancelEdit}
                 disabled={pending}
                 aria-label={t('action.cancel')}
               >

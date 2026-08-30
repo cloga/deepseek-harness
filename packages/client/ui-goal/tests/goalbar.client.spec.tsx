@@ -90,20 +90,36 @@ describe('GoalBar', () => {
     expect(screen.getByRole('button', { name: '保存目标' })).toHaveProperty('disabled', true)
 
     fireEvent.change(box, { target: { value: 'Ship v2\nwith tests' } })
-    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(fireEvent.keyDown(box, { key: 'Enter' })).toBe(true)
     expect(actions.onEdit).not.toHaveBeenCalled()
-    fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true })
+    expect(fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true })).toBe(false)
     expect(actions.onEdit).toHaveBeenCalledWith('Ship v2\nwith tests')
     await waitFor(() => { expect(screen.getByText('进行中的目标')).toBeTruthy() })
   })
 
-  it('Esc cancels the edit without calling onEdit', () => {
+  it('Cmd+Enter uses the same multiline save path', async () => {
     const actions = makeActions()
     render(<GoalBar goal={makeGoal()} {...actions} t={t} />)
     fireEvent.click(screen.getByRole('button', { name: '编辑目标' }))
-    fireEvent.keyDown(screen.getByRole('textbox', { name: '目标内容' }), { key: 'Escape' })
+    const box = screen.getByRole('textbox', { name: '目标内容' })
+    fireEvent.change(box, { target: { value: 'Ship v2\nfrom macOS' } })
+
+    expect(fireEvent.keyDown(box, { key: 'Enter', metaKey: true })).toBe(false)
+    expect(actions.onEdit).toHaveBeenCalledWith('Ship v2\nfrom macOS')
+    await waitFor(() => { expect(screen.getByText('进行中的目标')).toBeTruthy() })
+  })
+
+  it('Esc cancels the edit and drops the draft', () => {
+    const actions = makeActions()
+    render(<GoalBar goal={makeGoal()} {...actions} t={t} />)
+    fireEvent.click(screen.getByRole('button', { name: '编辑目标' }))
+    const box = screen.getByRole('textbox', { name: '目标内容' })
+    fireEvent.change(box, { target: { value: 'abandoned\ndraft' } })
+    fireEvent.keyDown(box, { key: 'Escape' })
     expect(actions.onEdit).not.toHaveBeenCalled()
     expect(screen.getByText('进行中的目标')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '编辑目标' }))
+    expect(screen.getByRole('textbox', { name: '目标内容' })).toHaveProperty('value', 'Ship the redesign')
   })
 
   it('the cancel button exits the form and drops the draft (re-edit starts from the objective)', () => {
@@ -186,6 +202,24 @@ describe('GoalBar', () => {
 
     expect((await screen.findByRole('alert')).textContent).toBe('stale revision (agent-busy)')
     expect(screen.getByRole('textbox', { name: '目标内容' })).toHaveProperty('value', 'retry this draft')
+  })
+
+  it('does not let Escape discard a save that is already in flight', async () => {
+    const actions = makeActions()
+    let resolveEdit!: (result: GoalActionResult) => void
+    actions.onEdit.mockImplementation(() => new Promise((resolve) => { resolveEdit = resolve }))
+    render(<GoalBar goal={makeGoal()} {...actions} t={t} />)
+    fireEvent.click(screen.getByRole('button', { name: '编辑目标' }))
+    const box = screen.getByRole('textbox', { name: '目标内容' })
+    fireEvent.change(box, { target: { value: 'keep this draft' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存目标' }))
+    fireEvent.keyDown(box, { key: 'Escape' })
+
+    expect(screen.getByRole('textbox', { name: '目标内容' })).toHaveProperty('value', 'keep this draft')
+    await act(async () => {
+      resolveEdit({ ok: false, error: { code: 'agent-busy', message: 'stale revision', details: {} } })
+    })
+    expect(screen.getByRole('textbox', { name: '目标内容' })).toHaveProperty('value', 'keep this draft')
   })
 
   it('reports resume and clear failures without hiding the goal', async () => {

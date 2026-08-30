@@ -25,7 +25,7 @@ This package renders the goal surface in the Web GUI: a strip in the composer-co
 <a id="use-this-package"></a>
 ## Use this package
 
-Mount this plugin alongside `ui-conversation` and the goal domain package; the strip then appears as the second card in the composer-context stack (after Todo, before Queue) whenever the session has a goal. An active goal offers pause; a paused one offers resume; edit rewrites the objective; clear removes the goal and suppresses the strip until the projection catches up.
+Mount this plugin alongside `ui-conversation` and the goal domain package; the strip then appears as the second card in the composer-context stack (after Todo, before Queue) whenever the session has a goal. An active goal offers pause; a paused one offers resume; edit opens a bounded, vertically resizable three-row field where Enter inserts a newline, Ctrl/Cmd+Enter saves, and Escape cancels; whitespace-only objectives remain invalid. Clear removes the goal and suppresses the strip until the projection catches up.
 
 ### The command-input bubble
 

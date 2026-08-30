@@ -25,7 +25,7 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-与 `ui-conversation` 及 goal 领域包一起挂载本插件；只要会话存在目标，条带就会作为 composer 上下文堆栈的第二张卡片出现（位于 Todo 之后、Queue 之前）。active 的 goal 提供暂停动作；paused 的提供恢复；编辑重写目标文本；清除移除目标，并在投影追上之前抑制条带。
+与 `ui-conversation` 及 goal 领域包一起挂载本插件；只要会话存在目标，条带就会作为 composer 上下文堆栈的第二张卡片出现（位于 Todo 之后、Queue 之前）。active 的 goal 提供暂停动作；paused 的提供恢复；编辑会打开一个高度受限、可垂直调整大小的三行字段，其中 Enter 插入换行，Ctrl/Cmd+Enter 保存，Escape 取消；纯空白目标仍然无效。清除会移除目标，并在投影追上之前抑制条带。
 
 ### 指令输入气泡
 
