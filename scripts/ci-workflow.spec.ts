@@ -106,6 +106,8 @@ describe('CI workflow', () => {
       expect(job['runs-on']).toContain('self-hosted')
       expect(job['runs-on']).toContain('dsh-win-ci')
       expect(job['runs-on']).toContain('dsh-windows-2025-16core')
+      expect(job['runs-on']).toContain("github.repository != 'deepseek-harness/deepseek-harness'")
+      expect(job['runs-on']).toContain('windows-2025')
       expect(job.if).toBe("github.event_name == 'pull_request'")
     }
 
@@ -173,6 +175,21 @@ describe('CI workflow', () => {
     expect(aggregate['runs-on']).toContain('DSH_CI_FAILOVER_LINUX')
     expect(aggregate['runs-on']).not.toContain('DSH_CI_FAILOVER_WINDOWS')
     expect(aggregate['runs-on']).toContain('vm-backup')
+  })
+
+  it('uses portable hosted runners when the workflow runs in a repository fork', () => {
+    const workflow = loadWorkflow('.github/workflows/ci.yml')
+    for (const name of ['node-24', 'node-24-coverage', 'node-24-consumers']) {
+      const runsOn = workflowJob(workflow, name)['runs-on']
+      expect(runsOn, name).toContain("github.repository != 'deepseek-harness/deepseek-harness'")
+      expect(runsOn, name).toContain('ubuntu-latest')
+      expect(runsOn, name).toContain('dsh-ubuntu-24-04-16core')
+    }
+    const aggregateRunsOn = workflowJob(workflow, 'all-checks-passed')['runs-on']
+    expect(aggregateRunsOn).toContain("github.repository != 'deepseek-harness/deepseek-harness'")
+    expect(aggregateRunsOn).toContain('ubuntu-latest')
+    const preview = workflowJob(loadWorkflow('.github/workflows/build-preview-cloudflare.yml'), 'preview')
+    expect(preview.if).toBe("github.repository == 'deepseek-harness/deepseek-harness'")
   })
 
   it('gives the Wine Host TypeScript compile the repository heap budget', () => {
