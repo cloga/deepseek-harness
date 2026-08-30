@@ -195,7 +195,7 @@ describe('CI workflow', () => {
     expect(jobEnv(consumers)['DSH_GATE_CONCURRENCY'])
       .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '10'")
     expect(jobEnv(consumers)['DSH_WEB_SNAPSHOT_WORKERS'])
-      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '1' || '6'")
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '6'")
     expect(jobEnv(consumers)['DSH_SNAPSHOT_MAX_CONCURRENCY'])
       .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '4'")
     const linuxCoverage = workflowJob(workflow, 'node-24-coverage')

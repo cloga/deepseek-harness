@@ -169,7 +169,7 @@ jobs:
       DSH_NODE_COMPAT_SKIP_TYPECHECK: '1'
       DSH_OXLINT_THREADS: ${{ github.repository != 'deepseek-harness/deepseek-harness' && '2' || '8' }}
       DSH_PUBLINT_CONCURRENCY: ${{ github.repository != 'deepseek-harness/deepseek-harness' && '2' || '8' }}
-      DSH_WEB_SNAPSHOT_WORKERS: ${{ github.repository != 'deepseek-harness/deepseek-harness' && '1' || '6' }}
+      DSH_WEB_SNAPSHOT_WORKERS: ${{ github.repository != 'deepseek-harness/deepseek-harness' && '2' || '6' }}
       # Failover halves snapshot concurrency for the shared 64-core VM.
       DSH_SNAPSHOT_MAX_CONCURRENCY: ${{ github.repository != 'deepseek-harness/deepseek-harness' && '4' || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted' && github.event.pull_request.user.login != 'dependabot[bot]' && '12' || '32' }}
     steps:
