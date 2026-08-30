@@ -69,7 +69,7 @@ function registerFakeAgent(ctx: Context, sessionId: string, inject: (...args: un
     id,
     ctx: scopeFiber.ctx,
     inject,
-    session: { id, header: { version: 0, id, createdAt: 0 } },
+    session: { id, header: { version: 0, id, createdAt: 0 }, events: [] },
   } as unknown as Agent
   ctx.agents.register(agent)
   return agent
