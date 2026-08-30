@@ -4,8 +4,7 @@ profile: acp
 composition: acp-default
 recording: live
 header:
-  class: acp-default
+  class: acp-workspace-write
   pin: true
   systemPromptSource: session/text-turn
-  toolSchemasSource: session/text-turn
 permission: workspace-write

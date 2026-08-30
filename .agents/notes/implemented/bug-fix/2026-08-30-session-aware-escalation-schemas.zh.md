@@ -14,6 +14,8 @@ Status: implemented
 
 bash、pwsh、write 与 edit 工具在请求组装期间解析接收方 agent 的沙箱模式和审批策略。审批策略为 `ask` 时仅公开 `WIDER_MODES[effectiveMode]`；`danger-full-access`、策略 `never`、缺少审批服务或提供方不施加约束时，不公开升级字段或重试提示。没有 agent 的诊断仍保留完整注册 schema。
 
+Recorded-session manifest 会为包含两个升级目标、仅包含 `danger-full-access` 或不含升级字段的 schema 分配不同 header class。每个 class 由一个 pin 持有可读 schema sidecar，使重放能够检查确切的模型输入，而无需在每个场景中重复保存。
+
 本决策只取代[子进程沙箱决策](../feature/2026-07-06-sandbox.zh.md)和[跨工具族文件系统沙箱决策](../feature/2026-07-14-cross-family-fs-sandbox.zh.md)中的进程级升级公布条款。这些记录继续负责强制执行、审批顺序、拒绝语义与各能力的约束方式。
 
 ## 曾考虑的替代方案

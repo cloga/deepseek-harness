@@ -634,6 +634,26 @@ describe('sandbox escalation through the generic task producer', () => {
     expect((await schemaFor(never)).properties['sandbox_permissions']).toBeUndefined()
   })
 
+  it('projects no escalation fields when an approval service has no sandbox policy', async () => {
+    const ctx = await setup()
+    await ctx.plugin(ApprovalService)
+    const agent = registerFakeAgent(ctx, 'unsandboxed-schema')
+    const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === 'bash')!
+    expect((schema.parameters as { properties: Record<string, unknown> }).properties)
+      .not.toHaveProperty('sandbox_permissions')
+  })
+
+  it('preserves non-text finalized content when no escalation is available', async () => {
+    const ctx = await setup()
+    const finalize = ctx.tools.get('bash')?.finalizeContent
+    if (finalize === undefined) throw new Error('bash finalizer is missing')
+    const content = [{ type: 'image' as const, data: 'aW1hZ2U=', mimeType: 'image/png' as const }]
+    expect(finalize(
+      { name: 'bash', arguments: {}, callId: ToolCallId('non-text'), signal: testToolSignal },
+      { content, isError: false } as never,
+    )).toEqual(content)
+  })
+
   it('rejects injected escalation without a sandbox and non-widening escalation without prompting', async () => {
     const plain = await setup()
     expect(text(await call(plain, 'bash', escalate))).toContain('not available in this composition')

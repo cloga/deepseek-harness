@@ -14,6 +14,8 @@ Sandbox-capable tools registered one process-wide escalation schema even though 
 
 The bash, pwsh, write, and edit tools resolve the receiving agent's sandbox mode and approval policy during request assembly. Approval policy `ask` exposes only `WIDER_MODES[effectiveMode]`; `danger-full-access`, policy `never`, a missing approval service, or a non-confining provider exposes no escalation fields or retry hint. Diagnostics without an agent retain the complete registered schema.
 
+Recorded-session manifests assign distinct header classes to schemas with two escalation targets, only `danger-full-access`, or no escalation fields. One pin owns each class's readable schema sidecar, so replay checks the exact model input without duplicating it in every scenario.
+
 This decision supersedes only the process-wide escalation-advertisement clauses in [the subprocess sandbox decision](../feature/2026-07-06-sandbox.md) and [the cross-family filesystem sandbox decision](../feature/2026-07-14-cross-family-fs-sandbox.md). Those notes continue to own enforcement, approval ordering, denial semantics, and capability-specific confinement.
 
 ## Alternatives considered

@@ -875,6 +875,15 @@ describe('sandbox escalation API (write/edit)', () => {
       .not.toHaveProperty('sandbox_permissions')
   })
 
+  it('projects no escalation fields when an approval service has no sandbox policy', async () => {
+    const { ctx } = await setup()
+    await ctx.plugin(ApprovalService)
+    const agent = escalationAgent() as Agent
+    const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === 'write')!
+    expect((schema.parameters as { properties: Record<string, unknown> }).properties)
+      .not.toHaveProperty('sandbox_permissions')
+  })
+
   it('a plain write stamps the default mode with the calling session root', async () => {
     const { ctx, fs } = await setupConfining()
     await call(ctx, 'write', { file_path: 'a.txt', content: 'x' }, escalationAgent())

@@ -609,6 +609,26 @@ describe('sandbox escalation through ctx.approval', () => {
       .not.toHaveProperty('sandbox_permissions')
   })
 
+  it('projects no escalation fields when an approval service has no sandbox policy', async () => {
+    const { ctx } = await setup()
+    await ctx.plugin(ApprovalService)
+    const agent = registerFakeAgent(ctx, 'unsandboxed-schema')
+    const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === 'pwsh')!
+    expect((schema.parameters as { properties: Record<string, unknown> }).properties)
+      .not.toHaveProperty('sandbox_permissions')
+  })
+
+  it('preserves non-text finalized content when no escalation is available', async () => {
+    const { ctx } = await setup()
+    const finalize = ctx.tools.get('pwsh')?.finalizeContent
+    if (finalize === undefined) throw new Error('pwsh finalizer is missing')
+    const content = [{ type: 'image' as const, data: 'aW1hZ2U=', mimeType: 'image/png' as const }]
+    expect(finalize(
+      { name: 'pwsh', arguments: {}, callId: ToolCallId('non-text'), signal: testToolSignal },
+      { content, isError: false } as never,
+    )).toEqual(content)
+  })
+
   it('the escalation fields and the confined-mode clauses stay out of sandbox-less compositions', async () => {
     const { ctx } = await setup()
     const schema = ctx.tools.schemas().find(item => item.name === 'pwsh')!

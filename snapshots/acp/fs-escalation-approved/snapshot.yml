@@ -4,7 +4,7 @@ profile: acp
 composition: acp-default
 recording: live
 header:
-  class: acp-default
+  class: acp-workspace-write
 permission: workspace-write
 workspace:
   final: true

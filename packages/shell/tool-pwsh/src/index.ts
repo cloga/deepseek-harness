@@ -144,6 +144,8 @@ function pwshDescription(backgroundEnabled: boolean, escalationModes: readonly S
 }
 
 /** Build the complete validator schema or one request's narrower model schema. */
+/* Deliberate parameter symmetry with dsh-tool-bash; each tool owns its dialect text. */
+/* jscpd:ignore-start */
 function pwshParameters(backgroundEnabled: boolean, escalationModes: readonly SandboxMode[]) {
   return {
     command: { type: 'string' as const, required: true as const, description: 'The PowerShell command to execute.' },
@@ -172,6 +174,7 @@ function pwshParameters(backgroundEnabled: boolean, escalationModes: readonly Sa
     } : {},
   }
 }
+/* jscpd:ignore-end */
 
 /**
  * Resolve an explicit workdir first, making a relative one session-workspace-relative;
@@ -234,6 +237,8 @@ export function apply(ctx: Context, config: Config = {}): void {
   /** Resolve the complete standing policy for this call when a confining executor is mounted. */
   const resolveSandboxPolicy = (exec: ToolExecution): SandboxExecutionPolicy | undefined =>
     sandboxPolicy?.resolve(exec.agent === undefined ? {} : { session: exec.agent.session })
+  /* The bash and pwsh consumers must expose identical session policy choices. */
+  /* jscpd:ignore-start */
   const modelEscalationModes = (agent: Agent | undefined): readonly SandboxMode[] => {
     if (agent === undefined) return escalationModes
     const approval = ctx.get('approval')
@@ -241,6 +246,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const mode = sandboxPolicy?.resolve({ session: agent.session }).mode
     return mode === undefined ? [] : (WIDER_MODES[mode] ?? [])
   }
+  /* jscpd:ignore-end */
 
   /* jscpd:ignore-start -- deliberate mirror of dsh-tool-bash's escalation resolver (pwsh-tool-and-executor Agent Note). */
   /**
@@ -362,6 +368,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           : renderPwshResult(value as RenderablePwshResult, escalationModes),
       }],
     },
+    /* Foreground hint removal mirrors bash because both render the shared marker. */
+    /* jscpd:ignore-start */
     finalizeContent(exec, result) {
       if (modelEscalationModes(exec.agent).length > 0) return undefined
       const hint = `\n${escalationHintMarker('command')}`
@@ -369,6 +377,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         ? { ...block, text: block.text.replace(hint, '') }
         : block)
     },
+    /* jscpd:ignore-end */
     /* jscpd:ignore-start -- the execute path mirrors dsh-tool-bash's by design (see the pwsh-tool-and-executor Agent Note). */
     async execute(args: PwshToolArgs, exec) {
       validatePwshArgs(args)
