@@ -101,10 +101,10 @@ jobs:
           || 'dsh-ubuntu-24-04-16core' }}
     name: node 24 / coverage
     env:
-      # Partitioning replaces the instrumented share; this budget gives the
-      # exempt-heavy gate two workers on both hosted and failover runners.
-      DSH_COVERAGE_MAX_WORKERS: ${{ github.repository != 'deepseek-harness/deepseek-harness' && '2' || '6' }}
-      DSH_COVERAGE_PARTITIONS: ${{ github.repository != 'deepseek-harness/deepseek-harness' && '2' || '4' }}
+      # Forks serialize the instrumented and exempt suites: concurrent full
+      # Vitest processes starve real-shell lifecycle probes on hosted runners.
+      DSH_COVERAGE_MAX_WORKERS: ${{ github.repository != 'deepseek-harness/deepseek-harness' && '1' || '6' }}
+      DSH_COVERAGE_PARTITIONS: ${{ github.repository == 'deepseek-harness/deepseek-harness' && '4' || '' }}
       DSH_GATE_CONCURRENCY: ${{ github.repository != 'deepseek-harness/deepseek-harness' && '1' || '3' }}
     steps:
       - uses: actions/checkout@v6
@@ -454,8 +454,8 @@ jobs:
     name: windows node 24 / coverage
     timeout-minutes: 120
     env:
-      DSH_COVERAGE_MAX_WORKERS: ${{ github.repository != 'deepseek-harness/deepseek-harness' && '2' || '6' }}
-      DSH_COVERAGE_PARTITIONS: ${{ github.repository != 'deepseek-harness/deepseek-harness' && '2' || '4' }}
+      DSH_COVERAGE_MAX_WORKERS: ${{ github.repository != 'deepseek-harness/deepseek-harness' && '1' || '6' }}
+      DSH_COVERAGE_PARTITIONS: ${{ github.repository == 'deepseek-harness/deepseek-harness' && '4' || '' }}
       DSH_COVERAGE_TEST_TIMEOUT_MS: '90000'
       DSH_GATE_CONCURRENCY: ${{ github.repository != 'deepseek-harness/deepseek-harness' && '1' || '3' }}
     steps:

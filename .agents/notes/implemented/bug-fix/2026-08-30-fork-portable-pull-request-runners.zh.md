@@ -10,7 +10,7 @@ Status: implemented
 
 ## 决策
 
-拉取请求运行器选择会检查 `github.repository`。`deepseek-harness/deepseek-harness` 保留经过测量的大型运行器和自托管故障切换选择。仓库 Fork 在 `ubuntu-latest` 上运行主要 Linux 作业与聚合判定，在 `windows-2025` 上运行原生 Windows 作业。Fork 作业还会按标准运行器容量降低外层 gate、snapshot、浏览器、coverage partition、lint 和包校验的并发；保留 16 核 fan-out 会使有界生命周期与持久化测试超时，或在文件系统发布时发生争用。Cloudflare 预览是仅限上游的作业，因为 Fork 无法发布到上游部署项目。
+拉取请求运行器选择会检查 `github.repository`。`deepseek-harness/deepseek-harness` 保留经过测量的大型运行器和自托管故障切换选择。仓库 Fork 在 `ubuntu-latest` 上运行主要 Linux 作业与聚合判定，在 `windows-2025` 上运行原生 Windows 作业。Fork 作业还会按标准运行器容量降低外层 gate、snapshot、浏览器、lint 和包校验的并发。覆盖率检查使用一个 Vitest 进程和一个 worker，因为并行的完整测试进程会耗尽托管运行器资源，使真实 shell 和生命周期探针失败。保留 16 核 fan-out 会使有界生命周期与持久化测试超时，或在文件系统发布时发生争用。Cloudflare 预览是仅限上游的作业，因为 Fork 无法发布到上游部署项目。
 
 工作流在 Fork 中保留每个必需作业及其命令，只改变运行器容量。因此，Fork 会执行完整的必需证据，而不是跳过检查或依赖仓库外部运行器配置。
 
