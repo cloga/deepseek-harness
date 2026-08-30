@@ -72,6 +72,56 @@ describe('ToolRuntime', () => {
     expect(schema.execute).toBeUndefined()
   })
 
+  it('projects a request-specific model schema without weakening execution validation', async () => {
+    const ctx = await setup()
+    const seen: unknown[] = []
+    ctx.tools.register(defineTool({
+      name: 'projected',
+      description: 'complete schema',
+      parameters: {
+        value: { type: 'string', required: true },
+        approval: { type: 'string' },
+      },
+      modelSchema: agent => ({
+        description: agent === undefined ? 'complete schema' : 'agent schema',
+        parameters: {
+          value: { type: 'string', required: true },
+          ...agent === undefined ? { approval: { type: 'string' as const } } : {},
+        },
+      }),
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: value }],
+      },
+      async execute(args) {
+        seen.push(args)
+        return args.value
+      },
+    }))
+    const agent = { session: {} } as Agent
+
+    expect(ctx.tools.schemas()[0]?.description).toBe('complete schema')
+    const assembly = await ctx.systemPrompt.assemble({ scope: agent, agent })
+    expect(assembly.tools[0]).toEqual({
+      name: 'projected',
+      description: 'agent schema',
+      parameters: {
+        type: 'object',
+        properties: { value: { type: 'string' } },
+        required: ['value'],
+      },
+    })
+    const result = await ctx.tools.execute({
+      callId: ToolCallId('projected-static-validation'),
+      name: 'projected',
+      arguments: { value: 'ok', approval: 'injected' },
+      agent,
+      signal: testToolSignal,
+    })
+    expect(result.isError).toBe(false)
+    expect(seen).toEqual([{ value: 'ok', approval: 'injected' }])
+  })
+
   it('schemas() excludes timeoutMs — the budget must never reach the model', async () => {
     const ctx = await setup()
     ctx.tools.register(defineContentToolFixture({

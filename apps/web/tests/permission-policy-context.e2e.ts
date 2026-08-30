@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
+import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import { canonicalPath } from '@deepseek-ai/dsh-sandbox'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import {
@@ -29,12 +30,26 @@ const PROMPTS = [
 ] as const
 
 const PRESET_LABELS = ['Read Only', 'Full access', 'Workspace Write'] as const
+const SHELL_TOOL = process.platform === 'win32' ? 'pwsh' : 'bash'
 
 function requestSystems(events: readonly SessionEvent[]): string[] {
   return events.flatMap((event) => {
     if (event.type !== 'request/header') return []
     return typeof event.data.header.system === 'string' ? [event.data.header.system] : []
   })
+}
+
+function requestTools(events: readonly SessionEvent[]): readonly ToolSchema[][] {
+  return events.flatMap((event) => {
+    if (event.type !== 'request/header') return []
+    return event.data.header.tools === undefined ? [] : [event.data.header.tools]
+  })
+}
+
+function escalationModes(tools: readonly ToolSchema[], name: string): string[] | undefined {
+  const tool = tools.find(schema => schema.name === name)
+  const parameters = tool?.parameters as { properties?: Record<string, { enum?: string[] }> } | undefined
+  return parameters?.properties?.['sandbox_permissions']?.enum
 }
 
 function runtimeContexts(events: readonly SessionEvent[]): string[] {
@@ -125,10 +140,20 @@ describe('web e2e: current sandbox policy reaches the model before tools', () =>
 
   it.skipIf(MODE === 'record')('records cache-safe current policy before the corresponding model behavior', async () => {
     const systems = requestSystems(sessionEvents)
-    expect(systems).toHaveLength(1)
-    expect(systems[0]).not.toContain('Current DSH file policy:')
-    expect(systems[0]).not.toContain('Approval policy:')
-    expect(systems[0]).not.toContain('Approval prompts are disabled in this session')
+    expect(systems).toHaveLength(4)
+    for (const system of systems) {
+      expect(system).not.toContain('Current DSH file policy:')
+      expect(system).not.toContain('Approval policy:')
+      expect(system).not.toContain('Approval prompts are disabled in this session')
+    }
+    const tools = requestTools(sessionEvents)
+    expect(tools).toHaveLength(4)
+    for (const name of [SHELL_TOOL, 'write']) {
+      expect(escalationModes(tools[0]!, name)).toEqual(['workspace-write', 'danger-full-access'])
+      expect(escalationModes(tools[1]!, name)).toBeUndefined()
+      expect(escalationModes(tools[2]!, name)).toEqual(['danger-full-access'])
+      expect(escalationModes(tools[3]!, name)).toEqual(['workspace-write', 'danger-full-access'])
+    }
 
     const contexts = runtimeContexts(sessionEvents)
     expect(contexts).toHaveLength(4)

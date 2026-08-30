@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolResult } from '@deepseek-ai/dsh-tools'
 import { FileSystem, FsError, FsTargetKey, FsVersion } from '@deepseek-ai/dsh-fs'
@@ -845,6 +846,35 @@ describe('sandbox escalation API (write/edit)', () => {
     }
   })
 
+  it('projects only usable escalation fields for each session', async () => {
+    const { ctx } = await setupConfining({ approval: true })
+    const propertiesFor = async (name: 'write' | 'edit', agent: Agent) => {
+      const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === name)!
+      return (schema.parameters as { properties: Record<string, { enum?: string[] }> }).properties
+    }
+    const readOnly = escalationAgent([{ type: 'sandbox/mode', data: { mode: 'read-only' } }]) as Agent
+    const unrestricted = escalationAgent([{ type: 'sandbox/mode', data: { mode: 'danger-full-access' } }]) as Agent
+    const never = escalationAgent([
+      { type: 'sandbox/mode', data: { mode: 'read-only' } },
+      { type: 'approval/policy', data: { policy: 'never' } },
+    ]) as Agent
+
+    for (const name of ['write', 'edit'] as const) {
+      expect((await propertiesFor(name, readOnly))['sandbox_permissions']?.enum)
+        .toEqual(['workspace-write', 'danger-full-access'])
+      expect(await propertiesFor(name, unrestricted)).not.toHaveProperty('sandbox_permissions')
+      expect(await propertiesFor(name, never)).not.toHaveProperty('sandbox_permissions')
+    }
+  })
+
+  it('projects no escalation fields without an approval service', async () => {
+    const { ctx } = await setupConfining()
+    const agent = escalationAgent([{ type: 'sandbox/mode', data: { mode: 'read-only' } }]) as Agent
+    const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === 'write')!
+    expect((schema.parameters as { properties: Record<string, unknown> }).properties)
+      .not.toHaveProperty('sandbox_permissions')
+  })
+
   it('a plain write stamps the default mode with the calling session root', async () => {
     const { ctx, fs } = await setupConfining()
     await call(ctx, 'write', { file_path: 'a.txt', content: 'x' }, escalationAgent())
@@ -857,13 +887,22 @@ describe('sandbox escalation API (write/edit)', () => {
     expect(fs.stamped).toEqual([{ mode: 'read-only', workspaceRoot: resolve('/session-project') }])
   })
 
-  it('a denied write maps to the shared marker plus the escalation hint (isError)', async () => {
-    const { ctx, fs } = await setupConfining()
+  it('a denied write maps to the shared marker plus the escalation hint when approval is available', async () => {
+    const { ctx, fs } = await setupConfining({ approval: true })
     fs.rejectWith = new FsError('denied', 'FS_SANDBOX_DENIED')
     const result = await call(ctx, 'write', { file_path: 'a.txt', content: 'x' }, escalationAgent())
     expect(result.isError).toBe(true)
     expect(text(result)).toContain('[sandbox: file access denied under workspace-write mode]')
     expect(text(result)).toContain('retry this exact operation once with sandbox_permissions')
+  })
+
+  it('a denied write omits an escalation hint when approval is unavailable', async () => {
+    const { ctx, fs } = await setupConfining()
+    fs.rejectWith = new FsError('denied', 'FS_SANDBOX_DENIED')
+    const result = await call(ctx, 'write', { file_path: 'a.txt', content: 'x' }, escalationAgent())
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('[sandbox: file access denied under workspace-write mode]')
+    expect(text(result)).not.toContain('sandbox_permissions')
   })
 
   it('a non-FS_SANDBOX_DENIED provider error passes through unchanged', async () => {

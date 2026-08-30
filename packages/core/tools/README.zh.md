@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-使用 `dsh-tools`，工具插件注册 schema 与执行器，每次模型工具调用都经过一条受守卫的流水线——允许／拒绝／询问策略、单调守卫、环绕分发包装层、结果检查、由工具定义持有的内容终结，以及最终的仅观测通知。该包还控制工具向模型呈现的方式：`mode` 配置选择原生 Function Calling（函数调用）、[PTC mode](#ptc-mode) 或两者，单个 agent 可用 `presentAs` 为自己遮蔽该默认值。工具作者使用 `defineTool` 定义类型化参数与输出 schema、可选的协作式超时、并行安全分类与可选的 UI 呈现意图。把任何希望模型触达的能力做成注册表时请选择本包——schema 会自动流入提示词组装。
+使用 `dsh-tools`，工具插件注册 schema 与执行器，每次模型工具调用都经过一条受守卫的流水线——允许／拒绝／询问策略、单调守卫、环绕分发包装层、结果检查、由工具定义持有的内容终结，以及最终的仅观测通知。该包还控制工具向模型呈现的方式：`mode` 配置选择原生 Function Calling（函数调用）、[PTC mode](#ptc-mode) 或两者，单个 agent 可用 `presentAs` 为自己遮蔽该默认值。工具作者使用 `defineTool` 定义类型化参数与输出 schema、可选的逐 agent 模型 schema 投影、可选的协作式超时、并行安全分类与可选的 UI 呈现意图。把任何希望模型触达的能力做成注册表时请选择本包——schema 会自动流入提示词组装。
 
 ## 目录
 
@@ -154,7 +154,7 @@ ctx.tools.register(defineTool({
 
 #### 模型看到什么
 
-在普通模式下，模型会看到每个可见定义的确切名称、描述与 JSON Schema；已交付定义记录在生成的[工具目录](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tools)中。agent 作用域的限制、遮蔽与扩展注册会改变该 agent 的最终工具集合。
+在普通模式下，模型会看到每个可见定义的确切名称，以及为该 agent 投影的描述与 JSON Schema；执行仍按完整的注册 schema 校验。已交付的诊断定义记录在生成的[工具目录](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tools)中。agent 作用域的限制、遮蔽、扩展注册和逐请求投影会改变该 agent 的最终工具集合或字段。
 
 #### Token 影响
 

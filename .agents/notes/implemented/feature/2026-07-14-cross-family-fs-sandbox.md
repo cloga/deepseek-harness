@@ -41,7 +41,7 @@ The threat model is stated in the package README: a policy fence in trusted code
 
 ### Tool parity — one denial marker, one escalation flow
 
-`dsh-tool-fs` resolves the active session's complete policy onto each mutation and maps `FS_SANDBOX_DENIED` to the marker the model already knows from bash: `[sandbox: file access denied under <mode> mode]`. When `ctx.fs.sandboxMode` reports a confining mode at registration, `write` and `edit` advertise the same `sandbox_permissions` + `justification` fields, teach the same same-turn retry, and resolve the same `ctx.approval` request before executing — the four outcomes and their verbatim fail-closed texts carried over from [the sandbox Agent Note](2026-07-06-sandbox.md) § Escalation (strict widening checked at execution against the call's effective mode; a grant changes only that call's mode and retains its session root; no new session events).
+`dsh-tool-fs` resolves the active session's complete policy onto each mutation and maps `FS_SANDBOX_DENIED` to the marker the model already knows from bash: `[sandbox: file access denied under <mode> mode]`. When `ctx.fs.sandboxMode` reports confinement, `write` and `edit` retain the same `sandbox_permissions` + `justification` fields for execution but expose only strictly wider modes that the session's approval policy can grant, as owned by [the session-aware escalation schema decision](../bug-fix/2026-08-30-session-aware-escalation-schemas.md). They resolve the same `ctx.approval` request before executing — the four outcomes and their verbatim fail-closed texts carried over from [the sandbox Agent Note](2026-07-06-sandbox.md) § Escalation (strict widening checked at execution against the call's effective mode; a grant changes only that call's mode and retains its session root; no new session events).
 
 The shared pieces live in `dsh-sandbox`, which owns the mode types: `WIDER_MODES`, the escalation-target enum, the argument-pairing validation, the denial/hint marker builders, and `approveEscalation` — the ordered fail-closed choreography. `approveEscalation` takes a minimal STRUCTURAL approver (`EscalationApprover`, generic over the agent and call-id types), not the approval service type, so `dsh-sandbox` gains no dependency on the approval or agent packages: each tool passes its own `ctx.approval`, agent, call id, and tool name as ingredients. `dsh-tool-bash` and `dsh-tool-fs` both use these; the cross-file duplication gate holds the single-sourcing honest.
 
@@ -81,7 +81,7 @@ What shipped — the tiers in § Testing hold each:
 - One `permission` preset switch governs both families: after a session switches modes, the next bash call and the next fs mutation both honor the new mode from the same `sandbox/mode` fold.
 - Concurrent sessions with different cwd roots carry different policies through the same service instances; neither family caches one session's root for the next call.
 - A direct `ctx.fs.writeText` with no per-call stamp is confined at the deployment default.
-- The escalation fields on `write`/`edit` exist exactly when the mounted `ctx.fs` confines, absent under `dsh-fs-local`.
+- The complete registered schema retains escalation fields when `ctx.fs` confines; each model request omits them unless that session has approval-enabled strictly wider modes.
 - `agent-loop` is untouched — everything rides `ctx.sandboxPolicy`, the `ctx.fs` seam, `SessionEventMap` merging, and the tool-execution pipeline.
 
 Costs and accepted limits:

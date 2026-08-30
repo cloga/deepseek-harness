@@ -8,7 +8,7 @@ Source: [`packages/core/tools/src/index.ts`](../../packages/core/tools/src/index
 
 ## `ToolDefinition` — a registered tool
 
-A `ToolSchema` (the model-facing fields) plus a mandatory canonical output declaration, the `execute` function, host-only scheduler metadata, an optional final-content callback, and optional UI presenters. The registry holds these; the loop dispatches calls through them. The registry's `schemas()` builds the model-facing `ToolSchema[]` by an explicit allowlist — `output`/`execute`/`finalizeContent`/`timeoutMs`/`isConcurrencySafe`/`presentCall`/`presentResult` must never leak into a model request.
+A `ToolSchema` (the model-facing fields) plus an optional request-specific schema projector, a mandatory canonical output declaration, the `execute` function, host-only scheduler metadata, an optional final-content callback, and optional UI presenters. The registry holds these; the loop dispatches calls through them. Request assembly evaluates `projectModelSchema` for the receiving agent, while execution validates against the complete registered parameters. The registry's `schemas()` builds diagnostic `ToolSchema[]` by an explicit allowlist — `projectModelSchema`/`output`/`execute`/`finalizeContent`/`timeoutMs`/`isConcurrencySafe`/`presentCall`/`presentResult` must never leak into a model request.
 
 ```ts type-equiv
 /** Tool-owned canonical output contract used after the body returns a JSON value. */
@@ -25,6 +25,13 @@ interface ToolOutputDefinition {
 ```ts type-equiv
 /** A registered tool: its schema plus the execution function. */
 interface ToolDefinition extends ToolSchema {
+  /**
+   * Project the description and parameters for one model request. Execution
+   * validation continues to use the complete registered parameter schema.
+   * @param agent - the agent receiving the schema, or undefined for diagnostics.
+   * @returns the request-specific model-facing fields.
+   */
+  projectModelSchema?(agent: Agent | undefined): Pick<ToolSchema, 'description' | 'parameters'>
   /** Mandatory canonical output declaration. */
   readonly output: ToolOutputDefinition
   /**

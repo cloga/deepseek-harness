@@ -164,6 +164,7 @@ async function setupWithTasks(toolConfig: Partial<ToolPwsh.Config> = {}, dshHome
 class ConfiningFakeBash extends ShellExecutor {
   requests: ShellExecRequest[] = []
   modes: Array<string | undefined> = []
+  backgroundDenied = false
 
   override get sandboxMode() {
     return 'read-only' as const
@@ -197,7 +198,10 @@ class ConfiningFakeBash extends ShellExecutor {
 
   override start(spec: ShellExecSpec): ShellProcess {
     this.modes.push(spec.sandboxPolicy?.mode)
-    return fakeProcess()
+    return {
+      ...fakeProcess('tail'),
+      sandbox: { mode: spec.sandboxPolicy?.mode ?? 'read-only', denied: this.backgroundDenied },
+    }
   }
 }
 
@@ -572,6 +576,39 @@ describe('sandbox escalation through ctx.approval', () => {
     }
   })
 
+  it('advertises only usable escalation modes for the current session', async () => {
+    const { ctx } = await setupSandboxed(true)
+    const schemaFor = async (agent: Agent) => {
+      const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === 'pwsh')!
+      return {
+        description: schema.description,
+        properties: (schema.parameters as { properties: Record<string, { enum?: string[] }> }).properties,
+      }
+    }
+
+    expect((await schemaFor(sandboxAgent('read-only'))).properties['sandbox_permissions']?.enum)
+      .toEqual(['workspace-write', 'danger-full-access'])
+    expect((await schemaFor(sandboxAgent('workspace-write'))).properties['sandbox_permissions']?.enum)
+      .toEqual(['danger-full-access'])
+    const unrestricted = await schemaFor(sandboxAgent('danger-full-access'))
+    expect(unrestricted.properties['sandbox_permissions']).toBeUndefined()
+    expect(unrestricted.properties['justification']).toBeUndefined()
+    expect(unrestricted.description).not.toContain('sandbox_permissions')
+
+    const never = sandboxAgent('read-only')
+    never.session.append('approval/policy', { policy: 'never' })
+    expect((await schemaFor(never)).properties['sandbox_permissions']).toBeUndefined()
+  })
+
+  it('omits unavailable escalation fields when no approval service is composed', async () => {
+    const { ctx } = await setupSandboxed()
+    const agent = sandboxAgent('read-only', ctx)
+    ctx.agents.register(agent)
+    const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === 'pwsh')!
+    expect((schema.parameters as { properties: Record<string, unknown> }).properties)
+      .not.toHaveProperty('sandbox_permissions')
+  })
+
   it('the escalation fields and the confined-mode clauses stay out of sandbox-less compositions', async () => {
     const { ctx } = await setup()
     const schema = ctx.tools.schemas().find(item => item.name === 'pwsh')!
@@ -671,6 +708,22 @@ describe('sandbox escalation through ctx.approval', () => {
     ctx.on('approval/request', () => Promise.resolve<ApprovalOutcome>('allowed-once'))
     await call(ctx, 'pwsh', { ...escalate, sandbox_permissions: 'danger-full-access' }, agent)
     expect(bash.modes).toEqual(['workspace-write', 'danger-full-access'])
+  })
+
+  it.each([
+    ['without approval', false, []],
+    ['with approval disabled', true, [{ type: 'approval/policy', data: { policy: 'never' } }]],
+  ] as const)('omits unusable escalation hints from background output %s', async (_label, withApproval, policyEvents) => {
+    const { ctx, bash } = await setupSandboxed(withApproval)
+    bash.backgroundDenied = true
+    const agent = registerFakeAgent(ctx, `background-${withApproval}`)
+    const events = agent.session.events as unknown as Array<{ type: string; data: unknown }>
+    events.push({ type: 'sandbox/mode', data: { mode: 'read-only' } }, ...policyEvents)
+    const started = await call(ctx, 'pwsh', { command: 'Write-Output ok', description: 'background denial', run_in_background: true }, agent)
+    expect(started.isError).toBe(false)
+    const output = await call(ctx, 'job_output', { job_id: 'pwsh-1' }, agent)
+    expect(text(output)).toContain('[sandbox: file access denied under read-only mode]')
+    expect(text(output)).not.toContain('sandbox_permissions')
   })
 
   it('omits sandbox facts the executor did not acquire from the canonical result', async () => {

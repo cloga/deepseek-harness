@@ -448,6 +448,15 @@ describe('approval policy (the approval/policy fold)', () => {
     await expect(ctx.approval.request({ agent, toolName: 'bash' })).resolves.toBe('rejected')
   })
 
+  it('exposes the effective policy for session-aware model schemas', async () => {
+    const ctx = new Context()
+    await ctx.plugin(ApprovalService, { policy: 'never' })
+    const { session } = sessionAgent('sess-effective-policy')
+    expect(ctx.approval.policyFor(session)).toBe('never')
+    setApprovalPolicy(session, 'ask')
+    expect(ctx.approval.policyFor(session)).toBe('ask')
+  })
+
   it('queues a live policy switch for the next model step', async () => {
     const ctx = new Context()
     await ctx.plugin(ApprovalService)
