@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-With `dsh-tools`, tool plugins register schemas and executors, and every model tool call runs through a guarded pipeline — allow/deny/ask policy, monotonic guards, around-dispatch wrappers, result inspection, definition-owned content finalization, and a final observe-only notification. The package also controls how tools are presented to the model: its `mode` config selects native function calling, [PTC mode](#ptc-mode), or both, and one agent shadows that default for itself with `presentAs`. Tool authors use `defineTool` for typed parameter and output schemas, an optional cooperative timeout, parallel-safety classification, and optional UI presentation intents. Choose it as the registry for any capability you want the model to reach — schemas flow into prompt assembly automatically.
+With `dsh-tools`, tool plugins register schemas and executors, and every model tool call runs through a guarded pipeline — allow/deny/ask policy, monotonic guards, around-dispatch wrappers, result inspection, definition-owned content finalization, and a final observe-only notification. The package also controls how tools are presented to the model: its `mode` config selects native function calling, [PTC mode](#ptc-mode), or both, and one agent shadows that default for itself with `presentAs`. Tool authors use `defineTool` for typed parameter and output schemas, an optional per-agent model-schema projection, an optional cooperative timeout, parallel-safety classification, and optional UI presentation intents. Choose it as the registry for any capability you want the model to reach — schemas flow into prompt assembly automatically.
 
 ## Table of Contents
 
@@ -154,7 +154,7 @@ The package-level contract is enough for most consumers; read these when you nee
 
 #### What the model sees
 
-In normal mode the model sees each visible definition's exact name, description, and JSON schema; the shipped definitions are recorded in the generated [tool catalog](../../../docs/tool-catalog.md#deepseek-aidsh-tools). Agent-scoped restrictions, shadows, and extension registrations change that agent's end-tool set.
+In normal mode the model sees each visible definition's exact name plus the description and JSON schema projected for that agent; execution still validates against the complete registered schema. The shipped diagnostic definitions are recorded in the generated [tool catalog](../../../docs/tool-catalog.md#deepseek-aidsh-tools). Agent-scoped restrictions, shadows, extension registrations, and request-specific projections change that agent's end-tool set or fields.
 
 #### Token effect
 

@@ -8,7 +8,7 @@
 
 ## `ToolDefinition` — 一个已注册的工具
 
-由一个 `ToolSchema`（面向模型的字段）、必需的规范输出声明、`execute` 函数、仅供宿主使用的调度器元数据、可选的最终内容回调和可选 UI 展示函数组成。注册表持有这些定义，循环通过它们分派调用。注册表的 `schemas()` 通过显式允许列表构建面向模型的 `ToolSchema[]`；`output`/`execute`/`finalizeContent`/`timeoutMs`/`isConcurrencySafe`/`presentCall`/`presentResult` 绝不能泄漏到模型请求中。
+由一个 `ToolSchema`（面向模型的字段）、可选的逐请求 schema 投影器、必需的规范输出声明、`execute` 函数、仅供宿主使用的调度器元数据、可选的最终内容回调和可选 UI 展示函数组成。注册表持有这些定义，循环通过它们分派调用。请求组装会针对接收 schema 的 agent 求值 `projectModelSchema`，而执行仍按完整的注册参数校验。注册表的 `schemas()` 通过显式允许列表构建诊断用 `ToolSchema[]`；`projectModelSchema`/`output`/`execute`/`finalizeContent`/`timeoutMs`/`isConcurrencySafe`/`presentCall`/`presentResult` 绝不能泄漏到模型请求中。
 
 ```ts type-equiv
 /** Tool-owned canonical output contract used after the body returns a JSON value. */
@@ -25,6 +25,13 @@ interface ToolOutputDefinition {
 ```ts type-equiv
 /** A registered tool: its schema plus the execution function. */
 interface ToolDefinition extends ToolSchema {
+  /**
+   * Project the description and parameters for one model request. Execution
+   * validation continues to use the complete registered parameter schema.
+   * @param agent - the agent receiving the schema, or undefined for diagnostics.
+   * @returns the request-specific model-facing fields.
+   */
+  projectModelSchema?(agent: Agent | undefined): Pick<ToolSchema, 'description' | 'parameters'>
   /** Mandatory canonical output declaration. */
   readonly output: ToolOutputDefinition
   /**

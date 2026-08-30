@@ -106,6 +106,8 @@ describe('CI workflow', () => {
       expect(job['runs-on']).toContain('self-hosted')
       expect(job['runs-on']).toContain('dsh-win-ci')
       expect(job['runs-on']).toContain('dsh-windows-2025-16core')
+      expect(job['runs-on']).toContain("github.repository != 'deepseek-harness/deepseek-harness'")
+      expect(job['runs-on']).toContain('windows-2025')
       expect(job.if).toBe("github.event_name == 'pull_request'")
     }
 
@@ -119,7 +121,8 @@ describe('CI workflow', () => {
 
     // windows-coverage uses the lower 4-partition profile.
     expect(windowsCoverage.name).toBe('windows node 24 / coverage')
-    expect(windowsCoverage.env).toMatchObject({ DSH_COVERAGE_PARTITIONS: '4' })
+    expect(jobEnv(windowsCoverage)['DSH_COVERAGE_PARTITIONS'])
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '4'")
     const coverageSteps = windowsCoverage.steps as unknown[]
     const coverageCommands = coverageSteps.filter((step): step is Record<string, unknown> & { run: string } => (
       isRecord(step) && typeof step.run === 'string'
@@ -173,6 +176,36 @@ describe('CI workflow', () => {
     expect(aggregate['runs-on']).toContain('DSH_CI_FAILOVER_LINUX')
     expect(aggregate['runs-on']).not.toContain('DSH_CI_FAILOVER_WINDOWS')
     expect(aggregate['runs-on']).toContain('vm-backup')
+  })
+
+  it('uses portable hosted runners when the workflow runs in a repository fork', () => {
+    const workflow = loadWorkflow('.github/workflows/ci.yml')
+    for (const name of ['node-24', 'node-24-coverage', 'node-24-consumers']) {
+      const runsOn = workflowJob(workflow, name)['runs-on']
+      expect(runsOn, name).toContain("github.repository != 'deepseek-harness/deepseek-harness'")
+      expect(runsOn, name).toContain('ubuntu-latest')
+      expect(runsOn, name).toContain('dsh-ubuntu-24-04-16core')
+    }
+    const aggregateRunsOn = workflowJob(workflow, 'all-checks-passed')['runs-on']
+    expect(aggregateRunsOn).toContain("github.repository != 'deepseek-harness/deepseek-harness'")
+    expect(aggregateRunsOn).toContain('ubuntu-latest')
+    expect(jobEnv(workflowJob(workflow, 'node-24'))['DSH_GATE_CONCURRENCY'])
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '3' || '8'")
+    const consumers = workflowJob(workflow, 'node-24-consumers')
+    expect(jobEnv(consumers)['DSH_GATE_CONCURRENCY'])
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '10'")
+    expect(jobEnv(consumers)['DSH_WEB_SNAPSHOT_WORKERS'])
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '6'")
+    expect(jobEnv(consumers)['DSH_SNAPSHOT_MAX_CONCURRENCY'])
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '4'")
+    const linuxCoverage = workflowJob(workflow, 'node-24-coverage')
+    expect(jobEnv(linuxCoverage)['DSH_COVERAGE_MAX_WORKERS'])
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '6'")
+    const windowsCoverage = workflowJob(workflow, 'windows-coverage')
+    expect(jobEnv(windowsCoverage)['DSH_COVERAGE_MAX_WORKERS'])
+      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '6'")
+    const preview = workflowJob(loadWorkflow('.github/workflows/build-preview-cloudflare.yml'), 'preview')
+    expect(preview.if).toBe("github.repository == 'deepseek-harness/deepseek-harness'")
   })
 
   it('gives the Wine Host TypeScript compile the repository heap budget', () => {
@@ -584,16 +617,23 @@ describe('Issue lifecycle workflow', () => {
     expect(lifecyclePullRequest.types).not.toContain('ready_for_review')
     expect(lifecyclePullRequest.types).toContain('review_requested')
     expect(lifecycleReview.types).toEqual(['submitted'])
-    const gated = "${{ github.event_name != 'pull_request_review' || github.event.review.state == 'changes_requested' }}"
+    const gated = "github.repository == 'deepseek-harness/deepseek-harness' && (github.event_name != 'pull_request_review' || github.event.review.state == 'changes_requested')"
     const steps = lifecycleJob.steps.filter(isRecord)
     const tokenStep = steps.find(s => s.name === 'Create project token')
     const handleStep = steps.find(s => s.name === 'Handle repository event')
     expect(tokenStep).toMatchObject({ if: gated })
     expect(handleStep).toMatchObject({ if: gated })
 
-    // issue-policy owns PR validation; it is read-only and a real gate.
+    // Both upstream-only jobs remain successful no-ops in forks, where the
+    // Project App credentials and upstream PR/Issue identities do not exist.
     const policyPullRequest = workflowEvent(policy, 'pull_request')
     expect(policyPullRequest.types).toContain('ready_for_review')
+    const policyJob = workflowJob(policy, 'policy')
+    if (!Array.isArray(policyJob.steps)) throw new TypeError('Issue policy job must define steps')
+    const validationStep = policyJob.steps.filter(isRecord).find(s => s.name === 'Validate pull request')
+    expect(validationStep).toMatchObject({
+      if: "${{ github.repository == 'deepseek-harness/deepseek-harness' }}",
+    })
   })
 })
 
@@ -696,6 +736,11 @@ function workflowJob(workflow: Record<string, unknown>, job: string): Record<str
     throw new TypeError(`workflow must define the ${job} job`)
   }
   return workflow.jobs[job]
+}
+
+function jobEnv(job: Record<string, unknown>): Record<string, unknown> {
+  if (!isRecord(job['env'])) throw new TypeError('workflow job must define env')
+  return job['env']
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

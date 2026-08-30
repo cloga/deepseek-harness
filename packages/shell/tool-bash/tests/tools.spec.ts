@@ -69,7 +69,7 @@ function registerFakeAgent(ctx: Context, sessionId: string, inject: (...args: un
     id,
     ctx: scopeFiber.ctx,
     inject,
-    session: { id, header: { version: 0, id, createdAt: 0 } },
+    session: { id, header: { version: 0, id, createdAt: 0 }, events: [] },
   } as unknown as Agent
   ctx.agents.register(agent)
   return agent
@@ -102,6 +102,7 @@ async function callUntilText(
 
 class RecordingSandboxExecutor extends ShellExecutor {
   readonly modes: Array<string | undefined> = []
+  backgroundDenied = false
 
   override get sandboxMode() {
     return 'read-only' as const
@@ -145,8 +146,8 @@ class RecordingSandboxExecutor extends ShellExecutor {
       exitCode: 0,
       signal: null,
       done: Promise.resolve(),
-      sandbox: { mode: spec.sandboxPolicy?.mode ?? 'read-only', denied: false },
-      readOutput: () => ({ delta: '', lossy: false }),
+      sandbox: { mode: spec.sandboxPolicy?.mode ?? 'read-only', denied: this.backgroundDenied },
+      readOutput: () => ({ delta: 'tail', lossy: false }),
       kill: () => false,
     }
   }
@@ -609,6 +610,50 @@ describe('sandbox escalation through the generic task producer', () => {
     }
   })
 
+  it('advertises only usable escalation modes for the current session', async () => {
+    const { ctx } = await setupSandboxed(true)
+    const schemaFor = async (agent: Agent) => {
+      const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === 'bash')!
+      return {
+        description: schema.description,
+        properties: (schema.parameters as { properties: Record<string, { enum?: string[] }> }).properties,
+      }
+    }
+
+    expect((await schemaFor(sandboxAgent('read-only'))).properties['sandbox_permissions']?.enum)
+      .toEqual(['workspace-write', 'danger-full-access'])
+    expect((await schemaFor(sandboxAgent('workspace-write'))).properties['sandbox_permissions']?.enum)
+      .toEqual(['danger-full-access'])
+    const unrestricted = await schemaFor(sandboxAgent('danger-full-access'))
+    expect(unrestricted.properties['sandbox_permissions']).toBeUndefined()
+    expect(unrestricted.properties['justification']).toBeUndefined()
+    expect(unrestricted.description).not.toContain('sandbox_permissions')
+
+    const never = sandboxAgent('read-only')
+    never.session.append('approval/policy', { policy: 'never' })
+    expect((await schemaFor(never)).properties['sandbox_permissions']).toBeUndefined()
+  })
+
+  it('projects no escalation fields when an approval service has no sandbox policy', async () => {
+    const ctx = await setup()
+    await ctx.plugin(ApprovalService)
+    const agent = registerFakeAgent(ctx, 'unsandboxed-schema')
+    const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === 'bash')!
+    expect((schema.parameters as { properties: Record<string, unknown> }).properties)
+      .not.toHaveProperty('sandbox_permissions')
+  })
+
+  it('preserves non-text finalized content when no escalation is available', async () => {
+    const ctx = await setup()
+    const tool = ctx.tools.get('bash')
+    if (tool?.finalizeContent === undefined) throw new Error('bash finalizer is missing')
+    const content = [{ type: 'image' as const, data: 'aW1hZ2U=', mimeType: 'image/png' as const }]
+    expect(tool.finalizeContent(
+      { name: 'bash', arguments: {}, callId: ToolCallId('non-text'), signal: testToolSignal } as never,
+      { content, isError: false } as never,
+    )).toEqual(content)
+  })
+
   it('rejects injected escalation without a sandbox and non-widening escalation without prompting', async () => {
     const plain = await setup()
     expect(text(await call(plain, 'bash', escalate))).toContain('not available in this composition')
@@ -699,6 +744,22 @@ describe('sandbox escalation through the generic task producer', () => {
     ctx.on('approval/request', () => Promise.resolve<ApprovalOutcome>('allowed-once'))
     await call(ctx, 'bash', { ...escalate, sandbox_permissions: 'danger-full-access' }, agent)
     expect(bash.modes).toEqual(['workspace-write', 'danger-full-access'])
+  })
+
+  it.each([
+    ['without approval', false, []],
+    ['with approval disabled', true, [{ type: 'approval/policy', data: { policy: 'never' } }]],
+  ] as const)('omits unusable escalation hints from background output %s', async (_label, withApproval, policyEvents) => {
+    const { ctx, bash } = await setupSandboxed(withApproval)
+    bash.backgroundDenied = true
+    const agent = registerFakeAgent(ctx, `background-${withApproval}`)
+    const events = agent.session.events as unknown as Array<{ type: string; data: unknown }>
+    events.push({ type: 'sandbox/mode', data: { mode: 'read-only' } }, ...policyEvents)
+    const started = await call(ctx, 'bash', { command: 'true', description: 'background denial', run_in_background: true }, agent)
+    expect(started.isError).toBe(false)
+    const output = await call(ctx, 'job_output', { job_id: 'bash-1' }, agent)
+    expect(text(output)).toContain('[sandbox: file access denied under read-only mode]')
+    expect(text(output)).not.toContain('sandbox_permissions')
   })
 
   it('omits sandbox facts the executor did not acquire from the canonical result', async () => {

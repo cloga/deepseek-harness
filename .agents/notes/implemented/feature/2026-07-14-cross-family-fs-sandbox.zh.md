@@ -41,7 +41,7 @@ Status: implemented
 
 ### 工具对等——一个拒绝标记、一条升级流程
 
-`dsh-tool-fs` 把当前会话解析成完整策略，并传给每次变更，同时将 `FS_SANDBOX_DENIED` 映射为模型已从 bash 认识的标记：`[sandbox: file access denied under <mode> mode]`。当 `ctx.fs.sandboxMode` 在注册时报告一个受限模式，`write` 与 `edit` 宣告相同的 `sandbox_permissions` + `justification` 字段，向模型说明同样的同一轮次重试方式，并在执行前处理同样的 `ctx.approval` 请求——四种结果及其逐字的 fail-closed 文案沿用自[沙箱 Agent Note](2026-07-06-sandbox.zh.md) § 升级（执行时根据调用的生效模式检查是否严格加宽；授权只改变当前调用的模式，并保留其会话根目录；不产生任何新会话事件）。
+`dsh-tool-fs` 把当前会话解析成完整策略，并传给每次变更，同时将 `FS_SANDBOX_DENIED` 映射为模型已从 bash 认识的标记：`[sandbox: file access denied under <mode> mode]`。当 `ctx.fs.sandboxMode` 报告约束时，`write` 与 `edit` 为执行保留相同的 `sandbox_permissions` + `justification` 字段，但只向模型公开会话审批策略可以授权的严格更宽模式；[会话感知升级 schema 决策](../bug-fix/2026-08-30-session-aware-escalation-schemas.zh.md)负责该规则。它们在执行前处理同样的 `ctx.approval` 请求——四种结果及其逐字的 fail-closed 文案沿用自[沙箱 Agent Note](2026-07-06-sandbox.zh.md) § 升级（执行时根据调用的生效模式检查是否严格加宽；授权只改变当前调用的模式，并保留其会话根目录；不产生任何新会话事件）。
 
 共享部分住在 `dsh-sandbox`，它拥有模式类型：`WIDER_MODES`、升级目标枚举、参数配对校验、拒绝/提示标记构造器，以及 `approveEscalation`——有序的 fail-closed 编排。`approveEscalation` 接收一个最小的结构式 approver（`EscalationApprover`，对 agent 与 call-id 类型泛型化），而非审批服务类型，所以 `dsh-sandbox` 不获得对 approval 或 agent 包的依赖：每个工具把自己的 `ctx.approval`、agent、call id 与工具名作为原料传入。`dsh-tool-bash` 与 `dsh-tool-fs` 都使用它们；跨文件重复检测门禁确保单一来源不走样。
 
@@ -81,7 +81,7 @@ Status: implemented
 - 一次 `permission` 预设切换同时管辖两个家族：会话切换模式后，下一次 bash 调用与下一次 fs 变更都从同一个 `sandbox/mode` 折叠遵循新模式。
 - cwd 根目录不同的并发会话通过同一组服务实例携带不同策略；两个家族都不会缓存某个会话的根目录供下一次调用使用。
 - 一次无 per-call 盖章的直连 `ctx.fs.writeText` 会被围栏于部署默认值。
-- `write`/`edit` 上的升级字段恰好在被挂载的 `ctx.fs` 受限时存在，在 `dsh-fs-local` 下不存在。
+- 当 `ctx.fs` 施加约束时，完整注册 schema 保留升级字段；除非该会话存在启用审批的严格更宽模式，否则每次模型请求都会省略这些字段。
 - `agent-loop` 未被触动——一切都依托于 `ctx.sandboxPolicy`、`ctx.fs` seam、`SessionEventMap` 合并以及工具执行流水线。
 
 代价与接受的限制：

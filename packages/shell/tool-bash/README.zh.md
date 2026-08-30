@@ -59,7 +59,7 @@ kind: "package-reference"
 
 ### 沙箱执行与升权
 
-当已挂载的执行器约束命令（例如 `dsh-bash-sandbox`）时，被阻止的文件操作会报告为 `[sandbox: file access denied under <mode> mode]`——这是策略拒绝，不是命令失败。模型随后可以在同一轮次中用 `sandbox_permissions`（满足需要的最窄更宽模式）与一句 `justification` 重试完全相同的命令一次；该重试引发的审批提示就是用户同意的方式。升权绝不能预先推测：没有真实拒绝依据的请求，或没有严格宽于当前模式的请求，会在不运行任何东西的情况下失败关闭，被拒绝的升权对该命令即为最终结果。
+当已挂载的执行器约束命令（例如 `dsh-bash-sandbox`）时，被阻止的文件操作会报告为 `[sandbox: file access denied under <mode> mode]`——这是策略拒绝，不是命令失败。对于审批策略为 `ask` 的会话，模型 schema 只公布严格宽于有效模式的目标；`danger-full-access`、审批策略 `never` 以及没有审批服务的组合会省略 `sandbox_permissions`、`justification` 与重试提示。模型可以在同一轮次中用公布的最窄模式与一句理由重试完全相同的命令一次；该重试引发的审批提示就是用户同意的方式。
 
 ### 可能出什么问题
 
@@ -146,7 +146,7 @@ Check the [exit code: N] marker on every bash result; investigate failures befor
 
 #### 模型看到什么
 
-模型会看到生成的 [`bash` schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-bash)。仅当本生产方启用 `run_in_background` 时，该字段才会出现；仅当已挂载执行器声明支持沙箱时，`sandbox_permissions` 和 `justification` 才会出现。按 agent（智能体）scope 限制工具可以移除该 agent 的定义。
+模型会看到生成的 [`bash` schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-bash)。仅当本生产方启用 `run_in_background` 时，该字段才会出现；仅当已挂载执行器施加约束、会话存在严格更宽的模式且审批策略为 `ask` 时，`sandbox_permissions` 和 `justification` 才会出现。按 agent（智能体）scope 限制工具可以移除该 agent 的定义。
 
 #### Token 影响
 

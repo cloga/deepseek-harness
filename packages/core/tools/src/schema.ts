@@ -2,6 +2,7 @@
 
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition, ToolExecution, ToolExecutionResult, ToolRunContext, ToolResult } from './index.ts'
 import { assertSupportedJsonSchema, isJsonSchemaRecord, isPlainJsonArray, JsonSchemaError, validateJsonSchemaValue } from './json-schema.ts'
@@ -487,6 +488,16 @@ export interface DefineToolOptions<S extends ParameterSchemaSpec, O extends Valu
   readonly description: string
   /** Per-property parameter schema compiled to an implicit open object root. */
   readonly parameters: S
+  /**
+   * Optional request-specific model schema. Execution always validates against
+   * the complete static {@link parameters} declaration.
+   * @param agent - the agent receiving the schema, or undefined for diagnostics.
+   * @returns the model-facing description and parameter declaration.
+   */
+  readonly modelSchema?: (agent: Agent | undefined) => {
+    readonly description: string
+    readonly parameters: ParameterSchemaSpec
+  }
   /** Canonical output schema plus pure Native and presentation projections. */
   readonly output: {
     /** Schema enforced against every successful body or policy-replaced value. */
@@ -558,6 +569,7 @@ export function defineTool<const S extends ParameterSchemaSpec, const O extends 
   const userPresentCall = options.presentCall
   // oxlint-disable-next-line typescript/unbound-method
   const userPresentResult = options.presentResult
+  const userModelSchema = options.modelSchema
   // oxlint-disable-next-line typescript/unbound-method
   const userIsConcurrencySafe = options.isConcurrencySafe
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)) {
@@ -570,6 +582,15 @@ export function defineTool<const S extends ParameterSchemaSpec, const O extends 
     name: options.name,
     description: options.description,
     parameters: parameters as unknown as Record<string, unknown>,
+    ...userModelSchema !== undefined ? {
+      projectModelSchema(agent: Agent | undefined) {
+        const projected = userModelSchema(agent)
+        return {
+          description: projected.description,
+          parameters: parameterSchemaSpecToJsonSchema(projected.parameters) as unknown as Record<string, unknown>,
+        }
+      },
+    } : {},
     output: {
       schema: outputSchema,
       render(args: unknown, value: JsonValue): ContentBlock[] {

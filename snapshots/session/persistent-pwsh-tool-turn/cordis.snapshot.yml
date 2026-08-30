@@ -90,6 +90,10 @@
   name: '@deepseek-ai/dsh-tool-bash'
   disabled: true
 
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: true
+
 - insert:
     - id: tool-pwsh-persistent
       name: '@deepseek-ai/dsh-tool-pwsh-persistent'

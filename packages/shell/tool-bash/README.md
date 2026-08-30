@@ -59,7 +59,7 @@ Passing `run_in_background: true` returns a job id immediately and no timeout ap
 
 ### Sandboxed execution and escalation
 
-When the mounted executor confines commands (for example `dsh-bash-sandbox`), a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a command failure. The model may then retry the exact same command once in the same turn with `sandbox_permissions` (the narrowest wider mode that suffices) and a one-sentence `justification`; the approval prompt raised by that retry is how the user consents. Escalation is never speculative: a request with no real prior denial, or one that is not strictly wider than the current mode, fails closed without running anything, and a rejected escalation is final for that command.
+When the mounted executor confines commands (for example `dsh-bash-sandbox`), a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a command failure. For a session whose approval policy is `ask`, the model schema advertises only modes strictly wider than the effective mode; `danger-full-access`, approval policy `never`, and compositions without approval omit `sandbox_permissions`, `justification`, and the retry hint. The model may retry the exact same command once in the same turn with the narrowest advertised mode and a one-sentence justification; the approval prompt raised by that retry is how the user consents.
 
 ### What can go wrong
 
@@ -146,7 +146,7 @@ Prefix-stable while the registration scope and prompt text are unchanged. Plugin
 
 #### What the model sees
 
-The model sees the generated [`bash` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-bash). `run_in_background` appears only when this producer enables it; `sandbox_permissions` and `justification` appear only when the mounted executor advertises sandboxing. Agent-scoped tool restrictions can remove the definition for that agent.
+The model sees the generated [`bash` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-bash). `run_in_background` appears only when this producer enables it. `sandbox_permissions` and `justification` appear only when the mounted executor confines, the session has a strictly wider mode, and approval policy is `ask`. Agent-scoped tool restrictions can remove the definition for that agent.
 
 #### Token effect
 
