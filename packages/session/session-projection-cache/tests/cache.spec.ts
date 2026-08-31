@@ -36,6 +36,7 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     'cache-test/marks': MarksState
     'cache-test/marks2': Map<string, string>
     'cache-test/count': number
+    'cache-test/secret': string
   }
   interface SessionProjectionMap {
     'cache-test/marks': { marks: string[] }
@@ -64,6 +65,14 @@ const marksUnit = (stateVersion = 1) => ({
   },
   stateVersion,
 }) satisfies ProjectionDefinition<'cache-test/marks', MarksState>
+
+const secretUnit = {
+  key: 'cache-test/secret',
+  stateSchema: z.string(),
+  init: () => '',
+  apply: state => state,
+  stateVersion: 1,
+} satisfies ProjectionDefinition<'cache-test/secret', string>
 
 /** One session's record document on the per-record medium. */
 const recordPath = (root: string, id: Session['id']): string =>
@@ -194,10 +203,13 @@ describe('SessionProjectionCache write policy', () => {
     await vi.waitFor(async () => {
       expect((await storedRows(root, session.id))?.['cache-test/marks']?.seq).toBe(-1)
     }, durableObservation)
+    const write = vi.spyOn(ctx.sessionProjectionCache, 'write')
     mark(session, ['3'])
-    await vi.waitFor(async () => {
-      expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['3'] })
-    }, durableObservation)
+    expect(write).toHaveBeenCalledExactlyOnceWith(session)
+    const thresholdWrite = write.mock.results[0]
+    if (thresholdWrite?.type !== 'return') throw new Error('count threshold did not start a cache write')
+    await thresholdWrite.value
+    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['3'] })
   })
 
   it('flushes on the configured interval when the count threshold is not reached', async () => {
@@ -281,6 +293,24 @@ describe('SessionProjectionCache write policy', () => {
 })
 
 describe('SessionProjectionCache listing read', () => {
+  it('keeps host-only checkpoint state out of cached wire snapshots', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    await seedRecord(root, 'host-state', {
+      'cache-test/marks': { ver: 1, seq: 4, val: { marks: ['wire'] } },
+      'cache-test/secret': { ver: 1, seq: 4, val: 'private prompt text' },
+    })
+    const { ctx, cache } = await harness({ root })
+    ctx.sessionProjections.register(secretUnit)
+    const header = headerOf(SessionId('host-state'))
+
+    expect(cache.cachedSnapshot(header)).toEqual({
+      asOfSeq: 4,
+      values: { 'cache-test/marks': { marks: ['wire'] } },
+    })
+    expect(JSON.stringify(cache.cachedSnapshot(header))).not.toContain('private prompt text')
+  })
+
   it('serves identity-matching rows with the cut watermark and refuses unrelated ones', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
     roots.push(root)

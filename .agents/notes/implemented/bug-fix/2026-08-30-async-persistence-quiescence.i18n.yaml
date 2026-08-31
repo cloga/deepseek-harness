@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-30-async-persistence-quiescence.md
-2026-08-30-async-persistence-quiescence.md: 11a3e6713d763b4484d1186cfc0db25d2df2432f
-2026-08-30-async-persistence-quiescence.zh.md: 178ee1f25cd155820fd2dfe298fc864abdb9369d
+2026-08-30-async-persistence-quiescence.md: e0acae905002252ecb94e5a35db2a8033bf9e008
+2026-08-30-async-persistence-quiescence.zh.md: 44eef0f2084c771b8ca477530e34580ebb1f91d2

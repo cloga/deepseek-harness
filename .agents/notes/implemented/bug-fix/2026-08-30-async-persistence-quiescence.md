@@ -10,7 +10,7 @@ Durable storage and recovery work can remain pending after the synchronous event
 
 ## Decision
 
-Projection-cache tests wait for the exact stored row or warning they need to observe. They do not infer write completion from elapsed wall-clock time.
+Projection-cache tests synchronize on the operation they own: direct and threshold-triggered writes await the exact write promise, while tests without an operation handle wait for the exact stored row or warning they need to observe. They do not infer write completion from elapsed wall-clock time.
 
 Agent Teams registers each scheduled recovery promise before its deferred callback can run. Disposal closes admission, settles those recovery promises, then settles creation and mailbox operations before releasing live children. Scheduling after the cutoff creates no operation.
 
@@ -26,4 +26,4 @@ The lifecycle test holds one recovery open and proves disposal remains pending u
 
 ## Consequences
 
-Coverage tests synchronize on observable state without weakening assertions. Team disposal may wait up to the configured disposal timeout for recovery, and no recovery can outlive the service's persistence dependencies.
+Coverage tests await owned operations before reading durable state and otherwise synchronize on the exact observable result without weakening assertions. Team disposal may wait up to the configured disposal timeout for recovery, and no recovery can outlive the service's persistence dependencies.
