@@ -393,7 +393,21 @@ export class SessionLogScanner {
     }
 
     const rowStart = this.events.length
-    for (const event of decoded) {
+    let firstUncommitted = 0
+    while (firstUncommitted < decoded.length) {
+      const candidate = decoded[firstUncommitted]
+      if (candidate === undefined || candidate.seq >= rowStart) break
+      firstUncommitted += 1
+    }
+    if (firstUncommitted > 0 && decoded[firstUncommitted - 1]?.seq !== rowStart - 1) {
+      this.issue = new Error(
+        `corrupt session log: non-contiguous overlap in committed region at line ${this.eventLine}`,
+      )
+      // No decoded turn/end follows in this row: this is an uncommitted replay
+      // fragment, so finish() preserves the preceding contiguous prefix.
+      return
+    }
+    for (const event of decoded.slice(firstUncommitted)) {
       if (event.seq !== this.events.length) {
         const expected = this.events.length
         this.events.length = rowStart

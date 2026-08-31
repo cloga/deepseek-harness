@@ -1160,6 +1160,31 @@ describe('JsonlSessionPersistence: default packed chunk rows', () => {
     expect(events[2]).toEqual({ type: 'assistant/chunk', seq: 2, time: 3, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'b' } } })
   })
 
+  it('scanLog: trims an idempotently replayed prefix from one packed row', () => {
+    const logText = [
+      JSON.stringify({ type: 'session', version: 0, id: 'row-overlap', createdAt: 1, delegationDepth: 0 }),
+      JSON.stringify({ type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } }),
+      JSON.stringify({ type: 'assistant/chunk', seq: 1, time: 2, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'a' } } }),
+      JSON.stringify({ type: 'assistant/chunk', seq: 2, time: 3, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'b' } } }),
+      JSON.stringify({ type: 'text-chunks', seq0: 1, time0: 2, data: { turn: 1, step: 1, index: 0, dt: [1, 1, 1], texts: ['a', 'b', 'c', 'd'] } }),
+      JSON.stringify({ type: 'turn/end', seq: 5, time: 6, data: { turn: 1, reason: { kind: 'completed' } } }),
+    ].join('\n') + '\n'
+    const { events } = scanLog(Buffer.from(logText))
+    expect(events.map(e => e.seq)).toEqual([0, 1, 2, 3, 4, 5])
+    expect(events[3]).toMatchObject({ type: 'assistant/chunk', seq: 3, data: { chunk: { text: 'c' } } })
+  })
+
+  it.concurrent('scanLog: defers a non-contiguous replay overlap in an uncommitted tail', () => {
+    const logText = [
+      JSON.stringify({ type: 'session', version: 0, id: 'tail-overlap', createdAt: 1, delegationDepth: 0 }),
+      JSON.stringify({ type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } }),
+      JSON.stringify({ type: 'assistant/chunk', seq: 1, time: 2, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'a' } } }),
+      JSON.stringify({ type: 'text-chunks', seq0: 0, time0: 1, data: { turn: 1, step: 1, index: 0, dt: [], texts: ['x'] } }),
+    ].join('\n') + '\n'
+    const scanned = scanLog(Buffer.from(logText))
+    expect(scanned.events.map(e => e.seq)).toEqual([0, 1])
+  })
+
   it('scanLog: a malformed packed row in the committed region rejects like corrupt JSON', () => {
     const logText = [
       JSON.stringify({ type: 'session', version: 0, id: 'bad-row', createdAt: 1, delegationDepth: 0 }),
