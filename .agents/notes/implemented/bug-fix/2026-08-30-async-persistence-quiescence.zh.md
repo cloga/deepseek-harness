@@ -10,7 +10,7 @@ Status: implemented
 
 ## Decision
 
-projection-cache 测试等待其需要观察的确切存储行或警告，不再根据经过的挂钟时间推断写入完成。
+projection-cache 测试与其拥有的操作同步：直接写入与阈值触发写入会等待确切的 write promise；无法持有操作句柄的测试则等待其需要观察的确切存储行或警告。测试不再根据经过的挂钟时间推断写入完成。
 
 Agent Teams 在延迟回调能够运行之前登记每个已调度的恢复 promise。dispose 先关闭准入并等待这些恢复 promise，再等待创建与 mailbox 操作，随后释放实时子 agent。截止点之后的调度不会创建操作。
 
@@ -26,4 +26,4 @@ Agent Teams 在延迟回调能够运行之前登记每个已调度的恢复 prom
 
 ## Consequences
 
-coverage 测试在不削弱断言的情况下与可观察状态同步。Team dispose 最多可按配置的 disposal timeout 等待恢复，且任何恢复都不能比服务的持久化依赖存活更久。
+coverage 测试在读取持久状态前等待其拥有的操作；其他测试在不削弱断言的情况下与确切可观察结果同步。Team dispose 最多可按配置的 disposal timeout 等待恢复，且任何恢复都不能比服务的持久化依赖存活更久。
