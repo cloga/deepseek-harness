@@ -1174,6 +1174,29 @@ describe('JsonlSessionPersistence: default packed chunk rows', () => {
     expect(events[3]).toMatchObject({ type: 'assistant/chunk', seq: 3, data: { chunk: { text: 'c' } } })
   })
 
+  it('scanLog: rejects a conflicting prefix in an overlapping packed row', () => {
+    const logText = [
+      JSON.stringify({ type: 'session', version: 0, id: 'row-conflict', createdAt: 1, delegationDepth: 0 }),
+      JSON.stringify({ type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } }),
+      JSON.stringify({ type: 'assistant/chunk', seq: 1, time: 2, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'a' } } }),
+      JSON.stringify({ type: 'assistant/chunk', seq: 2, time: 3, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'b' } } }),
+      JSON.stringify({ type: 'text-chunks', seq0: 1, time0: 2, data: { turn: 1, step: 1, index: 0, dt: [1, 1], texts: ['a', 'changed', 'c'] } }),
+      JSON.stringify({ type: 'turn/end', seq: 4, time: 5, data: { turn: 1, reason: { kind: 'completed' } } }),
+    ].join('\n') + '\n'
+    expect(() => scanLog(Buffer.from(logText))).toThrow(/invalid overlap in committed region/)
+  })
+
+  it('scanLog: rejects a repeated scalar row instead of treating it as a packed overlap', () => {
+    const turnStart = { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } }
+    const logText = [
+      JSON.stringify({ type: 'session', version: 0, id: 'scalar-overlap', createdAt: 1, delegationDepth: 0 }),
+      JSON.stringify(turnStart),
+      JSON.stringify(turnStart),
+      JSON.stringify({ type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } }),
+    ].join('\n') + '\n'
+    expect(() => scanLog(Buffer.from(logText))).toThrow(/invalid overlap in committed region/)
+  })
+
   it.concurrent('scanLog: defers a non-contiguous replay overlap in an uncommitted tail', () => {
     const logText = [
       JSON.stringify({ type: 'session', version: 0, id: 'tail-overlap', createdAt: 1, delegationDepth: 0 }),

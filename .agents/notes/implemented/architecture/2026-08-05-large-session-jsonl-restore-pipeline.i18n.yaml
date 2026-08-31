@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-05-large-session-jsonl-restore-pipeline.md
-2026-08-05-large-session-jsonl-restore-pipeline.md: eab53c683880ef7095233ed8122e532eb5add547
-2026-08-05-large-session-jsonl-restore-pipeline.zh.md: 2cd0d2ca20074d6adb0735db08071638ae2ced88
+2026-08-05-large-session-jsonl-restore-pipeline.md: a6daba00e7399760306cd7799a245072e9323451
+2026-08-05-large-session-jsonl-restore-pipeline.zh.md: 8ebc8a539898336112b39a61389d6a4fd4c8c6c9

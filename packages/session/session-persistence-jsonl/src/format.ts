@@ -9,6 +9,7 @@
  */
 
 import { join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import {
   decodeSeqRanges, decodeStorageRecord, encodeSeqRanges, packChunkRuns, SESSION_FORMAT_VERSION,
 } from '@deepseek-ai/dsh-session'
@@ -399,12 +400,16 @@ export class SessionLogScanner {
       if (candidate === undefined || candidate.seq >= rowStart) break
       firstUncommitted += 1
     }
-    if (firstUncommitted > 0 && decoded[firstUncommitted - 1]?.seq !== rowStart - 1) {
+    const validPackedOverlap = decoded.length > 1
+      && decoded.slice(0, firstUncommitted).every((event) => {
+        const committed = this.events[event.seq]
+        return committed !== undefined && isDeepStrictEqual(committed, event)
+      })
+    if (firstUncommitted > 0
+      && (decoded[firstUncommitted - 1]?.seq !== rowStart - 1 || !validPackedOverlap)) {
       this.issue = new Error(
-        `corrupt session log: non-contiguous overlap in committed region at line ${this.eventLine}`,
+        `corrupt session log: invalid overlap in committed region at line ${this.eventLine}`,
       )
-      // No decoded turn/end follows in this row: this is an uncommitted replay
-      // fragment, so finish() preserves the preceding contiguous prefix.
       return
     }
     for (const event of decoded.slice(firstUncommitted)) {
