@@ -9,6 +9,7 @@
  */
 
 import { join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import {
   decodeSeqRanges, decodeStorageRecord, encodeSeqRanges, packChunkRuns, SESSION_FORMAT_VERSION,
 } from '@deepseek-ai/dsh-session'
@@ -393,7 +394,25 @@ export class SessionLogScanner {
     }
 
     const rowStart = this.events.length
-    for (const event of decoded) {
+    let firstUncommitted = 0
+    while (firstUncommitted < decoded.length) {
+      const candidate = decoded[firstUncommitted]
+      if (candidate === undefined || candidate.seq >= rowStart) break
+      firstUncommitted += 1
+    }
+    const validPackedOverlap = decoded.length > 1
+      && decoded.slice(0, firstUncommitted).every((event) => {
+        const committed = this.events[event.seq]
+        return committed !== undefined && isDeepStrictEqual(committed, event)
+      })
+    if (firstUncommitted > 0
+      && (decoded[firstUncommitted - 1]?.seq !== rowStart - 1 || !validPackedOverlap)) {
+      this.issue = new Error(
+        `corrupt session log: invalid overlap in committed region at line ${this.eventLine}`,
+      )
+      return
+    }
+    for (const event of decoded.slice(firstUncommitted)) {
       if (event.seq !== this.events.length) {
         const expected = this.events.length
         this.events.length = rowStart

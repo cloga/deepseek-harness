@@ -203,10 +203,13 @@ describe('SessionProjectionCache write policy', () => {
     await vi.waitFor(async () => {
       expect((await storedRows(root, session.id))?.['cache-test/marks']?.seq).toBe(-1)
     }, durableObservation)
+    const write = vi.spyOn(ctx.sessionProjectionCache, 'write')
     mark(session, ['3'])
-    await vi.waitFor(async () => {
-      expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['3'] })
-    }, durableObservation)
+    expect(write).toHaveBeenCalledExactlyOnceWith(session)
+    const thresholdWrite = write.mock.results[0]
+    if (thresholdWrite?.type !== 'return') throw new Error('count threshold did not start a cache write')
+    await thresholdWrite.value
+    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['3'] })
   })
 
   it('flushes on the configured interval when the count threshold is not reached', async () => {
