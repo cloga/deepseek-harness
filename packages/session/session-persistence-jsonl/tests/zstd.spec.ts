@@ -664,33 +664,44 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
     expect((await ctx.sessionPersistence.load(header.id)).events).toEqual([...oneTurnLog(), ...secondTurn])
   })
 
-  it('skips empty, incomplete, and non-header compressed artifacts while rejecting malformed header frames', async () => {
+  it('skips corrupt compressed artifacts during listing without changing targeted read failures', async () => {
     const root = await freshRoot()
+    const validId = SessionId('valid')
     for (const [id, content] of [
       ['empty', Buffer.alloc(0)],
       ['partial', MAGIC],
       ['not-header', await compressZstdFrame('{"type":"turn/start"}\n')],
+      ['valid', await compressZstdFrame(`${JSON.stringify(toHeaderLine(meta(validId)))}\n`)],
     ] as const) {
       const sessionId = SessionId(id)
       await mkdir(sessionDir(root, undefined, sessionId), { recursive: true })
       await writeFile(logPath(root, undefined, sessionId, 'zstd'), content)
     }
     const ctx = await mount(root)
-    expect(await ctx.sessionPersistence.list()).toEqual([])
+    expect((await ctx.sessionPersistence.list()).map(header => header.id)).toEqual([validId])
 
     const twoLinesId = SessionId('two-lines')
+    const path = logPath(root, undefined, twoLinesId, 'zstd')
     await mkdir(sessionDir(root, undefined, twoLinesId), { recursive: true })
-    await writeFile(logPath(root, undefined, twoLinesId, 'zstd'), await compressZstdFrame([
+    const corrupt = await compressZstdFrame([
       JSON.stringify(toHeaderLine(meta('two-lines'))),
       JSON.stringify({ type: 'turn/start' }),
       '',
-    ].join('\n')))
-    await expect(ctx.sessionPersistence.list()).rejects.toThrow(/first frame is not exactly one header line/)
+    ].join('\n'))
+    await writeFile(path, corrupt)
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
+
+    expect((await ctx.sessionPersistence.list()).map(header => header.id)).toEqual([validId])
+    expect(warn).toHaveBeenCalledWith(
+      `session-persistence-jsonl: skipped corrupt Zstandard session artifact ${JSON.stringify(path)}: `
+      + 'corrupt Zstandard session log: first frame is not exactly one header line',
+    )
+    expect(await readFile(path)).toEqual(corrupt)
     await expect(ctx.sessionPersistence.load(SessionId('two-lines')))
       .rejects.toThrow(/first frame is not exactly one header line/)
   })
 
-  it('rejects missing, empty, and checksum-corrupt header frames on targeted reads', async () => {
+  it('skips checksum-corrupt header frames only during listing', async () => {
     const root = await freshRoot()
     for (const id of ['partial-only', 'empty-header', 'bad-checksum']) {
       await mkdir(sessionDir(root, undefined, SessionId(id)), { recursive: true })
@@ -706,7 +717,27 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
       .rejects.toThrow(/empty or header-less Zstandard session log/)
     await expect(ctx.sessionPersistence.load(SessionId('empty-header')))
       .rejects.toThrow(/first frame is not exactly one header line/)
-    await expect(ctx.sessionPersistence.list()).rejects.toThrow(/header frame failed validation/)
+    await expect(ctx.sessionPersistence.load(SessionId('bad-checksum')))
+      .rejects.toThrow(/frame at byte 0 failed validation/)
+    await expect(ctx.sessionPersistence.list()).resolves.toEqual([])
+  })
+
+  it('surfaces non-corruption failures during compressed artifact listing', async () => {
+    const root = await freshRoot()
+    const header = meta('list-io-failure')
+    await mkdir(sessionDir(root, header.cwd, header.id), { recursive: true })
+    await writeFile(
+      logPath(root, header.cwd, header.id, 'zstd'),
+      await compressZstdFrame(`${JSON.stringify(toHeaderLine(header))}\n`),
+    )
+    const ctx = await mount(root)
+    const persistence = ctx.sessionPersistence as unknown as {
+      readFirstZstdLine(path: string, signal?: AbortSignal): Promise<string | undefined>
+    }
+    const reason = Object.assign(new Error('simulated Zstandard catalog I/O failure'), { code: 'EACCES' })
+    vi.spyOn(persistence, 'readFirstZstdLine').mockRejectedValue(reason)
+
+    await expect(ctx.sessionPersistence.list()).rejects.toBe(reason)
   })
 })
 

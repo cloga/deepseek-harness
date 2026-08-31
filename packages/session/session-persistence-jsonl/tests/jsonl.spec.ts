@@ -1291,6 +1291,16 @@ describe('JsonlSessionPersistence: edge cases', () => {
     expect(ids).toEqual(['p1', 'p2', 'p3'])
   })
 
+  it('borrows a persisted session through the backend coordinator', async () => {
+    const m = meta('borrowed', '/project')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+
+    const source = await ctx.sessionPersistence.borrowSession(m.id)
+    expect(source.inspection.meta.id).toBe(m.id)
+    source[Symbol.dispose]()
+  })
+
   it('groups sessions whose cwd paths normalize to the same project directory', async () => {
     const first = meta('normalized-first', '/a/b-c')
     const second = meta('normalized-second', '/a-b/c')
