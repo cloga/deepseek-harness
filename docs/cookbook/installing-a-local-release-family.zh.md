@@ -38,7 +38,7 @@ pnpm run release:install-local -- `
 
 默认 prefix 是 `$HOME/.dsh/local-cli/<commit>`。传入 `--prefix <directory>` 可以选择其他隔离或全局 npm prefix。
 
-如果顺序文件中的 tarball 缺失，或提供的包遗漏 fork 自有的运行时依赖或 peer，安装器会在运行 npm 前失败。它校验每个 DSH payload，选择以 `@deepseek-ai/dsh` 为根的递归 dependency/peer 闭包，按依赖顺序安装该闭包，并在 `dsh-local-install.json` 中写入 repository URL、commit SHA、CLI package/version、release-manifest SHA-256、兼容 Desktop 的根 `cliPath` 和各已安装 tarball hash。测试支持与仅构建使用的发布族成员仍是经过验证的 pack 输入，但不会成为运行时根。
+如果顺序文件中的 tarball 缺失，或提供的包遗漏 fork 自有的运行时依赖或 peer，安装器会在运行 npm 前失败。它校验每个 DSH payload，选择以 `@deepseek-ai/dsh` 为根的递归 dependency/peer 闭包，按依赖顺序安装该闭包，并在 `dsh-local-install.json` 中写入 repository URL、commit SHA、CLI package/version、release-manifest SHA-256、兼容 Desktop 的根 `cliPath` 和各已安装 tarball hash。schema version 1 receipt 还会在发布 prefix 前，使用确定性的 prefix 相对路径和 SHA-256 值封存 staged 根 shim、npm shim 与 `@deepseek-ai/dsh` entrypoint。测试支持与仅构建使用的发布族成员仍是经过验证的 pack 输入，但不会成为运行时根。
 
 npm install 默认限制为五分钟，Web probe 默认限制为 30 秒。用 `--install-timeout-ms` 和 `--boot-timeout-ms` 覆盖；超时会携带有界的输出尾部并失败。Web probe 会清除 `NODE_PATH` 和 `NODE_OPTIONS`，并等待 `dsh --profile web --port 0 --no-open` 报告 URL。
 

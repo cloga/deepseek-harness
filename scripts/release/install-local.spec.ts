@@ -1,5 +1,6 @@
 /** Local packed-release installation planning and platform behavior. */
 
+import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -124,6 +125,18 @@ describe('local packed release installation', () => {
   })
 
   it('records the Desktop-compatible root shim without changing provenance hashes', () => {
+    const staging = mkdtempSync(join(tmpdir(), 'dsh local receipt-'))
+    roots.push(staging)
+    const stagedFiles = [
+      { path: ['dsh.cmd'], content: 'root shim' },
+      { path: ['node_modules', '.bin', 'dsh.cmd'], content: 'npm shim' },
+      { path: ['node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'], content: 'entrypoint' },
+    ] as const
+    for (const file of stagedFiles) {
+      const destination = join(staging, ...file.path)
+      mkdirSync(join(destination, '..'), { recursive: true })
+      writeFileSync(destination, file.content)
+    }
     const pkg: LocalPackedPackage = {
       ...packed('@deepseek-ai/dsh'),
       files: ['package/lib/bin.js'],
@@ -136,6 +149,8 @@ describe('local packed release installation', () => {
       'abc123',
       '0.1.0',
       rootPath,
+      staging,
+      'win32',
     )
 
     expect(receipt.cliPath).toBe('C:\\dsh-local\\dsh.cmd')
@@ -143,6 +158,45 @@ describe('local packed release installation', () => {
     expect(receipt.commitSha).toBe('abc123')
     expect(receipt.packages[0]?.sha256).toBe('a'.repeat(64))
     expect(receipt.releaseManifestSha256).toHaveLength(64)
+    expect(receipt.installedFiles).toEqual([
+      {
+        role: 'root-shim',
+        path: 'dsh.cmd',
+        sha256: createHash('sha256').update('root shim').digest('hex'),
+      },
+      {
+        role: 'npm-shim',
+        path: 'node_modules\\.bin\\dsh.cmd',
+        sha256: createHash('sha256').update('npm shim').digest('hex'),
+      },
+      {
+        role: 'entrypoint',
+        path: 'node_modules\\@deepseek-ai\\dsh\\lib\\bin.js',
+        sha256: createHash('sha256').update('entrypoint').digest('hex'),
+      },
+    ])
+    expect(receipt.installedFiles.every(file => /^[0-9a-f]{64}$/u.test(file.sha256))).toBe(true)
+  })
+
+  it('rejects receipt publication when an installed executable file is absent', () => {
+    const staging = mkdtempSync(join(tmpdir(), 'dsh local receipt-'))
+    roots.push(staging)
+    writeFileSync(join(staging, 'dsh.cmd'), 'root shim')
+    const pkg: LocalPackedPackage = {
+      ...packed('@deepseek-ai/dsh'),
+      files: ['package/lib/bin.js'],
+      sha256: 'a'.repeat(64),
+    }
+
+    expect(() => installReceipt(
+      [pkg],
+      'https://github.com/cloga/deepseek-harness.git',
+      'abc123',
+      '0.1.0',
+      cliShimPath('C:\\dsh-local', 'win32'),
+      staging,
+      'win32',
+    )).toThrow(/installed npm-shim is absent/u)
   })
 
   it('restores the previous prefix when publication fails', () => {

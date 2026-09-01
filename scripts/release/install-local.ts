@@ -49,6 +49,13 @@ export interface LocalPackedPackage {
   readonly sha256?: string
 }
 
+/** One installed executable file sealed by the local-install receipt. */
+export interface InstalledFileAttestation {
+  readonly role: 'root-shim' | 'npm-shim' | 'entrypoint'
+  readonly path: string
+  readonly sha256: string
+}
+
 export interface InstallReceipt {
   readonly schemaVersion: 1
   readonly repositoryUrl: string
@@ -64,6 +71,7 @@ export interface InstallReceipt {
     readonly sha256: string
     readonly files: number
   }[]
+  readonly installedFiles: readonly InstalledFileAttestation[]
 }
 
 /**
@@ -272,11 +280,43 @@ export function replaceInstallPrefix(
 }
 
 /**
+ * Hash the staged executable files that determine the installed CLI.
+ * @param prefix - Verified staging installation prefix.
+ * @param platform - Node platform identifier.
+ * @returns Deterministically ordered, prefix-relative file attestations.
+ */
+function installedFileAttestations(
+  prefix: string,
+  platform: NodeJS.Platform,
+): InstalledFileAttestation[] {
+  const shimName = platform === 'win32' ? 'dsh.cmd' : 'dsh'
+  const separator = platform === 'win32' ? '\\' : '/'
+  const files = [
+    { role: 'root-shim', segments: [shimName] },
+    { role: 'npm-shim', segments: ['node_modules', '.bin', shimName] },
+    { role: 'entrypoint', segments: ['node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'] },
+  ] as const
+
+  for (const file of files) {
+    const path = join(prefix, ...file.segments)
+    if (!existsSync(path)) throw new Error(`installed ${file.role} is absent at ${path}`)
+  }
+  return files.map(file => ({
+    role: file.role,
+    path: file.segments.join(separator),
+    sha256: createHash('sha256').update(readFileSync(join(prefix, ...file.segments))).digest('hex'),
+  }))
+}
+
+/**
  * Build a stable receipt for an installation.
  * @param packages - Installed packages in dependency order.
+ * @param repositoryUrl - Source repository URL.
  * @param commit - Selected checkout commit.
  * @param version - Selected dsh version.
  * @param cliPath - Final executable shim path.
+ * @param installedPrefix - Verified staging installation prefix.
+ * @param platform - Node platform identifier.
  * @returns Receipt content.
  */
 export function installReceipt(
@@ -285,6 +325,8 @@ export function installReceipt(
   commit: string,
   version: string,
   cliPath: string,
+  installedPrefix: string,
+  platform: NodeJS.Platform = process.platform,
 ): InstallReceipt {
   const entries = packages.map(pkg => ({
     name: pkg.name,
@@ -302,6 +344,7 @@ export function installReceipt(
     releaseManifestSha256: createHash('sha256').update(JSON.stringify(entries)).digest('hex'),
     cliPath,
     packages: entries,
+    installedFiles: installedFileAttestations(installedPrefix, platform),
   }
 }
 
@@ -526,7 +569,7 @@ async function main(): Promise<void> {
 
     const finalCliPath = cliShimPath(prefix)
     writeFileSync(join(staging, RECEIPT_FILE), `${JSON.stringify(
-      installReceipt(ordered, repositoryUrl, commit, cli.version, finalCliPath),
+      installReceipt(ordered, repositoryUrl, commit, cli.version, finalCliPath, staging),
       null,
       2,
     )}\n`)
