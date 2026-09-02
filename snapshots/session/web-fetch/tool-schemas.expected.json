@@ -28,7 +28,7 @@
           },
           "sandbox_permissions": {
             "type": "string",
-            "description": "The wider sandbox mode this command needs. Only valid as a one-shot retry of a command the sandbox just denied; requires justification and user approval.",
+            "description": "The sandbox mode this command requests. A strictly wider mode is only valid as a one-shot retry of a command the sandbox just denied and requires justification and user approval.",
             "enum": [
               "danger-full-access"
             ]
@@ -88,7 +88,7 @@
           },
           "sandbox_permissions": {
             "type": "string",
-            "description": "The wider sandbox mode this file operation needs. Only valid as a one-shot retry of an operation the sandbox just denied; requires justification and user approval.",
+            "description": "The sandbox mode this file operation requests. A strictly wider mode is only valid as a one-shot retry of an operation the sandbox just denied and requires justification and user approval.",
             "enum": [
               "danger-full-access"
             ]
@@ -676,7 +676,7 @@
           },
           "sandbox_permissions": {
             "type": "string",
-            "description": "The wider sandbox mode this file operation needs. Only valid as a one-shot retry of an operation the sandbox just denied; requires justification and user approval.",
+            "description": "The sandbox mode this file operation requests. A strictly wider mode is only valid as a one-shot retry of an operation the sandbox just denied and requires justification and user approval.",
             "enum": [
               "danger-full-access"
             ]

@@ -61,10 +61,6 @@ class BashArgs(TypedDict):
     workdir: NotRequired[str]
     # Run in the background and return a job id immediately (collect with job_output, stop with job_kill). No timeout applies.
     run_in_background: NotRequired[bool]
-    # The wider sandbox mode this command needs. Only valid as a one-shot retry of a command the sandbox just denied; requires justification and user approval.
-    sandbox_permissions: NotRequired[Literal["workspace-write", "danger-full-access"]]
-    # Required with sandbox_permissions: one sentence for the user explaining why this exact command needs the wider access.
-    justification: NotRequired[str]
     # Additional keys beyond those declared are allowed.
 
 class BashOutput1(TypedDict):
@@ -134,10 +130,6 @@ class EditArgs(TypedDict):
     new_string: str
     # Replace all matches. Defaults to false; when false, old_string must appear exactly once.
     replace_all: NotRequired[bool]
-    # The wider sandbox mode this file operation needs. Only valid as a one-shot retry of an operation the sandbox just denied; requires justification and user approval.
-    sandbox_permissions: NotRequired[Literal["workspace-write", "danger-full-access"]]
-    # Required with sandbox_permissions: one sentence for the user explaining why this exact file operation needs the wider access.
-    justification: NotRequired[str]
     # Additional keys beyond those declared are allowed.
 
 class EditOutput(TypedDict):
@@ -560,10 +552,6 @@ class WriteArgs(TypedDict):
     file_path: str
     # Full UTF-8 text content to write.
     content: str
-    # The wider sandbox mode this file operation needs. Only valid as a one-shot retry of an operation the sandbox just denied; requires justification and user approval.
-    sandbox_permissions: NotRequired[Literal["workspace-write", "danger-full-access"]]
-    # Required with sandbox_permissions: one sentence for the user explaining why this exact file operation needs the wider access.
-    justification: NotRequired[str]
     # Additional keys beyond those declared are allowed.
 
 class WriteOutput(TypedDict):
@@ -574,7 +562,7 @@ class WriteOutput(TypedDict):
 
 class Tools(Protocol):
     async def bash(self, args: BashArgs) -> BashOutput1 | BashOutput2:
-        """Execute a bash command (`bash -c`) and return its stdout/stderr. Each call runs in a fresh shell: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. Non-zero exits are reported as `[exit code: N]`. Current harness environment facts are exposed through managed `$DSH_*` variables; inspect them when needed. Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a bug in the command; do not retry another way. Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. Set `run_in_background: true` for long-running commands: the call returns a job id immediately; read its output with `job_output` and stop it with `job_kill`. Attempting a command the sandbox may deny is safe and expected: run it and read the marker rather than assuming the denial. When a command is denied and a wider mode would let it succeed, escalate immediately in the same turn — the one sanctioned exception to a denial: retry the exact same command once with `sandbox_permissions` (the narrowest wider mode that suffices) plus a one-sentence `justification`. Do not detour through chat to ask permission first — the approval prompt raised by that retry is how the user consents. If the session states approval prompts are disabled, there is no exception: a denial is final — do not set `sandbox_permissions`. Never escalate speculatively: ground the request in a real denial — normally the one this command just hit; escalating up front is fine only when this session already denied the same access. A rejected escalation is final for that command — stop and explain, never work around it — but it does not forbid attempting or escalating other commands later."""
+        """Execute a bash command (`bash -c`) and return its stdout/stderr. Each call runs in a fresh shell: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. Non-zero exits are reported as `[exit code: N]`. Current harness environment facts are exposed through managed `$DSH_*` variables; inspect them when needed. Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a bug in the command; do not retry another way. Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. Set `run_in_background: true` for long-running commands: the call returns a job id immediately; read its output with `job_output` and stop it with `job_kill`."""
     async def create_goal(self, args: CreateGoalArgs) -> CreateGoalOutput1 | CreateGoalOutput2:
         """Create one persisted same-session completion goal when the current direct human request is a long-running objective that should continue across autonomous goal rounds. You may infer that intent without requiring the user to say \"create a goal\". Do not use this for trivial single-turn work. Execution rejects non-human and subagent authority."""
     async def edit(self, args: EditArgs) -> EditOutput:
