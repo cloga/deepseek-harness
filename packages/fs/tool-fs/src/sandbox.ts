@@ -53,8 +53,8 @@ export class FsSandboxController {
   /**
    * The escalation schema fields for a mutating tool's `parameters`. Call it
    * only under a confining backend (guard on {@link escalationModes}); the
-   * enum pins the closed mode vocabulary, the strict-wider check happens per
-   * call at execution.
+   * enum pins the closed mode vocabulary; execution resolves equal, narrower,
+   * and wider requests against the call's effective mode.
    * @param agent - the agent receiving the schema, or undefined for diagnostics.
    * @returns the two escalation parameter specs.
    */
