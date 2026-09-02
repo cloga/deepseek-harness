@@ -41,9 +41,9 @@ export function recordKeyFor(providerId: string): CredentialKey {
  * Translate a stored record into the credential pi-ai expects.
  *
  * An `api-key` record is structural on both sides, so it is rebuilt field by
- * field. A `grant` payload is pi-ai's own OAuth credential, stored verbatim:
- * the seam treats it as opaque JSON precisely so a library that owns a token
- * format keeps owning it, refresh fields and all.
+ * field. A `grant` payload is pi-ai's own OAuth credential, read as the opaque
+ * JSON record the adapter wrote; the library keeps owning its token format,
+ * refresh fields and all.
  * @param record - the stored record, or undefined when nothing is stored.
  * @returns the pi-ai credential, or undefined for an absent record.
  */
@@ -59,6 +59,98 @@ function toPiCredential(record: CredentialRecord | undefined): Credential | unde
   return record.payload as Credential
 }
 
+class GrantPayloadError extends TypeError {
+  constructor(path: string, category: string) {
+    super(`llm-pi-ai: grant payload at ${path} ${category}`)
+    this.name = 'GrantPayloadError'
+  }
+}
+
+/** A realm-neutral test for ordinary records, including null-prototype records. */
+function hasPlainPrototype(value: object): boolean {
+  const prototype: unknown = Object.getPrototypeOf(value)
+  return prototype === null || (typeof prototype === 'object' && Object.getPrototypeOf(prototype) === null)
+}
+
+/** Render a useful structural path without disclosing an arbitrary property name. */
+function propertyPath(parent: string, key: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? `${parent}.${key}` : `${parent}.[property]`
+}
+
+/**
+ * Clone owner-defined grant data into strict host-realm JSON before it reaches
+ * the credential seam. Object properties whose value is `undefined` are
+ * omitted, while array holes and `undefined` elements become `null`, matching
+ * `JSON.stringify`. All other non-JSON values are rejected rather than lost.
+ *
+ * @param value - the provider-owned grant payload.
+ * @returns a detached tree of host-realm ordinary objects, arrays, and JSON scalars.
+ * @throws TypeError with only the structural path and rejected category.
+ */
+export function normalizeGrantPayload(value: unknown): unknown {
+  try {
+    return cloneJsonValue(value, '$', new Set())
+  } catch (error) {
+    if (error instanceof GrantPayloadError) throw error
+    throw new GrantPayloadError('$', 'could not be inspected safely')
+  }
+}
+
+function cloneJsonValue(value: unknown, path: string, seen: Set<object>): unknown {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new GrantPayloadError(path, 'contains a non-finite number')
+    return value
+  }
+  if (typeof value === 'bigint') throw new GrantPayloadError(path, 'contains a bigint')
+  if (typeof value === 'function') throw new GrantPayloadError(path, 'contains a function')
+  if (typeof value === 'symbol') throw new GrantPayloadError(path, 'contains a symbol')
+  if (value === undefined) throw new GrantPayloadError(path, 'contains undefined')
+
+  if (seen.has(value)) throw new GrantPayloadError(path, 'is cyclic')
+  seen.add(value)
+  try {
+    if (Object.getOwnPropertySymbols(value).length > 0) {
+      throw new GrantPayloadError(path, 'contains symbol-keyed data')
+    }
+    if (Array.isArray(value)) return cloneJsonArray(value, path, seen)
+    if (!hasPlainPrototype(value)) throw new GrantPayloadError(path, 'contains a non-plain object')
+    return cloneJsonObject(value, path, seen)
+  } finally {
+    seen.delete(value)
+  }
+}
+
+function cloneJsonArray(value: unknown[], path: string, seen: Set<object>): unknown[] {
+  for (const key of Object.keys(value)) {
+    const index = Number(key)
+    if (!Number.isInteger(index) || index < 0 || index >= value.length || String(index) !== key) {
+      throw new GrantPayloadError(propertyPath(path, key), 'is a non-index array property')
+    }
+  }
+  const clone = new Array<unknown>(value.length)
+  for (let index = 0; index < value.length; index++) {
+    const item = value[index]
+    clone[index] = item === undefined ? null : cloneJsonValue(item, `${path}[${index}]`, seen)
+  }
+  return clone
+}
+
+function cloneJsonObject(value: object, path: string, seen: Set<object>): Record<string, unknown> {
+  const clone: Record<string, unknown> = {}
+  for (const key of Object.keys(value)) {
+    const item = (value as Record<string, unknown>)[key]
+    if (item === undefined) continue
+    Object.defineProperty(clone, key, {
+      value: cloneJsonValue(item, propertyPath(path, key), seen),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
+  }
+  return clone
+}
+
 /**
  * Translate a pi-ai credential into the record to store.
  * @param credential - what a login or refresh produced.
@@ -72,7 +164,7 @@ function toRecord(credential: Credential): CredentialRecord {
       ...credential.env === undefined ? {} : { env: { ...credential.env } },
     }
   }
-  return { kind: 'grant', payload: credential }
+  return { kind: 'grant', payload: normalizeGrantPayload(credential) }
 }
 
 /**

@@ -29,7 +29,7 @@ harness 的凭据平面只能表达一种机密：藏在某个环境变量名之
 - **写入由 flow 拥有。** `run()` 返回即表示记录已通过 `ctx.credentials` 提交；seam 核实的是本次尝试期间观察到的提交——只看记录存在与否，会让重新授权把陈旧记录冒充成新鲜的——并拒绝返回时没提交记录的 flow。正是这一点让 `Models.login()`——它把持久化当作登录的一部分，经由 store 适配器完成——保持为唯一写入方，而不是把凭据复制出来再写第二遍。
 - **交互随请求传入，而非注册表。** 发起授权的一方才是能与人对话的一方，因此提示恰好抵达发问的那个页面，无头调用方传入一个直接拒绝的交互实现，也不存在"环境提供方缺席"或"该归两个已打开标签页中哪一个"的问题。
 
-**三处翻译全都留在 `llm-pi-ai`。** `credentialStoreFrom` 把 pi-ai 的 `CredentialStore` 映射到记录；`authContextFrom` 先查凭据 seam 再查启动环境来回答 pi-ai 的环境提问，文件存在性则按宿主进程的文件系统判断；`registerPiAiFlows` 把 pi-ai 的 `AuthEvent`/`AuthPrompt` 重述为中立词汇并运行 `Models.login()`。每个集合都用前两者构造，正是这一点让已登录的提供方在配置变更导致集合重建之后仍然处于登录状态。有了行得通的姿态之后，目录不再扣留仅 OAuth 的路由，`openai-codex` 重新被提供。
+**三处翻译全都留在 `llm-pi-ai`。** `credentialStoreFrom` 把 pi-ai 的 `CredentialStore` 映射到记录，并在适配器边界把 grant 规范化成分离的严格 JSON：省略值为 undefined 的对象字段，把数组中的 undefined 项变成 `null`，其余非 JSON 值全部拒绝，且不在诊断中渲染凭据值；`authContextFrom` 先查凭据 seam 再查启动环境来回答 pi-ai 的环境提问，文件存在性则按宿主进程的文件系统判断；`registerPiAiFlows` 把 pi-ai 的 `AuthEvent`/`AuthPrompt` 重述为中立词汇并运行 `Models.login()`。每个集合都用前两者构造，正是这一点让已登录的提供方在配置变更导致集合重建之后仍然处于登录状态。有了行得通的姿态之后，目录不再扣留仅 OAuth 的路由，`openai-codex` 重新被提供。
 
 凭据平面仍是可选的，正如它在引用解析上一贯如此。没有凭据服务时读取回答"未存储"，因为这样的组合确实不持有任何凭据；写入则指名拒绝，因为一次 grant 凭空蒸发的登录会先报告成功、再让每个请求失败。flow 注册通过 `ctx.inject` 限定在授权 seam 之下，因此 headless 或 ACP 组合挂载后没有登录能力，其余一切不变。
 
@@ -63,6 +63,6 @@ seam 的边缘与写入路径同一纪律。prompt 被拒是结果而非故障�
 
 seam 自己的套件钉住它拥有的生命周期：单飞的拒绝与释放、flow 启动前与进行中的撤销、一个忽略自身信号的 flow、提交核实，以及包含"调用方看到的是抛出错误"那种 `failed` 情形的结算事件。invariant companion 钉住"已结算的键就是空闲的键"，因为被卡住的键否则不可见。
 
-`llm-pi-ai` 针对一份真实的 `$DSH_HOME` 文档覆盖三处翻译——逐字段的 api-key 凭据、连 refresh 半边一起原样保存的 OAuth 凭据、按 scope 跳过的他插件记录，以及没有凭据服务时的写入拒绝——外加每一个 `AuthEvent` 与 `AuthPrompt` 成员的重述；`Models.login()` 在集合边界处被 mock，因为真实登录会打开浏览器。两个真实组合测试分别在挂载与不挂载授权 seam 的情况下启动插件。
+`llm-pi-ai` 针对一份真实的 `$DSH_HOME` 文档覆盖三处翻译——逐字段的 api-key 凭据、包含扩展字段的 OAuth 凭据之严格 JSON 规范化、按 scope 跳过的他插件记录，以及没有凭据服务时的写入拒绝——外加每一个 `AuthEvent` 与 `AuthPrompt` 成员的重述；`Models.login()` 在集合边界处被 mock，因为真实登录会打开浏览器。规范化测试还钉住了跨 realm 普通记录的准入、分离复制、undefined 处理，以及只含路径与非 JSON 类别的拒绝诊断。两个真实组合测试分别在挂载与不挂载授权 seam 的情况下启动插件。
 
 `models-settings` 与 `onboarding-usable-provider` 两条 web e2e golden 恰好收回了被扣留时失去的那一行 `openai-codex` 选项——这是本次改动今天在装配后的应用上造成的全部差异，因为 Models 页还没有可录制的登录控件。

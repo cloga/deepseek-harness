@@ -1,13 +1,13 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { runInNewContext } from 'node:vm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 import { credentialKey, credentialRef } from '@deepseek-ai/dsh-credentials'
-import { authContextFrom, credentialStoreFrom, recordKeyFor } from '../src/auth.ts'
-
-const CODEX = recordKeyFor('openai-codex')
+import type { Credential } from '@earendil-works/pi-ai'
+import { authContextFrom, credentialStoreFrom, normalizeGrantPayload, recordKeyFor } from '../src/auth.ts'
 
 const dirs: string[] = []
 
@@ -53,15 +53,80 @@ describe('pi-ai credential store over harness records', () => {
     await expect(store.read('bedrock')).resolves.toEqual({ type: 'api_key' })
   })
 
-  it('keeps an OAuth credential verbatim, refresh fields and all', async () => {
+  it('normalizes an OAuth credential to detached strict JSON, preserving extension fields', async () => {
     const ctx = await stored()
     const store = credentialStoreFrom(ctx)
-    const granted = { type: 'oauth' as const, access: 'at', refresh: 'rt', expires: 42, accountId: 'acc' }
+    const granted = {
+      type: 'oauth' as const,
+      access: 'at',
+      refresh: 'rt',
+      expires: 42,
+      enterpriseUrl: undefined,
+      availableModelIds: ['gpt-5', undefined, 'gpt-4.1'],
+      extension: { accountId: 'acc', absent: undefined, nested: [{ enabled: true }, undefined] },
+    }
 
-    await store.modify('openai-codex', () => Promise.resolve(granted))
+    await store.modify('github-copilot', () => Promise.resolve(granted as Credential))
 
-    await expect(store.read('openai-codex')).resolves.toEqual(granted)
-    await expect(ctx.credentials.readRecord(CODEX)).resolves.toEqual({ kind: 'grant', payload: granted })
+    const expected = {
+      type: 'oauth',
+      access: 'at',
+      refresh: 'rt',
+      expires: 42,
+      availableModelIds: ['gpt-5', null, 'gpt-4.1'],
+      extension: { accountId: 'acc', nested: [{ enabled: true }, null] },
+    }
+    await expect(store.read('github-copilot')).resolves.toEqual(expected)
+    await expect(ctx.credentials.readRecord(recordKeyFor('github-copilot')))
+      .resolves.toEqual({ kind: 'grant', payload: expected })
+  })
+
+  it('accepts same-realm, null-prototype, and cross-realm plain grant records', () => {
+    const sameRealm = { type: 'oauth', extension: { enabled: true } }
+    const nullPrototype = Object.assign(Object.create(null) as Record<string, unknown>, sameRealm)
+    const crossRealm = runInNewContext('({ type: "oauth", extension: { enabled: true } })') as unknown
+
+    for (const source of [sameRealm, nullPrototype, crossRealm]) {
+      const clone = normalizeGrantPayload(source) as { extension: { enabled: boolean } }
+      expect(clone).toEqual(sameRealm)
+      expect(Object.getPrototypeOf(clone)).toBe(Object.prototype)
+      expect(Object.getPrototypeOf(clone.extension)).toBe(Object.prototype)
+    }
+  })
+
+  it('detaches every retained object and array from the provider grant', () => {
+    const granted = { type: 'oauth', extension: { labels: ['one'], state: { enabled: true } } }
+    const clone = normalizeGrantPayload(granted) as typeof granted
+
+    granted.extension.labels[0] = 'changed'
+    granted.extension.state.enabled = false
+
+    expect(clone).toEqual({ type: 'oauth', extension: { labels: ['one'], state: { enabled: true } } })
+    expect(clone).not.toBe(granted)
+    expect(clone.extension).not.toBe(granted.extension)
+    expect(clone.extension.labels).not.toBe(granted.extension.labels)
+  })
+
+  it.each([
+    ['a non-finite number', { type: 'oauth', nested: { value: Number.NaN } }, /\$\.nested\.value contains a non-finite number/],
+    ['a bigint', { type: 'oauth', nested: { value: 1n } }, /\$\.nested\.value contains a bigint/],
+    ['a function', { type: 'oauth', nested: { value: () => true } }, /\$\.nested\.value contains a function/],
+    ['a symbol', { type: 'oauth', nested: { value: Symbol('secret') } }, /\$\.nested\.value contains a symbol/],
+    ['a Date', { type: 'oauth', nested: { value: new Date(0) } }, /\$\.nested\.value contains a non-plain object/],
+    ['a class instance', { type: 'oauth', nested: { value: new (class GrantExtension { marker = true })() } }, /\$\.nested\.value contains a non-plain object/],
+  ])('rejects grant payload containing %s without rendering its value', (_label, granted, diagnostic) => {
+    expect(() => normalizeGrantPayload(granted)).toThrow(diagnostic)
+  })
+
+  it('rejects cycles and symbol-keyed data by structural path and category', () => {
+    const cyclic: Record<string, unknown> = { type: 'oauth' }
+    cyclic['nested'] = { parent: cyclic }
+    const symbolKeyed = { type: 'oauth', nested: { visible: true } }
+    Object.defineProperty(symbolKeyed.nested, Symbol('secret'), { value: 'must-not-render' })
+
+    expect(() => normalizeGrantPayload(cyclic)).toThrow(/\$\.nested\.parent is cyclic/)
+    expect(() => normalizeGrantPayload(symbolKeyed)).toThrow(/\$\.nested contains symbol-keyed data/)
+    expect(() => normalizeGrantPayload(symbolKeyed)).not.toThrow(/must-not-render|secret/)
   })
 
   it('shows the mutation the current credential and leaves it alone when declined', async () => {
