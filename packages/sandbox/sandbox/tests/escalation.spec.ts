@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   ESCALATION_TARGETS,
+  SANDBOX_MODES,
   WIDER_MODES,
   approveEscalation,
   escalationHintMarker,
@@ -24,21 +25,22 @@ describe('the strictly-wider ladder', () => {
     expect(WIDER_MODES['danger-full-access']).toBeUndefined()
   })
 
-  it('the target enum is the closed set every session could escalate TO (read-only is the floor)', () => {
+  it('separates accepted request modes from strictly wider escalation targets', () => {
+    expect(SANDBOX_MODES).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
     expect(ESCALATION_TARGETS).toEqual(['workspace-write', 'danger-full-access'])
   })
 })
 
 describe('validateEscalationArgs', () => {
-  it('accepts neither field, or both with a non-empty justification', () => {
+  it('accepts no fields and defers a target justification until the rank is known', () => {
     expect(() => { validateEscalationArgs(undefined, undefined) }).not.toThrow()
     expect(() => { validateEscalationArgs('workspace-write', 'because the workspace needs it') }).not.toThrow()
+    expect(() => { validateEscalationArgs('workspace-write', undefined) }).not.toThrow()
+    expect(() => { validateEscalationArgs('workspace-write', '   ') }).not.toThrow()
   })
 
-  it('rejects one field without the other, and a blank justification', () => {
-    expect(() => { validateEscalationArgs('workspace-write', undefined) }).toThrow(/requires a justification/)
+  it('rejects a justification without a target', () => {
     expect(() => { validateEscalationArgs(undefined, 'orphan reason') }).toThrow(/only valid together with sandbox_permissions/)
-    expect(() => { validateEscalationArgs('workspace-write', '   ') }).toThrow(/non-empty sentence/)
   })
 })
 
@@ -78,16 +80,61 @@ describe('approveEscalation', () => {
     const seen: { reason?: string }[] = []
     const granted = await approveEscalation(req(), ingredients({ approver: approver('allowed-once', r => seen.push(r as { reason?: string })) }))
     expect(granted).toBe('workspace-write')
+    expect(seen).toHaveLength(1)
     expect(seen[0]?.reason).toBe('escalate sandbox to workspace-write: the user asked to write in the workspace')
   })
 
-  it('a non-widening request fails closed with its own text and never asks', async () => {
+  it('same and narrower targets retain the standing mode without justification or approval', async () => {
     const seen: unknown[] = []
     const spy = ingredients({ approver: approver('allowed-once', r => seen.push(r)) })
-    await expect(approveEscalation(req({ requestedMode: 'read-only' }), spy))
-      .rejects.toThrow(/not strictly wider than this call's current "read-only" mode/)
-    await expect(approveEscalation(req({ requestedMode: 'workspace-write', effectiveMode: 'danger-full-access' as never }), spy))
-      .rejects.toThrow(/not strictly wider/)
+    await expect(approveEscalation(req({
+      requestedMode: 'read-only',
+      effectiveMode: 'read-only',
+      justification: undefined,
+    }), spy)).resolves.toBe('read-only')
+    await expect(approveEscalation(req({
+      requestedMode: 'read-only',
+      effectiveMode: 'workspace-write',
+      justification: '   ',
+    }), spy)).resolves.toBe('workspace-write')
+    await expect(approveEscalation(req({
+      requestedMode: 'danger-full-access',
+      effectiveMode: 'danger-full-access',
+      justification: undefined,
+    }), spy)).resolves.toBe('danger-full-access')
+    await expect(approveEscalation(req({
+      requestedMode: 'workspace-write',
+      effectiveMode: 'danger-full-access',
+      justification: '   ',
+    }), spy)).resolves.toBe('danger-full-access')
+    expect(seen).toEqual([])
+  })
+
+  it.each([
+    [undefined, /requires a justification/],
+    ['   ', /non-empty sentence/],
+  ] as const)('a wider target with justification %j fails closed before approval', async (justification, message) => {
+    const seen: unknown[] = []
+    await expect(approveEscalation(
+      req({ justification }),
+      ingredients({ approver: approver('allowed-once', r => seen.push(r)) }),
+    )).rejects.toThrow(message)
+    expect(seen).toEqual([])
+  })
+
+  it.each(['unknown', 'toString', 'constructor'])('an unknown requested mode %j remains invalid and never asks', async (requestedMode) => {
+    const seen: unknown[] = []
+    const spy = ingredients({ approver: approver('allowed-once', r => seen.push(r)) })
+    await expect(approveEscalation(req({ requestedMode }), spy))
+      .rejects.toThrow(/invalid requested sandbox mode/)
+    expect(seen).toEqual([])
+  })
+
+  it.each(['unknown', 'toString', 'constructor'])('an unknown effective mode %j remains invalid and never asks', async (effectiveMode) => {
+    const seen: unknown[] = []
+    const spy = ingredients({ approver: approver('allowed-once', r => seen.push(r)) })
+    await expect(approveEscalation(req({ effectiveMode: effectiveMode as never }), spy))
+      .rejects.toThrow(/invalid effective sandbox mode/)
     expect(seen).toEqual([])
   })
 

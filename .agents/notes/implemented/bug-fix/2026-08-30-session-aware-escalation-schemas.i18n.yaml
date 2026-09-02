@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-30-session-aware-escalation-schemas.md
-2026-08-30-session-aware-escalation-schemas.md: a82ddf347af1204f1267bb4c5859c797039b0778
-2026-08-30-session-aware-escalation-schemas.zh.md: 7592befec3d498ae9ef803728fd28ea26183c8e6
+2026-08-30-session-aware-escalation-schemas.md: ebf678673aeedbc6035f4dcef95d9640d45dc91a
+2026-08-30-session-aware-escalation-schemas.zh.md: e50f9d875af2fdb38dbb3412126d4d11aa238cfb
