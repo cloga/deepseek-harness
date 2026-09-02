@@ -22,7 +22,7 @@ import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import { ShellExecutor } from '@deepseek-ai/dsh-shell'
@@ -240,20 +240,39 @@ function sandboxAgent(
   ctx?: Context,
   onAppend?: (type: string) => void,
 ): Agent {
-  const events: Array<{ type: string; data?: Record<string, unknown>; seq?: number }> = [
-    { type: 'turn/start', seq: 0, data: { turn: 1 } },
+  const events: Array<{
+    type: string
+    seq: ReturnType<typeof SessionSeq>
+    time: number
+    data: Record<string, unknown>
+  }> = [
+    { type: 'turn/start', seq: SessionSeq(0), time: 0, data: { turn: 1 } },
   ]
-  if (mode !== undefined) events.push({ type: 'sandbox/mode', seq: 1, data: { mode } })
+  if (mode !== undefined) {
+    events.push({ type: 'sandbox/mode', seq: SessionSeq(1), time: 1, data: { mode } })
+  }
   const id = SessionId('sandbox-session')
   return {
     id,
     ...ctx === undefined ? {} : { ctx: ctx.plugin(() => {}).ctx },
     session: {
       id,
-      header: { version: 0, id, createdAt: 0 },
-      events,
+      header: { version: 0, id, createdAt: 0, isSeeded: false },
+      inheritedEventCount: SessionLogOffset(0),
+      firstLiveSeq: SessionLogOffset(0),
+      get seq() { return SessionLogOffset(events.length) },
+      eventAt: (seq: ReturnType<typeof SessionSeq>) => events[seq],
+      snapshotEvents: (
+        fromSeq = SessionLogOffset(0),
+        toSeqExclusive = SessionLogOffset(events.length),
+      ) => events.slice(fromSeq, toSeqExclusive),
       append: (type: string, data: Record<string, unknown>) => {
-        const event = { type, data }
+        const event = {
+          type,
+          seq: SessionSeq(events.length),
+          time: events.length,
+          data,
+        }
         events.push(event)
         onAppend?.(type)
         return event
@@ -274,7 +293,15 @@ function registerFakeAgent(ctx: Context, sessionId: string): Agent {
   const agent = {
     id,
     ctx: scopeFiber.ctx,
-    session: { id, header: { version: 0, id, createdAt: 0 }, events: [] },
+    session: {
+      id,
+      header: { version: 0, id, createdAt: 0, isSeeded: false },
+      inheritedEventCount: SessionLogOffset(0),
+      firstLiveSeq: SessionLogOffset(0),
+      seq: SessionLogOffset(0),
+      eventAt: () => undefined,
+      snapshotEvents: () => [],
+    },
   } as unknown as Agent
   ctx.agents.register(agent)
   return agent
@@ -569,7 +596,7 @@ describe('sandbox escalation through ctx.approval', () => {
     const { ctx } = await setupSandboxed()
     const schema = ctx.tools.schemas().find(item => item.name === 'pwsh')!
     const properties = schema.parameters.properties as Record<string, { enum?: string[] }>
-    expect(properties['sandbox_permissions']?.enum).toEqual(['workspace-write', 'danger-full-access'])
+    expect(properties['sandbox_permissions']?.enum).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
     expect(schema.description).toContain('approval prompt')
     expect(schema.description).toContain('ConstrainedLanguage')
     expect(schema.description).toContain('workspace-write stays in FullLanguage')
@@ -647,23 +674,41 @@ describe('sandbox escalation through ctx.approval', () => {
     expect(schema.parameters.properties).not.toHaveProperty('sandbox_permissions')
   })
 
-  it('rejects injected escalation without a sandbox and non-widening escalation without prompting', async () => {
+  it('rejects injected escalation without a sandbox and treats non-widening requests as no-ops', async () => {
     const plain = await setup()
     expect(text(await call(plain.ctx, 'pwsh', escalate))).toContain('not available in this composition')
 
-    const { ctx } = await setupSandboxed(true)
+    const { ctx, bash } = await setupSandboxed(true)
     const prompted = vi.fn()
     ctx.on('approval/request', () => { prompted(); return Promise.resolve<ApprovalOutcome>('allowed-once') })
-    const result = await call(ctx, 'pwsh', { ...escalate, sandbox_permissions: 'workspace-write' }, sandboxAgent('workspace-write'))
-    expect(text(result)).toContain('not strictly wider')
+    const same = await call(ctx, 'pwsh', {
+      command: 'Write-Output ok',
+      description: 'same mode',
+      sandbox_permissions: 'danger-full-access',
+    }, sandboxAgent('danger-full-access'))
+    const narrower = await call(ctx, 'pwsh', {
+      command: 'Write-Output ok',
+      description: 'narrower mode',
+      sandbox_permissions: 'workspace-write',
+      justification: '   ',
+    }, sandboxAgent('danger-full-access'))
+    const floor = await call(ctx, 'pwsh', {
+      command: 'Write-Output ok',
+      description: 'narrowest mode',
+      sandbox_permissions: 'read-only',
+    }, sandboxAgent('workspace-write'))
+    expect(same.isError).toBe(false)
+    expect(narrower.isError).toBe(false)
+    expect(floor.isError).toBe(false)
+    expect(bash.modes).toEqual(['danger-full-access', 'danger-full-access', 'workspace-write'])
     expect(prompted).not.toHaveBeenCalled()
 
     const malformed = sandboxAgent()
-    ;(malformed.session.events as unknown as Array<{ type: string; data: { mode: string } }>).push({
-      type: 'sandbox/mode',
-      data: { mode: 'unknown-mode' },
-    })
-    expect(text(await call(ctx, 'pwsh', escalate, malformed))).toContain('not strictly wider')
+    ;(malformed.session.append as unknown as (
+      type: string,
+      data: Record<string, unknown>,
+    ) => unknown)('sandbox/mode', { mode: 'unknown-mode' })
+    expect(text(await call(ctx, 'pwsh', escalate, malformed))).toContain('invalid effective sandbox mode')
   })
 
   it('fails closed when approval cannot be routed', async () => {
@@ -745,9 +790,11 @@ describe('sandbox escalation through ctx.approval', () => {
   ] as const)('omits unusable escalation hints from background output %s', async (_label, withApproval, policyEvents) => {
     const { ctx, bash } = await setupSandboxed(withApproval)
     bash.backgroundDenied = true
-    const agent = registerFakeAgent(ctx, `background-${withApproval}`)
-    const events = agent.session.events as unknown as Array<{ type: string; data: unknown }>
-    events.push({ type: 'sandbox/mode', data: { mode: 'read-only' } }, ...policyEvents)
+    const agent = sandboxAgent('read-only', ctx)
+    ctx.agents.register(agent)
+    for (const event of policyEvents) {
+      agent.session.append(event.type, event.data)
+    }
     const started = await call(ctx, 'pwsh', { command: 'Write-Output ok', description: 'background denial', run_in_background: true }, agent)
     expect(started.isError).toBe(false)
     const output = await call(ctx, 'job_output', { job_id: 'pwsh-1' }, agent)

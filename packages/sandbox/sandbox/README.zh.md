@@ -63,7 +63,7 @@ kind: "package-reference"
 
 ### 被拒绝的调用与升权
 
-受限调用被拒绝时，操作会报告指明模式的拒绝标记——`[sandbox: file access denied under <mode> mode]`——组合声明升权能力时还会给出升权提示。模型可以用 `sandbox_permissions`（足以放行的最窄更宽模式）加 `justification` 重试一次完全相同的调用；用户会看到一次审批提示，可以选择允许一次、拒绝或取消。升权必须严格宽于调用的生效模式，且只作用于该次调用。
+受限调用被拒绝时，操作会报告指明模式的拒绝标记——`[sandbox: file access denied under <mode> mode]`——接收会话可以请求更宽模式时还会给出升权提示。模型可以用 `sandbox_permissions`（足以放行的最窄更宽模式）加 `justification` 重试一次完全相同的调用；用户会看到一次审批提示，可以选择允许一次、拒绝或取消。更宽请求只作用于该次调用；相同或更窄请求无需审批，继续使用现有生效模式且不会降低权限。
 
 ### 故障关闭行为
 
@@ -93,11 +93,11 @@ kind: "package-reference"
 | [`src/index.ts`](src/index.ts) | 插件入口：`SandboxProvider` 服务、模式/强制执行/策略类型、故障关闭错误 |
 | [`src/escalation.ts`](src/escalation.ts) | 升权词汇：更宽模式阶梯、参数校验、拒绝与提示标记、审批编排 |
 | [`src/roots.ts`](src/roots.ts) | 可写根目录推导，Seatbelt profile 与进程内 fs 栅栏共享 |
-| [`src/invariant.ts`](src/invariant.ts) | 不变式伴生插件（无运行时不变式；抽象 seam 不注册事件或数据关系） |
+| — | 不发布运行时不变式伴生入口；抽象 seam 不注册事件或数据关系。 |
 
 ### 升权编排
 
-阶梯是封闭表——`read-only` 可升权到 `workspace-write` 或 `danger-full-access`，`workspace-write` 只能升权到 `danger-full-access`——在执行时检查，绝不写入工具 schema，schema 的枚举保持封闭的目标词汇。[`approveEscalation`](src/escalation.ts) 校验 `sandbox_permissions`/`justification` 配对、不提示人类就拒绝非加宽请求，并在任何执行前把每个审批结果映射到各自的错误。
+阶梯是封闭表——`read-only` 可升权到 `workspace-write` 或 `danger-full-access`，`workspace-write` 只能升权到 `danger-full-access`——在执行时检查。完整校验 schema 接受封闭的模式词汇，而每次模型请求只公开严格宽于该会话有效模式的目标。[`approveEscalation`](src/escalation.ts) 让相同或更窄请求无需审批并保持现有模式，要求更宽请求提供非空理由，并在任何执行前把每个审批结果映射到各自的错误。
 
 ### 可写根目录
 
