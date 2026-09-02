@@ -28,6 +28,7 @@ import type {
   Provider,
   ThinkingLevelMap,
 } from '@earendil-works/pi-ai'
+import type { PiAiProtocol } from './provider.ts'
 
 /**
  * Pricing for a model the installed catalog does not describe. The harness
@@ -534,6 +535,8 @@ function assertOfferedCompatFields(
 export interface PiAiModelProfile {
   /** Model id sent to the provider and accepted by {@link GenerateOptions.model}. */
   id: string
+  /** Wire protocol for this model; wins over the route and installed catalog. */
+  api?: PiAiProtocol
   /** Display name for selectors; defaults to the catalog name, then the id. */
   name?: string
   /** Maximum combined request and response context in tokens. */
@@ -583,7 +586,7 @@ export interface RouteCatalogRequest {
   /** Provider route key, stamped onto every materialized model. */
   provider: string
   /** Wire protocol override; absent defers to each catalog model's own API. */
-  api?: string
+  api?: PiAiProtocol
   /** Endpoint override; absent defers to the catalog model, then the catalog provider. */
   baseURL?: string
   /** Configured catalog; absent means the whole installed catalog for this route. */
@@ -835,7 +838,7 @@ export function resolveRouteModels(request: RouteCatalogRequest): RouteCatalog {
     if (seen.has(entry.id)) invalid(provider, `lists model "${entry.id}" more than once`)
     seen.add(entry.id)
     const base = defaults.get(entry.id)
-    const api = request.api ?? base?.api ?? routeApi
+    const api = entry.api ?? request.api ?? base?.api ?? routeApi
     if (api === undefined) {
       invalid(provider, `model "${entry.id}" needs an api; the installed catalog does not describe it, so set the`
         + ' route\'s api to the wire protocol its endpoint speaks')

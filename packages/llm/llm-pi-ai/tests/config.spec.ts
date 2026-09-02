@@ -18,6 +18,32 @@ const routeWith = (profile: Record<string, unknown>): (() => unknown) =>
 const configWith = (model: Record<string, unknown>): (() => unknown) =>
   routeWith({ models: [{ id: 'm', ...model }] })
 
+describe('model api schema boundary', () => {
+  it('preserves a supported api on every model entry', () => {
+    type Materialized = { providers: Record<string, { models?: { id: string; api?: string }[] }> }
+    const parsed = Config({
+      providers: {
+        'mixed-gateway': {
+          baseURL: 'https://mixed.test/v1',
+          models: [
+            { id: 'gemini', api: 'openai-completions' },
+            { id: 'gpt', api: 'openai-responses' },
+          ],
+        },
+      },
+    }) as Materialized
+
+    expect(parsed.providers['mixed-gateway']?.models?.map(({ id, api }) => ({ id, api }))).toEqual([
+      { id: 'gemini', api: 'openai-completions' },
+      { id: 'gpt', api: 'openai-responses' },
+    ])
+  })
+
+  it('rejects an unsupported model api instead of stripping it', () => {
+    expect(configWith({ api: 'quantum-telepathy' })).toThrow(/expected/)
+  })
+})
+
 describe('reasoning schema boundary', () => {
   it('rejects a level pi-ai does not know at the write that produced it', () => {
     expect(configWith({ reasoningEfforts: { ultra: 'x' } })).toThrow(/"off"/)

@@ -47,6 +47,14 @@ Configure credentials, the model catalog, and deployment-specific transport sett
             reasoningEfforts:
               off:
               high: high
+      # Mixed-protocol route: each configured model selects its own wire API.
+      github-copilot:
+        apiKeyEnv: GITHUB_COPILOT_TOKEN
+        models:
+          - id: gemini
+            api: openai-completions
+          - id: gpt
+            api: openai-responses
       # Hand-declared route: pi-ai ships nothing under this key, so the profile
       # supplies the whole provider.
       acme-gateway:
@@ -81,9 +89,11 @@ The dict shape makes duplicate routes unrepresentable, and the pre-release array
 
 ## Catalog resolution
 
-A profile's `models` list *replaces* the route's installed catalog rather than extending it; omitting it (or leaving it empty) serves that catalog unchanged. Each entry defaults its unset fields from the installed model of the same `id`, so narrowing a catalog route to two models, correcting one capacity, or adding a model newer than the installed catalog are all one-line edits — but declaring any `models` list means every model the route should keep serving must appear in it, an entry of nothing but `id` being enough. The configurable entry fields are `id`, `name`, `contextWindow`, `maxTokens`, `input`, `reasoningEfforts`, and `compat`. Pricing has no harness consumer and rides the installed entry or is absent.
+A profile's `models` list *replaces* the route's installed catalog rather than extending it; omitting it (or leaving it empty) serves that catalog unchanged. Each entry defaults its unset fields from the installed model of the same `id`, so narrowing a catalog route to two models, correcting one capacity, or adding a model newer than the installed catalog are all one-line edits — but declaring any `models` list means every model the route should keep serving must appear in it, an entry of nothing but `id` being enough. The configurable entry fields are `id`, `api`, `name`, `contextWindow`, `maxTokens`, `input`, `reasoningEfforts`, and `compat`. Pricing has no harness consumer and rides the installed entry or is absent.
 
 `modelOverrides` reshapes individual installed-catalog models without that cost: each key is a catalog model id, each value the same fields a `models` entry takes with the id living in the key, and the rest of the catalog keeps serving untouched — "correct one model, keep the other thirty-seven" as a three-line edit. An override becomes that catalog entry's configuration, so capacities, efforts, and compat resolve through the same path with the same diagnostics and the same request-default semantics as a `models` entry. Overrides are only meaningful on a catalog route serving its catalog: one set beside a `models` list (which already replaces the catalog), on a hand-declared route (whose models are fully spelled in `models`), or naming a model the catalog does not describe is refused rather than skipped, because a silently unchanged model is a typo someone would otherwise hunt for.
+
+`api` resolves per model: the entry (or `modelOverrides` value) wins over the route, then the installed model, then the protocol shared by every installed sibling. This lets one route serve, for example, `openai-completions` and `openai-responses` models together without a route-level `api`. Both levels accept only `supportedProtocols()`; an unsupported model value is rejected rather than stripped. `baseURL` and every other catalog field keep their existing resolution order.
 
 ### Per-model reasoning efforts
 

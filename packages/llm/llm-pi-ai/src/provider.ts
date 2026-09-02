@@ -26,6 +26,16 @@ import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completio
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy'
 import { catalogProvider } from './catalog.ts'
 
+/** Wire protocols the public configuration surface can name. */
+const SUPPORTED_PROTOCOLS = [
+  'openai-completions',
+  'openai-responses',
+  'anthropic-messages',
+] as const
+
+/** One wire protocol accepted by public pi-ai configuration. */
+export type PiAiProtocol = typeof SUPPORTED_PROTOCOLS[number]
+
 /**
  * Wire protocols a configured route may name, mapped to pi-ai's lazily loaded
  * implementations. Each entry is the factory that pi-ai's matching provider
@@ -44,11 +54,11 @@ import { catalogProvider } from './catalog.ts'
  * still reach every protocol through their own provider; only an explicit
  * override is refused.
  */
-const PROTOCOLS: Readonly<Record<string, () => ProviderStreams>> = {
+const PROTOCOLS = {
   'openai-completions': openAICompletionsApi,
   'openai-responses': openAIResponsesApi,
   'anthropic-messages': anthropicMessagesApi,
-}
+} satisfies Record<PiAiProtocol, () => ProviderStreams>
 
 /**
  * Every wire protocol a configured route may name, most-reached first. The
@@ -58,8 +68,13 @@ const PROTOCOLS: Readonly<Record<string, () => ProviderStreams>> = {
  * can read — leads.
  * @returns the supported protocol identifiers.
  */
-export function supportedProtocols(): readonly string[] {
-  return Object.keys(PROTOCOLS)
+export function supportedProtocols(): readonly PiAiProtocol[] {
+  return [...SUPPORTED_PROTOCOLS]
+}
+
+/** Look up a protocol at runtime without widening the public protocol union. */
+function protocolFactory(api: string): (() => ProviderStreams) | undefined {
+  return (PROTOCOLS as Partial<Record<string, () => ProviderStreams>>)[api]
 }
 
 /**
@@ -159,6 +174,33 @@ function reuseCatalogProvider(base: Provider, spec: ProviderSpec): Provider {
 }
 
 /**
+ * Whether the installed provider already demonstrates dispatch for every
+ * protocol in the materialized route. A mixed installed provider owns its API
+ * map, while a single-API provider must be rebuilt when configuration moves a
+ * model to another protocol.
+ */
+function catalogServesModelApis(base: Provider, models: readonly Model<Api>[]): boolean {
+  const catalogApis = new Set(base.getModels().map(model => model.api))
+  return models.every(model => catalogApis.has(model.api))
+}
+
+/** Build the protocol map used by a hand-declared or protocol-expanded route. */
+function modelApiImplementations(spec: ProviderSpec): Partial<Record<Api, ProviderStreams>> {
+  const implementations: Partial<Record<Api, ProviderStreams>> = {}
+  for (const model of spec.models) {
+    const factory = protocolFactory(model.api)
+    if (factory === undefined) {
+      throw new Error(
+        `llm-pi-ai: provider "${spec.provider}" model "${model.id}" names api "${model.api}",`
+        + ` which this build cannot serve; supported protocols are ${supportedProtocols().join(', ')}`,
+      )
+    }
+    implementations[model.api] ??= factory()
+  }
+  return implementations
+}
+
+/**
  * Build the pi-ai provider for one resolved route.
  * @param spec - the resolved route facts.
  * @returns the provider to register in the adapter's `Models` collection.
@@ -167,15 +209,16 @@ function reuseCatalogProvider(base: Provider, spec: ProviderSpec): Provider {
 export function buildProvider(spec: ProviderSpec): Provider {
   const catalog = catalogProvider(spec.provider)
   // A catalog route keeping its catalog protocol reuses the catalog provider;
-  // an explicit protocol means the deployment is repointing the route at a
-  // different wire format, which only the protocol table can serve.
-  if (catalog !== undefined && spec.api === undefined) return reuseCatalogProvider(catalog, spec)
+  // an explicit route protocol, or a model protocol outside the catalog
+  // provider's demonstrated set, needs this package's protocol table.
+  if (catalog !== undefined && spec.api === undefined && catalogServesModelApis(catalog, spec.models)) {
+    return reuseCatalogProvider(catalog, spec)
+  }
 
-  // Every model on this path carries the route's protocol: model resolution
-  // requires one for a route the catalog cannot default, and an explicit one
-  // replaces each catalog model's own. So the route has a single API.
-  const factory = spec.api === undefined ? undefined : PROTOCOLS[spec.api]
-  if (factory === undefined) {
+  const api = spec.api !== undefined && spec.models.every(model => model.api === spec.api)
+    ? protocolFactory(spec.api)?.()
+    : modelApiImplementations(spec)
+  if (api === undefined || (spec.api === undefined && Object.keys(api).length === 0)) {
     throw new Error(
       `llm-pi-ai: provider "${spec.provider}" names api "${spec.api}", which this build cannot serve;`
       + ` supported protocols are ${supportedProtocols().join(', ')}`,
@@ -187,6 +230,6 @@ export function buildProvider(spec: ProviderSpec): Provider {
     ...spec.baseURL === undefined ? {} : { baseUrl: spec.baseURL },
     auth: routeAuth(spec, catalog),
     models: spec.models,
-    api: factory(),
+    api,
   })
 }

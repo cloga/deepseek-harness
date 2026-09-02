@@ -38,6 +38,7 @@ import type {
   PiAiReasoningEfforts,
 } from './catalog.ts'
 import { buildProvider, supportedProtocols } from './provider.ts'
+import type { PiAiProtocol } from './provider.ts'
 
 /** Default maximum idle interval while an adapter stream read is outstanding. */
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
@@ -83,6 +84,7 @@ export type {
   PiAiReasoningEfforts,
   PiAiThinkingFormat,
 } from './catalog.ts'
+export type { PiAiProtocol } from './provider.ts'
 
 /** Configuration for one pi-ai provider route; the `providers` dict key IS the route. */
 export interface PiAiProviderProfile {
@@ -95,7 +97,7 @@ export interface PiAiProviderProfile {
    * installed catalog model's own protocol, which is why a catalog route needs
    * no protocol at all; a route the catalog does not ship must name one.
    */
-  api?: string
+  api?: PiAiProtocol
   /** Endpoint for this route's models; defaults to the installed catalog's endpoint. */
   baseURL?: string
   /**
@@ -283,6 +285,7 @@ const reasoningEfforts = z.dict(
 /** The fields a `models` entry and a `modelOverrides` value share; only the id's home differs. */
 const modelFields = {
   name: z.string(),
+  api: z.union(supportedProtocols()),
   contextWindow: z.number().step(1).min(1),
   maxTokens: z.number().step(1).min(1),
   // No explicit default, unlike the route's `defaultInput`: schemastery
@@ -357,6 +360,7 @@ function rejectRemovedFields(provider: string, source: PiAiProviderProfile): voi
     maxRetries?: unknown
     maxRetryDelayMs?: unknown
   }
+
   if ('provider' in legacy) {
     throw new Error(`llm-pi-ai: provider "${provider}" sets "provider", which moved to the providers dict key`)
   }
@@ -365,6 +369,23 @@ function rejectRemovedFields(provider: string, source: PiAiProviderProfile): voi
       `llm-pi-ai: provider "${provider}" sets maxRetries or maxRetryDelayMs, which were removed;`
       + ' compose agent recovery with dsh-llm-retry',
     )
+  }
+}
+
+/** Reject programmatic configuration that bypassed the closed schema. */
+function assertSupportedModelApis(provider: string, source: PiAiProviderProfile): void {
+  const supported = new Set<string>(supportedProtocols())
+  const assertSupported = (site: string, api: string | undefined): void => {
+    if (api !== undefined && !supported.has(api)) {
+      throw new Error(
+        `llm-pi-ai: provider "${provider}" ${site} names api "${api}", which this build cannot serve;`
+        + ` supported protocols are ${supportedProtocols().join(', ')}`,
+      )
+    }
+  }
+  for (const model of source.models ?? []) assertSupported(`model "${model.id}"`, model.api)
+  for (const [id, model] of Object.entries(source.modelOverrides ?? {})) {
+    assertSupported(`modelOverrides entry "${id}"`, model.api)
   }
 }
 
@@ -386,6 +407,7 @@ export function resolveProfiles(
   const resolved = new Map<string, ResolvedPiAiProviderProfile>()
   for (const [provider, source] of entries) {
     rejectRemovedFields(provider, source)
+    assertSupportedModelApis(provider, source)
     if (provider.length === 0) throw new Error('llm-pi-ai: provider names must be non-empty')
     if (source.baseURL !== undefined && source.baseURL.length === 0) {
       throw new Error(`llm-pi-ai: provider "${provider}" has an empty baseURL`)

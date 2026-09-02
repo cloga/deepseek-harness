@@ -76,6 +76,40 @@ describe('login flows in a real composition', () => {
 })
 
 describe('request-level dynamic profiles', () => {
+  it('preserves and streams mixed per-model protocols from settings', async () => {
+    const dir = await home()
+    await writeFile(join(dir, '.credentials.yaml'), 'version: 1\nrefs:\n  PI_MIXED_KEY: mixed-key\n', { mode: 0o600 })
+    const server = await mockServer([
+      { events: textEvents },
+      { status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) },
+    ])
+    const ctx = await boot(dir, {})
+
+    await ctx.settings.update(NS, {
+      providers: {
+        'mixed-gateway': {
+          apiKeyEnv: 'PI_MIXED_KEY',
+          baseURL: `${server.url}/v1`,
+          models: [
+            { id: 'gemini', api: 'openai-completions' },
+            { id: 'gpt', api: 'openai-responses' },
+          ],
+        },
+      },
+    })
+
+    await expect(ctx.llm.resolveModelInfo('mixed-gateway', 'gemini'))
+      .resolves.toMatchObject({ provider: 'mixed-gateway', id: 'gemini' })
+    await expect(ctx.llm.resolveModelInfo('mixed-gateway', 'gpt'))
+      .resolves.toMatchObject({ provider: 'mixed-gateway', id: 'gpt' })
+
+    const completions = await assemble(ctx, { provider: 'mixed-gateway', model: 'gemini', messages: [] })
+    expect(completions.message.content).toEqual([{ type: 'text', text: 'hello' }])
+    const responses = await assemble(ctx, { provider: 'mixed-gateway', model: 'gpt', messages: [] })
+    expect(responses.finish.kind).toBe('error')
+    expect(server.paths).toEqual(['/v1/chat/completions', '/v1/responses'])
+  })
+
   it('mounts bare and dormant, then registers routes the moment settings supply providers', async () => {
     vi.stubEnv('PI_DYNAMIC_KEY', '')
     const dir = await home()

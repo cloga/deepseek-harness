@@ -77,6 +77,7 @@ export type {
   PiAiModelOverride,
   PiAiModelProfile,
   PiAiProviderProfile,
+  PiAiProtocol,
   PiAiReasoningEfforts,
   PiAiThinkingFormat,
   ResolvedPiAiProviderProfile,

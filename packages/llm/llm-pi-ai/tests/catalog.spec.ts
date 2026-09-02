@@ -76,6 +76,77 @@ async function harness(config: LlmPiAi.Config): Promise<Context> {
 }
 
 describe('hand-declared providers', () => {
+  it('resolves a mixed route from per-model protocols with no route api', () => {
+    const profile = resolveProfiles({
+      'mixed-gateway': {
+        baseURL: 'https://mixed.test/v1',
+        models: [
+          { id: 'gemini', api: 'openai-completions' },
+          { id: 'gpt', api: 'openai-responses' },
+        ],
+      },
+    }).get('mixed-gateway')
+
+    expect(profile?.piProvider.getModels()).toMatchObject([
+      { id: 'gemini', api: 'openai-completions', baseUrl: 'https://mixed.test/v1' },
+      { id: 'gpt', api: 'openai-responses', baseUrl: 'https://mixed.test/v1' },
+    ])
+  })
+
+  it('takes a model api before the route api and otherwise falls back to the route', () => {
+    const models = resolveProfiles({
+      'mixed-gateway': {
+        api: 'openai-responses',
+        baseURL: 'https://mixed.test/v1',
+        models: [
+          { id: 'gemini', api: 'openai-completions' },
+          { id: 'gpt' },
+        ],
+      },
+    }).get('mixed-gateway')?.piProvider.getModels()
+
+    expect(models).toMatchObject([
+      { id: 'gemini', api: 'openai-completions' },
+      { id: 'gpt', api: 'openai-responses' },
+    ])
+  })
+
+  it('streams through the model override and route fallback implementations', async () => {
+    const server = await mockServer([
+      { events: textEvents },
+      { status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) },
+    ])
+    const ctx = await harness({
+      providers: {
+        'mixed-gateway': {
+          apiKeyEnv: KEY_ENV,
+          api: 'openai-responses',
+          baseURL: `${server.url}/v1`,
+          models: [
+            { id: 'gemini', api: 'openai-completions' },
+            { id: 'gpt' },
+          ],
+        },
+      },
+    })
+
+    const completions = await assemble(ctx, { provider: 'mixed-gateway', model: 'gemini', messages: [] })
+    expect(completions.finish).toEqual({ kind: 'stop' })
+    const responses = await assemble(ctx, { provider: 'mixed-gateway', model: 'gpt', messages: [] })
+    expect(responses.finish.kind).toBe('error')
+    expect(server.paths).toEqual(['/v1/chat/completions', '/v1/responses'])
+  })
+
+  it('rejects an unsupported model api at programmatic resolution too', () => {
+    expect(() => resolveProfiles({
+      'mixed-gateway': {
+        baseURL: 'https://mixed.test/v1',
+        models: [{ id: 'gpt', api: 'quantum-telepathy' }],
+      },
+    } as unknown as Record<string, LlmPiAi.PiAiProviderProfile>))
+      .toThrow(/model "gpt" names api "quantum-telepathy".*supported protocols/)
+  })
+
   it('serves a route pi-ai has never heard of from its own declaration', async () => {
     const server = await mockServer([{ events: textEvents }])
     const ctx = await harness(gateway(`${server.url}/v1`))
@@ -923,7 +994,7 @@ describe('compat switches', () => {
   it('rejects a model switch on an unrecognized protocol as having no configurable compat', () => {
     expect(() => resolveProfiles({
       'acme-gateway': {
-        api: 'acme-chat',
+        api: 'acme-chat' as never,
         baseURL: 'https://acme.test',
         models: [{ id: 'acme-a', compat: { supportsStore: false } }],
       },
