@@ -88,7 +88,7 @@ interface ToolArgsMap {
     workdir?: string;
     /** Run in the background and return a job id immediately (collect with job_output, stop with job_kill). No timeout applies. */
     run_in_background?: boolean;
-    /** The wider sandbox mode this command needs. Only valid as a one-shot retry of a command the sandbox just denied; requires justification and user approval. */
+    /** The sandbox mode this command requests. A strictly wider mode is only valid as a one-shot retry of a command the sandbox just denied and requires justification and user approval. */
     sandbox_permissions?: "danger-full-access";
     /** Required with sandbox_permissions: one sentence for the user explaining why this exact command needs the wider access. */
     justification?: string;
@@ -110,7 +110,7 @@ interface ToolArgsMap {
     new_string: string;
     /** Replace all matches. Defaults to false; when false, old_string must appear exactly once. */
     replace_all?: boolean;
-    /** The wider sandbox mode this file operation needs. Only valid as a one-shot retry of an operation the sandbox just denied; requires justification and user approval. */
+    /** The sandbox mode this file operation requests. A strictly wider mode is only valid as a one-shot retry of an operation the sandbox just denied and requires justification and user approval. */
     sandbox_permissions?: "danger-full-access";
     /** Required with sandbox_permissions: one sentence for the user explaining why this exact file operation needs the wider access. */
     justification?: string;
@@ -258,7 +258,7 @@ interface ToolArgsMap {
     file_path: string;
     /** Full UTF-8 text content to write. */
     content: string;
-    /** The wider sandbox mode this file operation needs. Only valid as a one-shot retry of an operation the sandbox just denied; requires justification and user approval. */
+    /** The sandbox mode this file operation requests. A strictly wider mode is only valid as a one-shot retry of an operation the sandbox just denied and requires justification and user approval. */
     sandbox_permissions?: "danger-full-access";
     /** Required with sandbox_permissions: one sentence for the user explaining why this exact file operation needs the wider access. */
     justification?: string;
