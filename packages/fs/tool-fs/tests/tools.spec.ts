@@ -33,6 +33,7 @@ import { sessionCwd } from '../src/session-cwd.ts'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
+import { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 
 const testToolSignal = new AbortController().signal
@@ -806,13 +807,45 @@ describe('sandbox escalation API (write/edit)', () => {
   }
 
   /** A fake agent whose session records appends (the approval audit trail), mid-turn, carrying the given events for the fold. */
-  function escalationAgent(events: Array<{ type: string; data?: Record<string, unknown> }> = []): object {
+  function escalationAgent(records: Array<{ type: string; data?: Record<string, unknown> }> = []): object {
+    const id = SessionId('sess-fs-esc')
+    const events: Array<{
+      type: string
+      seq: ReturnType<typeof SessionSeq>
+      time: number
+      data: Record<string, unknown>
+    }> = [
+      { type: 'turn/start', seq: SessionSeq(0), time: 0, data: { turn: 1 } },
+      ...records.map((record, index) => ({
+        type: record.type,
+        seq: SessionSeq(index + 1),
+        time: index + 1,
+        data: record.data ?? {},
+      })),
+    ]
     return {
-      id: 'agent-fs-esc',
+      id,
       session: {
-        header: { version: 0, id: 'sess-fs-esc', createdAt: 0, cwd: '/session-project' },
-        events: [{ type: 'turn/start', data: { turn: 1 } }, ...events],
-        append: (type: string, data: Record<string, unknown>) => { events.push({ type, data }) },
+        id,
+        header: { version: 0, id, createdAt: 0, cwd: '/session-project', isSeeded: false },
+        inheritedEventCount: SessionLogOffset(0),
+        firstLiveSeq: SessionLogOffset(0),
+        get seq() { return SessionLogOffset(events.length) },
+        eventAt: (seq: ReturnType<typeof SessionSeq>) => events[seq],
+        snapshotEvents: (
+          fromSeq = SessionLogOffset(0),
+          toSeqExclusive = SessionLogOffset(events.length),
+        ) => events.slice(fromSeq, toSeqExclusive),
+        append: (type: string, data: Record<string, unknown>) => {
+          const event = {
+            type,
+            seq: SessionSeq(events.length),
+            time: events.length,
+            data,
+          }
+          events.push(event)
+          return event
+        },
       },
     }
   }
@@ -841,11 +874,11 @@ describe('sandbox escalation API (write/edit)', () => {
     }
   })
 
-  it('advertises the closed target vocabulary on write and edit under a confining backend', async () => {
+  it('advertises the closed sandbox-mode vocabulary on write and edit under a confining backend', async () => {
     const { ctx } = await setupConfining()
     for (const name of ['write', 'edit'] as const) {
       const props = fsSchema(ctx, name).parameters.properties
-      expect(props['sandbox_permissions']?.enum).toEqual(['workspace-write', 'danger-full-access'])
+      expect(props['sandbox_permissions']?.enum).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
       expect(props['justification']).toBeDefined()
     }
   })
@@ -891,13 +924,58 @@ describe('sandbox escalation API (write/edit)', () => {
   it('a plain write stamps the default mode with the calling session root', async () => {
     const { ctx, fs } = await setupConfining()
     await call(ctx, 'write', { file_path: 'a.txt', content: 'x' }, escalationAgent())
-    expect(fs.stamped).toEqual([{ mode: 'workspace-write', workspaceRoot: resolve('/session-project') }])
+    expect(fs.stamped).toEqual([{
+      mode: 'workspace-write',
+      workspaceRoot: resolve('/session-project'),
+      sessionId: SessionId('sess-fs-esc'),
+    }])
   })
 
   it('a standing session override folds onto the stamp', async () => {
     const { ctx, fs } = await setupConfining()
     await call(ctx, 'write', { file_path: 'a.txt', content: 'x' }, escalationAgent([{ type: 'sandbox/mode', data: { mode: 'read-only' } }]))
-    expect(fs.stamped).toEqual([{ mode: 'read-only', workspaceRoot: resolve('/session-project') }])
+    expect(fs.stamped).toEqual([{
+      mode: 'read-only',
+      workspaceRoot: resolve('/session-project'),
+      sessionId: SessionId('sess-fs-esc'),
+    }])
+  })
+
+  it('same and narrower requests retain the standing policy without approval or downgrade', async () => {
+    const same = await setupConfining({ approval: true })
+    const samePrompted = vi.fn()
+    same.ctx.on('approval/request', () => { samePrompted(); return Promise.resolve('allowed-once' as const) })
+    await call(same.ctx, 'write', {
+      file_path: 'a.txt',
+      content: 'x',
+      sandbox_permissions: 'workspace-write',
+    }, escalationAgent())
+    await call(same.ctx, 'write', {
+      file_path: 'b.txt',
+      content: 'x',
+      sandbox_permissions: 'read-only',
+    }, escalationAgent())
+    expect(same.fs.stamped).toEqual([
+      { mode: 'workspace-write', workspaceRoot: resolve('/session-project'), sessionId: SessionId('sess-fs-esc') },
+      { mode: 'workspace-write', workspaceRoot: resolve('/session-project'), sessionId: SessionId('sess-fs-esc') },
+    ])
+    expect(samePrompted).not.toHaveBeenCalled()
+
+    const narrower = await setupConfining({ approval: true })
+    const narrowerPrompted = vi.fn()
+    narrower.ctx.on('approval/request', () => { narrowerPrompted(); return Promise.resolve('allowed-once' as const) })
+    await call(narrower.ctx, 'write', {
+      file_path: 'a.txt',
+      content: 'x',
+      sandbox_permissions: 'workspace-write',
+      justification: '   ',
+    }, escalationAgent([{ type: 'sandbox/mode', data: { mode: 'danger-full-access' } }]))
+    expect(narrower.fs.stamped).toEqual([{
+      mode: 'danger-full-access',
+      workspaceRoot: resolve('/session-project'),
+      sessionId: SessionId('sess-fs-esc'),
+    }])
+    expect(narrowerPrompted).not.toHaveBeenCalled()
   })
 
   it('a denied write maps to the shared marker plus the escalation hint when approval is available', async () => {
@@ -939,7 +1017,11 @@ describe('sandbox escalation API (write/edit)', () => {
       agent: escalationAgent() as never,
       signal: new AbortController().signal,
     })
-    expect(fs.stamped).toEqual([{ mode: 'danger-full-access', workspaceRoot: resolve('/session-project') }])
+    expect(fs.stamped).toEqual([{
+      mode: 'danger-full-access',
+      workspaceRoot: resolve('/session-project'),
+      sessionId: SessionId('sess-fs-esc'),
+    }])
   })
 
   it('a rejected escalation fails closed with its own text and never mutates', async () => {
@@ -965,11 +1047,19 @@ describe('sandbox escalation API (write/edit)', () => {
     expect(text(result)).toContain('no agent to route it through')
   })
 
-  it('rejects the escalation argument pairing (one field without the other)', async () => {
+  it('requires a non-empty justification for an actual wider escalation', async () => {
     const { ctx } = await setupConfining()
-    const missing = await call(ctx, 'write', { file_path: 'a.txt', content: 'x', sandbox_permissions: 'workspace-write' }, escalationAgent())
+    const missing = await call(ctx, 'write', { file_path: 'a.txt', content: 'x', sandbox_permissions: 'danger-full-access' }, escalationAgent())
     expect(missing.isError).toBe(true)
     expect(text(missing)).toContain('sandbox_permissions requires a justification')
+    const blank = await call(ctx, 'write', {
+      file_path: 'a.txt',
+      content: 'x',
+      sandbox_permissions: 'danger-full-access',
+      justification: '   ',
+    }, escalationAgent())
+    expect(blank.isError).toBe(true)
+    expect(text(blank)).toContain('expected a non-empty sentence')
   })
 
   it('sandbox_permissions under a non-confining backend fails closed (unadvertised field still reaches execute)', async () => {

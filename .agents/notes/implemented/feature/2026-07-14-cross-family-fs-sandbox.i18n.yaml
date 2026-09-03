@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-07-14-cross-family-fs-sandbox.md
-2026-07-14-cross-family-fs-sandbox.md: e7a942bae69f8f67e2106b5ef622cc5ba701e34c
-2026-07-14-cross-family-fs-sandbox.zh.md: 296d2305eebb7e32483592e4259632f9806b225c
+2026-07-14-cross-family-fs-sandbox.md: 74a7f3d4c86869cdd9b918dfd0eb3f10b9fd023e
+2026-07-14-cross-family-fs-sandbox.zh.md: 3ca71ff4f87355d99b4853c253662b9840e6e6df

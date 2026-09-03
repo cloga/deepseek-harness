@@ -11,7 +11,7 @@ import ToolRuntime, { TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH } from '@deepse
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { turnBoundaryProjectionDefinition } from '@deepseek-ai/dsh-agent-loop'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
@@ -206,18 +206,37 @@ function sandboxAgent(
   ctx?: Context,
   onAppend?: (type: string) => void,
 ): Agent {
-  const events: Array<{ type: string; data?: Record<string, unknown> }> = [{ type: 'turn/start', data: { turn: 1 } }]
-  if (mode !== undefined) events.push({ type: 'sandbox/mode', data: { mode } })
+  const events: Array<{
+    type: string
+    seq: ReturnType<typeof SessionSeq>
+    time: number
+    data: Record<string, unknown>
+  }> = [{ type: 'turn/start', seq: SessionSeq(0), time: 0, data: { turn: 1 } }]
+  if (mode !== undefined) {
+    events.push({ type: 'sandbox/mode', seq: SessionSeq(1), time: 1, data: { mode } })
+  }
   const id = SessionId('sandbox-session')
   return {
     id,
     ...ctx === undefined ? {} : { ctx: ctx.plugin(() => {}).ctx },
     session: {
       id,
-      header: { version: 0, id, createdAt: 0 },
-      events,
+      header: { version: 0, id, createdAt: 0, isSeeded: false },
+      inheritedEventCount: SessionLogOffset(0),
+      firstLiveSeq: SessionLogOffset(0),
+      get seq() { return SessionLogOffset(events.length) },
+      eventAt: (seq: ReturnType<typeof SessionSeq>) => events[seq],
+      snapshotEvents: (
+        fromSeq = SessionLogOffset(0),
+        toSeqExclusive = SessionLogOffset(events.length),
+      ) => events.slice(fromSeq, toSeqExclusive),
       append: (type: string, data: Record<string, unknown>) => {
-        const event = { type, data }
+        const event = {
+          type,
+          seq: SessionSeq(events.length),
+          time: events.length,
+          data,
+        }
         events.push(event)
         onAppend?.(type)
         return event
@@ -602,7 +621,7 @@ describe('sandbox escalation through the generic task producer', () => {
     const { ctx } = await setupSandboxed()
     const schema = ctx.tools.schemas().find(item => item.name === 'bash')!
     const properties = schema.parameters.properties as Record<string, { enum?: string[] }>
-    expect(properties['sandbox_permissions']?.enum).toEqual(['workspace-write', 'danger-full-access'])
+    expect(properties['sandbox_permissions']?.enum).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
     expect(schema.description).toContain('approval prompt')
 
     for (const args of [
@@ -658,23 +677,41 @@ describe('sandbox escalation through the generic task producer', () => {
     )).toEqual(content)
   })
 
-  it('rejects injected escalation without a sandbox and non-widening escalation without prompting', async () => {
+  it('rejects injected escalation without a sandbox and treats non-widening requests as no-ops', async () => {
     const plain = await setup()
     expect(text(await call(plain, 'bash', escalate))).toContain('not available in this composition')
 
-    const { ctx } = await setupSandboxed(true)
+    const { ctx, bash } = await setupSandboxed(true)
     const prompted = vi.fn()
     ctx.on('approval/request', () => { prompted(); return Promise.resolve<ApprovalOutcome>('allowed-once') })
-    const result = await call(ctx, 'bash', { ...escalate, sandbox_permissions: 'workspace-write' }, sandboxAgent('workspace-write'))
-    expect(text(result)).toContain('not strictly wider')
+    const same = await call(ctx, 'bash', {
+      command: 'true',
+      description: 'same mode',
+      sandbox_permissions: 'danger-full-access',
+    }, sandboxAgent('danger-full-access'))
+    const narrower = await call(ctx, 'bash', {
+      command: 'true',
+      description: 'narrower mode',
+      sandbox_permissions: 'workspace-write',
+      justification: '   ',
+    }, sandboxAgent('danger-full-access'))
+    const floor = await call(ctx, 'bash', {
+      command: 'true',
+      description: 'narrowest mode',
+      sandbox_permissions: 'read-only',
+    }, sandboxAgent('workspace-write'))
+    expect(same.isError).toBe(false)
+    expect(narrower.isError).toBe(false)
+    expect(floor.isError).toBe(false)
+    expect(bash.modes).toEqual(['danger-full-access', 'danger-full-access', 'workspace-write'])
     expect(prompted).not.toHaveBeenCalled()
 
     const malformed = sandboxAgent()
-    ;(malformed.session.events as unknown as Array<{ type: string; data: { mode: string } }>).push({
-      type: 'sandbox/mode',
-      data: { mode: 'unknown-mode' },
-    })
-    expect(text(await call(ctx, 'bash', escalate, malformed))).toContain('not strictly wider')
+    ;(malformed.session.append as unknown as (
+      type: string,
+      data: Record<string, unknown>,
+    ) => unknown)('sandbox/mode', { mode: 'unknown-mode' })
+    expect(text(await call(ctx, 'bash', escalate, malformed))).toContain('invalid effective sandbox mode')
   })
 
   it('fails closed when approval cannot be routed', async () => {
@@ -756,9 +793,11 @@ describe('sandbox escalation through the generic task producer', () => {
   ] as const)('omits unusable escalation hints from background output %s', async (_label, withApproval, policyEvents) => {
     const { ctx, bash } = await setupSandboxed(withApproval)
     bash.backgroundDenied = true
-    const agent = registerFakeAgent(ctx, `background-${withApproval}`)
-    const events = agent.session.events as unknown as Array<{ type: string; data: unknown }>
-    events.push({ type: 'sandbox/mode', data: { mode: 'read-only' } }, ...policyEvents)
+    const agent = sandboxAgent('read-only', ctx)
+    ctx.agents.register(agent)
+    for (const event of policyEvents) {
+      agent.session.append(event.type, event.data)
+    }
     const started = await call(ctx, 'bash', { command: 'true', description: 'background denial', run_in_background: true }, agent)
     expect(started.isError).toBe(false)
     const output = await call(ctx, 'job_output', { job_id: 'bash-1' }, agent)
