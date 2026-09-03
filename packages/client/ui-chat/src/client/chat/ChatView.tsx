@@ -17,7 +17,6 @@ import { formatRunDuration } from './message-chrome.ts'
 import css from './ChatView.module.css'
 
 const FOLLOW_THRESHOLD = 24
-const SCROLL_SAMPLE_INTERVAL_MS = 500
 
 /** Active column host when present; otherwise the view-local scroller. */
 function scrollerOf(from: HTMLElement): HTMLElement {
@@ -308,8 +307,6 @@ export function ChatView({
   // restores it and normalizes a floor-clamped position back to following.
   const [atBottom, setAtBottom] = useState(() => chatScroll.read() === null)
   const atBottomRef = useRef(atBottom)
-  const scrollSamplePendingRef = useRef(false)
-  const [, setScrollSampleTick] = useState(0)
   const [activeTurn, setActiveTurn] = useState<number | null>(
     () => turnNavigationItems.at(-1)?.turn ?? null,
   )
@@ -346,7 +343,6 @@ export function ChatView({
   const followSig = `${openState}:${firstSeq}:${lastKey}:${order.length}:${running ? 1 : 0}:${lastSteeringId ?? ''}:${lastSubmissionId ?? ''}`
 
   const syncActiveTurn = useCallback((): void => {
-    if (scrollSamplePendingRef.current) return
     const local = listRef.current
     const first = turnNavigationItems[0]
     if (local === null || first === undefined) {
@@ -465,7 +461,6 @@ export function ChatView({
   }
 
   useLayoutEffect(() => {
-    if (scrollSamplePendingRef.current) return
     const local = listRef.current
     /* v8 ignore next -- ref-null guard: React attaches the ref before layout effects run. */
     if (local === null) return
@@ -579,33 +574,18 @@ export function ChatView({
     scheduleActiveTurn()
   }
 
-  // Raw scroll events only schedule work. Geometry is sampled at most once
-  // per interval, with scrollend providing the final sample for a short burst.
+  // Bind the scroll listener on the resolved scrollport once per mount;
+  // reader-input attribution rides the observed-top ledger, not per-device
+  // input listeners.
   useEffect(() => {
     const local = listRef.current
     /* v8 ignore next -- ref-null guard: effect runs after the list node commits. */
     if (local === null) return
     const el = scrollerOf(local)
-    let sampleTimer: number | undefined
-    const sample = (): void => {
-      if (!scrollSamplePendingRef.current) return
-      scrollSamplePendingRef.current = false
-      if (sampleTimer !== undefined) window.clearTimeout(sampleTimer)
-      sampleTimer = undefined
-      onScrollRef.current()
-      setScrollSampleTick(tick => tick + 1)
-    }
-    const onScroll = (): void => {
-      scrollSamplePendingRef.current = true
-      sampleTimer ??= window.setTimeout(sample, SCROLL_SAMPLE_INTERVAL_MS)
-    }
+    const onScroll = (): void => { onScrollRef.current() }
     el.addEventListener('scroll', onScroll, { passive: true })
-    el.addEventListener('scrollend', sample, { passive: true })
     return () => {
       el.removeEventListener('scroll', onScroll)
-      el.removeEventListener('scrollend', sample)
-      if (sampleTimer !== undefined) window.clearTimeout(sampleTimer)
-      scrollSamplePendingRef.current = false
     }
   }, [])
 
@@ -613,7 +593,6 @@ export function ChatView({
   // initializer a function initial value would need never exists.
   const followRef = useRef<(() => void) | null>(null)
   followRef.current = () => {
-    if (scrollSamplePendingRef.current) return
     const local = listRef.current
     if (local !== null && atBottomRef.current) {
       const el = scrollerOf(local)
