@@ -99,7 +99,7 @@ Windows 打包调用强制设置 `ELECTRON_BUILDER_7Z_FILTER=BCJ`。内置的 7-
 
 本地 Windows 安装测试使用显式的 `--unsigned` 打包调用，并执行相同的构建和运行时准备。它清除证书输入，将产物隔离到 `unsigned-artifacts`，并省略更新器配置和发布完成记录。即使父进程环境请求未签名模式，常规打包命令也会显式选择签名模式。这样既能在没有 EV Token 时诊断安装问题，也能防止本地测试产物通过发布上传校验。
 
-cloga fork release workflow 是唯一的未签名发布路径。其经过评审的 plan 同时推进语义版本与整数 sequence，提供固定 fork 身份与托管 capability，验证独立 helper 与不存在 `app-update.yml`，并从干净且固定工具版本的 Windows 构建发布 installer、manifest、receipt 与 checksums。受保护 release job 是唯一具有 repository 写权限的 job；它在结束 draft 前发布所有资产，随后要求 GitHub immutable 状态、精确 tag commit 与匹配的远程 asset digest。
+cloga fork release workflow 是唯一的未签名发布路径。Windows Ops 每次选择一个受支持的 upstream baseline，经过评审的 source plan 记录该 baseline，并同时推进语义版本与整数 sequence。Workflow 提供固定 fork 身份与托管 capability，验证独立 helper 与不存在 `app-update.yml`，并从干净且固定工具版本的 Windows 构建发布 installer、manifest、receipt 与 checksums。受保护 release job 是唯一具有 repository 写权限的 job；它在结束 draft 前发布所有资产，随后要求 GitHub immutable 状态、精确 tag commit 与匹配的远程 asset digest。
 
 NSIS 先解压到私有的 `7z-out` 目录，再把文件复制到应用目录。Finish 启动应用后，默认退出清理可能与后端的文件读取重叠。[安装器 hook](../../../../apps/desktop/scripts/installer.nsh) 在 `customInstall` 阶段仅删除该解压目录，早于交互和静默启动分支。它保留包归档、插件 DLL、回滚目录、寄存器和错误状态；[原生清理 smoke](../../../../apps/desktop/tests/fixtures/installer-cleanup-smoke.nsi) 检查这些约束。把清理移入安装阶段并不会减少文件系统工作，因此必须分别测量安装总耗时与点击 Finish 到窗口出现的耗时。
 

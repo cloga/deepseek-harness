@@ -12,7 +12,7 @@ cloga Windows Desktop fork 需要未签名 installer 与托管更新路径，同
 
 ## 决策
 
-`cloga/deepseek-harness` 拥有经过评审的 Windows x64 release plan、固定 fork 身份、installer 构建、托管 capability、release manifest、build receipt、checksums、不可变 Git tag 与 GitHub Release。Windows Ops 锁定、验证并部署这些由源码拥有的资产，不发布并行的长期 Desktop release 定义。
+Windows Ops 每次选择并锁定一个受支持的 upstream baseline。`cloga/deepseek-harness` 在经过评审的 Windows x64 release plan 中记录该 baseline，并拥有固定 fork 身份、installer 构建、托管 capability、release manifest、build receipt、checksums、不可变 Git tag 与 GitHub Release。Windows Ops 锁定、验证并部署这些由源码拥有的资产，不发布并行的长期 Desktop release 定义。
 
 fork 身份为 `io.github.cloga.deepseek-harness.desktop`，产品为 `DeepSeek Harness (cloga)`，包为 `cloga-deepseek-harness-desktop`，可执行文件为 `cloga-deepseek-harness`，artifact 前缀为 `cloga-deepseek-harness`。Installer 是未签名交互式 NSIS。它不接收静默参数，Windows warning、installer 选择、elevation 与 UAC 仍由用户控制。原生 `electron-updater` 被禁用，包中不存在 `app-update.yml`。
 

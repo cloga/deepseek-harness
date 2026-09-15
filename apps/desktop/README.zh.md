@@ -53,7 +53,7 @@ Electron 根据应用 locale 选择类型化的英文或中文桌面壳文案，
 
 下一个 Desktop process 仅在 helper result、pending marker、manifest、已安装 executable、runtime descriptor 与 managed sequence 全部匹配时接受 completion。已安装插件保持不变；用户通过 Desktop UI 使用插件自己的 structured source record 按需安装或更新独立插件。已确认但没有终态的 handoff，以及其他缺失、中断、阻塞、冲突或不匹配的 evidence，都会打开启动 recovery，而不是启动新 Host 或报告成功。从经过验证的 `dsh-windows-ops` checkout 执行旧 migration recovery 时，使用 `pwsh -NoProfile -File .\Install-DshOfficialDesktop.ps1 -Action Complete`。
 
-`cloga/deepseek-harness` 拥有 installer、经过评审的 release plan、manifest、receipt、checksums、不可变 tag 与 capability 注入。Windows Ops 锁定、验证并部署这些资产，不维护另一份 release 定义。旧 `dsh-local-0.1.5-rc.2.local.1` manifest 只能通过显式 migration 条目接受，不能成为第二个持续通道。当 fork 改用带发布者验证的已签名原生产物时，省略 capability 即可删除托管模式，而无需改变原生更新器。
+Windows Ops 每次选择并锁定一个受支持的 upstream baseline。`cloga/deepseek-harness` 在经过评审的 release plan 中记录该选择，并拥有 installer、manifest、receipt、checksums、不可变 tag 与 capability 注入。随后 Windows Ops 锁定、验证并部署这些由源码拥有的资产，不维护另一份 release 定义。旧 `dsh-local-0.1.5-rc.2.local.1` manifest 只能通过显式 migration 条目接受，不能成为第二个持续通道。当 fork 改用带发布者验证的已签名原生产物时，省略 capability 即可删除托管模式，而无需改变原生更新器。
 
 ## 开发
 

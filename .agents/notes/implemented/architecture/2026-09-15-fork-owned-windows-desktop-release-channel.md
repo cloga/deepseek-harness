@@ -12,7 +12,7 @@ A fixed future manifest URL cannot support continuing updates because a packaged
 
 ## Decision
 
-`cloga/deepseek-harness` owns the reviewed Windows x64 release plan, fixed fork identity, installer build, managed capability, release manifest, build receipt, checksums, immutable Git tag, and GitHub Release. Windows Ops pins, verifies, and deploys these source-owned assets. It does not publish a parallel long-lived Desktop release definition.
+Windows Ops selects and locks one supported upstream baseline at a time. `cloga/deepseek-harness` records that selected baseline in the reviewed Windows x64 release plan and owns the fixed fork identity, installer build, managed capability, release manifest, build receipt, checksums, immutable Git tag, and GitHub Release. Windows Ops pins, verifies, and deploys these source-owned assets. It does not publish a parallel long-lived Desktop release definition.
 
 The fork identity is `io.github.cloga.deepseek-harness.desktop`, product `DeepSeek Harness (cloga)`, package `cloga-deepseek-harness-desktop`, executable `cloga-deepseek-harness`, and artifact prefix `cloga-deepseek-harness`. The installer is unsigned, interactive NSIS. It receives no silent arguments, and Windows warnings, installer choices, elevation, and UAC remain user-controlled. Native `electron-updater` is disabled and the package contains no `app-update.yml`.
 
