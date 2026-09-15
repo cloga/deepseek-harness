@@ -45,7 +45,7 @@ it('installs a real pnpm graph, then executes approved scripts with the shared h
     runtimeFixture(dsh)
     const pnpm = join(root, 'pnpm.mjs')
     const realPnpm = join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs')
-    writeFileSync(pnpm, `process.argv = process.argv.map(arg => arg === '--config.registry=https://registry.npmjs.org/' ? ${JSON.stringify(`--config.registry=${origin}`)} : arg); await import(${JSON.stringify(pathToFileURL(realPnpm).href)})`)
+    writeFileSync(pnpm, `delete process.env.CI; process.argv = process.argv.map(arg => arg === '--config.registry=https://registry.npmjs.org/' ? ${JSON.stringify(`--config.registry=${origin}`)} : arg); await import(${JSON.stringify(pathToFileURL(realPnpm).href)})`)
     const manager = new DesktopProjectManager(resolveDesktopPaths(join(root, '.dsh')), { node: process.execPath, pnpm, dsh })
     const hooks: DesktopProjectHooks = {
       beforeChange: async () => {},

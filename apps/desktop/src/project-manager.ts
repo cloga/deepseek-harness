@@ -736,7 +736,6 @@ export class DesktopProjectManager {
           HOME: this.paths.pnpm.home,
           LOCALAPPDATA: this.paths.pnpm.state,
           NPM_CONFIG_GLOBALCONFIG: npmrc,
-          NPM_CONFIG_FROZEN_LOCKFILE: 'false',
           NPM_CONFIG_REGISTRY: registry,
           NPM_CONFIG_STORE_DIR: this.paths.pnpm.store,
           NPM_CONFIG_USERCONFIG: npmrc,
