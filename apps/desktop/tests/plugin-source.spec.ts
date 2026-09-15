@@ -68,6 +68,14 @@ function packageArchive(
 }
 
 function sourceFor(archive: Buffer): DesktopGithubReleasePluginSource {
+  const checksum = Buffer.from(`${JSON.stringify({
+    schemaVersion: 1,
+    packageName: 'dsh-github-copilot',
+    version: '0.4.0-alpha.18',
+    asset: 'dsh-github-copilot-0.4.0-alpha.18.tgz',
+    sha256: createHash('sha256').update(archive).digest('hex'),
+    integrity: `sha512-${createHash('sha512').update(archive).digest('base64')}`,
+  })}\n`)
   return {
     schemaVersion: 1,
     type: 'githubRelease',
@@ -82,7 +90,24 @@ function sourceFor(archive: Buffer): DesktopGithubReleasePluginSource {
     integrity: `sha512-${createHash('sha512').update(archive).digest('base64')}`,
     targetCommit,
     dependencyRegistry: 'https://packagefeedproxy.microsoft.io/npm/',
+    checksumManifest: {
+      asset: 'dsh-github-copilot-0.4.0-alpha.18.checksums.json',
+      size: checksum.byteLength,
+      sha256: createHash('sha256').update(checksum).digest('hex'),
+      integrity: `sha512-${createHash('sha512').update(checksum).digest('base64')}`,
+    },
   }
+}
+
+function checksumManifest(source: DesktopGithubReleasePluginSource): Buffer {
+  return Buffer.from(`${JSON.stringify({
+    schemaVersion: 1,
+    packageName: source.packageName,
+    version: source.version,
+    asset: source.asset,
+    sha256: source.sha256,
+    integrity: source.integrity,
+  })}\n`)
 }
 
 interface GithubFixtureOptions {
@@ -108,7 +133,13 @@ function githubFixture(source: DesktopGithubReleasePluginSource, options: Github
       state: 'uploaded',
       digest: `sha256:${source.sha256}`,
       ...options.asset,
-    }],
+    }, ...(source.checksumManifest === undefined ? [] : [{
+      id: 563672720,
+      name: source.checksumManifest.asset,
+      size: source.checksumManifest.size,
+      state: 'uploaded',
+      digest: `sha256:${source.checksumManifest.sha256}`,
+    }])],
     ...options.release,
   }
   const fetchFixture: typeof fetch = async (input) => {
@@ -124,6 +155,15 @@ function githubFixture(source: DesktopGithubReleasePluginSource, options: Github
         status: 302,
         headers: { location: options.redirect ?? 'https://release-assets.githubusercontent.com/asset.tgz' },
       })
+    }
+    if (url.pathname.endsWith('/releases/assets/563672720')) {
+      return new Response(null, {
+        status: 302,
+        headers: { location: 'https://release-assets.githubusercontent.com/checksums.json' },
+      })
+    }
+    if (url.hostname === 'release-assets.githubusercontent.com' && url.pathname.endsWith('checksums.json')) {
+      return new Response(checksumManifest(source).toString('utf8'))
     }
     if (url.hostname === 'release-assets.githubusercontent.com') return new Response(Uint8Array.from(archive))
     throw new Error(`unexpected request ${url.href}`)

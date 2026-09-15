@@ -55,6 +55,12 @@ export interface DesktopGithubReleasePluginSource {
   readonly integrity: string
   readonly targetCommit: string
   readonly dependencyRegistry?: string
+  readonly checksumManifest?: {
+    readonly asset: string
+    readonly size: number
+    readonly sha256: string
+    readonly integrity: string
+  }
 }
 
 /** Supported Desktop plugin package sources. */
@@ -131,6 +137,7 @@ export function parseDesktopPluginSource(value: unknown): DesktopPluginSource {
   if (!isRecord(value) || value.schemaVersion !== DESKTOP_PLUGIN_SOURCE_SCHEMA_VERSION) {
     throw new Error('desktop plugin source: unsupported schema version')
   }
+
   if (value.type === 'npmRegistry') {
     assertKeys(value, ['schemaVersion', 'type', 'spec'])
     assertString(value.spec, 'npm registry spec')
@@ -139,7 +146,7 @@ export function parseDesktopPluginSource(value: unknown): DesktopPluginSource {
   if (value.type !== 'githubRelease') throw new Error('desktop plugin source: unsupported source type')
   assertKeys(value, [
     'schemaVersion', 'type', 'owner', 'repo', 'tag', 'asset', 'packageName', 'version',
-    'size', 'sha256', 'integrity', 'targetCommit', 'dependencyRegistry',
+    'size', 'sha256', 'integrity', 'targetCommit', 'dependencyRegistry', 'checksumManifest',
   ])
   assertString(value.owner, 'GitHub owner', OWNER_PATTERN)
   assertString(value.repo, 'GitHub repository', REPO_PATTERN)
@@ -167,6 +174,28 @@ export function parseDesktopPluginSource(value: unknown): DesktopPluginSource {
     assertString(value.dependencyRegistry, 'dependency registry')
     assertSafeRegistry(value.dependencyRegistry)
   }
+  let checksumManifest: DesktopGithubReleasePluginSource['checksumManifest']
+  if (value.checksumManifest !== undefined) {
+    if (!isRecord(value.checksumManifest)) throw new Error('desktop plugin source: invalid checksum manifest')
+    assertKeys(value.checksumManifest, ['asset', 'size', 'sha256', 'integrity'])
+    assertString(value.checksumManifest.asset, 'checksum manifest asset', RELEASE_NAME_PATTERN)
+    if (!Number.isSafeInteger(value.checksumManifest.size) || (value.checksumManifest.size as number) <= 0
+      || (value.checksumManifest.size as number) > MAX_RELEASE_ASSET_BYTES) {
+      throw new Error('desktop plugin source: invalid checksum manifest size')
+    }
+    assertString(value.checksumManifest.sha256, 'checksum manifest SHA-256', SHA256_PATTERN)
+    assertString(value.checksumManifest.integrity, 'checksum manifest SRI')
+    if (!/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(value.checksumManifest.integrity)) {
+      throw new Error('desktop plugin source: checksum manifest integrity must be SHA-512 SRI')
+    }
+    checksumManifest = {
+      asset: value.checksumManifest.asset,
+      size: value.checksumManifest.size as number,
+      sha256: value.checksumManifest.sha256,
+      integrity: value.checksumManifest.integrity,
+    }
+  }
+
   return {
     schemaVersion: 1,
     type: 'githubRelease',
@@ -181,6 +210,51 @@ export function parseDesktopPluginSource(value: unknown): DesktopPluginSource {
     integrity: value.integrity,
     targetCommit: value.targetCommit,
     ...(value.dependencyRegistry === undefined ? {} : { dependencyRegistry: value.dependencyRegistry }),
+    ...(checksumManifest === undefined ? {} : { checksumManifest }),
+  }
+}
+
+/**
+ * Validate one durable verified-release transaction receipt.
+ * @param value - Untrusted receipt file or provisioning-state value.
+ * @returns Validated transaction receipt.
+ */
+export function parseDesktopPluginProvisionReceipt(value: unknown): DesktopPluginProvisionReceipt {
+  if (!isRecord(value) || value.schemaVersion !== DESKTOP_PLUGIN_RECEIPT_SCHEMA_VERSION
+    || JSON.stringify(value.capability) !== JSON.stringify(DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY)) {
+    throw new Error('desktop plugin source: invalid provision receipt')
+  }
+  const source = parseDesktopPluginSource(value.source)
+  if (source.type !== 'githubRelease'
+    || value.packageName !== source.packageName
+    || value.version !== source.version
+    || value.artifactSha256 !== source.sha256
+    || typeof value.releaseId !== 'number' || !Number.isSafeInteger(value.releaseId) || value.releaseId <= 0
+    || typeof value.assetId !== 'number' || !Number.isSafeInteger(value.assetId) || value.assetId <= 0
+    || !isRecord(value.states)
+    || value.states.staged !== true
+    || value.states.health !== 'passed'
+    || value.states.activated !== true
+    || value.states.rolledBack !== false
+    || value.states.verified !== true) {
+    throw new Error('desktop plugin source: invalid provision receipt')
+  }
+  return {
+    schemaVersion: DESKTOP_PLUGIN_RECEIPT_SCHEMA_VERSION,
+    capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
+    source,
+    releaseId: value.releaseId,
+    assetId: value.assetId,
+    packageName: source.packageName,
+    version: source.version,
+    artifactSha256: source.sha256,
+    states: {
+      staged: true,
+      health: 'passed',
+      activated: true,
+      rolledBack: false,
+      verified: true,
+    },
   }
 }
 
@@ -278,7 +352,7 @@ async function inspectPackageArchive(
 async function downloadArtifact(
   url: URL,
   destination: string,
-  source: DesktopGithubReleasePluginSource,
+  lock: { readonly size: number; readonly sha256: string; readonly integrity: string },
   fetcher: typeof fetch,
 ): Promise<void> {
   const response = await requestDesktopGithubRelease(
@@ -300,7 +374,7 @@ async function downloadArtifact(
         const chunk = await reader.read()
         if (chunk.done) break
         size += chunk.value.byteLength
-        if (size > source.size || size > MAX_RELEASE_ASSET_BYTES) {
+        if (size > lock.size || size > MAX_RELEASE_ASSET_BYTES) {
           throw new Error('desktop plugin source: release asset exceeds its locked size')
         }
         sha256.update(chunk.value)
@@ -313,12 +387,41 @@ async function downloadArtifact(
   } finally {
     closeSync(descriptor)
   }
-  if (size !== source.size) throw new Error('desktop plugin source: release asset size does not match the lock')
-  if (sha256.digest('hex') !== source.sha256) {
+  if (size !== lock.size) throw new Error('desktop plugin source: release asset size does not match the lock')
+  if (sha256.digest('hex') !== lock.sha256) {
     throw new Error('desktop plugin source: release asset SHA-256 does not match the lock')
   }
-  if (`sha512-${sha512.digest('base64')}` !== source.integrity) {
+  if (`sha512-${sha512.digest('base64')}` !== lock.integrity) {
     throw new Error('desktop plugin source: release asset SRI does not match the lock')
+  }
+}
+
+function releaseAsset(
+  release: Record<string, unknown>,
+  name: string,
+  lock: { readonly size: number; readonly sha256: string },
+): Record<string, unknown> {
+  if (!Array.isArray(release.assets)) throw new Error('desktop plugin source: GitHub release has no asset list')
+  const assets = release.assets.filter((asset): asset is Record<string, unknown> => isRecord(asset) && asset.name === name)
+  if (assets.length !== 1) throw new Error('desktop plugin source: GitHub release asset is missing or duplicated')
+  const asset = assets[0]
+  if (asset?.state !== 'uploaded' || asset.size !== lock.size
+    || !Number.isSafeInteger(asset.id) || (asset.id as number) <= 0) {
+    throw new Error('desktop plugin source: GitHub release asset metadata does not match the lock')
+  }
+  if (asset.digest !== undefined && asset.digest !== null && asset.digest !== `sha256:${lock.sha256}`) {
+    throw new Error('desktop plugin source: GitHub release asset digest does not match the lock')
+  }
+  return asset
+}
+
+function verifyChecksumManifest(path: string, source: DesktopGithubReleasePluginSource): void {
+  const value: unknown = JSON.parse(readFileSync(path, 'utf8'))
+  if (!isRecord(value)) throw new Error('desktop plugin source: checksum manifest must be an object')
+  assertKeys(value, ['schemaVersion', 'packageName', 'version', 'asset', 'sha256', 'integrity'])
+  if (value.schemaVersion !== 1 || value.packageName !== source.packageName || value.version !== source.version
+    || value.asset !== source.asset || value.sha256 !== source.sha256 || value.integrity !== source.integrity) {
+    throw new Error('desktop plugin source: checksum manifest does not match the package lock')
   }
 }
 
@@ -350,22 +453,23 @@ export async function acquireDesktopPluginArtifact(
   }
   const tagCommit = await resolveTagCommit(source, fetcher)
   if (tagCommit !== source.targetCommit) throw new Error('desktop plugin source: GitHub tag commit does not match the lock')
-  if (!Array.isArray(release.assets)) throw new Error('desktop plugin source: GitHub release has no asset list')
-  const assets = release.assets.filter((asset): asset is Record<string, unknown> => isRecord(asset) && asset.name === source.asset)
-  if (assets.length !== 1) throw new Error('desktop plugin source: GitHub release asset is missing or duplicated')
-  const asset = assets[0]
-  if (asset?.state !== 'uploaded' || asset.size !== source.size
-    || !Number.isSafeInteger(asset.id) || (asset.id as number) <= 0) {
-    throw new Error('desktop plugin source: GitHub release asset metadata does not match the lock')
-  }
-  if (asset.digest !== undefined && asset.digest !== null && asset.digest !== `sha256:${source.sha256}`) {
-    throw new Error('desktop plugin source: GitHub release asset digest does not match the lock')
-  }
+  const asset = releaseAsset(release, source.asset, source)
   const releaseId = release.id as number
   const assetId = asset.id as number
   const artifact = join(directory, source.asset)
   try {
     await downloadArtifact(new URL(`${base}/releases/assets/${String(assetId)}`), artifact, source, fetcher)
+    if (source.checksumManifest !== undefined) {
+      const checksumAsset = releaseAsset(release, source.checksumManifest.asset, source.checksumManifest)
+      const checksumPath = join(directory, source.checksumManifest.asset)
+      await downloadArtifact(
+        new URL(`${base}/releases/assets/${String(checksumAsset.id)}`),
+        checksumPath,
+        source.checksumManifest,
+        fetcher,
+      )
+      verifyChecksumManifest(checksumPath, source)
+    }
     await inspectPackageArchive(artifact, directory, source)
   } catch (error) {
     rmSync(artifact, { force: true })

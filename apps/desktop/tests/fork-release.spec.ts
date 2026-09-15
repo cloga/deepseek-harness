@@ -18,6 +18,7 @@ describe('Desktop fork release plan', () => {
   it('defines a monotonic source-owned release after the Windows Ops bridge', () => {
     const plan = parseDesktopForkReleasePlan(planValue())
     expect(plan).toMatchObject({
+      schemaVersion: 2,
       channel: 'cloga-windows-x64',
       version: '0.1.5-rc.3.cloga.1',
       sequence: 2,
@@ -27,15 +28,33 @@ describe('Desktop fork release plan', () => {
         maximumSequence: 1,
         channelVersion: '0.1.5-rc.2.local.1',
       },
+      desktopProvisioning: { schemaVersion: 1, mode: 'exact', plugins: [] },
     })
     expect(createDesktopForkReleaseCapability(plan)).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       mode: 'github-release-managed',
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
       currentSequence: 2,
       minimumSequence: 2,
+      provisioning: {
+        capability: { id: 'desktopNativePluginProvisioning' },
+      },
     })
+  })
+
+  it('normalizes the version-neutral schema 1 plan to an empty provisioning inventory', () => {
+    const plan = planValue() as Record<string, unknown>
+    const { desktopProvisioning: _desktopProvisioning, ...legacy } = plan
+    expect(parseDesktopForkReleasePlan({ ...legacy, schemaVersion: 1 })).toMatchObject({
+      schemaVersion: 2,
+      desktopProvisioning: { schemaVersion: 1, mode: 'exact', plugins: [] },
+    })
+  })
+
+  it('rejects unsupported fields in the schema 2 plan', () => {
+    const plan = planValue() as Record<string, unknown>
+    expect(() => parseDesktopForkReleasePlan({ ...plan, unexpected: true })).toThrow(/unsupported fields/u)
   })
 
   it('rejects a fork version or sequence that does not advance the bridge', () => {

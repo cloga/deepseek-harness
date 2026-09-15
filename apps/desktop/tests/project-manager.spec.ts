@@ -48,6 +48,16 @@ function verifiedPluginArchive(): Buffer {
 }
 
 function verifiedSource(archive: Buffer): DesktopGithubReleasePluginSource {
+  const artifactSha256 = createHash('sha256').update(archive).digest('hex')
+  const artifactIntegrity = `sha512-${createHash('sha512').update(archive).digest('base64')}`
+  const checksum = Buffer.from(`${JSON.stringify({
+    schemaVersion: 1,
+    packageName: 'dsh-github-copilot',
+    version: '0.4.0-alpha.18',
+    asset: 'dsh-github-copilot-0.4.0-alpha.18.tgz',
+    sha256: artifactSha256,
+    integrity: artifactIntegrity,
+  })}\n`)
   return {
     schemaVersion: 1,
     type: 'githubRelease',
@@ -58,10 +68,63 @@ function verifiedSource(archive: Buffer): DesktopGithubReleasePluginSource {
     packageName: 'dsh-github-copilot',
     version: '0.4.0-alpha.18',
     size: archive.byteLength,
-    sha256: createHash('sha256').update(archive).digest('hex'),
-    integrity: `sha512-${createHash('sha512').update(archive).digest('base64')}`,
+    sha256: artifactSha256,
+    integrity: artifactIntegrity,
     targetCommit,
     dependencyRegistry: 'https://packagefeedproxy.microsoft.io/npm/',
+    checksumManifest: {
+      asset: 'dsh-github-copilot-0.4.0-alpha.18.checksums.json',
+      size: checksum.byteLength,
+      sha256: createHash('sha256').update(checksum).digest('hex'),
+      integrity: `sha512-${createHash('sha512').update(checksum).digest('base64')}`,
+    },
+  }
+}
+
+function checksumManifest(source: DesktopGithubReleasePluginSource): Buffer {
+  return Buffer.from(`${JSON.stringify({
+    schemaVersion: 1,
+    packageName: source.packageName,
+    version: source.version,
+    asset: source.asset,
+    sha256: source.sha256,
+    integrity: source.integrity,
+  })}\n`)
+}
+
+function verifiedFetch(source: DesktopGithubReleasePluginSource, archive: Buffer): typeof fetch {
+  return async (input) => {
+    const url = new URL(input instanceof Request ? input.url : input)
+    if (url.pathname.endsWith(`/releases/tags/${source.tag}`)) {
+      return Response.json({
+        id: 388508318,
+        draft: false,
+        immutable: true,
+        tag_name: source.tag,
+        target_commitish: targetCommit,
+        assets: [{
+          id: 563672719,
+          name: source.asset,
+          state: 'uploaded',
+          size: source.size,
+          digest: `sha256:${source.sha256}`,
+        }, {
+          id: 563672720,
+          name: source.checksumManifest?.asset,
+          state: 'uploaded',
+          size: source.checksumManifest?.size,
+          digest: `sha256:${source.checksumManifest?.sha256}`,
+        }],
+      })
+    }
+    if (url.pathname.endsWith(`/git/ref/tags/${source.tag}`)) {
+      return Response.json({ object: { type: 'commit', sha: targetCommit } })
+    }
+    if (url.pathname.endsWith('/releases/assets/563672719')) return new Response(Uint8Array.from(archive))
+    if (url.pathname.endsWith('/releases/assets/563672720')) {
+      return new Response(checksumManifest(source).toString('utf8'))
+    }
+    throw new Error(`unexpected GitHub request ${url.href}`)
   }
 }
 
@@ -384,33 +447,7 @@ describe('desktop external plugin profile', () => {
     const archive = verifiedPluginArchive()
     const source = verifiedSource(archive)
     const originalFetch = globalThis.fetch
-    const fetchFixture: typeof fetch = async (input) => {
-      const url = new URL(input instanceof Request ? input.url : input)
-      if (url.pathname.endsWith(`/releases/tags/${source.tag}`)) {
-        return Response.json({
-          id: 388508318,
-          draft: false,
-          immutable: true,
-          tag_name: source.tag,
-          target_commitish: targetCommit,
-          assets: [{
-            id: 563672719,
-            name: source.asset,
-            state: 'uploaded',
-            size: source.size,
-            digest: `sha256:${source.sha256}`,
-          }],
-        })
-      }
-      if (url.pathname.endsWith(`/git/ref/tags/${source.tag}`)) {
-        return Response.json({ object: { type: 'commit', sha: targetCommit } })
-      }
-      if (url.pathname.endsWith('/releases/assets/563672719')) {
-        return new Response(Uint8Array.from(archive), { headers: { 'content-length': String(archive.byteLength) } })
-      }
-      throw new Error(`unexpected GitHub request ${url.href}`)
-    }
-    globalThis.fetch = fetchFixture
+    globalThis.fetch = verifiedFetch(source, archive)
     try {
       const receipt = await manager.mutate({ type: 'plugin-install', source }, hooks())
       expect(receipt).toMatchObject({
@@ -419,6 +456,7 @@ describe('desktop external plugin profile', () => {
         artifactSha256: source.sha256,
         states: { health: 'passed', activated: true, rolledBack: false, verified: true },
       })
+
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -441,6 +479,121 @@ describe('desktop external plugin profile', () => {
     expect(existsSync(artifact)).toBe(false)
     expect(JSON.parse(readFileSync(join(manager.paths.profile, 'desktop-plugin-receipts.json'), 'utf8')))
       .toEqual({ schemaVersion: 1, receipts: {} })
+  })
+
+  it('reconciles release-owned plugins exactly while preserving manual plugins and shared packages', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-add', spec: 'manual-plugin@1.0.0' }, hooks())
+    const archive = verifiedPluginArchive()
+    const source = verifiedSource(archive)
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = verifiedFetch(source, archive)
+    try {
+      const required = { schemaVersion: 1 as const, mode: 'exact' as const, plugins: [{ required: true, source }] }
+      const state = await manager.reconcileProvisioning(required, hooks({
+        healthCheck: async (projectDir) => {
+          const manifest = JSON.parse(readFileSync(join(projectDir, 'package.json'), 'utf8')) as {
+            dependencies: Record<string, string>
+            dsh: { profile: { bundles: string[] } }
+          }
+          expect(manifest.dsh.profile.bundles).toContain(source.packageName)
+          expect(manifest.dependencies).not.toHaveProperty('@deepseek-ai/cordis')
+          expect(realpathSync(join(projectDir, 'node_modules/@deepseek-ai/cordis')))
+            .toBe(realpathSync(join(manager.runtime.dsh, 'node_modules/@deepseek-ai/cordis')))
+        },
+      }))
+      expect(state).toMatchObject({
+        composition: 'active',
+        plugins: [{ name: source.packageName, status: 'active', required: true }],
+        removed: [],
+        rolledBack: false,
+        verified: true,
+      })
+      expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(['dsh-github-copilot', 'manual-plugin'])
+      const callCount = calls(root).length
+      await expect(manager.reconcileProvisioning(required, hooks())).resolves.toEqual(state)
+      expect(calls(root)).toHaveLength(callCount)
+
+      const optional = { ...required, plugins: [{ required: false, source }] }
+      const changed = await manager.reconcileProvisioning(optional, hooks())
+      expect(changed.planSha256).not.toBe(state.planSha256)
+      const removed = await manager.reconcileProvisioning(
+        { schemaVersion: 1, mode: 'exact', plugins: [] },
+        hooks(),
+      )
+      expect(removed.removed).toEqual([source.packageName])
+      expect(manager.listPlugins()).toEqual([{ name: 'manual-plugin', version: '1.0.0', enabled: true }])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('keeps the active exact inventory when required provisioning health fails', async () => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    const archive = verifiedPluginArchive()
+    const source = verifiedSource(archive)
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = verifiedFetch(source, archive)
+    try {
+      await expect(manager.reconcileProvisioning(
+        { schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source }] },
+        hooks({ healthCheck: async () => { throw new Error('required client composition failed') } }),
+      )).rejects.toThrow('required client composition failed')
+      expect(manager.listPlugins()).toEqual([])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('activates required plugins while disabling an optional plugin that fails composition health', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const archive = verifiedPluginArchive()
+    const source = verifiedSource(archive)
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = verifiedFetch(source, archive)
+    let healthChecks = 0
+    try {
+      const state = await manager.reconcileProvisioning(
+        { schemaVersion: 1, mode: 'exact', plugins: [{ required: false, source }] },
+        hooks({
+          healthCheck: async (projectDir) => {
+            healthChecks++
+            const manifest = JSON.parse(readFileSync(join(projectDir, 'package.json'), 'utf8')) as {
+              dsh: { profile: { bundles: string[] } }
+            }
+            if (healthChecks === 1) {
+              expect(manifest.dsh.profile.bundles).toContain(source.packageName)
+              throw new Error('optional client composition failed')
+            }
+            expect(manifest.dsh.profile.bundles).not.toContain(source.packageName)
+          },
+        }),
+      )
+      expect(healthChecks).toBe(2)
+      expect(state.plugins).toMatchObject([{
+        name: source.packageName,
+        required: false,
+        status: 'optional-failed',
+        message: 'optional client composition failed',
+      }])
+      expect(manager.listPlugins()).toEqual([{
+        name: source.packageName,
+        version: source.version,
+        enabled: false,
+        source,
+      }])
+      const callCount = calls(root).length
+      await expect(manager.reconcileProvisioning(
+        { schemaVersion: 1, mode: 'exact', plugins: [{ required: false, source }] },
+        hooks({ healthCheck: async () => { throw new Error('should not rerun') } }),
+      )).resolves.toEqual(state)
+      expect(calls(root)).toHaveLength(callCount)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 
   it('restarts the active Host when staged health fails', async () => {

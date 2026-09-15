@@ -1,5 +1,6 @@
 /** Electron shell: desktop project ownership, custom protocol, windows, and lifecycle. */
 
+import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -16,6 +17,11 @@ import {
 import { resolveDesktopPaths } from './paths.ts'
 import { DesktopProjectManager, type DesktopProjectHooks } from './project-manager.ts'
 import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, parseDesktopPluginSource } from './plugin-source.ts'
+import {
+  DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+  DESKTOP_PLUGIN_PROVISIONING_PLAN_FILE,
+  readDesktopPluginProvisioningPlan,
+} from './plugin-provisioning.ts'
 import { DesktopHostProcess, type DesktopUpdateImpact } from './host-process.ts'
 import { DesktopBackendController, type DesktopBackendState } from './backend-controller.ts'
 import {
@@ -76,6 +82,7 @@ interface RuntimeResources {
   readonly node: string
   readonly pnpm: string
   readonly dsh: string
+  readonly provisioning?: string
 }
 
 function runtimeResources(): RuntimeResources {
@@ -85,7 +92,10 @@ function runtimeResources(): RuntimeResources {
   const pnpm = (development ? process.env.DSH_DESKTOP_PNPM_ENTRY : undefined)
     ?? join(process.resourcesPath, 'runtime', 'pnpm', 'bin', 'pnpm.mjs')
   const dsh = (development ? process.env.DSH_DESKTOP_DSH_DIR : undefined) ?? join(process.resourcesPath, 'dsh')
-  return { node, pnpm, dsh }
+  const provisioning = development
+    ? undefined
+    : join(process.resourcesPath, 'desktop-provisioning', DESKTOP_PLUGIN_PROVISIONING_PLAN_FILE)
+  return { node, pnpm, dsh, ...(provisioning !== undefined && existsSync(provisioning) ? { provisioning } : {}) }
 }
 
 function developmentHostInspectPort(enabled: boolean): number | undefined {
@@ -164,6 +174,9 @@ async function main(): Promise<void> {
   const development = app.isPackaged ? undefined : join(app.getAppPath(), '.desktop-build', 'development', 'project')
   const activeProject = development ?? paths.profile
   const manager = new DesktopProjectManager(paths, resources)
+  const provisioning = resources.provisioning === undefined
+    ? undefined
+    : readDesktopPluginProvisioningPlan(resources.provisioning)
   const managedUpdate = app.isPackaged
     ? await loadDesktopManagedUpdateConfiguration(process.resourcesPath, app.getPath('userData'), process.platform)
     : undefined
@@ -290,7 +303,17 @@ async function main(): Promise<void> {
       await backend.start(async () => {
         if (development === undefined) {
           await manager.applyRelease()
+          if (provisioning !== undefined) {
+            await manager.reconcileProvisioning(provisioning, {
+              beforeChange: async () => {},
+              healthCheck: async projectDir => hooks.healthCheck(projectDir),
+              afterChange: async () => {},
+            })
+          }
           if (managedUpdate !== undefined && !managedCompletionChecked) {
+            if (resources.provisioning === undefined) {
+              throw new Error('desktop managed update: packaged plugin provisioning plan is missing')
+            }
             const completion = await completeDesktopManagedUpdate(
               managedUpdate.operationsRoot,
               managedUpdate.completionPath,
@@ -298,6 +321,7 @@ async function main(): Promise<void> {
               managedUpdate.installedSequence,
               process.execPath,
               join(resources.dsh, 'desktop-runtime.json'),
+              resources.provisioning,
             )
             if (completion.status === 'recovery-required') {
               throw new Error(`${completion.message}\n\nRecovery: ${completion.command}`)
@@ -411,7 +435,7 @@ async function main(): Promise<void> {
   ))
   ipcMain.handle(DESKTOP_IPC.capabilitiesGet, (event) => {
     assertDesktopSender(event, ['shell'])
-    return [DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY] as const
+    return [DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY] as const
   })
   ipcMain.handle(DESKTOP_IPC.pluginsRemove, (event, name: unknown) => {
     if (typeof name !== 'string') throw new Error('dsh desktop: plugin name must be a string')

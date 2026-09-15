@@ -146,10 +146,15 @@ describe('desktop macOS release signature', () => {
       DSH_DESKTOP_UNSIGNED: '1',
       DSH_DESKTOP_FORK_RELEASE_VERSION: '0.1.5-rc.3.cloga.1',
       DSH_DESKTOP_MANAGED_UPDATE_CAPABILITY: 'C:\\release\\capability.json',
+      DSH_DESKTOP_PLUGIN_PROVISIONING_PLAN: 'C:\\release\\provisioning.json',
     }, 'win32', 'x64')
     expect(config.extraResources).toContainEqual({
       from: 'C:\\release\\capability.json',
       to: 'managed-update/capability.json',
+    })
+    expect(config.extraResources).toContainEqual({
+      from: 'C:\\release\\provisioning.json',
+      to: 'desktop-provisioning/plan.json',
     })
     expect(config).toMatchObject({
       appId: 'io.github.cloga.deepseek-harness.desktop',
