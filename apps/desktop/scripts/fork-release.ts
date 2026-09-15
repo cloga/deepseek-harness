@@ -111,10 +111,12 @@ function git(...args: string[]): string {
 
 function pnpmVersion(): string {
   const entry = process.env.npm_execpath
-  if (entry === undefined || entry === '') {
-    throw new Error('desktop fork release: invoke through pnpm')
+  if (entry !== undefined && entry !== '') {
+    return execFileSync(process.execPath, [entry, '--version'], { encoding: 'utf8' }).trim()
   }
-  return execFileSync(process.execPath, [entry, '--version'], { encoding: 'utf8' }).trim()
+  return process.platform === 'win32'
+    ? execFileSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', 'pnpm --version'], { encoding: 'utf8' }).trim()
+    : execFileSync('pnpm', ['--version'], { encoding: 'utf8' }).trim()
 }
 
 /** Parse and validate the reviewed cloga Windows release plan. */
