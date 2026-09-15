@@ -113,6 +113,14 @@ describe('CI workflow', () => {
     },
   )
 
+  it('limits snapshot subprocess fan-out on standard fork runners', () => {
+    const consumers = workflowJob(loadWorkflow('.github/workflows/ci.yml'), 'node-24-consumers')
+    expect(consumers.env).toMatchObject({
+      DSH_SNAPSHOT_MAX_CONCURRENCY:
+        "${{ github.repository != 'deepseek-ai/deepseek-harness' && '2' || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted' && github.event.pull_request.user.login != 'dependabot[bot]' && '12' || '32' }}",
+    })
+  })
+
   it('isolates the python SDK exe pnpm setup destination per job', () => {
     const workflow: unknown = yaml.load(readFileSync(resolve(root, '.github/workflows/build-exe-for-python-sdk.yml'), 'utf8'))
     if (!isRecord(workflow) || !isRecord(workflow.jobs)) throw new TypeError('build-exe-for-python-sdk.yml must define jobs')
