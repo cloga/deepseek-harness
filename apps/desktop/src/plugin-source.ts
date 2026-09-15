@@ -262,7 +262,9 @@ function assertArchiveLink(entry: ReadEntry): void {
   if (link.includes('\\') || posix.isAbsolute(link)) {
     throw new Error(`desktop plugin source: unsafe archive link ${JSON.stringify(link)}`)
   }
-  const target = posix.normalize(posix.join(posix.dirname(entry.path), link))
+  const target = entry.type === 'Link'
+    ? posix.normalize(link)
+    : posix.normalize(posix.join(posix.dirname(entry.path), link))
   if (target !== 'package' && !target.startsWith('package/')) {
     throw new Error(`desktop plugin source: archive link escapes package root ${JSON.stringify(link)}`)
   }
@@ -397,8 +399,8 @@ export async function acquireDesktopPluginArtifact(
   const releaseId = release.id as number
   const assetId = asset.id as number
   const artifact = join(directory, source.asset)
-  await downloadArtifact(new URL(`${base}/releases/assets/${String(assetId)}`), artifact, source, fetcher)
   try {
+    await downloadArtifact(new URL(`${base}/releases/assets/${String(assetId)}`), artifact, source, fetcher)
     await inspectPackageArchive(artifact, directory, source)
   } catch (error) {
     rmSync(artifact, { force: true })

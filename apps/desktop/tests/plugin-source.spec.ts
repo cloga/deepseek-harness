@@ -212,6 +212,7 @@ describe('desktop verified plugin source', () => {
     ['absolute path', packageArchive({}, [{ path: '/escape', body: 'x' }]), /unsafe archive path/u],
     ['unexpected root', packageArchive({}, [{ path: 'other/file', body: 'x' }]), /unexpected archive root/u],
     ['escaping symlink', packageArchive({}, [{ path: 'package/link', type: '2', link: '../../escape' }]), /link escapes/u],
+    ['escaping hardlink', packageArchive({}, [{ path: 'package/link', type: '1', link: 'escape' }]), /link escapes/u],
     ['wrong name', packageArchive({ name: 'other' }), /package name/u],
     ['wrong version', packageArchive({ version: '0.4.0-alpha.19' }), /package version/u],
     ['lifecycle script', packageArchive({ scripts: { prepare: 'node build.js' } }), /lifecycle script prepare/u],
