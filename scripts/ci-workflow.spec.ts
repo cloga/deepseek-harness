@@ -912,8 +912,10 @@ describe('Weighted approval workflow', () => {
     const steps = job.steps.filter(isRecord)
     const checkout = steps.find(step => step.name === 'Check out trusted approval policy')
     const publish = steps.find(step => step.name === 'Publish weighted approval status')
+    const skip = steps.find(step => step.name === 'Skip weighted approval outside canonical upstream')
     const recordSteps = recordJob.steps.filter(isRecord)
     const record = recordSteps.find(step => step.name === 'Record review event')
+    const recordSkip = recordSteps.find(step => step.name === 'Skip weighted approval outside canonical upstream')
 
     expect(publisher.name).toBe('weighted-approval')
     expect(Object.keys(publisher.on)).toEqual(['pull_request_target', 'workflow_run'])
@@ -940,6 +942,7 @@ describe('Weighted approval workflow', () => {
       'timeout-minutes': 5,
     })
     expect(checkout).toMatchObject({
+      if: "github.repository == 'deepseek-ai/deepseek-harness'",
       uses: 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
       with: {
         ref: '${{ github.event.repository.default_branch }}',
@@ -947,20 +950,31 @@ describe('Weighted approval workflow', () => {
       },
     })
     expect(publish).toMatchObject({
+      if: "github.repository == 'deepseek-ai/deepseek-harness'",
       env: {
         GITHUB_TOKEN: '${{ github.token }}',
         GITHUB_RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
       },
       run: 'node .github/review-ownership/check-approval.mjs',
     })
+    expect(skip).toMatchObject({
+      if: "github.repository != 'deepseek-ai/deepseek-harness'",
+      run: "echo 'Weighted approval is owned by the canonical upstream repository.'",
+    })
     expect(recordJob).toMatchObject({
       name: 'record weighted approval review event',
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 2,
     })
-    expect(record).toBeDefined()
-    expect(record?.run).toBe("echo 'Recorded a weighted approval review event.'")
-    expect(recordSteps).toHaveLength(1)
+    expect(record).toMatchObject({
+      if: "github.repository == 'deepseek-ai/deepseek-harness'",
+      run: "echo 'Recorded a weighted approval review event.'",
+    })
+    expect(recordSkip).toMatchObject({
+      if: "github.repository != 'deepseek-ai/deepseek-harness'",
+      run: "echo 'Weighted approval is owned by the canonical upstream repository.'",
+    })
+    expect(recordSteps).toHaveLength(2)
     expect(JSON.stringify(publisher)).not.toContain('github.event.pull_request.head')
     expect(JSON.stringify(publisher)).not.toContain('secrets.')
     expect(JSON.stringify(reviewEvent)).not.toContain('github.token')

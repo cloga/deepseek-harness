@@ -12,7 +12,7 @@ Status: implemented
 
 拉取请求运行器选择会检查 `github.repository`。`deepseek-ai/deepseek-harness` 保留经过测量的大型运行器、Blacksmith 与自托管故障切换选择。仓库 Fork 在 `ubuntu-latest` 上运行主要 Linux 作业与聚合判定，在 `windows-2025` 上运行原生 Windows 作业。Fork 作业还会按标准运行器容量降低外层 gate、snapshot、浏览器、coverage partition、lint 和包校验的并发。真实终端进程测试在 Vitest 的 process-bound 项目中运行，并使用生产级 shell 交接时序，防止 worker 复用与托管运行器负载使静默回退取代精确就绪判定。Projection cache 的持久化观察使用 coverage 通道配置的测试预算，不施加更短的局部截止时间。保留 16 核 fan-out 会使有界生命周期与持久化测试超时，或在文件系统发布时发生争用。Cloudflare 预览与 Issue Project 自动化仅限上游，因为 Fork 无法发布到上游部署项目，也不能使用其 App 凭据和 Project 身份。
 
-工作流在 Fork 中保留每个必需作业及其命令，只改变运行器容量。因此，Fork 会执行完整的必需证据，而不是跳过检查或依赖仓库外部运行器配置。
+工作流在 Fork 中保留每个必需 CI 作业及其命令，只改变运行器容量。因此，Fork 会执行完整的必需证据，而不是跳过检查或依赖仓库外部运行器配置。加权批准仍属于 canonical upstream 治理：Fork 工作流作业以空操作完成，不发布 Fork 协作者无法满足的状态。
 
 本决策部分取代[可移植拉取请求 CI 决策](../../archived/process/2026-07-23-portable-required-pull-request-ci.md)中“没有自动后备”的条款，以及[原生 Windows 拉取请求 CI 决策](../process/2026-08-08-native-windows-pull-request-ci.zh.md)中“仅使用组织运行器”的条款。这些记录继续负责上游运行器拓扑、实测并发、必需聚合判定和 Wine／原生双通道覆盖。
 
