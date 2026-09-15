@@ -32,6 +32,7 @@ import {
 } from '@deepseek-ai/dsh-storage-domain'
 import SessionProjectionCache from '../src/index.ts'
 import { projectionCacheDomainSpec } from '../src/spec.ts'
+import { projectionDurableObservationOptions } from './durable-observation.ts'
 
 // Declarations must match the shipped title unit's exactly (the repo-wide
 // compile face sees both).
@@ -94,6 +95,7 @@ function headerFor(id: SessionId, identity: FixtureDoc['record']['identity']): S
 
 const contexts: Context[] = []
 const roots: string[] = []
+const durableObservation = projectionDurableObservationOptions()
 
 async function harness(root: string) {
   roots.push(root)
@@ -136,7 +138,7 @@ async function assertRewrite(ctx: Context, root: string, id: SessionId): Promise
       inheritedEventCount: 0,
     })
     expect(doc.record.rows['title']?.val).toBe('重写标题')
-  }, { timeout: 5_000 })
+  }, durableObservation)
 }
 
 afterEach(async () => {
