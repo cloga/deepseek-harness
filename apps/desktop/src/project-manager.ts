@@ -465,16 +465,22 @@ export class DesktopProjectManager {
           })
         }
         await hooks.beforeChange()
-        renameSync(this.paths.profile, rollback)
-        renameSync(staging, this.paths.profile)
+        let previousMoved = false
+        let stagedActivated = false
         try {
+          renameSync(this.paths.profile, rollback)
+          previousMoved = true
+          renameSync(staging, this.paths.profile)
+          stagedActivated = true
           await hooks.afterChange()
         } catch (activationError) {
           const failures: unknown[] = [activationError]
-          try { await hooks.beforeChange() } catch (error) { failures.push(error) }
+          if (stagedActivated) {
+            try { await hooks.beforeChange() } catch (error) { failures.push(error) }
+          }
           try {
-            renameSync(this.paths.profile, failed)
-            renameSync(rollback, this.paths.profile)
+            if (stagedActivated) renameSync(this.paths.profile, failed)
+            if (previousMoved) renameSync(rollback, this.paths.profile)
           } catch (error) {
             failures.push(error)
           }
