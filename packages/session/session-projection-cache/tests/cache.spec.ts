@@ -36,6 +36,7 @@ import {
 import SessionProjectionCache from '../src/index.ts'
 import { checkpointRecord, projectionCacheDomainSpec } from '../src/spec.ts'
 import type { CheckpointRecord } from '../src/spec.ts'
+import { projectionDurableObservationOptions } from './durable-observation.ts'
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
@@ -124,9 +125,7 @@ interface HarnessOptions {
 
 const contexts: Context[] = []
 const roots: string[] = []
-const durableObservation = {
-  timeout: Math.max(5_000, Number.parseInt(process.env.DSH_COVERAGE_TEST_TIMEOUT_MS ?? '', 10) || 0),
-} as const
+const durableObservation = projectionDurableObservationOptions()
 
 async function harness(options: HarnessOptions = {}) {
   const root = options.root ?? await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
