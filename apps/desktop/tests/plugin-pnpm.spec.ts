@@ -44,8 +44,15 @@ it('installs a real pnpm graph, then executes approved scripts with the shared h
     const dsh = join(root, 'dsh')
     runtimeFixture(dsh)
     const pnpm = join(root, 'pnpm.mjs')
+    const pnpmLog = join(root, 'pnpm-args.jsonl')
     const realPnpm = join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs')
-    writeFileSync(pnpm, `delete process.env.CI; process.argv = process.argv.map(arg => arg === '--config.registry=https://registry.npmjs.org/' ? ${JSON.stringify(`--config.registry=${origin}`)} : arg); await import(${JSON.stringify(pathToFileURL(realPnpm).href)})`)
+    writeFileSync(pnpm, `import {appendFileSync} from 'node:fs'
+process.argv = process.argv.map(arg => arg === '--config.registry=https://registry.npmjs.org/' ? ${JSON.stringify(`--config.registry=${origin}`)} : arg)
+const add = process.argv.indexOf('add')
+if (add >= 0) process.argv.splice(add + 1, 0, '--config.frozen-lockfile=false')
+appendFileSync(${JSON.stringify(pnpmLog)}, JSON.stringify(process.argv.slice(2)) + '\\n')
+await import(${JSON.stringify(pathToFileURL(realPnpm).href)})
+`)
     const manager = new DesktopProjectManager(resolveDesktopPaths(join(root, '.dsh')), { node: process.execPath, pnpm, dsh })
     const hooks: DesktopProjectHooks = {
       beforeChange: async () => {},
@@ -63,6 +70,15 @@ it('installs a real pnpm graph, then executes approved scripts with the shared h
     expect(execFileSync(process.execPath, [entry], { encoding: 'utf8' }).trim()).toBe('true')
     await manager.mutate({ type: 'plugin-remove', name: 'fixture-plugin' }, hooks)
     expect(manager.listPlugins()).toEqual([])
+    const pnpmCalls = readFileSync(pnpmLog, 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[])
+    const initialAdd = pnpmCalls.find(args => args.includes('add'))
+    expect(initialAdd?.slice(initialAdd.indexOf('add'))).toEqual([
+      'add', '--config.frozen-lockfile=false', 'fixture-plugin@1.0.0', '--save-exact', '--ignore-scripts',
+    ])
+    const frozenRelocation = pnpmCalls.find(args => args.includes('install') && args.includes('--frozen-lockfile'))
+    expect(frozenRelocation?.slice(frozenRelocation.indexOf('install'))).toEqual([
+      'install', '--frozen-lockfile', '--ignore-scripts',
+    ])
   } finally {
     server.closeAllConnections()
     if (server.listening) await new Promise<void>((resolve, reject) => {
