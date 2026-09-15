@@ -4,7 +4,7 @@ import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_pr
 import { globSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { parseArgs } from 'node:util'
 
@@ -12,6 +12,13 @@ const TARGET_PACKAGE = '@deepseek-ai/dsh'
 const DEFAULT_TIMEOUT_MS = 300_000
 const TERMINATION_GRACE_MS = 1_000
 const FORCED_EXIT_TIMEOUT_MS = 5_000
+const TEST_TIMEOUT_FLOOR_MS = 10_000
+const TEST_CASE_TIMEOUT_FLOOR_MS = 20_000
+const TEST_CASE_TIMEOUT_CEILING_MS = 300_000
+const WINDOWS_CLEANUP_MAX_RETRIES = 3
+const WINDOWS_CLEANUP_RETRY_DELAY_MS = 100
+const COVERAGE_TEST_TIMEOUT_ENV = 'DSH_COVERAGE_TEST_TIMEOUT_MS'
+const CONSUMER_TEMP_PREFIX = 'dsh-npm-resolution-'
 const WORKSPACE_MANIFEST_GLOBS = [
   'apps/*/package.json',
   'packages/*/*/package.json',
@@ -99,7 +106,38 @@ export function parsePositiveIntegerOption(raw: string | undefined, fallback: nu
   if (!Number.isSafeInteger(value) || value < 1 || String(value) !== raw) {
     throw new Error(`${name} must be a positive integer, got ${JSON.stringify(raw)}`)
   }
+
   return value
+}
+
+/**
+ * Resolve the npm subprocess budget used by focused benchmark tests.
+ * @param env - Environment carrying the optional coverage-lane test budget.
+ * @returns The normal 10-second floor or the larger configured coverage budget.
+ */
+export function benchmarkNpmResolutionTestTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const laneBudget = benchmarkNpmResolutionTestCaseTimeoutMs(env)
+  return Math.max(TEST_TIMEOUT_FLOOR_MS, laneBudget - TEST_TIMEOUT_FLOOR_MS)
+}
+
+/**
+ * Resolve the enclosing test budget for npm execution plus shutdown and cleanup.
+ * @param env - Environment carrying the optional coverage-lane test budget.
+ * @returns The normal 20-second floor or the configured coverage budget.
+ */
+export function benchmarkNpmResolutionTestCaseTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const timeoutMs = Math.max(
+    TEST_CASE_TIMEOUT_FLOOR_MS,
+    parsePositiveIntegerOption(
+      env[COVERAGE_TEST_TIMEOUT_ENV],
+      TEST_CASE_TIMEOUT_FLOOR_MS,
+      COVERAGE_TEST_TIMEOUT_ENV,
+    ),
+  )
+  if (timeoutMs > TEST_CASE_TIMEOUT_CEILING_MS) {
+    throw new Error(`${COVERAGE_TEST_TIMEOUT_ENV} must not exceed ${String(TEST_CASE_TIMEOUT_CEILING_MS)}`)
+  }
+  return timeoutMs
 }
 
 /**
@@ -275,6 +313,56 @@ function npmExecutable(): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolveDelay => setTimeout(resolveDelay, ms))
+}
+
+/**
+ * Remove one benchmark-owned consumer directory after process and server shutdown.
+ * @param path - Private directory created with the benchmark prefix under the temporary root.
+ * @param options - Test seams and the bounded Windows handle-release retry policy.
+ * @returns When the directory is removed.
+ */
+export async function removeNpmResolutionConsumer(
+  path: string,
+  options: {
+    readonly tempRoot?: string
+    readonly platform?: NodeJS.Platform
+    readonly maxRetries?: number
+    readonly retryDelayMs?: number
+    readonly remove?: (target: string) => void
+    readonly wait?: (ms: number) => Promise<void>
+  } = {},
+): Promise<void> {
+  const tempRoot = resolve(options.tempRoot ?? tmpdir())
+  const target = resolve(path)
+  const relativeTarget = relative(tempRoot, target)
+  if (relativeTarget === '' || relativeTarget === '..' || relativeTarget.startsWith(`..${sep}`)
+    || isAbsolute(relativeTarget) || !basename(target).startsWith(CONSUMER_TEMP_PREFIX)) {
+    throw new Error(`refusing to remove non-benchmark temporary directory ${JSON.stringify(target)}`)
+  }
+  const maxRetries = options.maxRetries ?? WINDOWS_CLEANUP_MAX_RETRIES
+  if (!Number.isSafeInteger(maxRetries) || maxRetries < 0) {
+    throw new Error(`cleanup maxRetries must be a non-negative integer, got ${JSON.stringify(maxRetries)}`)
+  }
+  const retryDelayMs = options.retryDelayMs ?? WINDOWS_CLEANUP_RETRY_DELAY_MS
+  if (!Number.isSafeInteger(retryDelayMs) || retryDelayMs < 1) {
+    throw new Error(`cleanup retryDelayMs must be a positive integer, got ${JSON.stringify(retryDelayMs)}`)
+  }
+  const remove = options.remove ?? ((ownedPath) => {
+    rmSync(ownedPath, { recursive: true, force: true })
+  })
+  const wait = options.wait ?? delay
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      remove(target)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      const transient = (options.platform ?? process.platform) === 'win32'
+        && (code === 'EPERM' || code === 'EBUSY' || code === 'ENOTEMPTY')
+      if (!transient || attempt >= maxRetries) throw error
+      await wait(retryDelayMs * (attempt + 1))
+    }
+  }
 }
 
 function signalProcessTree(child: ChildProcess, signal: 'SIGTERM' | 'SIGKILL'): void {
@@ -462,7 +550,7 @@ export async function resolveNpmPackageLock(
   })
   const port = await listen(server)
   registry = `http://127.0.0.1:${String(port)}/`
-  const consumer = mkdtempSync(join(tmpdir(), 'dsh-npm-resolution-'))
+  const consumer = mkdtempSync(join(tmpdir(), CONSUMER_TEMP_PREFIX))
   try {
     writeFileSync(join(consumer, 'package.json'), `${JSON.stringify({
       name: 'dsh-npm-resolution-benchmark',
@@ -482,7 +570,7 @@ export async function resolveNpmPackageLock(
   } finally {
     server.closeAllConnections()
     await close(server)
-    rmSync(consumer, { recursive: true, force: true })
+    await removeNpmResolutionConsumer(consumer)
   }
 }
 
