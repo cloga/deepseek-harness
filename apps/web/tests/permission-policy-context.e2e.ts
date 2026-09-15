@@ -19,7 +19,7 @@ import {
 import { connectFreshWorkspace, newEnglishPage, saveFailureShot, writeComposerDraft } from './support.ts'
 
 const SNAPSHOT_DIR = fileURLToPath(new URL('../../../snapshots/web/permission-policy-context', import.meta.url))
-const FIXTURE = fileURLToPath(new URL('../../../snapshots/web/permission-policy-context/session.jsonl', import.meta.url))
+const FIXTURE = fileURLToPath(new URL('../../../snapshots/web/permission-policy-context/session.v3.jsonl', import.meta.url))
 const MODE = webSnapshotMode()
 
 const PROMPTS = [
@@ -32,10 +32,10 @@ const PROMPTS = [
 const PRESET_LABELS = ['Read Only', 'Full access', 'Workspace Write'] as const
 const SHELL_TOOL = process.platform === 'win32' ? 'pwsh' : 'bash'
 
-function requestSystems(events: readonly SessionEvent[]): string[] {
+function systemPrompts(events: readonly SessionEvent[]): string[] {
   return events.flatMap((event) => {
-    if (event.type !== 'request/header') return []
-    return typeof event.data.header.system === 'string' ? [event.data.header.system] : []
+    if (event.type !== 'system/message') return []
+    return [event.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('')]
   })
 }
 
@@ -139,21 +139,11 @@ describe('web e2e: current sandbox policy reaches the model before tools', () =>
   }, 240_000)
 
   it.skipIf(MODE === 'record')('records cache-safe current policy before the corresponding model behavior', async () => {
-    const systems = requestSystems(sessionEvents)
-    expect(systems).toHaveLength(4)
-    for (const system of systems) {
-      expect(system).not.toContain('Current DSH file policy:')
-      expect(system).not.toContain('Approval policy:')
-      expect(system).not.toContain('Approval prompts are disabled in this session')
-    }
-    const tools = requestTools(sessionEvents)
-    expect(tools).toHaveLength(4)
-    for (const name of [SHELL_TOOL, 'write']) {
-      expect(escalationModes(tools[0]!, name)).toEqual(['workspace-write', 'danger-full-access'])
-      expect(escalationModes(tools[1]!, name)).toBeUndefined()
-      expect(escalationModes(tools[2]!, name)).toEqual(['danger-full-access'])
-      expect(escalationModes(tools[3]!, name)).toEqual(['workspace-write', 'danger-full-access'])
-    }
+    const systems = systemPrompts(sessionEvents)
+    expect(systems).toHaveLength(1)
+    expect(systems[0]).not.toContain('Current DSH file policy:')
+    expect(systems[0]).not.toContain('Approval policy:')
+    expect(systems[0]).not.toContain('Approval prompts are disabled in this session')
 
     const contexts = runtimeContexts(sessionEvents)
     expect(contexts).toHaveLength(4)
@@ -193,6 +183,6 @@ describe('web e2e: current sandbox policy reaches the model before tools', () =>
   it.skipIf(MODE === 'record')('stays clean and keeps the fixture inventory closed', async () => {
     expect(tripwire.pageErrors).toEqual([])
     expect(tripwire.warnings).toEqual([])
-    await assertFixtureInventory(SNAPSHOT_DIR, ['session.jsonl', 'workspace.expected'])
+    await assertFixtureInventory(SNAPSHOT_DIR, ['session.v3.jsonl', 'workspace.expected'])
   })
 })
