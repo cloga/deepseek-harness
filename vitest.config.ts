@@ -152,6 +152,7 @@ const processBoundTests = [
   'packages/context/time-context/tests/time-context.spec.ts',
   'packages/llm/llm-pi-ai/tests/adapter.spec.ts',
   'packages/boot/app-boot/tests/app-boot.spec.ts',
+  'packages/terminal/terminal-bash/tests/local.spec.ts',
   'packages/workflow/workflow-worker-thread/tests/session.spec.ts',
 ]
 
