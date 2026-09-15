@@ -427,7 +427,7 @@ describe('workspace browser rows', () => {
     vi.useFakeTimers()
     try {
       const node: SessionNode = {
-        id: sid('s-blank'), title: 'ignored', blank: true, running: false,
+        id: sid('s-blank'), title: '', blank: true, running: false,
         runningSubagentCount: 0, completed: false, hasActiveSchedule: false, updatedAt: 0,
       }
       render(<SessionNodeItem node={node} currentId={node.id} now={0} onOpen={vi.fn()}
@@ -446,6 +446,19 @@ describe('workspace browser rows', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('renders a durable title for a visible blank session without provisional row actions', () => {
+    const node: SessionNode = {
+      id: sid('s-titled-blank'), title: 'Scheduled research', blank: true, running: false,
+      runningSubagentCount: 0, completed: false, hasActiveSchedule: false, updatedAt: 0,
+    }
+    render(<SessionNodeItem node={node} currentId={undefined} now={0} onOpen={vi.fn()}
+      onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} t={t} />)
+    expect(screen.getByText('Scheduled research')).toBeTruthy()
+    expect(screen.queryByText('新会话')).toBeNull()
+    expect(screen.queryByRole('button', { name: /会话.*的操作/ })).toBeNull()
+    expect(screen.queryByText('刚刚')).toBeNull()
   })
 
   it('session row menu opens without opening the session and dispatches rename, fork, and archive', () => {

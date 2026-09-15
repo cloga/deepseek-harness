@@ -336,6 +336,27 @@ describe('WorkspaceBrowser', () => {
     expect(screen.getByRole('button', { name: '展开其余 2 个会话' })).toBeTruthy()
   })
 
+  it('charges explicitly titled blank sessions against the five-row folding quota', () => {
+    const provisional = summary('blank', 10, { blank: true })
+    const titled = [
+      summary('named-one', 9, { blank: true, title: 'Named one', displayTitle: 'Named one' }),
+      summary('named-two', 8, { blank: true, title: 'Named two', displayTitle: 'Named two' }),
+    ]
+    const ordinary = Array.from({ length: 5 }, (_, index) => summary(`ordinary-${index + 1}`, 7 - index))
+    mount({
+      useSessions: hook(sessionState([provisional, ...titled, ...ordinary], { current: provisional.id })),
+      useWorkspaces: hook(workspaceState([
+        workspace('alpha', [provisional.id, ...titled.map(item => item.id), ...ordinary.map(item => item.id)]),
+      ])),
+    })
+    expect(screen.getByText('新会话')).toBeTruthy()
+    expect(screen.getByText('Named one')).toBeTruthy()
+    expect(screen.getByText('Named two')).toBeTruthy()
+    expect(screen.getByText('ordinary-3')).toBeTruthy()
+    expect(screen.queryByText('ordinary-4')).toBeNull()
+    expect(screen.getByRole('button', { name: '展开其余 2 个会话' })).toBeTruthy()
+  })
+
   it('anchors collapsed drags before hidden rows so the source stays visible', async () => {
     const ordinary = Array.from({ length: 6 }, (_, index) => summary(`session-${index + 1}`, 6 - index))
     const blank = summary('blank', 7, { blank: true })
@@ -549,31 +570,36 @@ describe('WorkspaceBrowser', () => {
     expect(screen.queryByText('b')).toBeNull()
   })
 
-  it('shows only the current blank session as the localized New Session, excluded from search', () => {
+  it('shows and searches explicitly titled blanks while keeping the provisional blank localized', () => {
     const currentBlank = summary('alpha-blank', 9, { blank: true })
-    const staleBlank = summary('beta-blank', 8, { blank: true })
+    const titledBlank = summary('scheduled-blank', 8, {
+      blank: true, title: 'Scheduled research', displayTitle: 'Scheduled research',
+    })
+    const staleBlank = summary('beta-blank', 7, { blank: true })
     const sessions = sessionState(
-      [currentBlank, staleBlank],
+      [currentBlank, titledBlank, staleBlank],
       { current: currentBlank.id },
     )
     const b = mount({
       useSessions: hook(sessions),
       useWorkspaces: hook(workspaceState([
-        workspace('alpha', ['alpha-blank']), workspace('beta', ['beta-blank']),
+        workspace('alpha', ['alpha-blank', 'scheduled-blank']), workspace('beta', ['beta-blank']),
       ])),
     })
     expect(screen.getByText('新会话')).toBeTruthy()
+    expect(screen.getByText('Scheduled research')).toBeTruthy()
     expect(screen.queryByText('alpha-blank')).toBeNull()
     expect(screen.queryByText('beta-blank')).toBeNull()
 
     rerender(b, { useSessions: hook({ ...sessions, current: staleBlank.id }) })
     expect(screen.getAllByText('新会话')).toHaveLength(1)
+    expect(screen.getByText('Scheduled research')).toBeTruthy()
     b.store.actions.setGroupBy('flat')
     rerender(b, {})
     expect(screen.getAllByText('新会话')).toHaveLength(1)
-    // Search excludes blank rows entirely — neither the canonical stored
-    // title nor the localized display label participates in matching.
-    fireEvent.change(screen.getByPlaceholderText('搜索会话…'), { target: { value: 'new session' } })
+    expect(screen.getByText('Scheduled research')).toBeTruthy()
+    fireEvent.change(screen.getByPlaceholderText('搜索会话…'), { target: { value: 'scheduled' } })
+    expect(screen.getByText('Scheduled research')).toBeTruthy()
     expect(screen.queryByText('新会话')).toBeNull()
     fireEvent.change(screen.getByPlaceholderText('搜索会话…'), { target: { value: '新会话' } })
     expect(screen.queryByText('新会话')).toBeNull()
@@ -606,6 +632,28 @@ describe('WorkspaceBrowser', () => {
     b.store.actions.setGroupBy('flat')
     await waitFor(() => {
       expect(b.store.getSnapshot().sessionOrderByAccount[FLAT_SESSION_ORDER_KEY]).toEqual(['blank', 'mid', 'old'])
+    })
+  })
+
+  it('does not promote an explicitly titled blank when it becomes current', async () => {
+    const reserved = summary('reserved', 150, {
+      blank: true, title: 'Reserved', displayTitle: 'Reserved',
+    })
+    const items = [summary('old', 100), reserved, summary('mid', 200)]
+    const b = mount({
+      useSessions: hook(sessionState(items)),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['old', 'reserved', 'mid'])])),
+    })
+    await waitFor(() => {
+      expect(b.store.getSnapshot().sessionOrderByAccount.alpha).toEqual(['old', 'reserved', 'mid'])
+    })
+    b.store.actions.setSessionOrder(FLAT_SESSION_ORDER_KEY, ['old', 'reserved', 'mid'])
+
+    rerender(b, { useSessions: hook(sessionState(items, { current: reserved.id })) })
+    await waitFor(() => {
+      expect(b.store.getSnapshot().sessionOrderByAccount.alpha).toEqual(['old', 'reserved', 'mid'])
+      expect(b.store.getSnapshot().sessionOrderByAccount[FLAT_SESSION_ORDER_KEY])
+        .toEqual(['old', 'reserved', 'mid'])
     })
   })
 

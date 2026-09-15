@@ -1,7 +1,7 @@
 /**
  * Derives the workspace browser tree from Host Workspace order and membership.
- * Unassigned Sessions trail under Ungrouped; only the selected blank Session
- * remains visible.
+ * Unassigned Sessions trail under Ungrouped; explicitly titled blanks and the
+ * selected provisional blank Session remain visible.
  */
 import {
   type SessionListState, type SessionSearchResultItem, type SessionSummary,
@@ -41,9 +41,9 @@ type SessionPendingInteractions = ReadonlyMap<SessionId, SessionPendingInteracti
 /** One top-level session row in a group or the flat list. */
 export interface SessionNode {
   id: SessionId
-  /** Stored display title; the renderer substitutes the localized New Session label for blank rows. */
+  /** Stored display title, or empty only for the selected untitled New Session placeholder. */
   title: string
-  /** The provisional blank session (renderer shows the localized New Session title). */
+  /** Whether the Session log has not started its first turn. */
   blank: boolean
   /** A Session-scoped UI consumer is awaiting this user. */
   pendingInteraction?: SessionPendingInteractionStatus
@@ -137,24 +137,24 @@ function byRecency(a: SessionSummary, b: SessionSummary): number {
 }
 
 /**
- * Ordinary sessions are visible; among blank sessions, only the current one
- * is visible. Subagent children use their parent header catalog; archived
- * sessions are visible nowhere, while their accounting slots remain so
- * unarchiving restores position.
+ * Ordinary and explicitly titled sessions are visible; among untitled blank
+ * sessions, only the current one is visible. Subagent children use their
+ * parent header catalog; archived sessions are visible nowhere, while their
+ * accounting slots remain so unarchiving restores position.
  */
 function sessionVisible(session: SessionSummary, current: SessionId | undefined, archived: ReadonlySet<SessionId>): boolean {
   return session.origin !== 'subagent'
     && !archived.has(session.id)
-    && (!session.blank || session.id === current)
+    && (!session.blank || session.id === current || session.title !== undefined)
 }
 
 /**
- * A blank session is the selected Workspace's provisional New Session row;
- * its canonical title never enters search (blank rows are query-excluded)
- * and the renderer localizes its display label.
+ * An untitled blank session is the selected Workspace's provisional New
+ * Session row, whose renderer localizes its display label. A durable title
+ * makes a blank root Session an intentional navigation target.
  */
 function sessionTitle(session: SessionSummary): string {
-  return session.blank ? '' : session.displayTitle
+  return session.blank && session.title === undefined ? '' : session.displayTitle
 }
 
 /** The list projection alone owns the best-effort active-Schedule indicator. */
@@ -278,8 +278,8 @@ function sessionNode(
  * Derive the workspace browser groups with every session as a top-level row.
  *
  * Every group shows; sessions populate under expanded groups in the selected
- * local order. Blank sessions are excluded except for the selected
- * provisional New Session row; archived sessions are excluded everywhere.
+ * local order. Explicitly titled blank roots and the selected provisional New
+ * Session row remain visible; archived sessions are excluded everywhere.
  * Content search lives outside this derivation
  * (see {@link deriveSearchResults}).
  * @param list - sessions list snapshot (`current` feeds containsCurrent).
@@ -392,9 +392,11 @@ export function deriveSearchResults(
   const local: SessionSummary[] = []
   for (const id of list.ids) {
     const summary = list.byId[id]
-    // Blank placeholders never match a query (their canonical title displays
-    // localized, so matching it would tie search to one language).
-    if (summary === undefined || summary.blank || !sessionVisible(summary, list.current, archived)) continue
+    // Untitled blank placeholders never match a query because their localized
+    // display label is not a durable title. Explicitly titled blanks do.
+    if (summary === undefined
+      || (summary.blank && summary.title === undefined)
+      || !sessionVisible(summary, list.current, archived)) continue
     if (
       sessionTitle(summary).toLowerCase().includes(q)
       || labelOf(summary).toLowerCase().includes(q)
@@ -419,7 +421,7 @@ export function deriveSearchResults(
 
   return {
     items: ordered.slice(0, limit).map((summary) => {
-      const match = contentBySession.get(summary.id)
+      const match = summary.blank ? undefined : contentBySession.get(summary.id)
       const pendingInteraction = visiblePendingKind(pendingInteractions.get(summary.id)?.kind)
       return {
         id: summary.id,

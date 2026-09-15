@@ -338,19 +338,20 @@ describe('UiWorkspaceService', () => {
     }
   })
 
-  it('reuses only an unarchived member blank and coalesces concurrent creation', async () => {
+  it('reuses only an unarchived untitled member blank and coalesces concurrent creation', async () => {
     const b = bench()
     const memberBlank = sid('member-blank')
     const archivedBlank = sid('archived-blank')
     const summaries: readonly SessionSummary[] = [
       summary('stray', { blank: true, cwd: '/w/alpha' }),
       summary('member-blank', { blank: true, cwd: '/w/alpha' }),
+      summary('titled-blank', { blank: true, title: 'Reserved', cwd: '/w/beta' }),
       summary('active', { cwd: '/w/beta' }),
       summary('archived-blank', { blank: true, cwd: '/w/gamma' }),
     ]
     b.workspaces.list.set(workspaceState([
       workspace('alpha', [memberBlank]),
-      workspace('beta', [sid('active')]),
+      workspace('beta', [sid('titled-blank'), sid('active')]),
       workspace('gamma', [archivedBlank]),
     ], [archivedBlank]))
     b.sessions.list.set({

@@ -42,14 +42,14 @@ const SEARCH_QUERY_MAX_CODE_UNITS = 500
 /** Session rows visible per Workspace before the local overflow control. */
 const COLLAPSED_SESSION_LIMIT = 5
 
-/** Fold one Workspace without charging its provisional New Session against the ordinary-row limit. */
+/** Fold one Workspace without charging only its untitled provisional New Session against the ordinary-row limit. */
 function collapsedSessionRows(sessions: readonly SessionNode[]): {
   rows: readonly SessionNode[]
   hiddenCount: number
 } {
   let ordinaryCount = 0
   const rows = sessions.filter((session) => {
-    if (session.blank) return true
+    if (session.blank && session.title === '') return true
     if (ordinaryCount >= COLLAPSED_SESSION_LIMIT) return false
     ordinaryCount += 1
     return true
@@ -875,32 +875,42 @@ export function WorkspaceBrowser({
   const groupExpansion = useStore(s => s.groupExpansion)
   const sessionOrderByAccount = useStore(s => s.sessionOrderByAccount)
   const sessionUpdatedAtByAccount = useStore(s => s.sessionUpdatedAtByAccount)
-  const currentBlankSessionId = useSessions((state) => {
+  const currentUntitledBlankSessionId = useSessions((state) => {
     const current = state.current
-    return current !== undefined && state.byId[current]?.blank === true ? current : undefined
+    if (current === undefined) return undefined
+    const summary = state.byId[current]
+    return summary?.blank === true && summary.title === undefined ? current : undefined
   })
-  const currentBlankAccount = currentBlankSessionId === undefined
+  const currentUntitledBlankAccount = currentUntitledBlankSessionId === undefined
     || workspacePhase !== 'ready'
     ? undefined
-    : owningGroupKey(workspaces, currentBlankSessionId)
-  const promotedBlank = useRef<{ sessionId: SessionId; accountKey: string } | undefined>(undefined)
+    : owningGroupKey(workspaces, currentUntitledBlankSessionId)
+  const promotedUntitledBlank = useRef<{ sessionId: SessionId; accountKey: string } | undefined>(undefined)
   useEffect(() => {
-    if (currentBlankSessionId === undefined || currentBlankAccount === undefined) {
-      promotedBlank.current = undefined
+    if (currentUntitledBlankSessionId === undefined || currentUntitledBlankAccount === undefined) {
+      promotedUntitledBlank.current = undefined
       return
     }
-    const promoted = promotedBlank.current
-    if (promoted !== undefined && promoted.sessionId === currentBlankSessionId
-      && promoted.accountKey === currentBlankAccount) return
-    promotedBlank.current = { sessionId: currentBlankSessionId, accountKey: currentBlankAccount }
-    for (const accountKey of new Set([currentBlankAccount, FLAT_SESSION_ORDER_KEY])) {
+    const promoted = promotedUntitledBlank.current
+    if (promoted !== undefined && promoted.sessionId === currentUntitledBlankSessionId
+      && promoted.accountKey === currentUntitledBlankAccount) return
+    promotedUntitledBlank.current = {
+      sessionId: currentUntitledBlankSessionId,
+      accountKey: currentUntitledBlankAccount,
+    }
+    for (const accountKey of new Set([currentUntitledBlankAccount, FLAT_SESSION_ORDER_KEY])) {
       const previous = sessionOrderByAccount[accountKey] ?? []
       actions.setSessionOrder(accountKey, [
-        currentBlankSessionId,
-        ...previous.filter(id => id !== currentBlankSessionId),
+        currentUntitledBlankSessionId,
+        ...previous.filter(id => id !== currentUntitledBlankSessionId),
       ])
     }
-  }, [actions.setSessionOrder, currentBlankAccount, currentBlankSessionId, sessionOrderByAccount])
+  }, [
+    actions.setSessionOrder,
+    currentUntitledBlankAccount,
+    currentUntitledBlankSessionId,
+    sessionOrderByAccount,
+  ])
   useEffect(() => {
     if (workspacePhase !== 'ready') return
     actions.retainAccountKeys([

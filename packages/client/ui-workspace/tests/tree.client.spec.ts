@@ -108,29 +108,33 @@ describe('deriveGroups', () => {
     ])
   })
 
-  it('shows only the current blank session in its Workspace count and tree', () => {
+  it('shows the current or explicitly titled blank session in its Workspace count and tree', () => {
     const currentBlank = { ...summary('current-blank', 5), blank: true }
-    const staleBlank = { ...summary('stale-blank', 4), blank: true }
-    const real = summary('shown', 3)
+    const titledBlank = {
+      ...summary('titled-blank', 4), blank: true, title: 'Scheduled research', displayTitle: 'Scheduled research',
+    }
+    const staleBlank = { ...summary('stale-blank', 3), blank: true }
+    const real = summary('shown', 2)
     const sessions = {
-      ...list(real, currentBlank, staleBlank),
+      ...list(real, currentBlank, titledBlank, staleBlank),
       current: currentBlank.id,
     }
     const groups = deriveGroups(
-      sessions, [workspace('first', ['shown', 'current-blank', 'stale-blank'])],
+      sessions, [workspace('first', ['shown', 'current-blank', 'titled-blank', 'stale-blank'])],
       noArchive, noAttention, view(['first']),
     )
-    expect(groups[0]!.sessions.map(session => session.id)).toEqual([real.id, currentBlank.id])
-    const blankNode = groups[0]!.sessions.find(session => session.id === currentBlank.id)!
-    // The stored placeholder title stays canonical; the renderer swaps in
-    // the localized New Session label via the blank flag.
-    expect(blankNode.title).toBe('')
-    expect(blankNode.blank).toBe(true)
+    expect(groups[0]!.sessions.map(session => session.id)).toEqual([real.id, currentBlank.id, titledBlank.id])
+    const currentNode = groups[0]!.sessions.find(session => session.id === currentBlank.id)!
+    expect(currentNode.title).toBe('')
+    expect(currentNode.blank).toBe(true)
+    const titledNode = groups[0]!.sessions.find(session => session.id === titledBlank.id)!
+    expect(titledNode.title).toBe('Scheduled research')
+    expect(titledNode.blank).toBe(true)
     expect(groups[0]!.sessions.find(session => session.id === real.id)!.blank).toBe(false)
-    expect(groups[0]!.sessionCount).toBe(2)
-    // A non-current blank stray never surfaces an Ungrouped bucket either.
+    expect(groups[0]!.sessionCount).toBe(3)
+    // A non-current untitled blank stray never surfaces an Ungrouped bucket either.
     const strayGroups = deriveGroups(
-      list({ ...summary('stray', 2), blank: true }),
+      list({ ...summary('stray', 1), blank: true }),
       [workspace('first', [])], noArchive, noAttention, view(),
     )
     expect(strayGroups.map(group => group.key)).toEqual(['first'])
@@ -307,8 +311,12 @@ describe('deriveFlat', () => {
     const parent = summary('parent', 1)
     const fork = { ...summary('fork', 2), parentId: parent.id }
     const subagent = { ...summary('subagent', 3), parentId: parent.id, origin: 'subagent' as const }
+    const titledBlankSubagent = {
+      ...summary('titled-blank-subagent', 4), blank: true, title: 'Hidden child', displayTitle: 'Hidden child',
+      parentId: parent.id, origin: 'subagent' as const,
+    }
     const rows = deriveFlat(
-      { ...list(parent, fork, subagent), current: subagent.id },
+      { ...list(parent, fork, subagent, titledBlankSubagent), current: subagent.id },
       noArchive,
       noAttention,
     )
@@ -320,23 +328,30 @@ describe('deriveFlat', () => {
     expect(deriveFlat(partial, noArchive, noAttention).map(row => row.id)).toEqual([sid('present')])
   })
 
-  it('shows only the current blank session and excludes blanks from search', () => {
+  it('shows current and explicitly titled blank sessions while hiding stale untitled blanks', () => {
     const currentBlank = { ...summary('current-blank', 9), blank: true }
-    const staleBlank = { ...summary('stale-blank', 8), blank: true }
+    const titledBlank = {
+      ...summary('titled-blank', 8), blank: true, title: 'Scheduled research', displayTitle: 'Scheduled research',
+    }
+    const staleBlank = { ...summary('stale-blank', 7), blank: true }
     const sessions = {
-      ...list(summary('real', 1), currentBlank, staleBlank),
+      ...list(summary('real', 1), currentBlank, titledBlank, staleBlank),
       current: currentBlank.id,
     }
     const rows = deriveFlat(sessions, noArchive, noAttention)
-    expect(rows.map(row => row.id)).toEqual([currentBlank.id, sid('real')])
-    expect(rows.map(row => row.title)).toEqual(['', 'real'])
-    expect(rows.map(row => row.blank)).toEqual([true, false])
+    expect(rows.map(row => row.id)).toEqual([currentBlank.id, titledBlank.id, sid('real')])
+    expect(rows.map(row => row.title)).toEqual(['', 'Scheduled research', 'real'])
+    expect(rows.map(row => row.blank)).toEqual([true, true, false])
   })
 
-  it('hides archived sessions in flat mode', () => {
+  it('hides archived sessions in flat mode, including explicitly titled blanks', () => {
     const kept = summary('kept', 1)
     const gone = summary('gone', 2)
-    expect(deriveFlat(list(kept, gone), archived('gone'), noAttention).map(row => row.id)).toEqual([kept.id])
+    const titledBlank = {
+      ...summary('titled-blank', 3), blank: true, title: 'Archived schedule', displayTitle: 'Archived schedule',
+    }
+    expect(deriveFlat(list(kept, gone, titledBlank), archived('gone', 'titled-blank'), noAttention)
+      .map(row => row.id)).toEqual([kept.id])
   })
 })
 
@@ -428,31 +443,41 @@ describe('deriveSearchResults', () => {
     })
   })
 
-  it('excludes blank sessions from search regardless of query or content hits', () => {
+  it('searches a durable blank title without accepting blank content hits', () => {
     const currentBlank = { ...summary('opaque-current', 5), blank: true }
-    const staleBlank = { ...summary('new session stale', 4), blank: true }
+    const titledBlank = {
+      ...summary('titled-blank', 4), blank: true, title: 'Scheduled research', displayTitle: 'Scheduled research',
+    }
+    const staleBlank = { ...summary('new session stale', 3), blank: true }
     const sessions = {
-      ...list(currentBlank, staleBlank),
+      ...list(currentBlank, titledBlank, staleBlank),
       current: currentBlank.id,
     }
-    // Blank placeholders never match — not their localized-display title, not
-    // their id, and not even a backend content hit naming them.
     const result = deriveSearchResults(
       sessions,
-      [workspace('first', ['opaque-current', 'new session stale'])],
-      'new session',
+      [workspace('first', ['opaque-current', 'titled-blank', 'new session stale'])],
+      'scheduled',
       noArchive,
       noAttention,
       {
         items: [
-          { sessionId: staleBlank.id, snippet: 'stale body' },
-          { sessionId: currentBlank.id, snippet: 'current body' },
+          { sessionId: titledBlank.id, snippet: 'blank logs are not searchable' },
+          { sessionId: staleBlank.id, snippet: 'scheduled stale body' },
+          { sessionId: currentBlank.id, snippet: 'scheduled current body' },
         ],
         hasMore: false,
       },
       10,
     )
-    expect(result.items).toEqual([])
+    expect(result.items).toEqual([{
+      id: titledBlank.id,
+      title: 'Scheduled research',
+      workspace: 'first',
+      running: false,
+      runningSubagentCount: 0,
+      completed: false,
+      hasActiveSchedule: false,
+    }])
   })
 
   it('uses the supplied cap and preserves either local overflow or backend hasMore', () => {
