@@ -3,16 +3,26 @@ import { DESKTOP_IPC, type DshDesktopStartupApi } from '../src/ipc.ts'
 
 const electron = vi.hoisted(() => ({
   contextBridge: { exposeInMainWorld: vi.fn() },
-  ipcRenderer: { invoke: vi.fn(), on: vi.fn(), off: vi.fn() },
+  ipcRenderer: { invoke: vi.fn(), on: vi.fn(), off: vi.fn(), send: vi.fn() },
 }))
 vi.mock('electron', () => electron)
 
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); vi.resetModules() })
 
-it.each(['dsh-app://app/index.html', 'https://shell/startup.html'])('exposes only the carrier marker to %s', async (url) => {
+it.each(['dsh-app://app/index.html', 'https://shell/startup.html'])('exposes the carrier marker and fixed update-impact bridge to %s', async (url) => {
   vi.stubGlobal('location', new URL(url))
   await import('../src/preload-app.ts')
-  expect(electron.contextBridge.exposeInMainWorld).toHaveBeenCalledWith('dshDesktop', { protocolVersion: 1 })
+  const api = electron.contextBridge.exposeInMainWorld.mock.calls[0]?.[1] as {
+    protocolVersion: number
+    updates: { reportImpact(value: unknown): void }
+  }
+  expect(api.protocolVersion).toBe(2)
+  api.updates.reportImpact({ hasDraft: true, attachmentCount: 2, submitting: false })
+  expect(electron.ipcRenderer.send).toHaveBeenCalledWith(DESKTOP_IPC.updatesImpactReport, {
+    hasDraft: true,
+    attachmentCount: 2,
+    submitting: false,
+  })
 })
 
 it('provides startup controls and a removable state subscription to shell documents', async () => {

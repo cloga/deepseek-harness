@@ -67,8 +67,8 @@ describe('desktop update coordinator', () => {
       () => true,
     )
 
-    await expect(coordinator.check()).resolves.toEqual({ phase: 'available', version: '1.1.0' })
-    await expect(coordinator.install()).resolves.toEqual({ phase: 'ready', version: '1.1.0' })
+    await expect(coordinator.check()).resolves.toEqual({ phase: 'available', version: '1.1.0', mode: 'native' })
+    await expect(coordinator.install()).resolves.toEqual({ phase: 'ready', version: '1.1.0', mode: 'native' })
     expect(downloadUpdate).toHaveBeenCalledOnce()
     expect(beforeRestart).toHaveBeenCalledOnce()
     expect(quitAndInstall).toHaveBeenCalledWith(false, true)
@@ -95,8 +95,8 @@ describe('desktop update coordinator', () => {
     expect(downloadUpdate).not.toHaveBeenCalled()
     checked.resolve({ isUpdateAvailable: true, updateInfo: { version: '1.2.0' } })
 
-    await expect(checking).resolves.toEqual({ phase: 'available', version: '1.2.0' })
-    await expect(installing).resolves.toEqual({ phase: 'ready', version: '1.2.0' })
+    await expect(checking).resolves.toEqual({ phase: 'available', version: '1.2.0', mode: 'native' })
+    await expect(installing).resolves.toEqual({ phase: 'ready', version: '1.2.0', mode: 'native' })
     expect(downloadUpdate).toHaveBeenCalledOnce()
   })
 })

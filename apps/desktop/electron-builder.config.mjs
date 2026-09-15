@@ -67,6 +67,7 @@ export function createElectronBuilderConfig(
     extraResources: [
       { from: buildPaths.runtime, to: 'runtime' },
       { from: buildPaths.dsh, to: 'dsh' },
+      { from: 'lib/managed-update-helper.js', to: 'managed-update/helper.mjs' },
       // electron-builder excludes a source directory's root node_modules.
       { from: join(buildPaths.dsh, 'node_modules'), to: 'dsh/node_modules' },
     ],

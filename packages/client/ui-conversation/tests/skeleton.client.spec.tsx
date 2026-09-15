@@ -410,6 +410,33 @@ describe('ConversationRoot resident composer', () => {
     expect(b.view.queryByText('Root')).toBeNull()
   })
 
+  it('reports live composer impact to the Desktop update bridge', () => {
+    const reportImpact = vi.fn()
+    Object.defineProperty(window, 'dshDesktop', {
+      configurable: true,
+      value: { protocolVersion: 2, updates: { reportImpact } },
+    })
+    const b = mount(sessionSnapshotOf())
+    expect(reportImpact).toHaveBeenLastCalledWith({
+      hasDraft: true,
+      attachmentCount: 0,
+      submitting: false,
+    })
+    act(() => { b.wiring.setDraft('') })
+    expect(reportImpact).toHaveBeenLastCalledWith({
+      hasDraft: false,
+      attachmentCount: 0,
+      submitting: false,
+    })
+    b.view.unmount()
+    expect(reportImpact).toHaveBeenLastCalledWith({
+      hasDraft: false,
+      attachmentCount: 0,
+      submitting: false,
+    })
+    delete (window as Window & { dshDesktop?: unknown }).dshDesktop
+  })
+
   it('shows hierarchy only for subagents and opens their ordinary owner', () => {
     const b = mount(sessionSnapshotOf(), undefined, undefined, { summaryOrigin: 'subagent' })
     const root = b.view.getByRole('button', { name: 'Root' })
