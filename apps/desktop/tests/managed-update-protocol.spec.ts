@@ -1,3 +1,4 @@
+import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   assertManagedUpdateRedirect,
@@ -182,7 +183,7 @@ describe('Desktop managed update protocol', () => {
       token: 'a'.repeat(64),
       capability: { ...capabilityValue, manifestSha256: 'b'.repeat(64) },
       selectedManifest: 'source',
-      stageRoot: 'C:\\Users\\test\\AppData\\Local\\dsh\\updates\\stage',
+      stageRoot: resolve('.test-managed-update-stage'),
       waitPids: [12, 34, 12],
       waitTimeoutMs: 60_000,
       installedSequence: 1,
