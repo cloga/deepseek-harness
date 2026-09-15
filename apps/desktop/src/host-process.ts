@@ -65,6 +65,13 @@ export interface DesktopHostReady {
   readonly dshVersion: string
 }
 
+/** Host-owned work that an update confirmation must disclose. */
+export interface DesktopUpdateImpact {
+  readonly runningSessions: number
+  readonly queuedMessages: number
+  readonly runningJobs: number
+}
+
 /** One dsh backend running under the bundled upstream Node.js executable. */
 export class DesktopHostProcess {
   private child: ChildProcess | undefined
@@ -84,6 +91,9 @@ export class DesktopHostProcess {
   private exitPromise: Promise<void> | undefined
   private stderr = ''
   private failureReported = false
+
+  /** Process id owned by this host, when it has been spawned. */
+  get pid(): number | undefined { return this.child?.pid }
 
   /**
    * @param node - absolute bundled upstream Node.js executable.
@@ -169,6 +179,7 @@ export class DesktopHostProcess {
     if (child === undefined || !child.connected || this.requestPipe === undefined) {
       throw new Error('dsh desktop host is unavailable')
     }
+
     if (this.nextStreamId > 0xffff_ffff) throw new Error('dsh desktop host exhausted its request stream ids')
     const streamId = this.nextStreamId++
     const method = request.method.toUpperCase()
@@ -203,6 +214,29 @@ export class DesktopHostProcess {
         this.failPending(streamId, errorOf(error, 'dsh desktop request upload failed'))
       })
     })
+  }
+
+  /** Read current Host work through the same private request transport used by the application. */
+  async updateImpact(): Promise<DesktopUpdateImpact> {
+    const response = await this.fetch(new Request('dsh-app://app/.dsh/update-impact'))
+    if (!response.ok) throw new Error(`dsh desktop host update impact returned HTTP ${String(response.status)}`)
+    const value: unknown = await response.json()
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new Error('dsh desktop host returned invalid update impact')
+    }
+    const impact = value as Record<string, unknown>
+    const keys = Object.keys(impact).sort().join(',')
+    if (keys !== 'queuedMessages,runningJobs,runningSessions'
+      || !Number.isSafeInteger(impact.runningSessions) || !Number.isSafeInteger(impact.queuedMessages)
+      || !Number.isSafeInteger(impact.runningJobs)
+      || Number(impact.runningSessions) < 0 || Number(impact.queuedMessages) < 0 || Number(impact.runningJobs) < 0) {
+      throw new Error('dsh desktop host returned invalid update impact')
+    }
+    return {
+      runningSessions: Number(impact.runningSessions),
+      queuedMessages: Number(impact.queuedMessages),
+      runningJobs: Number(impact.runningJobs),
+    }
   }
 
   /** Request graceful teardown, then wait for child exit. */

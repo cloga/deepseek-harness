@@ -20,6 +20,8 @@ const harness = await vi.hoisted(async () => {
   let navigated = deferred()
   let errorPublished = deferred()
   let quitCompleted = deferred()
+  let managedUpdates = false
+  let hostImpacts = [{ runningSessions: 0, queuedMessages: 0, runningJobs: 0 }]
   class FakeWindow extends EventEmitter {
     destroyed = false
     readonly urls: string[] = []
@@ -45,6 +47,7 @@ const harness = await vi.hoisted(async () => {
     close() { this.destroyed = true; this.emit('closed') }
   }
   class FakeHost {
+    readonly pid = 321
     readonly ready = deferred()
     readonly exited = deferred()
     readonly stopping = deferred()
@@ -54,6 +57,8 @@ const harness = await vi.hoisted(async () => {
       this.ready.reject(new Error('child stopped'))
       return this.exited.promise
     })
+    readonly updateImpact = vi.fn(async () => hostImpacts.shift()
+      ?? { runningSessions: 0, queuedMessages: 0, runningJobs: 0 })
     constructor(readonly node: string, readonly runtime: string, readonly profile: string) { hosts.push(this) }
   }
   const app = Object.assign(new EventEmitter(), {
@@ -63,6 +68,7 @@ const harness = await vi.hoisted(async () => {
     getLocale: () => 'en-US',
     getVersion: () => '1.0.0',
     getAppPath: () => 'desktop-test-app',
+    getPath: () => 'desktop-test-user-data',
     requestSingleInstanceLock: () => true,
     exit: vi.fn(),
     relaunch: vi.fn(),
@@ -75,6 +81,11 @@ const harness = await vi.hoisted(async () => {
   return {
     windows, hosts, handlers, app, FakeWindow, FakeHost,
     dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn() },
+    managedInstall: vi.fn(async () => ({
+      phase: 'installing' as const,
+      mode: 'windows-ops-managed' as const,
+      version: '1.2.3',
+    })),
     applyRelease: vi.fn(() => { preparing.resolve(); return prepared.promise }),
     assertProfileRuntime: vi.fn(),
     canRecoverProfile: vi.fn(() => true),
@@ -84,10 +95,15 @@ const harness = await vi.hoisted(async () => {
     nextHostStart() { hostStarted = deferred(); return hostStarted.promise },
     get pluginsEnabled() { return pluginsEnabled },
     set pluginsEnabled(value: boolean) { pluginsEnabled = value },
+    get managedUpdates() { return managedUpdates },
+    set managedUpdates(value: boolean) { managedUpdates = value },
+    setHostImpacts(value: typeof hostImpacts) { hostImpacts = [...value] },
     reset() {
       windows.length = 0; hosts.length = 0; handlers.clear(); app.removeAllListeners()
       app.isPackaged = true
       pluginsEnabled = false
+      managedUpdates = false
+      hostImpacts = [{ runningSessions: 0, queuedMessages: 0, runningJobs: 0 }]
       preparing = deferred(); prepared = deferred(); hostStarted = deferred()
       navigated = deferred(); errorPublished = deferred(); quitCompleted = deferred()
     },
@@ -100,6 +116,7 @@ vi.mock('electron', () => ({
   dialog: harness.dialog,
   ipcMain: {
     handle: (channel: string, handler: (event: { senderFrame: { url: string } }) => unknown) => { harness.handlers.set(channel, handler) },
+    on: vi.fn(),
   },
   Menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn() },
   protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn() },
@@ -122,6 +139,36 @@ vi.mock('../src/project-manager.ts', () => ({
 }))
 vi.mock('../src/host-process.ts', () => ({ DesktopHostProcess: harness.FakeHost }))
 vi.mock('../src/update-coordinator.ts', () => ({ DesktopUpdateCoordinator: vi.fn() }))
+vi.mock('../src/managed-update-state.ts', () => ({
+  loadDesktopManagedUpdateConfiguration: () => harness.managedUpdates
+    ? {
+      capability: {
+        schemaVersion: 1,
+        mode: 'windows-ops-managed',
+        manifestUrl: 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/release.json',
+        manifestSha256: 'a'.repeat(64),
+        minimumSequence: 2,
+        expectedSource: { version: '1.2.3', commit: 'b'.repeat(40) },
+      },
+      installedSequence: 1,
+      operationsRoot: 'desktop-test-operations',
+      completionPath: 'desktop-test-completion.json',
+      helperBundle: 'desktop-test-helper.mjs',
+    }
+    : undefined,
+}))
+vi.mock('../src/managed-update-coordinator.ts', () => ({
+  DesktopManagedUpdateCoordinator: class {
+    async check() {
+      return {
+        phase: 'available' as const,
+        mode: 'windows-ops-managed' as const,
+        version: '1.2.3',
+      }
+    }
+    readonly install = harness.managedInstall
+  },
+}))
 
 function invoke(channel: string): unknown {
   const handler = harness.handlers.get(channel)
@@ -134,6 +181,8 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.useFakeTimers()
   harness.reset()
+  harness.dialog.showMessageBox.mockReset()
+  harness.managedInstall.mockClear()
   vi.stubEnv('DSH_DESKTOP_NODE_BINARY', 'test-node')
   vi.stubEnv('DSH_DESKTOP_PNPM_ENTRY', 'test-pnpm')
   vi.stubEnv('DSH_DESKTOP_DSH_DIR', 'test-runtime')
@@ -155,6 +204,31 @@ afterEach(async () => {
 })
 
 describe('desktop main startup', () => {
+  it('requires a fresh managed-update confirmation when active work changes in the dialog', async () => {
+    harness.managedUpdates = true
+    harness.setHostImpacts([
+      { runningSessions: 0, queuedMessages: 0, runningJobs: 0 },
+      { runningSessions: 1, queuedMessages: 0, runningJobs: 0 },
+      { runningSessions: 1, queuedMessages: 0, runningJobs: 0 },
+    ])
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 0 })
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+
+    await Promise.resolve(invoke(DESKTOP_IPC.updatesInstall))
+
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledTimes(2)
+    const firstDialog = harness.dialog.showMessageBox.mock.calls[0]?.[0] as { detail: string } | undefined
+    const secondDialog = harness.dialog.showMessageBox.mock.calls[1]?.[0] as { detail: string } | undefined
+    expect(firstDialog?.detail).toContain('Running Sessions: 0')
+    expect(secondDialog?.detail).toContain('Running Sessions: 1')
+    expect(harness.managedInstall).toHaveBeenCalledOnce()
+  })
+
   it('exits with a diagnostic when both initialization and emergency navigation fail', async () => {
     const exited = Promise.withResolvers<undefined>()
     vi.spyOn(harness.app, 'getLocale').mockImplementationOnce(() => { throw new Error('locale unavailable') })
