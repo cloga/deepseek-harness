@@ -10,6 +10,7 @@ import {
   ipcMain,
   Menu,
   protocol,
+  type IpcMainEvent,
   type IpcMainInvokeEvent,
 } from 'electron'
 import { resolveDesktopPaths } from './paths.ts'
@@ -17,10 +18,14 @@ import { DesktopProjectManager, type DesktopProjectHooks } from './project-manag
 import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, parseDesktopPluginSource } from './plugin-source.ts'
 import { DesktopHostProcess } from './host-process.ts'
 import { DesktopBackendController, type DesktopBackendState } from './backend-controller.ts'
-import { DESKTOP_IPC, type DesktopUpdateState } from './ipc.ts'
+import { DESKTOP_IPC, parseDesktopRendererUpdateImpact, type DesktopUpdateState } from './ipc.ts'
 import { formatDesktopMessage, resolveDesktopLocale } from './locale.ts'
 import { claimDesktopSingleInstance } from './single-instance.ts'
 import { DesktopUpdateCoordinator } from './update-coordinator.ts'
+import { DesktopManagedUpdateCoordinator } from './managed-update-coordinator.ts'
+import { completeDesktopManagedUpdateHandoff, launchDesktopManagedUpdate } from './managed-update-launcher.ts'
+import { loadDesktopManagedUpdateConfiguration } from './managed-update-state.ts'
+import { completeDesktopManagedUpdate } from './managed-update-completion.ts'
 import { desktopErrorState } from './startup-error.ts'
 import { startupFailureDocument } from './startup-document.ts'
 
@@ -119,7 +124,7 @@ function createWindow(preload: string, show = false): BrowserWindow {
   return window
 }
 
-function assertDesktopSender(event: IpcMainInvokeEvent, hostnames: readonly string[]): void {
+function assertDesktopSender(event: IpcMainEvent | IpcMainInvokeEvent, hostnames: readonly string[]): void {
   const senderFrame = event.senderFrame
   if (senderFrame === null) throw new Error('dsh desktop: rejected IPC without a sender frame')
   const url = new URL(senderFrame.url)
@@ -154,6 +159,10 @@ async function main(): Promise<void> {
   const development = app.isPackaged ? undefined : join(app.getAppPath(), '.desktop-build', 'development', 'project')
   const activeProject = development ?? paths.profile
   const manager = new DesktopProjectManager(paths, resources)
+  const managedUpdate = app.isPackaged
+    ? await loadDesktopManagedUpdateConfiguration(process.resourcesPath, app.getPath('userData'), process.platform)
+    : undefined
+  let managedInstalledSequence = managedUpdate?.installedSequence ?? 0
   profileRecoveryAvailable = () => development === undefined && manager.canRecoverProfile()
   let pageError: Extract<DesktopBackendState, { phase: 'error' }> | undefined
   let quitting = false
@@ -162,6 +171,9 @@ async function main(): Promise<void> {
   let pluginWindow: BrowserWindow | undefined
   let shellInstallerOwnsQuit = false
   let updateState: DesktopUpdateState = { phase: 'idle' }
+  let rendererUpdateImpact = { hasDraft: false, attachmentCount: 0, submitting: false }
+  let updateConfirmation: Promise<DesktopUpdateState | undefined> | undefined
+  let managedCompletionChecked = false
   const locale = resolveDesktopLocale(app.getLocale())
   const messages = locale.messages
   const appPreload = fileURLToPath(new URL('./preload-app.cjs', import.meta.url))
@@ -210,6 +222,8 @@ async function main(): Promise<void> {
       start: () => host.start(),
       stop: () => host.stop(),
       fetch: (request: Request) => host.fetch(request),
+      get pid() { return host.pid },
+      updateImpact: () => host.updateImpact(),
     }
   }, (state) => {
     if (state.phase === 'starting' && !emergencyDocument) pageError = undefined
@@ -237,6 +251,11 @@ async function main(): Promise<void> {
       }
     },
     afterChange: () => backend.start(async () => {}),
+  }
+  const completionHooks: DesktopProjectHooks = {
+    beforeChange: async () => {},
+    healthCheck: projectDir => hooks.healthCheck(projectDir),
+    afterChange: async () => {},
   }
 
   recoverApplication = async (action): Promise<void> => {
@@ -272,6 +291,31 @@ async function main(): Promise<void> {
       await backend.start(async () => {
         if (development === undefined) {
           await manager.applyRelease()
+          if (managedUpdate !== undefined && !managedCompletionChecked) {
+            const completion = await completeDesktopManagedUpdate(
+              managedUpdate.operationsRoot,
+              managedUpdate.completionPath,
+              managedUpdate.capability,
+              managedUpdate.installedSequence,
+              process.execPath,
+              join(resources.dsh, 'desktop-runtime.json'),
+              async (manifest) => {
+                const receipt = await manager.mutate({
+                  type: 'plugin-install',
+                  source: manifest.pluginProvisioning.source,
+                }, completionHooks)
+                if (receipt === undefined) {
+                  throw new Error('desktop managed update: plugin transaction returned no verified receipt')
+                }
+                return receipt
+              },
+            )
+            if (completion.status === 'recovery-required') {
+              throw new Error(`${completion.message}\n\nRecovery: ${completion.command}`)
+            }
+            if (completion.status === 'complete') managedInstalledSequence = completion.sequence
+            managedCompletionChecked = true
+          }
         }
       })
       if (backend.host !== undefined) await navigateMain(applicationUrl)
@@ -282,13 +326,40 @@ async function main(): Promise<void> {
     return startup
   }
 
-  const updates = new DesktopUpdateCoordinator(
-    publishUpdate,
-    async () => {
-      shellInstallerOwnsQuit = true
-      await backend.stop()
-    },
-  )
+  const updates = managedUpdate === undefined
+    ? new DesktopUpdateCoordinator(
+      publishUpdate,
+      async () => {
+        shellInstallerOwnsQuit = true
+        await backend.stop()
+      },
+    )
+    : new DesktopManagedUpdateCoordinator(
+      managedUpdate.capability,
+      () => managedInstalledSequence,
+      publishUpdate,
+      async (selection) => {
+        const host = backend.host
+        const hostPid = host?.pid
+        if (host === undefined || hostPid === undefined) {
+          throw new Error('desktop managed update: Desktop Host is not running')
+        }
+        await completeDesktopManagedUpdateHandoff(
+          () => launchDesktopManagedUpdate({
+            operationsRoot: managedUpdate.operationsRoot,
+            nodeExecutable: resources.node,
+            helperBundle: managedUpdate.helperBundle,
+            capability: managedUpdate.capability,
+            selectedManifest: selection.kind,
+            installedSequence: managedInstalledSequence,
+            waitPids: [process.pid, hostPid],
+          }),
+          () => { shellInstallerOwnsQuit = true },
+          () => backend.stop(),
+          () => { app.quit() },
+        )
+      },
+    )
 
   protocol.handle(SCHEME, (request) => {
     const url = new URL(request.url)
@@ -397,8 +468,52 @@ async function main(): Promise<void> {
   })
   ipcMain.handle(DESKTOP_IPC.updatesInstall, async (event) => {
     assertDesktopSender(event, ['shell'])
-    await updates.install()
+    await confirmAndInstallUpdate()
   })
+  ipcMain.on(DESKTOP_IPC.updatesImpactReport, (event, value: unknown) => {
+    try {
+      assertDesktopSender(event, ['app'])
+      rendererUpdateImpact = parseDesktopRendererUpdateImpact(value)
+    } catch (error) {
+      console.error('desktop update impact report rejected', error)
+    }
+  })
+
+  const confirmAndInstallUpdate = (): Promise<DesktopUpdateState | undefined> => {
+    if (updateConfirmation !== undefined) return updateConfirmation
+    updateConfirmation = (async () => {
+      const state = updateState.phase === 'available' ? updateState : await updates.check()
+      if (state.phase !== 'available') return state
+      const hostImpact = await backend.host?.updateImpact() ?? {
+        runningSessions: 0,
+        queuedMessages: 0,
+        runningJobs: 0,
+      }
+      const managedDetail = state.mode === 'windows-ops-managed'
+        ? formatDesktopMessage(messages.managedUpdateDetail, {
+          version: state.version ?? '',
+          runningSessions: String(hostImpact.runningSessions),
+          queuedMessages: String(hostImpact.queuedMessages),
+          runningJobs: String(hostImpact.runningJobs),
+          draft: rendererUpdateImpact.hasDraft ? messages.yes : messages.no,
+          attachments: String(rendererUpdateImpact.attachmentCount),
+          submitting: rendererUpdateImpact.submitting ? messages.yes : messages.no,
+        })
+        : formatDesktopMessage(messages.updateDetail, { version: state.version ?? '' })
+      const result = await dialog.showMessageBox({
+        type: 'info',
+        title: messages.updateTitle,
+        message: messages.updateAvailable,
+        detail: managedDetail,
+        buttons: [state.mode === 'windows-ops-managed' ? messages.installInteractive : messages.installAndRestart, messages.later],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      if (result.response !== 0) return undefined
+      return updates.install()
+    })().finally(() => { updateConfirmation = undefined })
+    return updateConfirmation
+  }
 
   const checkAndPrompt = async (manual: boolean): Promise<void> => {
     const state = await updates.check()
@@ -422,17 +537,8 @@ async function main(): Promise<void> {
       }
       return
     }
-    const result = await dialog.showMessageBox({
-      type: 'info',
-      title: messages.updateTitle,
-      message: messages.updateAvailable,
-      detail: formatDesktopMessage(messages.updateDetail, { version: state.version ?? '' }),
-      buttons: [messages.installAndRestart, messages.later],
-      defaultId: 0,
-      cancelId: 1,
-    })
-    if (result.response !== 0) return
-    const installed = await updates.install()
+    const installed = await confirmAndInstallUpdate()
+    if (installed === undefined) return
     if (installed.phase === 'error') {
       await dialog.showMessageBox({
         type: 'error',
@@ -478,6 +584,7 @@ async function main(): Promise<void> {
       void showEmergencyError(error).catch((failure: unknown) => { console.error(failure) })
     })
     window.webContents.on('render-process-gone', (_event, details) => {
+      rendererUpdateImpact = { hasDraft: false, attachmentCount: 0, submitting: false }
       navigation = undefined
       emergencyDocument = false
       void showStartupError(new Error(`Desktop renderer exited: ${details.reason}`))
@@ -514,9 +621,7 @@ async function main(): Promise<void> {
   mainWindow = createMainWindow()
   await reconcileBackend().catch(() => undefined)
   // Window lifecycle callbacks run while backend startup is pending.
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   if (quitting) return
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   if (mainWindow !== undefined && development !== undefined && process.env.DSH_DESKTOP_OPEN_DEVTOOLS !== '0') {
     mainWindow.webContents.openDevTools({ mode: 'detach' })
   }

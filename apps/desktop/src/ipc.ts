@@ -28,13 +28,42 @@ export const DESKTOP_IPC = {
   updatesInstall: 'dsh-desktop:updates-install',
   updatesState: 'dsh-desktop:updates-state',
   capabilitiesGet: 'dsh-desktop:capabilities-get',
+  updatesImpactReport: 'dsh-desktop:updates-impact-report',
 } as const
+
+/** Unsaved application-document work reported through the fixed preload bridge. */
+export interface DesktopRendererUpdateImpact {
+  readonly hasDraft: boolean
+  readonly attachmentCount: number
+  readonly submitting: boolean
+}
+
+/** Validate the only application-document values accepted by the update confirmation. */
+export function parseDesktopRendererUpdateImpact(value: unknown): DesktopRendererUpdateImpact {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('dsh desktop: invalid update impact report')
+  }
+  const impact = value as Record<string, unknown>
+  if (Object.keys(impact).sort().join(',') !== 'attachmentCount,hasDraft,submitting'
+    || typeof impact.hasDraft !== 'boolean' || typeof impact.submitting !== 'boolean'
+    || !Number.isSafeInteger(impact.attachmentCount) || Number(impact.attachmentCount) < 0
+    || Number(impact.attachmentCount) > 1000) {
+    throw new Error('dsh desktop: invalid update impact report')
+  }
+  return {
+    hasDraft: impact.hasDraft,
+    attachmentCount: Number(impact.attachmentCount),
+    submitting: impact.submitting,
+  }
+}
 
 /** Desktop release update state rendered by desktop-owned UI. */
 export interface DesktopUpdateState {
   readonly phase: 'idle' | 'checking' | 'available' | 'installing' | 'ready' | 'error'
   readonly version?: string
   readonly message?: string
+  readonly mode?: 'native' | 'windows-ops-managed'
+  readonly interactiveInstaller?: boolean
 }
 
 /** Narrow bridge exposed through context isolation. */
@@ -69,4 +98,12 @@ export interface DshDesktopStartupApi extends Pick<DshDesktopApi, 'protocolVersi
   disablePlugins(): Promise<void>
   restart(): Promise<void>
   resetConfiguration(): Promise<void>
+}
+
+/** Minimal bridge available to the backend-provided application document. */
+export interface DshDesktopApplicationApi {
+  readonly protocolVersion: 2
+  readonly updates: {
+    reportImpact(impact: DesktopRendererUpdateImpact): void
+  }
 }

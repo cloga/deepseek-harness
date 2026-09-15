@@ -12,6 +12,7 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
+import type {} from '@deepseek-ai/dsh-agent'
 import {
   boot,
   composeEntries,
@@ -21,6 +22,7 @@ import {
 } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
+import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-api-gateway'
 import type { ConnectionFetchHandler } from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-client-modules'
@@ -95,6 +97,7 @@ const DESKTOP_PATCH = fileURLToPath(new URL('../config/desktop.cordis.patch.yml'
 const ROOT_CONFIG = '# Electron desktop composition root; package transactions own this file.\n[]\n'
 const ROOT_CONFIG_FILENAME = 'desktop.cordis.yml'
 const DESKTOP_STREAM_PATH = '/.dsh/remote-stream'
+const DESKTOP_UPDATE_IMPACT_PATH = '/.dsh/update-impact'
 
 const DESKTOP_TRANSPORT_SCRIPT = `globalThis.__DSH_TRANSPORT__={
   ownsHost:true,
@@ -126,6 +129,37 @@ const MIME: Readonly<Record<string, string>> = {
   '.json': 'application/json',
   '.svg': 'image/svg+xml',
   '.webmanifest': 'application/manifest+json',
+}
+
+/** Work that an interactive Desktop update would interrupt. */
+export interface DesktopUpdateImpact {
+  readonly runningSessions: number
+  readonly queuedMessages: number
+  readonly runningJobs: number
+}
+
+/** Read Host-owned live work without stopping or mutating it. */
+export function desktopUpdateImpact(ctx: Context): DesktopUpdateImpact {
+  const agents = ctx.agents.list()
+  const jobs = ctx.get('jobs')
+  const activeJobs = new Set<string>()
+  if (jobs !== undefined) {
+    for (const job of jobs.list()) {
+      if (job.status === 'running' || job.status === 'stopping') activeJobs.add(job.id)
+    }
+    for (const agent of agents) {
+      for (const job of jobs.list(agent)) {
+        if (job.status === 'running' || job.status === 'stopping') activeJobs.add(job.id)
+      }
+    }
+  }
+  return {
+    runningSessions: agents.filter(agent => agent.status === 'running').length,
+    queuedMessages: agents.reduce((count, agent) => (
+      count + agent.inbox.nextTurn.length + agent.inbox.nextStep.length
+    ), 0),
+    runningJobs: activeJobs.size,
+  }
 }
 
 function readManifest(path: string): PackageManifest {
@@ -339,11 +373,15 @@ export async function runDesktopHost(
           signal: controller.signal,
         }
         const request = new Request(url, init)
-        const response = url.pathname === DESKTOP_STREAM_PATH
-          ? await streams.fetch(request)
-          : url.pathname.startsWith('/api/')
-            ? await api.fetch(request)
-            : await assets.fetch(request)
+        const response = url.pathname === DESKTOP_UPDATE_IMPACT_PATH
+          ? request.method === 'GET'
+            ? Response.json(desktopUpdateImpact(ctx))
+            : new Response(null, { status: 405 })
+          : url.pathname === DESKTOP_STREAM_PATH
+            ? await streams.fetch(request)
+            : url.pathname.startsWith('/api/')
+              ? await api.fetch(request)
+              : await assets.fetch(request)
         await writeResponse(encodeDesktopResponseStart(command.streamId, {
           status: response.status,
           headers: [...response.headers.entries()],

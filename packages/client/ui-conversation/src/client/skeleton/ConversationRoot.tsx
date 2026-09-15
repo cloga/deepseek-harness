@@ -23,6 +23,22 @@ const CONTENT_MIN = 640
  * way to drag back. */
 const CONTENT_EDGE_BUDGET = 176
 
+interface DesktopUpdateImpactBridge {
+  readonly protocolVersion: 2
+  readonly updates?: {
+    reportImpact(impact: {
+      readonly hasDraft: boolean
+      readonly attachmentCount: number
+      readonly submitting: boolean
+    }): void
+  }
+}
+
+function reportDesktopUpdateImpact(impact: Parameters<NonNullable<DesktopUpdateImpactBridge['updates']>['reportImpact']>[0]): void {
+  const bridge = (window as Window & { readonly dshDesktop?: DesktopUpdateImpactBridge }).dshDesktop
+  bridge?.updates?.reportImpact(impact)
+}
+
 /** Reads the persisted width preference; durable-storage boundary, so a
  * missing or corrupt value resolves to "no preference".
  * @returns the stored width in px, or null when unset or invalid. */
@@ -148,6 +164,19 @@ export function ConversationRoot({
   // A plugin this package cannot import (ui-model-selection) says this session cannot
   // send; its reason is already localized by whoever raised it.
   const composerBlock = useComposerBlock(block => block)
+
+  useEffect(() => {
+    reportDesktopUpdateImpact({
+      hasDraft: (inputState?.draft.length ?? 0) > 0,
+      attachmentCount: inputState?.attachmentIds.length ?? 0,
+      submitting: inputState?.phase === 'adjudicating'
+        || inputState?.phase === 'claimed'
+        || inputState?.phase === 'submitting',
+    })
+  }, [inputState?.attachmentIds.length, inputState?.draft.length, inputState?.phase])
+  useEffect(() => () => {
+    reportDesktopUpdateImpact({ hasDraft: false, attachmentCount: 0, submitting: false })
+  }, [])
 
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pendingWorkspaceId, setPendingWorkspaceId] = useState<WorkspaceId | undefined>()

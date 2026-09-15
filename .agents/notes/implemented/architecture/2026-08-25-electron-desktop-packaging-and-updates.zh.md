@@ -73,11 +73,17 @@ Desktop 在直接修改 profile 前停止 Host。包操作失败后保留部分�
 
 ## 更新与恢复
 
-Electron 更新只使用一个 `electron-updater` 发布流和签名 `electron-builder` 产物。该版本就是 Desktop 发布版本；不存在独立 dsh manifest、兼容范围或仅更新 dsh 的操作。前台安装会等待正在进行的后台检查，而不会把检查结果复用成安装结果。更新弹窗下载并安装 Electron 产物，然后重启进入新发布。
+Desktop 根据打包资源精确选择一种更新实现。包含 `app-update.yml` 的已签名包使用 `electron-updater`，并保留平台发布者验证。不包含 `app-update.yml` 的 Windows Ops 包可以携带 `managed-update/capability.json` 与独立的 `managed-update/helper.mjs`；启动会拒绝同时携带两种配置的包。两种实现都替换完整 Desktop 发布，因此不存在仅更新 dsh 的操作或独立运行时兼容范围。
+
+托管 capability 通过带版本 HTTPS URL、规范 JSON SHA-256、最小 sequence、预期 Desktop 版本和预期源码 commit 锁定一个不可变的 `cloga/deepseek-harness` GitHub Release manifest。Parser 只把可选的 `cloga/dsh-windows-ops` manifest 作为 sequence-zero migration 接受。检查会验证精确 manifest fields、规范 self-hash、source repository、tag、commit、sequence、build receipt、installer hashes、installed evidence 与经过验证的 GitHub Release plugin source。手动 redirect 保持为不带凭据的 HTTPS，并限制在 GitHub release asset hosts。Renderer IPC 只提供有界 composer-impact fields，不能选择 URL、executable、path、process id 或 arguments。
+
+安装确认会报告 Host 拥有的运行中 Sessions、排队消息、活动 jobs 与 renderer 拥有的未保存输入。Electron 创建随机 operation directory，复制内置 Node.js executable 与独立 helper，写入一个由 main process 拥有的 handoff，并等待包含一次性 token 与所选 manifest hash 的 acknowledgement。缺失、格式错误、不匹配或超时的 acknowledgement 会让 Desktop 保持运行。确认后，Electron 把退出归属交给 updater path，只正常停止自己拥有的 Host，然后退出。Helper 只等待 handoff 中的 Electron 与 Host process ids，下载并重新验证 build receipt 与 installer，写入 pending marker，再次验证 staged installer，从子进程环境中移除凭据型变量，并以空 arguments 启动交互式 NSIS。它绝不结束进程，也不抑制 Windows warning 或 UAC。
+
+下一个 Desktop 启动只扫描自己的 operation directory。成功 helper result 不等于 completion：运行中 executable 与 `desktop-runtime.json` hashes、manifest sequence、pending marker 与经过验证的 plugin-provision receipt 必须全部匹配发布。Desktop 在启动活动 Host 前执行发布锁定的 GitHub Release plugin transaction，并且只在 activation 成功后写入 durable completion sequence。中断 operation、非零 installer exit、格式错误或冲突 records、installed-evidence mismatch 与 plugin failure 会进入 startup recovery，而不是报告成功。Windows Ops `Complete` 保持为外部 recovery owner，并消费同一 manifest 与 receipt identities。
 
 [立即显示窗口决策](2026-09-09-desktop-immediate-window-and-direct-start.zh.md)负责本地加载页、直接启动 Host 和主窗口恢复。profile 协调遵循[内置运行时决策](2026-09-08-desktop-bundled-runtime-and-external-plugins.zh.md)。
 
-`DSH_DESKTOP_AUTO_UPDATE_ENV` 默认为测试部署，也可以选择生产部署，并同时决定目标专用的 generic-provider URL 与 COS 目标。发布自动化通过 `DOWNLOAD_TEST_ORIGIN` 提供测试 HTTPS origin，并通过 `DOWNLOAD_TEST_COS_BUCKET` 或 `DOWNLOAD_PROD_COS_BUCKET` 提供各部署的 bucket；可变的测试路由与 COS 存储身份不写入源码，部署基础设施变更时无需发布新代码，而公开的生产 origin 仍固定。打包只解析公开更新 URL、禁止 electron-builder 发布、从子进程环境中删除每个 COS 凭据字段，并且只有在 electron-builder 以及每个签名或公证 hook 成功后才写入完成记录。目标上传还必须提供所选 bucket，随后会先要求完成记录、根 dsh 版本、Desktop 版本、根据版本得出的频道元数据、产物名称、大小与 SHA-512 全部一致，再读取所选凭据或发送数据。它先上传不可变且带版本的更新载荷与所有独立 blockmap，最后替换 electron-builder 生成的频道元数据，并且不会删除历史对象。稳定版本使用 `latest` 元数据名称，预发布版本则使用语义化版本的第一个预发布标识符。NSIS 把 blockmap 嵌入已签名的可执行文件，macOS ZIP 则使用独立 blockmap；两者都让 electron-updater 在平台支持时只下载变化的数据块，而应用替换与本地 pnpm 包操作仍是两个独立操作。
+`DSH_DESKTOP_AUTO_UPDATE_ENV` 默认为测试部署，也可以选择生产部署，并同时决定目标专用的原生 generic-provider URL 与 COS 目标。发布自动化通过 `DOWNLOAD_TEST_ORIGIN` 提供测试 HTTPS origin，并通过 `DOWNLOAD_TEST_COS_BUCKET` 或 `DOWNLOAD_PROD_COS_BUCKET` 提供各部署的 bucket；可变的测试路由与 COS 存储身份不写入源码，部署基础设施变更时无需发布新代码，而公开的生产 origin 仍固定。打包只解析公开更新 URL、禁止 electron-builder 发布、从子进程环境中删除每个 COS 凭据字段，并且只有在 electron-builder 以及每个签名或公证 hook 成功后才写入完成记录。目标上传还必须提供所选 bucket，随后会先要求完成记录、根 dsh 版本、Desktop 版本、根据版本得出的频道元数据、产物名称、大小与 SHA-512 全部一致，再读取所选凭据或发送数据。它先上传不可变且带版本的更新载荷与所有独立 blockmap，最后替换 electron-builder 生成的频道元数据，并且不会删除历史对象。稳定版本使用 `latest` 元数据名称，预发布版本则使用语义化版本的第一个预发布标识符。NSIS 把 blockmap 嵌入已签名的可执行文件，macOS ZIP 则使用独立 blockmap；两者都让 electron-updater 在平台支持时只下载变化的数据块，而应用替换与本地 pnpm 包操作仍是两个独立操作。
 
 ## 安全与发布策略
 

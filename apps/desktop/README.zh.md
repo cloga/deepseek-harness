@@ -15,7 +15,7 @@
 | 状态归属 | 共享可执行依赖图会让 CLI（命令行界面）与 Desktop 相互改变 dsh、Cordis、插件或原生模块版本，而两个桌面进程还可能争用同一个 profile。 | Electron 在访问任何 profile 前获取进程生命周期单实例锁，并独占 `$DSH_HOME/profiles/desktop` 及其包管理器状态。CLI 与 Desktop 共享 `$DSH_HOME` 下受支持的产品数据，但绝不共享可执行包、插件激活、锁文件或 `node_modules`。 |
 | 通信 | 监听 Web 服务会引入端口归属、认证、CORS 与暴露风险；Electron 与上游 Node.js 之间也需要明确的跨进程协议。 | 应用不打开 Web 端口。`dsh-app://` 承载 Web 资源和 Fetch 流量；分帧字节管道以背压传输有界请求与响应分块，Node IPC 只承载子进程生命周期控制。 |
 | 插件变更 | 包安装和 Host 启动可能失败。 | Desktop 停止 Host 后直接修改当前 profile。失败保留部分修改供用户修复，不自动回滚 profile。 |
-| 更新 | 桌面壳与 dsh 独立更新会重新产生版本分裂，而桌面壳未变化的数据块不应强制完整传输。 | Electron 壳、匹配的 dsh 运行时、Node.js 与 pnpm 组成一个已签名更新单元。平台更新产物可以复用未变化的数据块，但运行时版本选择绝不脱离 Desktop 发布。 |
+| 更新 | 桌面壳与 dsh 独立更新会重新产生版本分裂，而未签名企业构建不能削弱原生发布者验证。 | 已签名发布使用原生更新器。Windows Ops 构建可以改为携带一个锁定源码的托管更新 capability 与独立 helper；两种模式互斥，并且都替换完整 Desktop 发布。 |
 
 [Electron 打包与更新 Agent Note](../../.agents/notes/implemented/architecture/2026-08-25-electron-desktop-packaging-and-updates.zh.md) 记录了这些决策背后的理由、替代方案、安全约束和发布验证要求。
 
@@ -42,6 +42,18 @@ Electron 根据应用 locale 选择类型化的英文或中文桌面壳文案，
 重置删除 `$DSH_HOME/profiles/desktop` 中除所持事务锁外的所有条目，然后初始化内置 profile。它删除 Desktop 配置和已安装第三方包，不保留备份。共享任务、设置和 Harness-home `.env` 保持不变。壳资源和 preload 失败时使用独立文档显示可用恢复操作和诊断；其控件不依赖 preload。
 
 包事务独占持有 `$DSH_HOME/profiles/desktop/lock`，直到 pnpm 进程退出。重置保留目录及其锁，直到初始化和 Host 启动完成。共享链接在 macOS/Linux 使用目录软链接，在 Windows 使用 junction；清理只移除链接，不删除其目标。共享包使用文件系统的规范路径识别，因此 Windows 路径大小写变化不会单独触发 profile 激活。原生构建遵循 profile 中经过审查的 `allowBuilds` 列表；新安装的包如果需要构建但未在列表中获准，事务会失败。
+
+### Windows Ops 托管更新
+
+包含 `resources/app-update.yml` 的已签名包使用 `electron-updater`，并保留其发布者与平台签名检查。Windows Ops 包仅在同时携带 `resources/managed-update/capability.json` 与已打包的 `resources/managed-update/helper.mjs` 时选择独立托管模式；启动会拒绝同时启用两种模式的包。Capability 通过带版本 GitHub Release URL、规范 manifest SHA-256、最小 sequence、预期 Desktop 版本和预期源码 commit 锁定一个不可变 HTTPS `cloga/deepseek-harness` 发布 manifest。可选的 `cloga/dsh-windows-ops` 迁移 manifest 仅在已安装 sequence 为零时可接受。
+
+**Check for updates** 只获取 capability URL，只通过 GitHub release asset host 跟随不带凭据的 HTTPS redirect，并验证精确 schema、规范 self-hash、sequence、源码 repository、tag、commit、installer hash、installed evidence 与经过验证的 GitHub Release plugin source。Renderer 消息不能提供 URL、executable、process id、path 或 installer argument。
+
+**Install** 在一次确认前报告正在运行的 Sessions、排队消息、活动 jobs、当前 composer draft、attachments 与 submission 状态。确认后，Electron 在自己的 user-data 目录中写入一次性交接文件，并启动复制的 Node.js 与独立 helper。除非 helper 验证所选 manifest 并确认同一 manifest hash，Electron 会保持应用与 Host 运行。确认后，Electron 只停止自己拥有的 Host，并正常退出。Helper 只等待记录的 Electron 与 Host process id，下载并重新验证 build receipt 与 installer，在 operation 目录下暂存它们，检查声明的未签名 Authenticode 状态，从子进程环境中移除凭据型变量，并以空 silent argument 启动 NSIS installer。Windows warning 与 UAC 仍由用户交互决定。
+
+下一个 Desktop process 仅在 helper result、pending marker、manifest、已安装 executable、runtime descriptor、managed sequence 与 plugin-provision receipt 全部匹配时接受 completion。它在启动活动 Host 前通过经过验证的 GitHub Release transaction 安装发布锁定插件。缺失、中断、阻塞、冲突或不匹配的 evidence 会打开启动 recovery，而不是报告成功。从经过验证的 `dsh-windows-ops` checkout 执行 recovery 时，使用 `pwsh -NoProfile -File .\Install-DshOfficialDesktop.ps1 -Action Complete`。
+
+Windows Ops 拥有发布并为其未签名托管构建注入 capability；renderer 与普通 Desktop packaging 不会创建或编辑它。源码 release manifest 保持发布 identity，Windows Ops 消费该记录，而不维护第二份发布定义。当托管 Windows 构建改用带发布者验证的已签名原生产物时，省略 capability 即可删除托管路径，而无需改变原生更新器。
 
 ## 开发
 

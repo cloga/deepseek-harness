@@ -13,7 +13,9 @@
     { "path": "../../packages/boot/cmdline" },
     { "path": "../../packages/client/connection/tsconfig.host.json" },
     { "path": "../../packages/client/modules" },
+    { "path": "../../packages/core/agent" },
     { "path": "../../packages/host/webserver" },
+    { "path": "../../packages/jobs/jobs" },
     { "path": "../../packages/util/launch-environment" }
   ]
 }

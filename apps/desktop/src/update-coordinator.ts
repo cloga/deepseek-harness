@@ -50,22 +50,23 @@ export class DesktopUpdateCoordinator {
   }
 
   private async doCheck(): Promise<DesktopUpdateState> {
-    this.publish({ phase: 'checking' })
+    this.publish({ phase: 'checking', mode: 'native' })
     try {
       if (!this.enabled()) {
         this.availableVersion = undefined
-        return this.publish({ phase: 'idle' })
+        return this.publish({ phase: 'idle', mode: 'native' })
       }
       const result = await this.updater.checkForUpdates()
       const version = result?.isUpdateAvailable === true ? result.updateInfo.version : undefined
       this.availableVersion = version
       return version === undefined
-        ? this.publish({ phase: 'idle' })
-        : this.publish({ phase: 'available', version })
+        ? this.publish({ phase: 'idle', mode: 'native' })
+        : this.publish({ phase: 'available', version, mode: 'native' })
     } catch (error) {
       this.availableVersion = undefined
       return this.publish({
         phase: 'error',
+        mode: 'native',
         message: error instanceof Error ? error.message : String(error),
       })
     }
@@ -76,17 +77,18 @@ export class DesktopUpdateCoordinator {
     if (version === undefined) {
       throw new Error('desktop update: no verified update is available')
     }
-    this.publish({ phase: 'installing', version })
+    this.publish({ phase: 'installing', version, mode: 'native' })
     try {
       await this.updater.downloadUpdate()
       this.availableVersion = undefined
-      const ready = this.publish({ phase: 'ready', version })
+      const ready = this.publish({ phase: 'ready', version, mode: 'native' })
       await this.beforeRestart()
       this.updater.quitAndInstall(false, true)
       return ready
     } catch (error) {
       return this.publish({
         phase: 'error',
+        mode: 'native',
         version,
         message: error instanceof Error ? error.message : String(error),
       })
