@@ -5,12 +5,13 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { CodeRuntime } from '@deepseek-ai/dsh-code-runtime'
+import { createScope, type Scope } from '@deepseek-ai/dsh-scope'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { turnBoundaryProjectionDefinition } from '@deepseek-ai/dsh-agent-loop'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolResult } from '@deepseek-ai/dsh-tools'
 import { FileSystem, FsError, FsTargetKey, FsVersion } from '@deepseek-ai/dsh-fs'
@@ -81,6 +82,9 @@ class FakeFs extends FileSystem {
       throw new FsError(`too large: ${target.displayPath}`, 'FS_TOO_LARGE')
     }
     return bytes
+  }
+  override async readByteRange(target: FsTarget, range: { offset: number; length: number }): Promise<Uint8Array> {
+    return new TextEncoder().encode(this.files.get(target.targetKey) ?? '').subarray(range.offset, range.offset + range.length)
   }
   override async listDir(_target: FsTarget): Promise<FsDirEntry[]> {
     return []
@@ -197,11 +201,11 @@ describe('registration', () => {
     // withdraw both, not just the schemas.
     expect(ctx.tools.schemas()).toHaveLength(3)
     const sectionNames = (a: { sections: { name: string }[] }) => a.sections.map(s => s.name).sort()
-    expect(sectionNames(await ctx.systemPrompt.assemble())).toEqual(['deployment:persona', 'harness:identity', 'tool:edit', 'tool:read', 'tool:write'])
+    expect(sectionNames(await ctx.systemPrompt.assemble())).toEqual(['deployment:persona-prefix', 'deployment:persona-suffix', 'harness:identity', 'tool:edit', 'tool:read', 'tool:write'])
     await fiber.dispose()
     expect(ctx.tools.schemas()).toHaveLength(0)
     // Only the system-prompt plugin's own built-in sections remain.
-    expect(sectionNames(await ctx.systemPrompt.assemble())).toEqual(['deployment:persona', 'harness:identity'])
+    expect(sectionNames(await ctx.systemPrompt.assemble())).toEqual(['deployment:persona-prefix', 'deployment:persona-suffix', 'harness:identity'])
   })
 })
 
@@ -874,51 +878,13 @@ describe('sandbox escalation API (write/edit)', () => {
     }
   })
 
-  it('advertises the closed sandbox-mode vocabulary on write and edit under a confining backend', async () => {
+  it('advertises the closed target vocabulary on write and edit under a confining backend', async () => {
     const { ctx } = await setupConfining()
     for (const name of ['write', 'edit'] as const) {
       const props = fsSchema(ctx, name).parameters.properties
-      expect(props['sandbox_permissions']?.enum).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
+      expect(props['sandbox_permissions']?.enum).toEqual(['workspace-write', 'danger-full-access'])
       expect(props['justification']).toBeDefined()
     }
-  })
-
-  it('projects only usable escalation fields for each session', async () => {
-    const { ctx } = await setupConfining({ approval: true })
-    const propertiesFor = async (name: 'write' | 'edit', agent: Agent) => {
-      const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === name)!
-      return (schema.parameters as { properties: Record<string, { enum?: string[] }> }).properties
-    }
-    const readOnly = escalationAgent([{ type: 'sandbox/mode', data: { mode: 'read-only' } }]) as Agent
-    const unrestricted = escalationAgent([{ type: 'sandbox/mode', data: { mode: 'danger-full-access' } }]) as Agent
-    const never = escalationAgent([
-      { type: 'sandbox/mode', data: { mode: 'read-only' } },
-      { type: 'approval/policy', data: { policy: 'never' } },
-    ]) as Agent
-
-    for (const name of ['write', 'edit'] as const) {
-      expect((await propertiesFor(name, readOnly))['sandbox_permissions']?.enum)
-        .toEqual(['workspace-write', 'danger-full-access'])
-      expect(await propertiesFor(name, unrestricted)).not.toHaveProperty('sandbox_permissions')
-      expect(await propertiesFor(name, never)).not.toHaveProperty('sandbox_permissions')
-    }
-  })
-
-  it('projects no escalation fields without an approval service', async () => {
-    const { ctx } = await setupConfining()
-    const agent = escalationAgent([{ type: 'sandbox/mode', data: { mode: 'read-only' } }]) as Agent
-    const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === 'write')!
-    expect((schema.parameters as { properties: Record<string, unknown> }).properties)
-      .not.toHaveProperty('sandbox_permissions')
-  })
-
-  it('projects no escalation fields when an approval service has no sandbox policy', async () => {
-    const { ctx } = await setup()
-    await ctx.plugin(ApprovalService)
-    const agent = escalationAgent() as Agent
-    const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === 'write')!
-    expect((schema.parameters as { properties: Record<string, unknown> }).properties)
-      .not.toHaveProperty('sandbox_permissions')
   })
 
   it('a plain write stamps the default mode with the calling session root', async () => {
@@ -941,59 +907,13 @@ describe('sandbox escalation API (write/edit)', () => {
     }])
   })
 
-  it('same and narrower requests retain the standing policy without approval or downgrade', async () => {
-    const same = await setupConfining({ approval: true })
-    const samePrompted = vi.fn()
-    same.ctx.on('approval/request', () => { samePrompted(); return Promise.resolve('allowed-once' as const) })
-    await call(same.ctx, 'write', {
-      file_path: 'a.txt',
-      content: 'x',
-      sandbox_permissions: 'workspace-write',
-    }, escalationAgent())
-    await call(same.ctx, 'write', {
-      file_path: 'b.txt',
-      content: 'x',
-      sandbox_permissions: 'read-only',
-    }, escalationAgent())
-    expect(same.fs.stamped).toEqual([
-      { mode: 'workspace-write', workspaceRoot: resolve('/session-project'), sessionId: SessionId('sess-fs-esc') },
-      { mode: 'workspace-write', workspaceRoot: resolve('/session-project'), sessionId: SessionId('sess-fs-esc') },
-    ])
-    expect(samePrompted).not.toHaveBeenCalled()
-
-    const narrower = await setupConfining({ approval: true })
-    const narrowerPrompted = vi.fn()
-    narrower.ctx.on('approval/request', () => { narrowerPrompted(); return Promise.resolve('allowed-once' as const) })
-    await call(narrower.ctx, 'write', {
-      file_path: 'a.txt',
-      content: 'x',
-      sandbox_permissions: 'workspace-write',
-      justification: '   ',
-    }, escalationAgent([{ type: 'sandbox/mode', data: { mode: 'danger-full-access' } }]))
-    expect(narrower.fs.stamped).toEqual([{
-      mode: 'danger-full-access',
-      workspaceRoot: resolve('/session-project'),
-      sessionId: SessionId('sess-fs-esc'),
-    }])
-    expect(narrowerPrompted).not.toHaveBeenCalled()
-  })
-
-  it('a denied write maps to the shared marker plus the escalation hint when approval is available', async () => {
-    const { ctx, fs } = await setupConfining({ approval: true })
-    fs.rejectWith = new FsError('denied', 'FS_SANDBOX_DENIED')
-    const result = await call(ctx, 'write', { file_path: 'a.txt', content: 'x' }, escalationAgent())
-    expect(result.isError).toBe(true)
-    expect(text(result)).toContain('[sandbox: file access denied under workspace-write mode]')
-    expect(text(result)).toContain('retry this exact operation once with sandbox_permissions')
-  })
-
-  it('a denied write omits an escalation hint when approval is unavailable', async () => {
+  it('a denied write maps to the shared marker plus the escalation hint (isError)', async () => {
     const { ctx, fs } = await setupConfining()
     fs.rejectWith = new FsError('denied', 'FS_SANDBOX_DENIED')
     const result = await call(ctx, 'write', { file_path: 'a.txt', content: 'x' }, escalationAgent())
     expect(result.isError).toBe(true)
     expect(text(result)).toContain('[sandbox: file access denied under workspace-write mode]')
-    expect(text(result)).not.toContain('sandbox_permissions')
+    expect(text(result)).toContain('retry this exact operation once with sandbox_permissions')
   })
 
   it('a non-FS_SANDBOX_DENIED provider error passes through unchanged', async () => {
@@ -1047,19 +967,11 @@ describe('sandbox escalation API (write/edit)', () => {
     expect(text(result)).toContain('no agent to route it through')
   })
 
-  it('requires a non-empty justification for an actual wider escalation', async () => {
+  it('rejects the escalation argument pairing (one field without the other)', async () => {
     const { ctx } = await setupConfining()
-    const missing = await call(ctx, 'write', { file_path: 'a.txt', content: 'x', sandbox_permissions: 'danger-full-access' }, escalationAgent())
+    const missing = await call(ctx, 'write', { file_path: 'a.txt', content: 'x', sandbox_permissions: 'workspace-write' }, escalationAgent())
     expect(missing.isError).toBe(true)
     expect(text(missing)).toContain('sandbox_permissions requires a justification')
-    const blank = await call(ctx, 'write', {
-      file_path: 'a.txt',
-      content: 'x',
-      sandbox_permissions: 'danger-full-access',
-      justification: '   ',
-    }, escalationAgent())
-    expect(blank.isError).toBe(true)
-    expect(text(blank)).toContain('expected a non-empty sentence')
   })
 
   it('sandbox_permissions under a non-confining backend fails closed (unadvertised field still reaches execute)', async () => {
@@ -1067,5 +979,104 @@ describe('sandbox escalation API (write/edit)', () => {
     const result = await call(ctx, 'write', { file_path: 'a.txt', content: 'x', sandbox_permissions: 'workspace-write', justification: 'why' }, escalationAgent())
     expect(result.isError).toBe(true)
     expect(text(result)).toContain('not available in this composition')
+  })
+})
+
+/** Create a real per-agent scope over the mounted tool plugins. */
+async function guidanceScope(ctx: Context) {
+  const key = {}
+  let scope!: Scope
+  await ctx.plugin(Object.assign((inner: Context) => { scope = createScope(inner, key) },
+    { inject: ['tools', 'systemPrompt'] }))
+  return { key, scope }
+}
+
+const originalGuidance = {
+  read: 'Use the read tool — not shell commands like cat — to inspect text files. Results include line numbers. Use offset and limit to continue reading large files.',
+  write: 'Use the write tool to create files or completely replace file contents. Existing files are overwritten, so read an existing file first (the default fs-observation-policy requires it) and prefer edit for targeted changes.',
+  edit: 'Use the edit tool for targeted changes to existing UTF-8 text files. It replaces literal old_string with new_string; by default old_string must appear exactly once. If old_string appears multiple times, provide a more specific old_string or set replace_all to true. Read the file first (the default fs-observation-policy requires it), unless you just created or edited it in this session.',
+}
+
+describe('scope-aware filesystem guidance', () => {
+  it.each(Array.from({ length: 8 }, (_, mask) => mask))('preserves exact text for visible tools (mask %i)', async (mask) => {
+    const { ctx } = await setup()
+    const { key, scope } = await guidanceScope(ctx)
+    const names = ['read', 'write', 'edit'] as const
+    const allow = names.filter((_, index) => (mask & (1 << index)) !== 0)
+    const baseline = withPersona(...names.map(name => originalGuidance[name]))
+    expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(baseline)
+    const release = scope.ctx.tools.restrict({ allow })
+    try {
+      const assembly = await ctx.systemPrompt.assemble({ scope: key })
+      expect(assembly.tools.map(tool => tool.name)).toEqual([...allow].sort())
+      const expected = withPersona(...allow.map(name => name === 'write' && !allow.includes('edit')
+        ? originalGuidance.write.replace(' and prefer edit for targeted changes', '')
+        : originalGuidance[name]))
+      expect(renderPrompt(assembly)).toBe(expected)
+      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(baseline)
+      release()
+      expect(renderPrompt(await ctx.systemPrompt.assemble({ scope: key }))).toBe(baseline)
+    } finally {
+      await scope.dispose()
+    }
+  })
+
+  it('honors deny filters and the existing exemption for own-scope tools', async () => {
+    const { ctx } = await setup()
+    const { key, scope } = await guidanceScope(ctx)
+    const write = ctx.tools.get('write')!
+    scope.ctx.tools.restrict({ deny: ['write', 'edit'] })
+    try {
+      expect(renderPrompt(await ctx.systemPrompt.assemble({ scope: key }))).toBe(withPersona(originalGuidance.read))
+      const denied = await call(ctx, 'write', { file_path: '/blocked', content: 'blocked' }, key)
+      expect(denied.isError).toBe(true)
+      expect(text(denied)).toContain('unknown tool "write"')
+      scope.ctx.tools.register(write)
+      const assembly = await ctx.systemPrompt.assemble({ scope: key })
+      expect(assembly.tools.map(tool => tool.name)).toEqual(['read', 'write'])
+      expect(renderPrompt(assembly)).toBe(withPersona(originalGuidance.read,
+        originalGuidance.write.replace(' and prefer edit for targeted changes', '')))
+    } finally {
+      await scope.dispose()
+    }
+  })
+})
+
+/** Preserve the default persona and exact section separators in the oracle. */
+function withPersona(...sections: string[]): string {
+  return ['You are an AI agent powered by DeepSeek Harness.', ...sections].join('\n\n')
+}
+
+/** Schema assembly only: these cases never execute user code. */
+class GuidanceCodeRuntime extends CodeRuntime {
+  readonly language = 'typescript'
+  readonly isolation = 'fake'
+  run() { return Promise.resolve({ logs: [] }) }
+}
+
+describe('scope-aware PTC guidance', () => {
+  it.each(['ptc', 'both'] as const)('uses capability visibility in %s mode', async (mode) => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(GuidanceCodeRuntime)
+    await ctx.plugin(ToolRuntime, { mode })
+    await ctx.plugin(FakeFs)
+    await ctx.plugin(ToolFs)
+    const { key, scope } = await guidanceScope(ctx)
+    try {
+      const baseline = renderPrompt(await ctx.systemPrompt.assemble({ scope: key }))
+      const release = scope.ctx.tools.restrict({ allow: ['read'] })
+      const assembly = await ctx.systemPrompt.assemble({ scope: key })
+      expect(assembly.tools.map(tool => tool.name)).toEqual(mode === 'ptc' ? ['run_code'] : ['read', 'run_code'])
+      expect(assembly.sections.filter(section => ['tool:read', 'tool:write', 'tool:edit'].includes(section.name))
+        .map(section => section.text).filter(Boolean)).toEqual([originalGuidance.read])
+      expect(renderPrompt(assembly)).toContain(originalGuidance.read)
+      expect(renderPrompt(assembly)).not.toContain(originalGuidance.write)
+      expect(renderPrompt(assembly)).not.toContain(originalGuidance.edit)
+      release()
+      expect(renderPrompt(await ctx.systemPrompt.assemble({ scope: key }))).toBe(baseline)
+    } finally {
+      await scope.dispose()
+    }
   })
 })

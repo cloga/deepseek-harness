@@ -54,7 +54,7 @@ interface WriteToolArgs {
 }
 
 /**
- * Register the `write` tool and its system-prompt guidance.
+ * Register the `write` tool and its scope-aware system-prompt guidance.
  * @param ctx - the plugin context; registrations are effects scoped to it, and execution uses its `fs` service.
  * @param sandbox - the shared sandbox-escalation API (advertisement, mode stamping, denial mapping).
  */
@@ -62,22 +62,21 @@ export function applyWriteTool(ctx: Context, sandbox: FsSandboxController): void
   ctx.systemPrompt.section({
     name: 'tool:write',
     order: ctx.systemPrompt.getSectionOrder('TOOL_WRITE'),
-    text: 'Use the write tool to create files or completely replace file contents. Existing files are overwritten, so read an existing file first (the default fs-observation-policy requires it) and prefer edit for targeted changes.',
+    text: ({ scope }) => ctx.tools.get('write', scope) === undefined
+      ? ''
+      : 'Use the write tool to create files or completely replace file contents. Existing files are overwritten, so read an existing file first (the default fs-observation-policy requires it)'
+        + (ctx.tools.get('edit', scope) === undefined ? '' : ' and prefer edit for targeted changes')
+        + '.',
   })
 
-  const parameters = (escalationFields = sandbox.escalationModes.length > 0 ? sandbox.schemaFields() : {}) => ({
-    file_path: { type: 'string' as const, required: true as const, description: 'Path to write, resolved by the filesystem backend.' },
-    content: { type: 'string' as const, required: true as const, description: 'Full UTF-8 text content to write.' },
-    ...escalationFields,
-  })
   ctx.tools.register(defineTool({
     name: 'write',
     description: 'Create or fully replace a UTF-8 text file.',
-    parameters: parameters(),
-    modelSchema: agent => ({
-      description: 'Create or fully replace a UTF-8 text file.',
-      parameters: parameters(sandbox.escalationModesFor(agent).length > 0 ? sandbox.schemaFields(agent) : {}),
-    }),
+    parameters: {
+      file_path: { type: 'string', required: true, description: 'Path to write, resolved by the filesystem backend.' },
+      content: { type: 'string', required: true, description: 'Full UTF-8 text content to write.' },
+      ...sandbox.escalationModes.length > 0 ? sandbox.schemaFields() : {},
+    },
     output: {
       schema: {
         type: 'object',
@@ -118,9 +117,9 @@ export function applyWriteTool(ctx: Context, sandbox: FsSandboxController): void
         outcome = await ctx.fs.writeText(target, input.content, intent, exec.signal, sandboxPolicy)
       } catch (error: unknown) {
         // A sandbox denial becomes the shared [sandbox: …] marker (the model
-        // recognizes it from bash); stale/not-observed failures gain their
-        // model-facing remedy; anything else passes through.
-        throw remediateFsError(sandbox.mapError(error, sandboxPolicy, exec.agent))
+        // recognizes it from bash); guarded mutation failures receive their
+        // stable model-facing diagnostic; anything else passes through.
+        throw remediateFsError(sandbox.mapError(error, sandboxPolicy), target.displayPath)
       }
       ctx.emit('fs/observed', target, { kind: 'present', version: outcome.version }, exec)
       return {
