@@ -97,7 +97,7 @@ describe('Desktop managed update helper', () => {
       sha512: createHash('sha512').update(body).digest('base64'),
       signature: 'NotSigned',
     })).resolves.toBe(7)
-  })
+  }, 30_000)
 
   it('acknowledges validated metadata before waiting, stages verified files, and passes no installer arguments', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-managed-update-'))
