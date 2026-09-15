@@ -13,7 +13,12 @@ export interface DesktopManagedUpdateLaunch {
   readonly nodeExecutable: string
   readonly helperBundle: string
   readonly capability: DesktopManagedUpdateCapability
-  readonly selectedManifest: 'source' | 'migration'
+  readonly selection: {
+    readonly kind: 'source' | 'migration'
+    readonly manifestUrl: string
+    readonly manifestSha256: string
+    readonly assetSha256: string
+  }
   readonly installedSequence: number
   readonly waitPids: readonly number[]
 }
@@ -132,7 +137,7 @@ export async function launchDesktopManagedUpdate(
     schemaVersion: 1,
     token,
     capability: launch.capability,
-    selectedManifest: launch.selectedManifest,
+    selection: launch.selection,
     stageRoot: join(operationRoot, 'stage'),
     waitPids: launch.waitPids,
     waitTimeoutMs: 120_000,
@@ -140,12 +145,7 @@ export async function launchDesktopManagedUpdate(
   }
   const handoffPath = join(operationRoot, 'handoff.json')
   await writeFile(handoffPath, `${JSON.stringify(handoff, undefined, 2)}\n`, { flag: 'wx', mode: 0o600 })
-  const expectedManifestSha256 = launch.selectedManifest === 'source'
-    ? launch.capability.manifestSha256
-    : launch.capability.migration?.manifestSha256
-  if (expectedManifestSha256 === undefined) {
-    throw new Error('desktop managed update: selected migration has no locked manifest')
-  }
+  const expectedManifestSha256 = launch.selection.manifestSha256
   const child = operations.spawn(node, [helper, handoffPath], {
     cwd: operationRoot,
     detached: true,

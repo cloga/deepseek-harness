@@ -84,7 +84,7 @@ const harness = await vi.hoisted(async () => {
     dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn() },
     managedInstall: vi.fn(async () => ({
       phase: 'installing' as const,
-      mode: 'windows-ops-managed' as const,
+      mode: 'github-release-managed' as const,
       version: '1.2.3',
     })),
     applyRelease: vi.fn(() => { preparing.resolve(); return prepared.promise }),
@@ -145,14 +145,15 @@ vi.mock('../src/managed-update-state.ts', () => ({
   loadDesktopManagedUpdateConfiguration: () => harness.managedUpdates
     ? {
       capability: {
-        schemaVersion: 1,
-        mode: 'windows-ops-managed',
-        manifestUrl: 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/release.json',
-        manifestSha256: 'a'.repeat(64),
+        schemaVersion: 2,
+        mode: 'github-release-managed',
+        owner: 'cloga/deepseek-harness',
+        tagPrefix: 'dsh-desktop-v',
+        manifestAsset: 'release.json',
+        currentSequence: 2,
         minimumSequence: 2,
-        expectedSource: { version: '1.2.3', commit: 'b'.repeat(40) },
       },
-      installedSequence: 1,
+      installedSequence: 2,
       operationsRoot: 'desktop-test-operations',
       completionPath: 'desktop-test-completion.json',
       helperBundle: 'desktop-test-helper.mjs',
@@ -164,7 +165,7 @@ vi.mock('../src/managed-update-coordinator.ts', () => ({
     async check() {
       return {
         phase: 'available' as const,
-        mode: 'windows-ops-managed' as const,
+        mode: 'github-release-managed' as const,
         version: '1.2.3',
       }
     }

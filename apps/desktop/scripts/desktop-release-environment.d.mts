@@ -1,6 +1,15 @@
 /** Environment variable that supplies the Electron application identifier. */
 export const DESKTOP_APP_ID_ENV: 'DSH_DESKTOP_APP_ID'
 
+/** Environment variable that supplies the managed update capability file. */
+export const DESKTOP_MANAGED_UPDATE_CAPABILITY_ENV: 'DSH_DESKTOP_MANAGED_UPDATE_CAPABILITY'
+
+/** Environment variable that supplies the fork release semantic version. */
+export const DESKTOP_FORK_RELEASE_VERSION_ENV: 'DSH_DESKTOP_FORK_RELEASE_VERSION'
+
+/** Environment variable that supplies the dependency materialization registry. */
+export const DESKTOP_PACKAGE_REGISTRY_ENV: 'DSH_DESKTOP_PACKAGE_REGISTRY'
+
 /** Environment variable that supplies electron-builder's macOS certificate qualifier. */
 export const MACOS_SIGNING_IDENTITY_ENV: 'DSH_DESKTOP_MACOS_SIGNING_IDENTITY'
 
@@ -45,6 +54,32 @@ export type MacOSNotarizationEnvironment =
  * @returns Reverse-DNS application identifier.
  */
 export function resolveDesktopAppId(env: NodeJS.ProcessEnv): string
+
+/** Fixed cloga identity selected for an unsigned managed Windows release. */
+export interface DesktopForkReleaseEnvironment {
+  readonly appId: 'io.github.cloga.deepseek-harness.desktop'
+  readonly productName: 'DeepSeek Harness (cloga)'
+  readonly packageName: 'cloga-deepseek-harness-desktop'
+  readonly executableName: 'cloga-deepseek-harness'
+  readonly version: string
+  readonly capabilityPath: string
+}
+
+/**
+ * Resolve the fixed unsigned cloga release identity when a managed capability is packaged.
+ * @param env - Packaging environment.
+ * @returns Fork release identity, or undefined for ordinary packaging.
+ */
+export function resolveDesktopForkReleaseEnvironment(
+  env: NodeJS.ProcessEnv,
+): DesktopForkReleaseEnvironment | undefined
+
+/**
+ * Resolve the credential-free HTTPS registry used while materializing locked Desktop dependencies.
+ * @param env - Packaging environment.
+ * @returns Normalized registry URL with a trailing slash.
+ */
+export function resolveDesktopPackageRegistry(env: NodeJS.ProcessEnv): string
 
 /**
  * Resolve and validate the public identity expected on a macOS release.

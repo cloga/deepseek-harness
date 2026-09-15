@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "channel": "cloga-windows-x64",
+  "version": "0.1.5-rc.3.cloga.1",
+  "sequence": 2,
+  "upstreamVersion": "0.1.5-rc.2",
+  "identity": {
+    "appId": "io.github.cloga.deepseek-harness.desktop",
+    "productName": "DeepSeek Harness (cloga)",
+    "packageName": "cloga-deepseek-harness-desktop",
+    "executableName": "cloga-deepseek-harness"
+  },
+  "migration": {
+    "owner": "cloga/dsh-windows-ops",
+    "manifestUrl": "https://github.com/cloga/dsh-windows-ops/releases/download/dsh-local-0.1.5-rc.2.local.1/release.json",
+    "manifestSha256": "b13e0e7b160b84c6f001a96cd048a411384c4c4678f36457f9c596ed441fa367",
+    "assetSha256": "7c5a5359bf70ba9234d409e751929d0135a0c2a9430d5473f4b0fe3da47823d2",
+    "maximumSequence": 1,
+    "expectedSource": {
+      "version": "0.1.5-rc.2",
+      "commit": "fb2c4b9e698e30edb738bca4cf0618587db7d203"
+    },
+    "channelVersion": "0.1.5-rc.2.local.1"
+  }
+}
