@@ -76,6 +76,7 @@ const ASK_SENTENCE = 'Approval policy: ask. Operations that require approval may
  */
 function hasOpenTurn(session: Session): boolean {
   for (let seq = session.seq - 1; seq >= 0; seq -= 1) {
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const type = session.eventAt(SessionSeq(seq))?.type
     if (type === 'turn/start') return true
     if (type === 'turn/end') return false
@@ -147,7 +148,7 @@ export class ApprovalService extends Service {
   constructor(ctx: Context, public config: Config) {
     super(ctx, 'approval')
 
-    const effective = (agent: Agent): ApprovalPolicy => this.policyFor(agent.session)
+    const effective = (agent: Agent): ApprovalPolicy => this.effectivePolicy(agent.session)
 
     // The complete current value travels after retained history, so switching
     // policy does not rewrite the stable system-prompt cache prefix.
@@ -174,7 +175,7 @@ export class ApprovalService extends Service {
    * @param policy - the new effective policy.
    */
   setPolicy(agent: Agent, policy: ApprovalPolicy): void {
-    const previous = this.policyFor(agent.session)
+    const previous = this.effectivePolicy(agent.session)
     if (previous === policy) return
     setApprovalPolicy(agent.session, policy)
     agent.inject(createUserMessage({
@@ -232,7 +233,7 @@ export class ApprovalService extends Service {
    * @param session - the exact accepted session whose policy applies.
    * @returns the policy every ask for this session resolves under right now.
    */
-  policyFor(session: Session): ApprovalPolicy {
+  private effectivePolicy(session: Session): ApprovalPolicy {
     return this.overrideOf(session) ?? this.config.policy ?? 'ask'
   }
 
@@ -243,6 +244,7 @@ export class ApprovalService extends Service {
    */
   overrideOf(session: Session): ApprovalPolicy | undefined {
     for (let seq = session.seq - 1; seq >= 0; seq -= 1) {
+      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       const event = session.eventAt(SessionSeq(seq))
       if (event?.type === 'approval/policy') return event.data.policy
     }
@@ -263,7 +265,7 @@ export class ApprovalService extends Service {
     // ahead of any gate LISTENER, so a listener-shaped gate cannot keep the
     // documented promise that 'never' rejects deterministically regardless
     // of registration order — only the service's own request path can.
-    if (this.policyFor(session) === 'never') return 'rejected'
+    if (this.effectivePolicy(session) === 'never') return 'rejected'
     // Enter the promise chain BEFORE dispatching: a listener that throws
     // SYNCHRONOUSLY (before its first await) must land in the same rejection
     // path as an async one — `Promise.resolve(call())` would let it escape

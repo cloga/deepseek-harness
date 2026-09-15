@@ -5,6 +5,7 @@ import {
   defaultConcurrency,
   formatGateResultReason,
   gatesForMode,
+  collectDescendants,
   parsePidPpidLines,
   runGate,
   runGates,
@@ -141,6 +142,7 @@ describe('gate graph validation', () => {
     'ci-static',
     'ci-lint-contracts-ready',
     'ci-coverage',
+    'ci-bench',
     'ci-snapshot',
     'ci-artifacts',
     'ci-consumers',
@@ -159,6 +161,27 @@ describe('gate graph validation', () => {
     await expect(runGates(subject, subject.length, execute)).resolves.toHaveLength(subject.length)
   })
 
+  it('builds the native addon before benchmarks through the ci-bench script chain', () => {
+    const subject = withPnpmEntrypoint(() => gatesForMode('ci-bench'))
+    const { scripts } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      scripts: Record<string, string>
+    }
+
+    expect(scripts['check:ci:bench']).toBe('tsx scripts/run-gates.ts ci-bench')
+    expect(subject).toHaveLength(1)
+    expect(subject[0]).toMatchObject({
+      id: 'bench',
+      displayCommand: 'pnpm run test:bench',
+      args: ['/private/pnpm.cjs', 'run', 'test:bench'],
+    })
+    expect(scripts['test:bench']).toBe('npm run build:bench && npm run build:web && npm run test:bench:built')
+    expect(scripts['build:bench']).toBe(
+      'npm run build:native-system && npm run build:lib && tsdown --config benchmarks/tsdown.config.ts',
+    )
+    expect(scripts['build:native-system']).toBe('tsx native/system/scripts/build.ts --host-addon-only')
+    expect(scripts['test:bench:built']).toBe('vitest run --config vitest.bench.config.ts')
+  })
+
   it('keeps the public repository link policy in the documentation gate', () => {
     const ids = withPnpmEntrypoint(() => gatesForMode('doc-sync').map(subject => subject.id))
 
@@ -169,6 +192,12 @@ describe('gate graph validation', () => {
     const ids = withPnpmEntrypoint(() => gatesForMode('doc-sync').map(subject => subject.id))
 
     expect(ids).toContain('subsystem-pages')
+  })
+
+  it('keeps the package README Summary limit in the documentation gate', () => {
+    const ids = withPnpmEntrypoint(() => gatesForMode('doc-sync').map(subject => subject.id))
+
+    expect(ids).toContain('package-readme-summaries')
   })
 
   it('derives the quick documentation aggregate from marked doc-sync leaves', () => {
@@ -184,7 +213,7 @@ describe('gate graph validation', () => {
     expect(ids).toEqual([
       'rescope-vendor', 'publint', 'constraints', 'package-dependencies', 'application-entrypoints',
       'dsh-package-licenses', 'package-invariants', 'built-package-invariants', 'node-next-types',
-      'optional-dependency-imports', 'client-packages', 'client-ui-i18n', 'cordis-config',
+      'optional-dependency-imports', 'client-packages', 'client-ui-i18n', 'no-bare-dispatcher', 'cordis-config',
       'runtime-closure', 'vendored-links',
     ])
     expect(defaultConcurrency('hygiene', ids.length, 8)).toEqual({
@@ -236,6 +265,15 @@ describe('gate graph validation', () => {
       const ids = withPnpmEntrypoint(() => gatesForMode(mode).map(subject => subject.id))
 
       expect(ids).toContain('client-packages')
+    },
+  )
+
+  it.each(['ci-primary', 'ci-static', 'check-all'] as const)(
+    'keeps weighted approval policy tests in %s',
+    (mode) => {
+      const ids = withPnpmEntrypoint(() => gatesForMode(mode).map(subject => subject.id))
+
+      expect(ids).toContain('approval-policy')
     },
   )
 
@@ -547,6 +585,7 @@ describe('Node 24 lane ownership', () => {
     })
     expect(subject.find(item => item.id === 'built-bin-smoke')?.args).toEqual(
       expect.arrayContaining([
+        'packages/subprocess/subprocess-local/tests/spawn-runner-built.e2e.ts',
         'packages/subagent/subagent-codex/tests/loader-composition.e2e.ts',
         'packages/subagent/subagent-claude-code/tests/loader-composition.e2e.ts',
         'packages/experimental/agent-team/tests/built-lib.e2e.ts',
@@ -889,6 +928,17 @@ describe('process-table parsing', () => {
 
   it('drops blank and malformed lines', () => {
     expect(parsePidPpidLines('  123   1\n\ncommand not found\n999 abc\n')).toEqual([[123, 1]])
+  })
+
+  it('collects each descendant once when a changing process table contains duplicates and cycles', () => {
+    expect(collectDescendants(100, [
+      [201, 100],
+      [201, 100],
+      [302, 201],
+      [403, 302],
+      [201, 403],
+      [100, 403],
+    ])).toEqual([201, 302, 403])
   })
 })
 

@@ -1,7 +1,7 @@
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { ShellExecutor } from '@deepseek-ai/dsh-shell'
@@ -11,8 +11,7 @@ import ToolRuntime, { TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH } from '@deepse
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { turnBoundaryProjectionDefinition } from '@deepseek-ai/dsh-agent-loop'
-import SessionStore, { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
@@ -29,6 +28,10 @@ import { renderProcessRead, renderResult } from '../src/render.ts'
 const testToolSignal = new AbortController().signal
 
 const spillDir = mkdtempSync(join(tmpdir(), 'dsh-tool-bash-spec-'))
+
+afterAll(() => {
+  rmSync(spillDir, { recursive: true, force: true })
+})
 
 /** Foreground-only harness: no job runtime (backgrounding fails loud here). */
 async function setup() {
@@ -71,7 +74,7 @@ function registerFakeAgent(ctx: Context, sessionId: string, inject: (...args: un
     id,
     ctx: scopeFiber.ctx,
     inject,
-    session: { id, header: { version: 0, id, createdAt: 0 }, events: [] },
+    session: { id, header: { version: 0, id, createdAt: 0 } },
   } as unknown as Agent
   ctx.agents.register(agent)
   return agent
@@ -104,7 +107,6 @@ async function callUntilText(
 
 class RecordingSandboxExecutor extends ShellExecutor {
   readonly modes: Array<string | undefined> = []
-  backgroundDenied = false
 
   override get sandboxMode() {
     return 'read-only' as const
@@ -148,8 +150,8 @@ class RecordingSandboxExecutor extends ShellExecutor {
       exitCode: 0,
       signal: null,
       done: Promise.resolve(),
-      sandbox: { mode: spec.sandboxPolicy?.mode ?? 'read-only', denied: this.backgroundDenied },
-      readOutput: () => ({ delta: 'tail', lossy: false }),
+      sandbox: { mode: spec.sandboxPolicy?.mode ?? 'read-only', denied: false },
+      readOutput: () => ({ delta: '', lossy: false }),
       kill: () => false,
     }
   }
@@ -206,37 +208,20 @@ function sandboxAgent(
   ctx?: Context,
   onAppend?: (type: string) => void,
 ): Agent {
-  const events: Array<{
-    type: string
-    seq: ReturnType<typeof SessionSeq>
-    time: number
-    data: Record<string, unknown>
-  }> = [{ type: 'turn/start', seq: SessionSeq(0), time: 0, data: { turn: 1 } }]
-  if (mode !== undefined) {
-    events.push({ type: 'sandbox/mode', seq: SessionSeq(1), time: 1, data: { mode } })
-  }
+  const events: Array<{ type: string; data?: Record<string, unknown>; seq: number }> = [{ type: 'turn/start', seq: 0, data: { turn: 1 } }]
+  if (mode !== undefined) events.push({ type: 'sandbox/mode', seq: events.length, data: { mode } })
   const id = SessionId('sandbox-session')
   return {
     id,
     ...ctx === undefined ? {} : { ctx: ctx.plugin(() => {}).ctx },
     session: {
       id,
-      header: { version: 0, id, createdAt: 0, isSeeded: false },
-      inheritedEventCount: SessionLogOffset(0),
-      firstLiveSeq: SessionLogOffset(0),
-      get seq() { return SessionLogOffset(events.length) },
-      eventAt: (seq: ReturnType<typeof SessionSeq>) => events[seq],
-      snapshotEvents: (
-        fromSeq = SessionLogOffset(0),
-        toSeqExclusive = SessionLogOffset(events.length),
-      ) => events.slice(fromSeq, toSeqExclusive),
+      header: { version: 0, id, createdAt: 0 },
+      get seq() { return events.length },
+      eventAt: (seq: number) => events[seq],
+      snapshotEvents: () => events,
       append: (type: string, data: Record<string, unknown>) => {
-        const event = {
-          type,
-          seq: SessionSeq(events.length),
-          time: events.length,
-          data,
-        }
+        const event = { type, data, seq: events.length }
         events.push(event)
         onAppend?.(type)
         return event
@@ -415,10 +400,11 @@ describe('bash tool', () => {
     const section = assembly.sections.find(s => s.name === 'tool:bash')
     expect(assembly.sections.map(s => s.name)).toEqual([
       'harness:identity',
-      'deployment:persona',
+      'deployment:persona-prefix',
       'test:before-bash',
       'tool:bash',
       'test:after-bash',
+      'deployment:persona-suffix',
     ])
     expect(section?.text).toContain('[exit code: N]')
   })
@@ -432,11 +418,11 @@ describe('bash tool', () => {
     await ctx.plugin(BashEnvPlugin)
     const fiber = await ctx.plugin(ToolBash)
     expect(ctx.tools.schemas()).toHaveLength(1)
-    expect((await ctx.systemPrompt.assemble()).sections.map(s => s.name)).toEqual(['harness:identity', 'deployment:persona', 'tool:bash'])
+    expect((await ctx.systemPrompt.assemble()).sections.map(s => s.name)).toEqual(['harness:identity', 'deployment:persona-prefix', 'tool:bash', 'deployment:persona-suffix'])
     await fiber.dispose()
     expect(ctx.tools.schemas()).toHaveLength(0)
     // Only the system-prompt plugin's own built-in sections remain.
-    expect((await ctx.systemPrompt.assemble()).sections.map(s => s.name)).toEqual(['harness:identity', 'deployment:persona'])
+    expect((await ctx.systemPrompt.assemble()).sections.map(s => s.name)).toEqual(['harness:identity', 'deployment:persona-prefix', 'deployment:persona-suffix'])
   })
 
   it('tools depend on the executor: no registration without ctx.shell', async () => {
@@ -621,7 +607,7 @@ describe('sandbox escalation through the generic task producer', () => {
     const { ctx } = await setupSandboxed()
     const schema = ctx.tools.schemas().find(item => item.name === 'bash')!
     const properties = schema.parameters.properties as Record<string, { enum?: string[] }>
-    expect(properties['sandbox_permissions']?.enum).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
+    expect(properties['sandbox_permissions']?.enum).toEqual(['workspace-write', 'danger-full-access'])
     expect(schema.description).toContain('approval prompt')
 
     for (const args of [
@@ -633,85 +619,24 @@ describe('sandbox escalation through the generic task producer', () => {
     }
   })
 
-  it('advertises only usable escalation modes for the current session', async () => {
-    const { ctx } = await setupSandboxed(true)
-    const schemaFor = async (agent: Agent) => {
-      const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === 'bash')!
-      return {
-        description: schema.description,
-        properties: (schema.parameters as { properties: Record<string, { enum?: string[] }> }).properties,
-      }
-    }
-
-    expect((await schemaFor(sandboxAgent('read-only'))).properties['sandbox_permissions']?.enum)
-      .toEqual(['workspace-write', 'danger-full-access'])
-    expect((await schemaFor(sandboxAgent('workspace-write'))).properties['sandbox_permissions']?.enum)
-      .toEqual(['danger-full-access'])
-    const unrestricted = await schemaFor(sandboxAgent('danger-full-access'))
-    expect(unrestricted.properties['sandbox_permissions']).toBeUndefined()
-    expect(unrestricted.properties['justification']).toBeUndefined()
-    expect(unrestricted.description).not.toContain('sandbox_permissions')
-
-    const never = sandboxAgent('read-only')
-    never.session.append('approval/policy', { policy: 'never' })
-    expect((await schemaFor(never)).properties['sandbox_permissions']).toBeUndefined()
-  })
-
-  it('projects no escalation fields when an approval service has no sandbox policy', async () => {
-    const ctx = await setup()
-    await ctx.plugin(ApprovalService)
-    const agent = registerFakeAgent(ctx, 'unsandboxed-schema')
-    const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === 'bash')!
-    expect((schema.parameters as { properties: Record<string, unknown> }).properties)
-      .not.toHaveProperty('sandbox_permissions')
-  })
-
-  it('preserves non-text finalized content when no escalation is available', async () => {
-    const ctx = await setup()
-    const tool = ctx.tools.get('bash')
-    if (tool?.finalizeContent === undefined) throw new Error('bash finalizer is missing')
-    const content = [{ type: 'image' as const, data: 'aW1hZ2U=', mimeType: 'image/png' as const }]
-    expect(tool.finalizeContent(
-      { name: 'bash', arguments: {}, callId: ToolCallId('non-text'), signal: testToolSignal } as never,
-      { content, isError: false } as never,
-    )).toEqual(content)
-  })
-
-  it('rejects injected escalation without a sandbox and treats non-widening requests as no-ops', async () => {
+  it('rejects injected escalation without a sandbox and non-widening escalation without prompting', async () => {
     const plain = await setup()
     expect(text(await call(plain, 'bash', escalate))).toContain('not available in this composition')
 
-    const { ctx, bash } = await setupSandboxed(true)
+    const { ctx } = await setupSandboxed(true)
     const prompted = vi.fn()
     ctx.on('approval/request', () => { prompted(); return Promise.resolve<ApprovalOutcome>('allowed-once') })
-    const same = await call(ctx, 'bash', {
-      command: 'true',
-      description: 'same mode',
-      sandbox_permissions: 'danger-full-access',
-    }, sandboxAgent('danger-full-access'))
-    const narrower = await call(ctx, 'bash', {
-      command: 'true',
-      description: 'narrower mode',
-      sandbox_permissions: 'workspace-write',
-      justification: '   ',
-    }, sandboxAgent('danger-full-access'))
-    const floor = await call(ctx, 'bash', {
-      command: 'true',
-      description: 'narrowest mode',
-      sandbox_permissions: 'read-only',
-    }, sandboxAgent('workspace-write'))
-    expect(same.isError).toBe(false)
-    expect(narrower.isError).toBe(false)
-    expect(floor.isError).toBe(false)
-    expect(bash.modes).toEqual(['danger-full-access', 'danger-full-access', 'workspace-write'])
+    const result = await call(ctx, 'bash', { ...escalate, sandbox_permissions: 'workspace-write' }, sandboxAgent('workspace-write'))
+    expect(text(result)).toContain('not strictly wider')
     expect(prompted).not.toHaveBeenCalled()
 
     const malformed = sandboxAgent()
-    ;(malformed.session.append as unknown as (
-      type: string,
-      data: Record<string, unknown>,
-    ) => unknown)('sandbox/mode', { mode: 'unknown-mode' })
-    expect(text(await call(ctx, 'bash', escalate, malformed))).toContain('invalid effective sandbox mode')
+    ;(malformed.session.snapshotEvents() as unknown as Array<{ type: string; data: { mode: string }; seq: number }>).push({
+      type: 'sandbox/mode',
+      data: { mode: 'unknown-mode' },
+      seq: malformed.session.seq,
+    })
+    expect(text(await call(ctx, 'bash', escalate, malformed))).toContain('not strictly wider')
   })
 
   it('fails closed when approval cannot be routed', async () => {
@@ -785,24 +710,6 @@ describe('sandbox escalation through the generic task producer', () => {
     ctx.on('approval/request', () => Promise.resolve<ApprovalOutcome>('allowed-once'))
     await call(ctx, 'bash', { ...escalate, sandbox_permissions: 'danger-full-access' }, agent)
     expect(bash.modes).toEqual(['workspace-write', 'danger-full-access'])
-  })
-
-  it.each([
-    ['without approval', false, []],
-    ['with approval disabled', true, [{ type: 'approval/policy', data: { policy: 'never' } }]],
-  ] as const)('omits unusable escalation hints from background output %s', async (_label, withApproval, policyEvents) => {
-    const { ctx, bash } = await setupSandboxed(withApproval)
-    bash.backgroundDenied = true
-    const agent = sandboxAgent('read-only', ctx)
-    ctx.agents.register(agent)
-    for (const event of policyEvents) {
-      agent.session.append(event.type, event.data)
-    }
-    const started = await call(ctx, 'bash', { command: 'true', description: 'background denial', run_in_background: true }, agent)
-    expect(started.isError).toBe(false)
-    const output = await call(ctx, 'job_output', { job_id: 'bash-1' }, agent)
-    expect(text(output)).toContain('[sandbox: file access denied under read-only mode]')
-    expect(text(output)).not.toContain('sandbox_permissions')
   })
 
   it('omits sandbox facts the executor did not acquire from the canonical result', async () => {
@@ -1212,15 +1119,11 @@ describe('the model-facing bash tool builds its request from named args only (no
     }
   }
 
-  async function setupRecording(withJsonl = false) {
+  async function setupRecording() {
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(AgentRegistry)
-    if (withJsonl) {
-      await ctx.plugin(SessionStore)
-      await ctx.plugin(JsonlSessionPersistence, { root: join(spillDir, 'jsonl') })
-    }
     await ctx.plugin(LocalJobRegistry)
     await ctx.plugin(ToolTasks)
     await ctx.plugin(BashEnvPlugin, { dshHome: recordingDshHome })
@@ -1233,13 +1136,12 @@ describe('the model-facing bash tool builds its request from named args only (no
     const { ctx } = await setupRecording()
     const description = ctx.tools.get('bash')?.description ?? ''
     expect(description).toContain('$DSH_*')
-    expect(description).not.toContain('DSH_SESSION_JSONL')
   })
 
-  it('injects the session id and JSONL target path into a foreground request', async () => {
-    const { ctx, bash } = await setupRecording(true)
+  it('injects built-ins and the stable session id into a foreground request', async () => {
+    const { ctx, bash } = await setupRecording()
     const agent = registerFakeAgent(ctx, 'request-fg', () => undefined)
-    const path = ctx.sessionPersistence.locate(agent.session.header)?.path
+    const ambient = process.env.DSH_SESSION_ID
 
     await ctx.tools.execute({
       signal: testToolSignal,
@@ -1252,15 +1154,14 @@ describe('the model-facing bash tool builds its request from named args only (no
     expect(bash.requests[0]?.dshEnv).toEqual({
       DSH_HOME: recordingDshHome,
       DSH_SESSION_ID: 'request-fg',
-      DSH_SESSION_JSONL: path,
       DSH_SHELL: '1',
     })
+    expect(process.env.DSH_SESSION_ID).toBe(ambient)
   })
 
   it('injects the same trusted variables into a background request without forwarding model env', async () => {
-    const { ctx, bash } = await setupRecording(true)
+    const { ctx, bash } = await setupRecording()
     const agent = registerFakeAgent(ctx, 'request-bg', () => undefined)
-    const path = ctx.sessionPersistence.locate(agent.session.header)?.path
 
     await ctx.tools.execute({
       signal: testToolSignal,
@@ -1270,7 +1171,7 @@ describe('the model-facing bash tool builds its request from named args only (no
         command: 'sleep 1',
         description: 'run command',
         run_in_background: true,
-        env: { DSH_SESSION_ID: 'spoofed', DSH_SESSION_JSONL: '/tmp/spoofed' },
+        env: { DSH_SESSION_ID: 'spoofed' },
       },
       agent,
     })
@@ -1279,34 +1180,12 @@ describe('the model-facing bash tool builds its request from named args only (no
     expect(bash.requests[0]?.dshEnv).toEqual({
       DSH_HOME: recordingDshHome,
       DSH_SESSION_ID: 'request-bg',
-      DSH_SESSION_JSONL: path,
       DSH_SHELL: '1',
     })
-  })
-
-  it('injects built-ins and the stable session id when no JSONL locator is available', async () => {
-    const { ctx, bash } = await setupRecording()
-    const agent = registerFakeAgent(ctx, 'request-id-only', () => undefined)
-    const ambient = process.env.DSH_SESSION_ID
-
-    await ctx.tools.execute({
-      signal: testToolSignal,
-      callId: ToolCallId('session-env-id-only'),
-      name: 'bash',
-      arguments: { command: 'true', description: 'run command' },
-      agent,
-    })
-
-    expect(bash.requests[0]?.dshEnv).toEqual({
-      DSH_HOME: recordingDshHome,
-      DSH_SESSION_ID: 'request-id-only',
-      DSH_SHELL: '1',
-    })
-    expect(process.env.DSH_SESSION_ID).toBe(ambient)
   })
 
   it('keeps parent and child agent session environments isolated', async () => {
-    const { ctx, bash } = await setupRecording(true)
+    const { ctx, bash } = await setupRecording()
     const parent = registerFakeAgent(ctx, 'request-parent', () => undefined)
     const child = registerFakeAgent(ctx, 'request-child', () => undefined)
 
@@ -1324,17 +1203,14 @@ describe('the model-facing bash tool builds its request from named args only (no
       {
         DSH_HOME: recordingDshHome,
         DSH_SESSION_ID: 'request-parent',
-        DSH_SESSION_JSONL: ctx.sessionPersistence.locate(parent.session.header)?.path,
         DSH_SHELL: '1',
       },
       {
         DSH_HOME: recordingDshHome,
         DSH_SESSION_ID: 'request-child',
-        DSH_SESSION_JSONL: ctx.sessionPersistence.locate(child.session.header)?.path,
         DSH_SHELL: '1',
       },
     ])
-    expect(bash.requests[0]?.dshEnv?.DSH_SESSION_JSONL).not.toBe(bash.requests[1]?.dshEnv?.DSH_SESSION_JSONL)
   })
 
   it('does not forward trusted-only fields even when the model includes them as extra arguments', async () => {
