@@ -43,7 +43,12 @@ it('verifies installed evidence and plugin provisioning before recording complet
   }
   const provisionReceipt = {
     schemaVersion: 1 as const,
-    capability: { id: 'desktopNativeVerifiedRelease' as const, schemaVersion: 1 as const },
+    capability: {
+      id: 'desktopNativeVerifiedRelease' as const,
+      schemaVersion: 1 as const,
+      sourceSchemaVersion: 1 as const,
+      receiptSchemaVersion: 1 as const,
+    },
     source: pluginSource,
     releaseId: 10,
     assetId: 20,
@@ -111,6 +116,40 @@ it('verifies installed evidence and plugin provisioning before recording complet
   )).resolves.toEqual({ status: 'complete', sequence: 2, version: '1.2.3' })
   expect(provision).toHaveBeenCalledOnce()
   expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({ status: 'complete', sequence: 2 })
+})
+
+it('requires recovery when a helper acknowledgement has no terminal state', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-managed-completion-'))
+  roots.push(root)
+  const token = 'a'.repeat(64)
+  const operation = join(root, 'operations', token)
+  await mkdir(operation, { recursive: true })
+  await writeFile(join(operation, 'ack.json'), JSON.stringify({
+    schemaVersion: 1,
+    token,
+    manifestSha256: 'b'.repeat(64),
+    helperPid: 123,
+  }))
+
+  await expect(completeDesktopManagedUpdate(
+    join(root, 'operations'),
+    join(root, 'completion.json'),
+    {
+      schemaVersion: 1,
+      mode: 'windows-ops-managed',
+      manifestUrl: 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/release.json',
+      manifestSha256: 'b'.repeat(64),
+      minimumSequence: 2,
+      expectedSource: { version: '1.2.3', commit: 'c'.repeat(40) },
+    },
+    1,
+    join(root, 'unused.exe'),
+    join(root, 'unused-runtime.json'),
+    async () => { throw new Error('provisioning must not run') },
+  )).resolves.toMatchObject({
+    status: 'recovery-required',
+    message: /acknowledged the handoff/u,
+  })
 })
 
 it.each([

@@ -18,6 +18,7 @@ import {
 
 const MAX_MANIFEST_BYTES = 1024 * 1024
 const MAX_RECEIPT_BYTES = 16 * 1024 * 1024
+const REQUEST_TIMEOUT_MS = 30_000
 const REDIRECTS = new Set([301, 302, 303, 307, 308])
 const SENSITIVE_ENVIRONMENT_NAME = /(?:AUTH|KEY|SECRET|TOKEN|PASSWORD)|^(?:ALL|HTTP|HTTPS|NO)_PROXY$/iu
 
@@ -176,11 +177,20 @@ async function fetchResponse(
 ): Promise<{ response: Response; finalUrl: string }> {
   let current = url
   for (let redirects = 0; redirects <= 5; redirects++) {
-    const response = await operations.fetch(current, { method: 'GET', redirect: 'manual', credentials: 'omit' })
+    const response = await operations.fetch(current, {
+      method: 'GET',
+      redirect: 'manual',
+      credentials: 'omit',
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
     if (!REDIRECTS.has(response.status)) return { response, finalUrl: current }
     const location = response.headers.get('location')
-    if (location === null) throw new Error('desktop managed update: redirect omitted Location')
+    if (location === null) {
+      await response.body?.cancel()
+      throw new Error('desktop managed update: redirect omitted Location')
+    }
     assertManagedUpdateRedirect(current, location)
+    await response.body?.cancel()
     current = new URL(location, current).href
   }
   throw new Error('desktop managed update: redirect limit exceeded')
@@ -192,9 +202,13 @@ async function fetchBytes(
   operations: DesktopManagedUpdateHelperOperations,
 ): Promise<Buffer> {
   const { response } = await fetchResponse(url, operations)
-  if (!response.ok) throw new Error(`desktop managed update: ${url} returned HTTP ${String(response.status)}`)
+  if (!response.ok) {
+    await response.body?.cancel()
+    throw new Error(`desktop managed update: ${url} returned HTTP ${String(response.status)}`)
+  }
   const declared = response.headers.get('content-length')
   if (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) > maximum)) {
+    await response.body?.cancel()
     throw new Error(`desktop managed update: ${url} exceeds the allowed size`)
   }
   const body = Buffer.from(await response.arrayBuffer())

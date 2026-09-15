@@ -19,7 +19,7 @@ function sha256(body: Uint8Array): string {
 }
 
 function response(body: Uint8Array, status = 200, headers: Record<string, string> = {}): Response {
-  return new Response(body, { status, headers })
+  return new Response(Buffer.from(body), { status, headers })
 }
 
 const temporaryRoots: string[] = []
@@ -151,7 +151,8 @@ describe('Desktop managed update helper', () => {
     const manifestValue = { ...payload, manifestSha256: managedUpdateJsonSha256(payload) }
     const manifest = Buffer.from(JSON.stringify(manifestValue))
     const base = 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/'
-    const fetch = vi.fn(async (url: string) => {
+    const fetch = vi.fn(async (url: string, init: RequestInit) => {
+      expect(init.signal).toBeInstanceOf(AbortSignal)
       if (url === `${base}release.json`) return response(manifest)
       if (url === `${base}build-receipt.json`) return response(receipt)
       if (url === `${base}installer.exe`) return response(installer, 200, { 'content-length': String(installer.length) })

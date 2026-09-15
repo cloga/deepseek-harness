@@ -116,10 +116,28 @@ export async function completeDesktopManagedUpdate(
           command: RECOVERY_COMMAND,
         }
       }
-      const [result, pending] = await Promise.all([
+      const [acknowledgement, result, pending] = await Promise.all([
+        readJsonIfExists(join(operationRoot, 'ack.json')),
         readJsonIfExists(join(root, 'helper-result.json')),
         readJsonIfExists(join(root, 'pending-completion.json')),
       ])
+      if (acknowledgement !== undefined) {
+        exactKeys(acknowledgement, ['schemaVersion', 'token', 'manifestSha256', 'helperPid'], 'helper acknowledgement')
+        const acknowledgedManifest = acknowledgement.manifestSha256
+        if (acknowledgement.schemaVersion !== 1 || acknowledgement.token !== name
+          || !Number.isSafeInteger(acknowledgement.helperPid) || Number(acknowledgement.helperPid) <= 0
+          || (acknowledgedManifest !== capability.manifestSha256
+            && acknowledgedManifest !== capability.migration?.manifestSha256)) {
+          throw new Error('desktop managed update: helper acknowledgement does not match its operation')
+        }
+        if (result === undefined && pending === undefined) {
+          return {
+            status: 'recovery-required',
+            message: 'The managed update helper acknowledged the handoff but did not record a terminal result.',
+            command: RECOVERY_COMMAND,
+          }
+        }
+      }
       const resultSequence = Number.isSafeInteger(result?.sequence) ? Number(result?.sequence) : undefined
       const pendingSequence = Number.isSafeInteger(pending?.sequence) ? Number(pending?.sequence) : undefined
       if (result?.status === 'blocked' && resultSequence !== undefined && resultSequence > installedSequence) {
