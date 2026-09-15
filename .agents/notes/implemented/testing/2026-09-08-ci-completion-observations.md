@@ -14,6 +14,8 @@ The [GitHub review browser test](../../../../apps/web/tests/github-ready-review.
 
 The [PowerShell executor tests](../../../../packages/shell/pwsh-local/tests/executor.spec.ts) hold startup and consuming reads at private file barriers. The test controls when later output becomes available; final stdin/environment output is read after `done`. Polling uses the active test budget, and every constructed Context is registered before plugin initialization. Teardown captures Contexts and directories before awaiting disposal and removes directories only after that disposal completes.
 
+The [projection-cache recovery and write-policy tests](../../../../packages/session/session-projection-cache/tests/fixtures.spec.ts) wait for the cache domain's post-durability checkpoint state, using the exact sequence watermark when the case owns one, then read each JSON record once. Domain memory changes only after the atomic replacement completes, so the wait proves completion without repeatedly opening the Windows target while replacement is pending. The assertions retain the real mandatory write path and independently verify the persisted record.
+
 The [queued-image test](../../../../apps/web/tests/queue-image.e2e.ts) separately holds admission and attachment retrieval, then captures the admitted row's loaded thumbnail. Cleanup shares one promise, releases held requests, and drains their handlers before closing the browser.
 
 The [Details Session-lifecycle test](../../../../apps/web/tests/details-session-lifecycle.e2e.ts) awaits the frame's captured animation promises after closed state appears, then checks the zero-width track. Cancelled transitions also reach that assertion; animation settlement cannot make a persistent nonzero track pass.

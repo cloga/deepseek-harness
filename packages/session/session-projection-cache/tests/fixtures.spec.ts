@@ -32,7 +32,12 @@ import {
 } from '@deepseek-ai/dsh-storage-domain'
 import SessionProjectionCache from '../src/index.ts'
 import { projectionCacheDomainSpec } from '../src/spec.ts'
-import { projectionDurableObservationOptions } from './durable-observation.ts'
+import { waitForProjectionCheckpoint } from './durable-observation.ts'
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const fs = await importOriginal<typeof import('node:fs/promises')>()
+  return { ...fs, readFile: vi.fn(fs.readFile) }
+})
 
 // Declarations must match the shipped title unit's exactly (the repo-wide
 // compile face sees both).
@@ -95,7 +100,7 @@ function headerFor(id: SessionId, identity: FixtureDoc['record']['identity']): S
 
 const contexts: Context[] = []
 const roots: string[] = []
-const durableObservation = projectionDurableObservationOptions()
+const releaseBarriers: (() => void)[] = []
 
 async function harness(root: string) {
   roots.push(root)
@@ -127,26 +132,58 @@ async function placeDoc(root: string, id: string, name: string): Promise<Fixture
 async function assertRewrite(ctx: Context, root: string, id: SessionId): Promise<void> {
   const session = ctx.sessions.create(id)
   session.append('fixtures-test/set-title', { title: '重写标题' })
-  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  const end = session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await waitForProjectionCheckpoint(ctx.sessionProjectionCache, session, end.seq)
   const path = join(root, projectionCacheDomainSpec.name, 'sessions', `${id}.json`)
-  await vi.waitFor(async () => {
-    const doc = JSON.parse(await readFile(path, 'utf8')) as FixtureDoc
-    expect(doc.version).toBe(projectionCacheDomainSpec.version)
-    expect(doc.record.identity).toMatchObject({
-      formatVersion: SESSION_FORMAT_VERSION,
-      isSeeded: false,
-      inheritedEventCount: 0,
-    })
-    expect(doc.record.rows['title']?.val).toBe('重写标题')
-  }, durableObservation)
+  const doc = JSON.parse(await readFile(path, 'utf8')) as FixtureDoc
+  expect(doc.version).toBe(projectionCacheDomainSpec.version)
+  expect(doc.record.identity).toMatchObject({
+    formatVersion: SESSION_FORMAT_VERSION,
+    isSeeded: false,
+    inheritedEventCount: 0,
+  })
+  expect(doc.record.rows['title']).toEqual({ ver: 1, seq: end.seq, val: '重写标题' })
 }
 
 afterEach(async () => {
+  for (const release of releaseBarriers.splice(0)) release()
   await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose()))
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })))
+  vi.clearAllMocks()
 })
 
 describe('archived version recovery', () => {
+  it('does not open the recovered document until the mandatory rewrite is durable', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-fx-'))
+    const id = SessionId('held-rewrite')
+    await placeDoc(root, id, 'v4-session-doc.json')
+    const { ctx } = await harness(root)
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    releaseBarriers.push(() => { release.resolve(undefined) })
+    ctx.on('session/flush', () => {
+      entered.resolve(undefined)
+      return release.promise
+    })
+    vi.mocked(readFile).mockClear()
+
+    let settled = false
+    const rewrite = assertRewrite(ctx, root, id).then(() => { settled = true })
+    const outcome = Promise.allSettled([rewrite])
+    try {
+      await entered.promise
+      expect(settled).toBe(false)
+      expect(readFile).not.toHaveBeenCalled()
+    } finally {
+      release.resolve(undefined)
+      expect(await outcome).toEqual([{ status: 'fulfilled', value: undefined }])
+    }
+    expect(readFile).toHaveBeenCalledExactlyOnceWith(
+      join(root, projectionCacheDomainSpec.name, 'sessions', `${id}.json`),
+      'utf8',
+    )
+  })
+
   it('recovers the v3 whole-unit archive through the legacy bootstrap', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-fx-'))
     await cp(join(FIXTURES, 'v3-single-unit.json'), join(root, `${projectionCacheDomainSpec.name}.json`))

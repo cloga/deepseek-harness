@@ -136,6 +136,6 @@ These limits define where the cache needs operational care. They are current pac
 <details>
 <summary>Working context for maintainers — click to expand</summary>
 
-None.
+Durability tests use [`waitForProjectionCheckpoint`](tests/durable-observation.ts) to observe the expected committed checkpoint state in `cachedSnapshot` before independently reading the JSON record. Sequence-bearing cases require the exact watermark; seeded creation preserves its value-based contract. Do not poll the file while a background checkpoint is pending: an open Windows read handle can make atomic replacement fail with `EPERM`. The creation cut cannot satisfy a later `turn/end` assertion, and tests must not trigger an extra write to complete the observation. See the [completion-observation decision](../../../.agents/notes/implemented/testing/2026-09-08-ci-completion-observations.md).
 
 </details>
