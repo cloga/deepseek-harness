@@ -286,7 +286,10 @@ function assertUnsignedInstaller(path: string): void {
   const status = execFileSync(
     join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-      `(Get-AuthenticodeSignature -LiteralPath '${escaped}').Status.ToString()`],
+      [
+        'Import-Module (Join-Path $env:SystemRoot "System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1")',
+        `(Get-AuthenticodeSignature -LiteralPath '${escaped}').Status.ToString()`,
+      ].join('\n')],
     { encoding: 'utf8' },
   ).trim()
   if (status !== 'NotSigned') throw new Error(`desktop fork release: installer signature status is ${status}`)
