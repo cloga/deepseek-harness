@@ -98,7 +98,7 @@ appendFileSync(${JSON.stringify(join(root, 'pnpm-log.jsonl'))}, JSON.stringify({
   credentials: {
     npmToken: process.env.NPM_TOKEN,
     corepackToken: process.env.COREPACK_NPM_TOKEN,
-    userConfig: process.env.npm_config_userconfig,
+    userConfig: process.env.NPM_CONFIG_USERCONFIG,
     secret: process.env.DESKTOP_FIXTURE_SECRET,
   },
 }) + '\\n')

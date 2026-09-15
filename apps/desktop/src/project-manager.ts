@@ -724,6 +724,7 @@ export class DesktopProjectManager {
         `--config.registry=${registry}`,
         `--config.store-dir=${this.paths.pnpm.store}`,
         '--config.enable-global-virtual-store=false',
+        '--config.frozen-lockfile=false',
         `--config.userconfig=${npmrc}`,
         command,
         ...commandArgs,
