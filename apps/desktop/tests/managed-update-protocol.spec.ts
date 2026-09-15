@@ -114,7 +114,7 @@ describe('Desktop managed update protocol', () => {
         maximumSequence: 1,
         expectedSource: {
           version: '0.1.5-rc.2',
-          commit: 'f'.repeat(40),
+          tag: 'dsh-v0.1.5-rc.2',
         },
       },
     })
@@ -170,7 +170,7 @@ describe('Desktop managed update protocol', () => {
     })).toThrow()
   })
 
-  it('pins manifest provenance, build inputs, plugin schemas, network policy, and interactive completion', () => {
+  it('pins manifest source identity, build inputs, plugin schemas, network policy, and interactive completion', () => {
     const manifest = managedManifest()
     expect(manifest.source.tree).toMatch(/^[a-f0-9]{40}$/u)
     expect(manifest).toMatchObject({

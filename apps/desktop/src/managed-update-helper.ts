@@ -237,15 +237,11 @@ function verifyBuildReceipt(
     throw new Error('desktop managed update: build receipt omits source identity')
   }
   const identity = source as Record<string, unknown>
-  const expectedCommit = manifest.owner === 'cloga/deepseek-harness'
-    ? manifest.source.commit
-    : handoff.capability.migration?.expectedSource.commit
-  const expectedVersion = manifest.owner === 'cloga/deepseek-harness'
-    ? manifest.version
-    : handoff.capability.migration?.expectedSource.version
-  if (expectedCommit === undefined || expectedVersion === undefined || identity.commit !== expectedCommit
-    || (identity.tag !== (manifest.owner === 'cloga/deepseek-harness' ? manifest.source.tag : undefined)
-      && identity.version !== expectedVersion)) {
+  const sourceMatches = manifest.owner === 'cloga/deepseek-harness'
+    ? identity.commit === manifest.source.commit
+      && (identity.tag === manifest.source.tag || identity.version === manifest.version)
+    : identity.tag === handoff.capability.migration?.expectedSource.tag
+  if (!sourceMatches) {
     throw new Error('desktop managed update: build receipt source does not match the local capability')
   }
   const repositories = manifest.owner === 'cloga/deepseek-harness'

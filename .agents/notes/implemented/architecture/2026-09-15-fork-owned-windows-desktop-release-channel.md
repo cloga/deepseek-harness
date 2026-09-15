@@ -34,7 +34,7 @@ Check lists the fixed repository's GitHub Releases. Every matching release must 
 
 The selected handoff locks both the manifest's canonical self-hash and its raw release-asset SHA-256. The detached helper revalidates both before it downloads the receipt and installer. Completion verifies the running executable, runtime descriptor, expected GitHub release and asset identifiers before it records the new sequence. It does not mutate plugin state.
 
-The immutable `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest remains an exact sequence-zero migration only when the source repository has no matching release. Any malformed, mutable, conflicting, or unreachable source release fails closed instead of falling back. Once a source release exists, Windows Ops cannot act as a second channel.
+The immutable `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest remains an exact sequence-zero migration only when the source repository has no matching release. The migration record fixes the manifest and installer hashes plus the build receipt's `dsh-v0.1.5-rc.2` source tag; the manifest-fixed receipt retains the source commit and tree. Any malformed, mutable, conflicting, or unreachable source release fails closed instead of falling back. Once a source release exists, Windows Ops cannot act as a second channel.
 
 ## Publication
 

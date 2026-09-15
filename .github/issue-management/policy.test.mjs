@@ -907,11 +907,13 @@ test('keeps trusted preflight before token minting and required policy unconditi
   assert.ok(steps[1].includes('node .github/issue-management/policy.mjs pr-preflight'))
   assert.ok(steps[1].includes('if [ -f .github/issue-management/selective-preflight.json ]; then'))
   assert.doesNotMatch(steps[1], /secrets\.|PROJECT_TOKEN|if:/)
-  assert.ok(steps[2].includes("if: ${{ steps.preflight.outputs.needs-project == 'true' }}"))
+  assert.ok(steps[2].includes("github.repository == 'deepseek-ai/deepseek-harness'"))
+  assert.ok(steps[2].includes("steps.preflight.outputs.needs-project == 'true'"))
   assert.ok(steps[2].includes('permission-organization-projects: read'))
   assert.ok(steps[3].includes('PROJECT_TOKEN: ${{ steps.app-token.outputs.token }}'))
   assert.ok(steps[3].includes('run: node .github/issue-management/policy.mjs pr'))
-  assert.ok(steps[3].includes("if: ${{ steps.preflight.outputs.legacy-automated != 'true' }}"))
+  assert.ok(steps[3].includes("github.repository == 'deepseek-ai/deepseek-harness'"))
+  assert.ok(steps[3].includes("steps.preflight.outputs.legacy-automated != 'true'"))
 })
 
 test('runs trusted rollout selection with absent and present capability markers', { skip: process.platform === 'win32' ? 'The policy workflow executes under hosted Ubuntu bash' : false }, (t) => {

@@ -34,7 +34,7 @@ Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须�
 
 所选 handoff 同时锁定 manifest 的规范 self-hash 与 raw release-asset SHA-256。独立 helper 在下载 receipt 与 installer 前重新验证二者。Completion 在记录新 sequence 前验证运行中的 executable、runtime descriptor 与预期 GitHub release 和 asset identifiers。它不修改插件状态。
 
-不可变 `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest 仅在源码 repository 没有匹配 release 时作为精确 sequence-zero migration 保留。任何格式错误、可变、冲突或不可达的 source release 都会 fail closed，不会 fallback。一旦 source release 存在，Windows Ops 不能充当第二通道。
+不可变 `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest 仅在源码 repository 没有匹配 release 时作为精确 sequence-zero migration 保留。Migration record 固定 manifest 与 installer hash，并固定 build receipt 的 `dsh-v0.1.5-rc.2` source tag；由 manifest 固定的 receipt 仍保留 source commit 与 tree。任何格式错误、可变、冲突或不可达的 source release 都会 fail closed，不会 fallback。一旦 source release 存在，Windows Ops 不能充当第二通道。
 
 ## 发布
 

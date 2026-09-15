@@ -85,7 +85,7 @@ describe('DesktopManagedUpdateCoordinator', () => {
           manifestSha256: '2'.repeat(64),
           assetSha256: '3'.repeat(64),
           maximumSequence: 1,
-          expectedSource: { version: '0.1.5-rc.2', commit: '4'.repeat(40) },
+          expectedSource: { version: '0.1.5-rc.2', tag: 'dsh-v0.1.5-rc.2' },
         },
       }),
       () => 0,
