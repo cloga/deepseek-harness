@@ -61,7 +61,7 @@ describe('Desktop fork release plan', () => {
     }
     expect(workflow.permissions).toEqual({ contents: 'read' })
     expect(workflow.env).toMatchObject({
-      NODE_VERSION: '24.17.0',
+      NODE_VERSION: '24.13.0',
       PNPM_VERSION: '11.7.0',
     })
     expect(workflow.jobs.build?.permissions).toBeUndefined()

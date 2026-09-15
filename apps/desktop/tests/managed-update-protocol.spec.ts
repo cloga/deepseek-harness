@@ -177,7 +177,7 @@ describe('Desktop managed update protocol', () => {
       source: { commit: MANAGED_COMMIT },
       build: {
         workflow: '.github/workflows/desktop-fork-release.yml',
-        nodeVersion: 'v24.17.0',
+        nodeVersion: 'v24.13.0',
         pnpmVersion: '11.7.0',
       },
       pluginProvisioning: {

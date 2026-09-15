@@ -93,7 +93,7 @@ export function managedManifest(
       workflow: DESKTOP_MANAGED_UPDATE_WORKFLOW,
       lockfileSha256: '4'.repeat(64),
       planSha256: '5'.repeat(64),
-      nodeVersion: 'v24.17.0',
+      nodeVersion: 'v24.13.0',
       pnpmVersion: '11.7.0',
     },
     identity: {

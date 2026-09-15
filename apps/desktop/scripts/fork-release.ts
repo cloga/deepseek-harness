@@ -39,7 +39,7 @@ import { discoverDesktopManagedSourceRelease } from '../src/managed-update-coord
 
 const APP_ROOT = resolve(import.meta.dirname, '..')
 const REPOSITORY_ROOT = resolve(APP_ROOT, '..', '..')
-const NODE_VERSION = 'v24.17.0'
+const NODE_VERSION = 'v24.13.0'
 const PNPM_VERSION = '11.7.0'
 const IDENTITY = {
   appId: 'io.github.cloga.deepseek-harness.desktop',

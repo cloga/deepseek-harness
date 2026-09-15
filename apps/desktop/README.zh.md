@@ -159,7 +159,7 @@ pnpm run package:desktop:win:x64:unsigned
 
 ### Fork 拥有的 Windows 发布
 
-`release/cloga-windows-x64.json` 中经过评审的 plan 同时推进语义版本与整数 sequence。手动 `Desktop fork release (Windows x64)` workflow 只能从当前 `master` 运行，要求操作员确认经过评审的版本，固定 Node 24.17.0 与 pnpm 11.7.0，从冻结 lockfile 安装，测试 Desktop，打包固定 cloga 身份，并验证独立 helper、capability、未签名 installer、已安装 executable、runtime descriptor 与原生/托管互斥。受保护的 release job 获得唯一的 `contents: write` 权限，交叉检查下载的 workflow artifact，以精确 commit tag 创建 draft，上传全部资产并发布；除非 GitHub 报告 release 不可变且每个远程 asset digest 匹配，否则流程失败。最后一个不带凭据的 job 针对 GitHub 运行已发布的 release discovery。
+`release/cloga-windows-x64.json` 中经过评审的 plan 同时推进语义版本与整数 sequence。手动 `Desktop fork release (Windows x64)` workflow 只能从当前 `master` 运行，要求操作员确认经过评审的版本，固定 Node 24.13.0 与 pnpm 11.7.0，从冻结 lockfile 安装，测试 Desktop，打包固定 cloga 身份，并验证独立 helper、capability、未签名 installer、已安装 executable、runtime descriptor 与原生/托管互斥。受保护的 release job 获得唯一的 `contents: write` 权限，交叉检查下载的 workflow artifact，以精确 commit tag 创建 draft，上传全部资产并发布；除非 GitHub 报告 release 不可变且每个远程 asset digest 匹配，否则流程失败。最后一个不带凭据的 job 针对 GitHub 运行已发布的 release discovery。
 
 每个 release 包含交互式 NSIS installer、`release.json`、`build-receipt.json`、`SHA256SUMS` 与 `SHA512SUMS`。Manifest 与 receipt 锁定源码 commit 与 tree、lockfile 与 plan hash、构建工具、fork package identity、installer size 与 hash、插件 capability 与结构化 source/receipt 版本、允许的 origin 与 redirect，以及重启后 completion 语义。Workflow 不会启动 installer。
 

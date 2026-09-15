@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  NODE_VERSION: '24.17.0'
+  NODE_VERSION: '24.13.0'
   PNPM_VERSION: '11.7.0'
   DSH_TELEMETRY_DISABLED: '1'
   RELEASE_PLAN: apps/desktop/release/cloga-windows-x64.json
