@@ -1,18 +1,23 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   benchmarkNpmResolution,
+  benchmarkNpmResolutionTestCaseTimeoutMs,
+  benchmarkNpmResolutionTestTimeoutMs,
   buildRegistryIndex,
   parseBenchmarkOptions,
   publishWorkspaceRange,
+  removeNpmResolutionConsumer,
   resolveNpmPackageLock,
   runCommandWithTimeout,
   type RegistryIndex,
 } from './benchmark-npm-resolution.ts'
 
 const roots: string[] = []
+const npmResolutionTimeoutMs = benchmarkNpmResolutionTestTimeoutMs()
+const npmResolutionTestCaseTimeoutMs = benchmarkNpmResolutionTestCaseTimeoutMs()
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
@@ -50,6 +55,89 @@ describe('npm resolution benchmark', () => {
     ])).toEqual({ runs: 3, timeoutMs: 45_000, maxMs: 20_000, ref: 'master' })
     expect(parseBenchmarkOptions(['--', '--runs', '2'])).toEqual({ runs: 2, timeoutMs: 300_000 })
     expect(() => parseBenchmarkOptions(['--runs', '0'])).toThrow('--runs must be a positive integer')
+  })
+
+  it('inherits the bounded coverage-lane timeout without lowering the normal floor', () => {
+    expect(benchmarkNpmResolutionTestTimeoutMs({})).toBe(10_000)
+    expect(benchmarkNpmResolutionTestTimeoutMs({ DSH_COVERAGE_TEST_TIMEOUT_MS: '5000' })).toBe(10_000)
+    expect(benchmarkNpmResolutionTestTimeoutMs({ DSH_COVERAGE_TEST_TIMEOUT_MS: '90000' })).toBe(80_000)
+    expect(benchmarkNpmResolutionTestCaseTimeoutMs({})).toBe(20_000)
+    expect(benchmarkNpmResolutionTestCaseTimeoutMs({ DSH_COVERAGE_TEST_TIMEOUT_MS: '90000' })).toBe(90_000)
+    expect(() => benchmarkNpmResolutionTestTimeoutMs({ DSH_COVERAGE_TEST_TIMEOUT_MS: 'invalid' }))
+      .toThrow('DSH_COVERAGE_TEST_TIMEOUT_MS must be a positive integer')
+    expect(() => benchmarkNpmResolutionTestTimeoutMs({ DSH_COVERAGE_TEST_TIMEOUT_MS: '300001' }))
+      .toThrow('DSH_COVERAGE_TEST_TIMEOUT_MS must not exceed 300000')
+  })
+
+  it('retries only transient Windows cleanup failures with bounded backoff', async () => {
+    const tempRoot = join(tmpdir(), 'benchmark-cleanup-test-root')
+    const target = join(tempRoot, 'dsh-npm-resolution-owned')
+    const waits: number[] = []
+    let attempts = 0
+    await removeNpmResolutionConsumer(target, {
+      tempRoot,
+      platform: 'win32',
+      remove: () => {
+        attempts++
+        if (attempts < 4) {
+          const codes = ['EPERM', 'EBUSY', 'ENOTEMPTY']
+          throw Object.assign(new Error('busy'), { code: codes[attempts - 1] })
+        }
+      },
+      wait: (ms) => {
+        waits.push(ms)
+        return Promise.resolve()
+      },
+    })
+    expect(attempts).toBe(4)
+    expect(waits).toEqual([100, 200, 300])
+  })
+
+  it('fails after the bounded Windows cleanup retries are exhausted', async () => {
+    const tempRoot = join(tmpdir(), 'benchmark-cleanup-test-root')
+    const target = join(tempRoot, 'dsh-npm-resolution-owned')
+    const failure = Object.assign(new Error('still busy'), { code: 'EPERM' })
+    let attempts = 0
+    await expect(removeNpmResolutionConsumer(target, {
+      tempRoot,
+      platform: 'win32',
+      maxRetries: 2,
+      remove: () => {
+        attempts++
+        throw failure
+      },
+      wait: () => Promise.resolve(),
+    })).rejects.toBe(failure)
+    expect(attempts).toBe(3)
+  })
+
+  it('does not retry a non-transient cleanup failure', async () => {
+    const tempRoot = join(tmpdir(), 'benchmark-cleanup-test-root')
+    const target = join(tempRoot, 'dsh-npm-resolution-owned')
+    const failure = Object.assign(new Error('access denied'), { code: 'EACCES' })
+    const wait = vi.fn((_ms: number) => Promise.resolve())
+    const remove = vi.fn(() => { throw failure })
+    await expect(removeNpmResolutionConsumer(target, {
+      tempRoot,
+      platform: 'win32',
+      remove,
+      wait,
+    })).rejects.toBe(failure)
+    expect(remove).toHaveBeenCalledTimes(1)
+    expect(wait).not.toHaveBeenCalled()
+  })
+
+  it('refuses cleanup outside the private benchmark directory namespace', async () => {
+    const tempRoot = join(tmpdir(), 'benchmark-cleanup-test-root')
+    const remove = vi.fn()
+    await expect(removeNpmResolutionConsumer(tempRoot, { tempRoot, remove })).rejects.toThrow('refusing to remove')
+    await expect(removeNpmResolutionConsumer(join(tempRoot, 'other'), { tempRoot, remove }))
+      .rejects.toThrow('refusing to remove')
+    await expect(removeNpmResolutionConsumer(join(tempRoot, '..', 'dsh-npm-resolution-outside'), {
+      tempRoot,
+      remove,
+    })).rejects.toThrow('refusing to remove')
+    expect(remove).not.toHaveBeenCalled()
   })
 
   it('projects workspace protocols to published ranges', () => {
@@ -94,13 +182,13 @@ describe('npm resolution benchmark', () => {
       '@deepseek-ai/dsh',
       new Map([['0.1.0', { name: '@deepseek-ai/dsh', version: '0.1.0' }]]),
     ]])
-    const result = await benchmarkNpmResolution(index, '0.1.0', 10_000)
+    const result = await benchmarkNpmResolution(index, '0.1.0', npmResolutionTimeoutMs)
 
     expect(result.durationMs).toBeGreaterThan(0)
     expect(result.registryRequests).toBeGreaterThan(0)
     expect(result.archiveRequests).toBe(0)
     expect(result.unknownPackages).toEqual([])
-  })
+  }, npmResolutionTestCaseTimeoutMs)
 
   it('returns npm placement for two aliased package versions without requesting archives', async () => {
     const index: RegistryIndex = new Map([[
@@ -114,7 +202,7 @@ describe('npm resolution benchmark', () => {
     const result = await resolveNpmPackageLock(index, {
       '@deepseek-ai/dsh': '0.2.0',
       'dsh-previous': 'npm:@deepseek-ai/dsh@0.1.0',
-    }, 10_000)
+    }, npmResolutionTimeoutMs)
 
     expect(result.archiveRequests).toBe(0)
     expect(result.packageLock.packages['node_modules/@deepseek-ai/dsh']?.version).toBe('0.2.0')
@@ -122,7 +210,7 @@ describe('npm resolution benchmark', () => {
       name: '@deepseek-ai/dsh',
       version: '0.1.0',
     })
-  })
+  }, npmResolutionTestCaseTimeoutMs)
 
   it('isolates peer resolution from inherited npm configuration', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-hostile-npm-config-'))
@@ -150,7 +238,7 @@ describe('npm resolution benchmark', () => {
         }]])],
       ])
 
-      const result = await resolveNpmPackageLock(index, { '@deepseek-ai/dsh': '0.1.0' }, 10_000)
+      const result = await resolveNpmPackageLock(index, { '@deepseek-ai/dsh': '0.1.0' }, npmResolutionTimeoutMs)
 
       expect(result.archiveRequests).toBe(0)
       expect(result.packageLock.packages['node_modules/@deepseek-ai/dsh-peer']?.version).toBe('1.0.0')
@@ -162,7 +250,7 @@ describe('npm resolution benchmark', () => {
       if (previous.omit === undefined) delete process.env.npm_config_omit
       else process.env.npm_config_omit = previous.omit
     }
-  })
+  }, npmResolutionTestCaseTimeoutMs)
 
   it.skipIf(process.platform === 'win32')('force-kills a timed-out process tree', async () => {
     const source = [
