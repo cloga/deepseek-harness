@@ -12,7 +12,6 @@ import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { turnBoundaryProjectionDefinition } from '@deepseek-ai/dsh-agent-loop'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolResult } from '@deepseek-ai/dsh-tools'
 import { FileSystem, FsError, FsTargetKey, FsVersion } from '@deepseek-ai/dsh-fs'
@@ -879,51 +878,13 @@ describe('sandbox escalation API (write/edit)', () => {
     }
   })
 
-  it('advertises the closed sandbox-mode vocabulary on write and edit under a confining backend', async () => {
+  it('advertises the closed target vocabulary on write and edit under a confining backend', async () => {
     const { ctx } = await setupConfining()
     for (const name of ['write', 'edit'] as const) {
       const props = fsSchema(ctx, name).parameters.properties
-      expect(props['sandbox_permissions']?.enum).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
+      expect(props['sandbox_permissions']?.enum).toEqual(['workspace-write', 'danger-full-access'])
       expect(props['justification']).toBeDefined()
     }
-  })
-
-  it('projects only usable escalation fields for each session', async () => {
-    const { ctx } = await setupConfining({ approval: true })
-    const propertiesFor = async (name: 'write' | 'edit', agent: Agent) => {
-      const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === name)!
-      return (schema.parameters as { properties: Record<string, { enum?: string[] }> }).properties
-    }
-    const readOnly = escalationAgent([{ type: 'sandbox/mode', data: { mode: 'read-only' } }]) as Agent
-    const unrestricted = escalationAgent([{ type: 'sandbox/mode', data: { mode: 'danger-full-access' } }]) as Agent
-    const never = escalationAgent([
-      { type: 'sandbox/mode', data: { mode: 'read-only' } },
-      { type: 'approval/policy', data: { policy: 'never' } },
-    ]) as Agent
-
-    for (const name of ['write', 'edit'] as const) {
-      expect((await propertiesFor(name, readOnly))['sandbox_permissions']?.enum)
-        .toEqual(['workspace-write', 'danger-full-access'])
-      expect(await propertiesFor(name, unrestricted)).not.toHaveProperty('sandbox_permissions')
-      expect(await propertiesFor(name, never)).not.toHaveProperty('sandbox_permissions')
-    }
-  })
-
-  it('projects no escalation fields without an approval service', async () => {
-    const { ctx } = await setupConfining()
-    const agent = escalationAgent([{ type: 'sandbox/mode', data: { mode: 'read-only' } }]) as Agent
-    const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === 'write')!
-    expect((schema.parameters as { properties: Record<string, unknown> }).properties)
-      .not.toHaveProperty('sandbox_permissions')
-  })
-
-  it('projects no escalation fields when an approval service has no sandbox policy', async () => {
-    const { ctx } = await setup()
-    await ctx.plugin(ApprovalService)
-    const agent = escalationAgent() as Agent
-    const schema = (await ctx.systemPrompt.assemble({ scope: agent, agent })).tools.find(item => item.name === 'write')!
-    expect((schema.parameters as { properties: Record<string, unknown> }).properties)
-      .not.toHaveProperty('sandbox_permissions')
   })
 
   it('a plain write stamps the default mode with the calling session root', async () => {
@@ -946,59 +907,13 @@ describe('sandbox escalation API (write/edit)', () => {
     }])
   })
 
-  it('same and narrower requests retain the standing policy without approval or downgrade', async () => {
-    const same = await setupConfining({ approval: true })
-    const samePrompted = vi.fn()
-    same.ctx.on('approval/request', () => { samePrompted(); return Promise.resolve('allowed-once' as const) })
-    await call(same.ctx, 'write', {
-      file_path: 'a.txt',
-      content: 'x',
-      sandbox_permissions: 'workspace-write',
-    }, escalationAgent())
-    await call(same.ctx, 'write', {
-      file_path: 'b.txt',
-      content: 'x',
-      sandbox_permissions: 'read-only',
-    }, escalationAgent())
-    expect(same.fs.stamped).toEqual([
-      { mode: 'workspace-write', workspaceRoot: resolve('/session-project'), sessionId: SessionId('sess-fs-esc') },
-      { mode: 'workspace-write', workspaceRoot: resolve('/session-project'), sessionId: SessionId('sess-fs-esc') },
-    ])
-    expect(samePrompted).not.toHaveBeenCalled()
-
-    const narrower = await setupConfining({ approval: true })
-    const narrowerPrompted = vi.fn()
-    narrower.ctx.on('approval/request', () => { narrowerPrompted(); return Promise.resolve('allowed-once' as const) })
-    await call(narrower.ctx, 'write', {
-      file_path: 'a.txt',
-      content: 'x',
-      sandbox_permissions: 'workspace-write',
-      justification: '   ',
-    }, escalationAgent([{ type: 'sandbox/mode', data: { mode: 'danger-full-access' } }]))
-    expect(narrower.fs.stamped).toEqual([{
-      mode: 'danger-full-access',
-      workspaceRoot: resolve('/session-project'),
-      sessionId: SessionId('sess-fs-esc'),
-    }])
-    expect(narrowerPrompted).not.toHaveBeenCalled()
-  })
-
-  it('a denied write maps to the shared marker plus the escalation hint when approval is available', async () => {
-    const { ctx, fs } = await setupConfining({ approval: true })
-    fs.rejectWith = new FsError('denied', 'FS_SANDBOX_DENIED')
-    const result = await call(ctx, 'write', { file_path: 'a.txt', content: 'x' }, escalationAgent())
-    expect(result.isError).toBe(true)
-    expect(text(result)).toContain('[sandbox: file access denied under workspace-write mode]')
-    expect(text(result)).toContain('retry this exact operation once with sandbox_permissions')
-  })
-
-  it('a denied write omits an escalation hint when approval is unavailable', async () => {
+  it('a denied write maps to the shared marker plus the escalation hint (isError)', async () => {
     const { ctx, fs } = await setupConfining()
     fs.rejectWith = new FsError('denied', 'FS_SANDBOX_DENIED')
     const result = await call(ctx, 'write', { file_path: 'a.txt', content: 'x' }, escalationAgent())
     expect(result.isError).toBe(true)
     expect(text(result)).toContain('[sandbox: file access denied under workspace-write mode]')
-    expect(text(result)).not.toContain('sandbox_permissions')
+    expect(text(result)).toContain('retry this exact operation once with sandbox_permissions')
   })
 
   it('a non-FS_SANDBOX_DENIED provider error passes through unchanged', async () => {
@@ -1052,19 +967,11 @@ describe('sandbox escalation API (write/edit)', () => {
     expect(text(result)).toContain('no agent to route it through')
   })
 
-  it('requires a non-empty justification for an actual wider escalation', async () => {
+  it('rejects the escalation argument pairing (one field without the other)', async () => {
     const { ctx } = await setupConfining()
-    const missing = await call(ctx, 'write', { file_path: 'a.txt', content: 'x', sandbox_permissions: 'danger-full-access' }, escalationAgent())
+    const missing = await call(ctx, 'write', { file_path: 'a.txt', content: 'x', sandbox_permissions: 'workspace-write' }, escalationAgent())
     expect(missing.isError).toBe(true)
     expect(text(missing)).toContain('sandbox_permissions requires a justification')
-    const blank = await call(ctx, 'write', {
-      file_path: 'a.txt',
-      content: 'x',
-      sandbox_permissions: 'danger-full-access',
-      justification: '   ',
-    }, escalationAgent())
-    expect(blank.isError).toBe(true)
-    expect(text(blank)).toContain('expected a non-empty sentence')
   })
 
   it('sandbox_permissions under a non-confining backend fails closed (unadvertised field still reaches execute)', async () => {

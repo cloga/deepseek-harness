@@ -113,6 +113,15 @@ describe('CI workflow', () => {
     },
   )
 
+  it('limits snapshot subprocess fan-out on standard fork runners', () => {
+    const consumers = workflowJob(loadWorkflow('.github/workflows/ci.yml'), 'node-24-consumers')
+    expect(consumers.env).toMatchObject({
+      DSH_GATE_CONCURRENCY: "${{ github.repository != 'deepseek-ai/deepseek-harness' && '1' || '10' }}",
+      DSH_SNAPSHOT_MAX_CONCURRENCY:
+        "${{ github.repository != 'deepseek-ai/deepseek-harness' && '1' || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted' && github.event.pull_request.user.login != 'dependabot[bot]' && '12' || '32' }}",
+    })
+  })
+
   it('isolates the python SDK exe pnpm setup destination per job', () => {
     const workflow: unknown = yaml.load(readFileSync(resolve(root, '.github/workflows/build-exe-for-python-sdk.yml'), 'utf8'))
     if (!isRecord(workflow) || !isRecord(workflow.jobs)) throw new TypeError('build-exe-for-python-sdk.yml must define jobs')
@@ -174,6 +183,8 @@ describe('CI workflow', () => {
       expect(job['runs-on']).toContain('dsh-win-ci')
       expect(job['runs-on']).toContain('dsh-windows-2025-16core')
       expect(job['runs-on']).toContain('blacksmith-16vcpu-windows-2025')
+      expect(job['runs-on']).toContain("github.repository != 'deepseek-ai/deepseek-harness'")
+      expect(job['runs-on']).toContain('windows-2025')
       expect(job.if).toBe("github.event_name == 'pull_request'")
     }
 
@@ -214,10 +225,12 @@ describe('CI workflow', () => {
       expect(install!.run).not.toContain('$cloneFlag')
     }
 
-    // windows-coverage uses the lower 4-partition profile.
+    // windows-coverage uses the lower 4-partition upstream profile and
+    // reduces fork fan-out to fit GitHub-hosted capacity.
     expect(windowsCoverage.name).toBe('windows node 24 / coverage')
-    expect(jobEnv(windowsCoverage)['DSH_COVERAGE_PARTITIONS'])
-      .toContain("github.repository != 'deepseek-harness/deepseek-harness' && '2' || '4'")
+    expect(windowsCoverage.env).toMatchObject({
+      DSH_COVERAGE_PARTITIONS: "${{ github.repository != 'deepseek-ai/deepseek-harness' && '2' || '4' }}",
+    })
     const coverageSteps = windowsCoverage.steps as unknown[]
     const coverageCommands = coverageSteps.filter((step): step is Record<string, unknown> & { run: string } => (
       isRecord(step) && typeof step.run === 'string'
@@ -314,11 +327,14 @@ describe('CI workflow', () => {
       expect(job['runs-on'], `${jobName} runs-on must not use the Windows failover switch`).not.toContain('DSH_CI_FAILOVER_WINDOWS')
       expect(job['runs-on']).toContain('vm-backup')
       expect(job['runs-on']).toContain('blacksmith-16vcpu-ubuntu-2404')
+      expect(job['runs-on']).toContain("github.repository != 'deepseek-ai/deepseek-harness'")
+      expect(job['runs-on']).toContain('ubuntu-latest')
     }
     expect(aggregate['runs-on']).toContain('DSH_CI_FAILOVER_LINUX')
     expect(aggregate['runs-on']).not.toContain('DSH_CI_FAILOVER_WINDOWS')
     expect(aggregate['runs-on']).toContain('vm-backup')
     expect(aggregate['runs-on']).toContain('blacksmith-4vcpu-ubuntu-2404')
+    expect(aggregate['runs-on']).toContain("github.repository != 'deepseek-ai/deepseek-harness'")
 
     // Evaluating the full selector, not just substring containment, proves the
     // blacksmith branch is standalone: it must not fall through to the
@@ -328,12 +344,17 @@ describe('CI workflow', () => {
       linuxAggregate: aggregate['runs-on'] as string,
       windows: windowsBuild['runs-on'] as string,
     }
-    const evaluate = (expression: string, vars: Record<string, string>, login = 'maintainer'): unknown => {
+    const evaluate = (
+      expression: string,
+      vars: Record<string, string>,
+      login = 'maintainer',
+      repository = 'deepseek-ai/deepseek-harness',
+    ): unknown => {
       const body = expression.trim().slice(3, -2)
       return runInNewContext(body, {
         vars,
         fromJSON: JSON.parse,
-        github: { event: { pull_request: { user: { login } } } },
+        github: { repository, event: { pull_request: { user: { login } } } },
       }, { timeout: 1000 })
     }
     for (const [name, selector, variable, pool, hosted] of [
@@ -350,6 +371,9 @@ describe('CI workflow', () => {
         expect(evaluate(selector, { [variable]: mode }), `${name} default on ${mode}`).toBe(hosted)
       }
     }
+    expect(evaluate(selectors.linux, {}, 'maintainer', 'cloga/deepseek-harness')).toBe('ubuntu-latest')
+    expect(evaluate(selectors.linuxAggregate, {}, 'maintainer', 'cloga/deepseek-harness')).toBe('ubuntu-latest')
+    expect(evaluate(selectors.windows, {}, 'maintainer', 'cloga/deepseek-harness')).toBe('windows-2025')
 
     // The run-gates aggregate lanes stop at the first blocking gate failure so
     // a red aggregate does not keep burning runner time on the remaining
@@ -399,6 +423,16 @@ describe('CI workflow', () => {
         }
       }
     }
+  })
+
+  it('keeps upstream-only automation inert in repository forks', () => {
+    const preview = workflowJob(loadWorkflow('.github/workflows/build-preview-cloudflare.yml'), 'preview')
+    const issuePolicy = workflowJob(loadWorkflow('.github/workflows/issue-policy.yml'), 'policy')
+    const issueLifecycle = workflowJob(loadWorkflow('.github/workflows/issue-lifecycle.yml'), 'lifecycle')
+
+    expect(preview.if).toBe("github.repository == 'deepseek-ai/deepseek-harness'")
+    expect(JSON.stringify(issuePolicy.steps)).toContain("github.repository == 'deepseek-ai/deepseek-harness'")
+    expect(JSON.stringify(issueLifecycle.steps)).toContain("github.repository == 'deepseek-ai/deepseek-harness'")
   })
 
   it('runs required benchmarks on standard hosted Linux independently of failover', () => {
@@ -957,23 +991,17 @@ describe('Issue lifecycle workflow', () => {
     expect(lifecyclePullRequest.types).not.toContain('ready_for_review')
     expect(lifecyclePullRequest.types).toContain('review_requested')
     expect(lifecycleReview.types).toEqual(['submitted'])
-    const gated = "github.repository == 'deepseek-harness/deepseek-harness' && (github.event_name != 'pull_request_review' || github.event.review.state == 'changes_requested')"
+    const gated =
+      "github.repository == 'deepseek-ai/deepseek-harness' && (github.event_name != 'pull_request_review' || github.event.review.state == 'changes_requested')"
     const steps = lifecycleJob.steps.filter(isRecord)
     const tokenStep = steps.find(s => s.name === 'Create project token')
     const handleStep = steps.find(s => s.name === 'Handle repository event')
     expect(tokenStep).toMatchObject({ if: gated })
     expect(handleStep).toMatchObject({ if: gated })
 
-    // Both upstream-only jobs remain successful no-ops in forks, where the
-    // Project App credentials and upstream PR/Issue identities do not exist.
+    // issue-policy owns PR validation; it is read-only and a real gate.
     const policyPullRequest = workflowEvent(policy, 'pull_request')
     expect(policyPullRequest.types).toContain('ready_for_review')
-    const policyJob = workflowJob(policy, 'policy')
-    if (!Array.isArray(policyJob.steps)) throw new TypeError('Issue policy job must define steps')
-    const validationStep = policyJob.steps.filter(isRecord).find(s => s.name === 'Validate pull request')
-    expect(validationStep).toMatchObject({
-      if: "${{ github.repository == 'deepseek-harness/deepseek-harness' }}",
-    })
   })
 
   it('uses a read-only Project token only for human pull request policy metadata', () => {
@@ -983,12 +1011,12 @@ describe('Issue lifecycle workflow', () => {
     const steps = policyJob.steps.filter(isRecord)
     const tokenStep = steps.find(step => step.name === 'Create Project read token')
     const validateStep = steps.find(step => step.name === 'Validate pull request')
-    const humanPullRequest =
-      "${{ github.event.pull_request.user.type != 'Bot' && github.event.pull_request.user.type != 'App' }}"
+    const upstreamHumanPullRequest =
+      "github.repository == 'deepseek-ai/deepseek-harness' && github.event.pull_request.user.type != 'Bot' && github.event.pull_request.user.type != 'App'"
 
     expect(tokenStep).toMatchObject({
       id: 'app-token',
-      if: humanPullRequest,
+      if: upstreamHumanPullRequest,
       uses: 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1',
       with: {
         'client-id': '${{ vars.DSH_ISSUE_APP_CLIENT_ID }}',
@@ -1000,7 +1028,7 @@ describe('Issue lifecycle workflow', () => {
       },
     })
     expect(validateStep).toMatchObject({
-      if: humanPullRequest,
+      if: upstreamHumanPullRequest,
       env: {
         GITHUB_TOKEN: '${{ github.token }}',
         PROJECT_TOKEN: '${{ steps.app-token.outputs.token }}',
@@ -1122,11 +1150,6 @@ function workflowJob(workflow: Record<string, unknown>, job: string): Record<str
     throw new TypeError(`workflow must define the ${job} job`)
   }
   return workflow.jobs[job]
-}
-
-function jobEnv(job: Record<string, unknown>): Record<string, unknown> {
-  if (!isRecord(job['env'])) throw new TypeError('workflow job must define env')
-  return job['env']
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

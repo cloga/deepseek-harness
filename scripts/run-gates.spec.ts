@@ -5,6 +5,7 @@ import {
   defaultConcurrency,
   formatGateResultReason,
   gatesForMode,
+  collectDescendants,
   parsePidPpidLines,
   runGate,
   runGates,
@@ -927,6 +928,17 @@ describe('process-table parsing', () => {
 
   it('drops blank and malformed lines', () => {
     expect(parsePidPpidLines('  123   1\n\ncommand not found\n999 abc\n')).toEqual([[123, 1]])
+  })
+
+  it('collects each descendant once when a changing process table contains duplicates and cycles', () => {
+    expect(collectDescendants(100, [
+      [201, 100],
+      [201, 100],
+      [302, 201],
+      [403, 302],
+      [201, 403],
+      [100, 403],
+    ])).toEqual([201, 302, 403])
   })
 })
 

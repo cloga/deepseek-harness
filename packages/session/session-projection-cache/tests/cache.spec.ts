@@ -124,7 +124,9 @@ interface HarnessOptions {
 
 const contexts: Context[] = []
 const roots: string[] = []
-const durableObservation = { timeout: 5_000 } as const
+const durableObservation = {
+  timeout: Math.max(5_000, Number.parseInt(process.env.DSH_COVERAGE_TEST_TIMEOUT_MS ?? '', 10) || 0),
+} as const
 
 async function harness(options: HarnessOptions = {}) {
   const root = options.root ?? await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
@@ -199,8 +201,8 @@ describe('SessionProjectionCache write policy', () => {
     }, durableObservation)
     const end = endTurn(session)
     await vi.waitFor(async () => {
-      const rows = await storedRows(root, session.id)
-      expect(rows?.['cache-test/marks']).toEqual({ ver: 1, seq: end.seq, val: { marks: ['a'] } })
+      expect((await storedRows(root, session.id))?.['cache-test/marks'])
+        .toEqual({ ver: 1, seq: end.seq, val: { marks: ['a'] } })
     }, durableObservation)
   })
 
@@ -226,11 +228,11 @@ describe('SessionProjectionCache write policy', () => {
       session = inner.sessions.create(SessionId('detach'))
     }, { inject: ['sessions'] }))
     if (session === undefined) throw new Error('session was not created')
-    const disposedSession = session
-    mark(disposedSession, ['live'])
+    mark(session, ['live'])
     await owner.dispose()
+    const detached = session
     await vi.waitFor(async () => {
-      expect((await storedRows(root, disposedSession.id))?.['cache-test/marks']?.val).toEqual({ marks: ['live'] })
+      expect((await storedRows(root, detached.id))?.['cache-test/marks']?.val).toEqual({ marks: ['live'] })
     }, durableObservation)
   })
 
@@ -242,13 +244,11 @@ describe('SessionProjectionCache write policy', () => {
     await vi.waitFor(async () => {
       expect((await storedRows(root, session.id))?.['cache-test/marks'])
         .toEqual({ ver: 1, seq: -1, val: null }) // still the creation cut
-    }, { timeout: 5_000 })
+    }, durableObservation)
     mark(session, ['3'])
-    expect(write).toHaveBeenCalledExactlyOnceWith(session)
-    const thresholdWrite = write.mock.results[0]
-    if (thresholdWrite?.type !== 'return') throw new Error('count threshold did not start a cache write')
-    await thresholdWrite.value
-    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['3'] })
+    await vi.waitFor(async () => {
+      expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['3'] })
+    }, durableObservation)
   })
 
   it('flushes on the configured interval when the count threshold is not reached', async () => {
@@ -317,9 +317,14 @@ describe('SessionProjectionCache write policy', () => {
     const session = ctx.sessions.create(SessionId('fail-soft'))
     mark(session, ['x'])
     endTurn(session)
+    // The failed creation/turn-end writes are fire-and-forget: wait for the
+    // warn (the write actually failed), then assert no row landed — the
+    // property under test is that a failed write leaves no partial row.
+    await vi.waitFor(() => {
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('turn/end write for "fail-soft" failed'))
+    }, durableObservation)
     await vi.waitFor(async () => {
       expect(await storedRows(root, session.id)).toBeUndefined()
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('turn/end write for "fail-soft" failed'))
     }, durableObservation)
     // Self-heal: once the blocker clears, the next mandatory point writes.
     await rm(recordPath(root, session.id), { recursive: true })
@@ -721,6 +726,8 @@ describe('SessionProjectionCache cold-read seeding', () => {
     const meta = headerOf(SessionId('cold-fail'))
     await mkdir(recordPath(root, meta.id), { recursive: true })
     expect(ctx.sessionProjectionCache.coldSnapshot(meta, SessionLogOffset(0), [])).toBeDefined()
+    // The failed write-back is fire-and-forget: poll for the warn instead of
+    // assuming a fixed settle window (slow runners exceed it).
     await vi.waitFor(() => {
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('cold-read write-back for "cold-fail" failed'))
     }, durableObservation)

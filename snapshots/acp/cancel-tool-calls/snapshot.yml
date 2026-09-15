@@ -4,7 +4,7 @@ profile: acp
 composition: acp-default
 recording: authored
 header:
-  class: acp-danger-full-access
+  class: acp-default
 replay:
   override: true
 platform: posix

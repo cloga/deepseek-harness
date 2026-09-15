@@ -9,7 +9,6 @@ import { fileURLToPath } from 'node:url'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
-import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import { canonicalPath } from '@deepseek-ai/dsh-sandbox'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import {
@@ -30,26 +29,12 @@ const PROMPTS = [
 ] as const
 
 const PRESET_LABELS = ['Read Only', 'Full access', 'Workspace Write'] as const
-const SHELL_TOOL = process.platform === 'win32' ? 'pwsh' : 'bash'
 
 function systemPrompts(events: readonly SessionEvent[]): string[] {
   return events.flatMap((event) => {
     if (event.type !== 'system/message') return []
     return [event.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('')]
   })
-}
-
-function requestTools(events: readonly SessionEvent[]): readonly ToolSchema[][] {
-  return events.flatMap((event) => {
-    if (event.type !== 'request/header') return []
-    return event.data.header.tools === undefined ? [] : [event.data.header.tools]
-  })
-}
-
-function escalationModes(tools: readonly ToolSchema[], name: string): string[] | undefined {
-  const tool = tools.find(schema => schema.name === name)
-  const parameters = tool?.parameters as { properties?: Record<string, { enum?: string[] }> } | undefined
-  return parameters?.properties?.['sandbox_permissions']?.enum
 }
 
 function runtimeContexts(events: readonly SessionEvent[]): string[] {
