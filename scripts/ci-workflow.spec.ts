@@ -116,8 +116,9 @@ describe('CI workflow', () => {
   it('limits snapshot subprocess fan-out on standard fork runners', () => {
     const consumers = workflowJob(loadWorkflow('.github/workflows/ci.yml'), 'node-24-consumers')
     expect(consumers.env).toMatchObject({
+      DSH_GATE_CONCURRENCY: "${{ github.repository != 'deepseek-ai/deepseek-harness' && '1' || '10' }}",
       DSH_SNAPSHOT_MAX_CONCURRENCY:
-        "${{ github.repository != 'deepseek-ai/deepseek-harness' && '2' || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted' && github.event.pull_request.user.login != 'dependabot[bot]' && '12' || '32' }}",
+        "${{ github.repository != 'deepseek-ai/deepseek-harness' && '1' || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted' && github.event.pull_request.user.login != 'dependabot[bot]' && '12' || '32' }}",
     })
   })
 
