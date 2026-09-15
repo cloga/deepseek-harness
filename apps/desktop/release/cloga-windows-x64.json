@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "channel": "cloga-windows-x64",
   "version": "0.1.5-rc.3.cloga.1",
   "sequence": 2,
@@ -9,6 +9,11 @@
     "productName": "DeepSeek Harness (cloga)",
     "packageName": "cloga-deepseek-harness-desktop",
     "executableName": "cloga-deepseek-harness"
+  },
+  "desktopProvisioning": {
+    "schemaVersion": 1,
+    "mode": "exact",
+    "plugins": []
   },
   "migration": {
     "owner": "cloga/dsh-windows-ops",

@@ -9,6 +9,10 @@ import {
   managedCapability,
   managedManifest,
 } from './managed-update-fixture.ts'
+import {
+  DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+  desktopPluginProvisioningPlanSha256,
+} from '../src/plugin-provisioning.ts'
 
 const roots: string[] = []
 const sha256 = (body: Uint8Array): string => createHash('sha256').update(body).digest('hex')
@@ -17,7 +21,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true })))
 })
 
-it('verifies installed evidence before recording completion without provisioning plugins', async () => {
+it('verifies installed evidence and the packaged provisioning plan before recording completion', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-managed-completion-'))
   roots.push(root)
   const operation = join(root, 'operations', 'a'.repeat(64), 'stage')
@@ -26,8 +30,11 @@ it('verifies installed evidence before recording completion without provisioning
   const runtime = Buffer.from('runtime')
   const executablePath = join(root, 'DeepSeek Harness.exe')
   const runtimePath = join(root, 'desktop-runtime.json')
+  const provisioningPath = join(root, 'desktop-provisioning.json')
+  const provisioning = { schemaVersion: 1 as const, mode: 'exact' as const, plugins: [] }
   await writeFile(executablePath, executable)
   await writeFile(runtimePath, runtime)
+  await writeFile(provisioningPath, JSON.stringify(provisioning))
   const manifest = managedManifest({
     source: {
       repository: 'cloga/deepseek-harness',
@@ -64,12 +71,71 @@ it('verifies installed evidence before recording completion without provisioning
   await expect(completeDesktopManagedUpdate(
     join(root, 'operations'),
     completionPath,
-    managedCapability(),
+    managedCapability({
+      provisioning: {
+        capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+        planSha256: desktopPluginProvisioningPlanSha256(provisioning),
+      },
+    }),
     1,
     executablePath,
     runtimePath,
+    provisioningPath,
   )).resolves.toEqual({ status: 'complete', sequence: 2, version: '1.2.3' })
   expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({ status: 'complete', sequence: 2 })
+})
+
+it('requires recovery when the installed provisioning plan differs from the build capability', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-managed-completion-'))
+  roots.push(root)
+  const operation = join(root, 'operations', 'a'.repeat(64), 'stage')
+  await mkdir(operation, { recursive: true })
+  const executable = Buffer.from('desktop')
+  const runtime = Buffer.from('runtime')
+  const executablePath = join(root, 'DeepSeek Harness.exe')
+  const runtimePath = join(root, 'desktop-runtime.json')
+  const provisioningPath = join(root, 'desktop-provisioning.json')
+  await writeFile(executablePath, executable)
+  await writeFile(runtimePath, runtime)
+  await writeFile(provisioningPath, JSON.stringify({ schemaVersion: 1, mode: 'exact', plugins: [] }))
+  const manifest = managedManifest({
+    installer: {
+      file: 'installer.exe',
+      bytes: 1,
+      sha256: 'c'.repeat(64),
+      sha512: 'YQ'.padEnd(86, 'A') + '==',
+      signature: 'NotSigned',
+    },
+    buildReceipt: { file: 'build-receipt.json', sha256: 'd'.repeat(64), receiptSha256: 'e'.repeat(64) },
+    installedEvidence: { executableSha256: sha256(executable), runtimeSha256: sha256(runtime) },
+  })
+  await writeFile(join(operation, 'release.json'), JSON.stringify(manifest))
+  await writeFile(join(operation, 'helper-result.json'), JSON.stringify({
+    schemaVersion: 1,
+    status: 'installer-exited',
+    manifestSha256: manifest.manifestSha256,
+    sequence: 2,
+    installerExitCode: 0,
+    pendingCompletion: true,
+  }))
+  await writeFile(join(operation, 'pending-completion.json'), JSON.stringify({
+    schemaVersion: 1,
+    manifestSha256: manifest.manifestSha256,
+    sequence: 2,
+    installedEvidence: manifest.installedEvidence,
+  }))
+  await expect(completeDesktopManagedUpdate(
+    join(root, 'operations'),
+    join(root, 'completion.json'),
+    managedCapability({ provisioning: { ...managedCapability().provisioning, planSha256: 'f'.repeat(64) } }),
+    1,
+    executablePath,
+    runtimePath,
+    provisioningPath,
+  )).resolves.toMatchObject({
+    status: 'recovery-required',
+    message: /provisioning plan does not match/u,
+  })
 })
 
 it('requires recovery when a helper acknowledgement has no terminal state', async () => {
@@ -92,6 +158,7 @@ it('requires recovery when a helper acknowledgement has no terminal state', asyn
     1,
     join(root, 'unused.exe'),
     join(root, 'unused-runtime.json'),
+    join(root, 'unused-provisioning.json'),
   )).resolves.toMatchObject({
     status: 'recovery-required',
     message: /acknowledged the handoff/u,
@@ -138,6 +205,7 @@ it.each([
     1,
     join(root, 'unused.exe'),
     join(root, 'unused-runtime.json'),
+    join(root, 'unused-provisioning.json'),
   )).resolves.toMatchObject({ status: 'recovery-required', message })
 })
 
@@ -163,5 +231,6 @@ it('ignores an operation explicitly cancelled by its owning Desktop process', as
     1,
     join(root, 'unused.exe'),
     join(root, 'unused-runtime.json'),
+    join(root, 'unused-provisioning.json'),
   )).resolves.toEqual({ status: 'none' })
 })

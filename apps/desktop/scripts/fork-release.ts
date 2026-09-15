@@ -31,6 +31,12 @@ import {
 import {
   DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
 } from '../src/plugin-source.ts'
+import {
+  DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+  desktopPluginProvisioningPlanSha256,
+  parseDesktopPluginProvisioningPlan,
+  type DesktopPluginProvisioningPlan,
+} from '../src/plugin-provisioning.ts'
 import { discoverDesktopManagedSourceRelease } from '../src/managed-update-coordinator.ts'
 import { resolveDesktopPackageRegistry } from './desktop-release-environment.mjs'
 
@@ -47,12 +53,13 @@ const IDENTITY = {
 
 /** Reviewed source inputs for one immutable cloga Windows release. */
 export interface DesktopForkReleasePlan {
-  readonly schemaVersion: 1
+  readonly schemaVersion: 2
   readonly channel: typeof DESKTOP_MANAGED_UPDATE_CHANNEL
   readonly version: string
   readonly sequence: number
   readonly upstreamVersion: string
   readonly identity: typeof IDENTITY
+  readonly desktopProvisioning: DesktopPluginProvisioningPlan
   readonly migration: NonNullable<DesktopManagedUpdateCapability['migration']> & {
     readonly channelVersion: string
   }
@@ -111,10 +118,16 @@ function pnpmVersion(): string {
 /** Parse and validate the reviewed cloga Windows release plan. */
 export function parseDesktopForkReleasePlan(value: unknown): DesktopForkReleasePlan {
   const plan = record(value, 'plan')
-  exactKeys(plan, [
-    'schemaVersion', 'channel', 'version', 'sequence', 'upstreamVersion', 'identity', 'migration',
-  ], 'plan')
-  if (plan.schemaVersion !== 1 || plan.channel !== DESKTOP_MANAGED_UPDATE_CHANNEL
+  if (plan.schemaVersion === 1) {
+    exactKeys(plan, ['schemaVersion', 'channel', 'version', 'sequence', 'upstreamVersion', 'identity', 'migration'], 'plan')
+  } else if (plan.schemaVersion === 2) {
+    exactKeys(plan, [
+      'schemaVersion', 'channel', 'version', 'sequence', 'upstreamVersion', 'identity', 'desktopProvisioning', 'migration',
+    ], 'plan')
+  } else {
+    throw new Error('desktop fork release: plan identity or version is invalid')
+  }
+  if (plan.channel !== DESKTOP_MANAGED_UPDATE_CHANNEL
     || typeof plan.version !== 'string' || valid(plan.version) !== plan.version
     || typeof plan.upstreamVersion !== 'string' || valid(plan.upstreamVersion) !== plan.upstreamVersion) {
     throw new Error('desktop fork release: plan identity or version is invalid')
@@ -125,6 +138,9 @@ export function parseDesktopForkReleasePlan(value: unknown): DesktopForkReleaseP
     throw new Error('desktop fork release: plan identity must use the cloga fork identity')
   }
   const migration = record(plan.migration, 'plan.migration')
+  const desktopProvisioning = parseDesktopPluginProvisioningPlan(plan.schemaVersion === 1
+    ? { schemaVersion: 1, mode: 'exact', plugins: [] }
+    : plan.desktopProvisioning)
   exactKeys(migration, [
     'owner', 'manifestUrl', 'manifestSha256', 'assetSha256', 'maximumSequence', 'expectedSource', 'channelVersion',
   ], 'plan.migration')
@@ -140,6 +156,10 @@ export function parseDesktopForkReleasePlan(value: unknown): DesktopForkReleaseP
     manifestAsset: DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET,
     currentSequence: sequence,
     minimumSequence: 2,
+    provisioning: {
+      capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+      planSha256: desktopPluginProvisioningPlanSha256(desktopProvisioning),
+    },
     migration: {
       owner: migration.owner,
       manifestUrl: migration.manifestUrl,
@@ -156,12 +176,13 @@ export function parseDesktopForkReleasePlan(value: unknown): DesktopForkReleaseP
     throw new Error('desktop fork release: version and sequence must advance the upstream and migration releases')
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     channel: DESKTOP_MANAGED_UPDATE_CHANNEL,
     version: plan.version,
     sequence,
     upstreamVersion: plan.upstreamVersion,
     identity: IDENTITY,
+    desktopProvisioning,
     migration: {
       ...capability.migration,
       channelVersion: migration.channelVersion,
@@ -181,6 +202,10 @@ export function createDesktopForkReleaseCapability(
     manifestAsset: DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET,
     currentSequence: plan.sequence,
     minimumSequence: 2,
+    provisioning: {
+      capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+      planSha256: desktopPluginProvisioningPlanSha256(plan.desktopProvisioning),
+    },
     migration: {
       owner: plan.migration.owner,
       manifestUrl: plan.migration.manifestUrl,
@@ -257,6 +282,7 @@ function relativeImportPresent(source: string): boolean {
 export function finalizeDesktopForkRelease(
   plan: DesktopForkReleasePlan,
   capabilityPath: string,
+  provisioningPath: string,
   artifactsRoot: string,
   outputRoot: string,
 ): void {
@@ -270,9 +296,16 @@ export function finalizeDesktopForkRelease(
     'capability.json',
   )
   const helperPath = join(artifactsRoot, 'win-unpacked', 'resources', 'managed-update', 'helper.mjs')
+  const packagedProvisioningPath = join(
+    artifactsRoot,
+    'win-unpacked',
+    'resources',
+    'desktop-provisioning',
+    'plan.json',
+  )
   const appUpdatePath = join(artifactsRoot, 'win-unpacked', 'resources', 'app-update.yml')
-  if (!existsSync(packagedCapabilityPath) || !existsSync(helperPath)) {
-    throw new Error('desktop fork release: packaged managed capability or standalone helper is missing')
+  if (!existsSync(packagedCapabilityPath) || !existsSync(packagedProvisioningPath) || !existsSync(helperPath)) {
+    throw new Error('desktop fork release: packaged capability, provisioning plan, or standalone helper is missing')
   }
   if (existsSync(appUpdatePath)) {
     throw new Error('desktop fork release: native app-update.yml must not accompany managed mode')
@@ -284,6 +317,12 @@ export function finalizeDesktopForkRelease(
     !== JSON.stringify(parseDesktopManagedUpdateCapability(readJson(packagedCapabilityPath)))) {
     throw new Error('desktop fork release: packaged capability does not match the reviewed input')
   }
+  const provisioning = parseDesktopPluginProvisioningPlan(readJson(provisioningPath))
+  if (JSON.stringify(provisioning)
+    !== JSON.stringify(parseDesktopPluginProvisioningPlan(readJson(packagedProvisioningPath)))) {
+    throw new Error('desktop fork release: packaged provisioning plan does not match the reviewed input')
+  }
+  const provisioningSha256 = desktopPluginProvisioningPlanSha256(provisioning)
   const installerName = `cloga-deepseek-harness-${plan.version}-win-x64.exe`
   const installerPath = join(artifactsRoot, installerName)
   if (!existsSync(installerPath)) {
@@ -305,7 +344,10 @@ export function finalizeDesktopForkRelease(
   rmSync(outputRoot, { recursive: true, force: true })
   mkdirSync(outputRoot, { recursive: true })
   const publishedInstaller = join(outputRoot, installerName)
+  const provisioningName = 'desktop-provisioning.json'
+  const publishedProvisioning = join(outputRoot, provisioningName)
   copyFileSync(installerPath, publishedInstaller)
+  copyFileSync(provisioningPath, publishedProvisioning)
   const receiptPayload = {
     schemaVersion: 1,
     action: 'desktop-fork-release',
@@ -339,12 +381,18 @@ export function finalizeDesktopForkRelease(
       runtimeSha256: fileSha256(runtimePath),
       helperSha256: fileSha256(helperPath),
       capabilitySha256: fileSha256(packagedCapabilityPath),
+      provisioning: {
+        file: provisioningName,
+        sha256: fileSha256(publishedProvisioning),
+        planSha256: provisioningSha256,
+      },
     },
     validation: {
       helperStandalone: true,
       nativeUpdaterEnabled: false,
       appUpdateYmlPresent: false,
       managedCapabilityMatches: true,
+      provisioningPlanMatches: true,
       installerStarted: false,
       installedDesktopTouched: false,
     },
@@ -365,7 +413,11 @@ export function finalizeDesktopForkRelease(
     },
     pluginCompatibility: {
       capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
-      automaticProvisioning: false,
+      automaticProvisioning: true,
+      provisioning: {
+        capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+        planSha256: provisioningSha256,
+      },
     },
   }
   const receipt = { ...receiptPayload, receiptSha256: managedUpdateJsonSha256(receiptPayload) }
@@ -404,7 +456,10 @@ export function finalizeDesktopForkRelease(
       executableSha256: receipt.artifacts.executableSha256,
       runtimeSha256: receipt.artifacts.runtimeSha256,
     },
-    pluginCompatibility: receipt.pluginCompatibility,
+    pluginCompatibility: {
+      capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
+      automaticProvisioning: false,
+    },
     network: receipt.network,
     installation: receipt.installation,
   }
@@ -412,7 +467,7 @@ export function finalizeDesktopForkRelease(
   parseDesktopManagedUpdateManifest(manifest, capability, 0, true)
   const manifestPath = join(outputRoot, DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET)
   writeJson(manifestPath, manifest)
-  const files = [installerName, basename(receiptPath), basename(manifestPath)]
+  const files = [installerName, provisioningName, basename(receiptPath), basename(manifestPath)]
   writeFileSync(join(outputRoot, 'SHA256SUMS'), `${files.map(name => `${fileSha256(join(outputRoot, name))}  ${name}`).join('\n')}\n`)
   writeFileSync(join(outputRoot, 'SHA512SUMS'), `${files.map(name => `${sha512(join(outputRoot, name))}  ${name}`).join('\n')}\n`)
 }
@@ -430,6 +485,7 @@ async function main(): Promise<void> {
       plan: { type: 'string' },
       out: { type: 'string' },
       capability: { type: 'string' },
+      provisioning: { type: 'string' },
       artifacts: { type: 'string' },
       remote: { type: 'boolean', default: false },
     },
@@ -448,12 +504,14 @@ async function main(): Promise<void> {
     const output = requiredOption(values.out, 'out')
     mkdirSync(resolve(output, '..'), { recursive: true })
     writeJson(output, capability)
+    writeJson(requiredOption(values.provisioning, 'provisioning'), plan.desktopProvisioning)
     return
   }
   if (command === 'finalize') {
     finalizeDesktopForkRelease(
       plan,
       requiredOption(values.capability, 'capability'),
+      requiredOption(values.provisioning, 'provisioning'),
       requiredOption(values.artifacts, 'artifacts'),
       requiredOption(values.out, 'out'),
     )

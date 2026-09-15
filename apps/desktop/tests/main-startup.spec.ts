@@ -121,12 +121,21 @@ vi.mock('electron', () => ({
   Menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn() },
   protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn() },
 }))
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return {
+    ...actual,
+    existsSync: (path: Parameters<typeof actual.existsSync>[0]) =>
+      (String(path).includes('desktop-provisioning') && harness.managedUpdates) || actual.existsSync(path),
+  }
+})
 vi.mock('../src/paths.ts', () => ({ resolveDesktopPaths: () => ({ profile: 'desktop-test-profile' }) }))
 vi.mock('../src/project-manager.ts', () => ({
   DesktopProjectManager: class {
     readonly applyRelease = harness.applyRelease
     readonly assertProfileRuntime = harness.assertProfileRuntime
     canRecoverProfile = harness.canRecoverProfile
+    async reconcileProvisioning() {}
     async mutate(_mutation: unknown, hooks: { beforeChange(): Promise<void>; afterChange(): Promise<void> }) {
       await hooks.beforeChange()
       harness.pluginsEnabled = false
@@ -137,6 +146,13 @@ vi.mock('../src/project-manager.ts', () => ({
     }
   },
 }))
+vi.mock('../src/plugin-provisioning.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/plugin-provisioning.ts')>()
+  return {
+    ...actual,
+    readDesktopPluginProvisioningPlan: () => ({ schemaVersion: 1, mode: 'exact', plugins: [] }),
+  }
+})
 vi.mock('../src/host-process.ts', () => ({ DesktopHostProcess: harness.FakeHost }))
 vi.mock('../src/update-coordinator.ts', () => ({ DesktopUpdateCoordinator: vi.fn() }))
 vi.mock('../src/managed-update-state.ts', () => ({

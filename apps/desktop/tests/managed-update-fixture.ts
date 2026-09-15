@@ -12,6 +12,7 @@ import {
   type DesktopManagedUpdateManifest,
 } from '../src/managed-update-protocol.ts'
 import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY } from '../src/plugin-source.ts'
+import { DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY } from '../src/plugin-provisioning.ts'
 
 export const MANAGED_VERSION = '1.2.3'
 export const MANAGED_SEQUENCE = 2
@@ -30,6 +31,10 @@ export function managedCapability(
     manifestAsset: DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET,
     currentSequence: MANAGED_SEQUENCE,
     minimumSequence: MANAGED_SEQUENCE,
+    provisioning: {
+      capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+      planSha256: 'b'.repeat(64),
+    },
     ...overrides,
   }
 }

@@ -26,14 +26,37 @@ export async function smokeDesktopRuntime(root: string, node: string, runtime: D
     const cordis = runtime.sharedPackages.find(entry => entry.name === '@deepseek-ai/cordis')
     if (cordis === undefined) throw new Error('desktop runtime: missing shared Cordis package')
     writeFileSync(join(plugin, 'package.json'), JSON.stringify({
-      name: pluginName, version: '1.0.0', type: 'module', exports: './index.js',
-      peerDependencies: { '@deepseek-ai/cordis': cordis.version }, dsh: { bundle: { patch: './bundle.yml' } },
+      name: pluginName,
+      version: '1.0.0',
+      type: 'module',
+      exports: { '.': './index.js', './client': './client.js' },
+      peerDependencies: { '@deepseek-ai/cordis': cordis.version },
+      dsh: {
+        bundle: { patch: './bundle.yml' },
+        client: { platform: 'web' },
+      },
     }))
     writeFileSync(join(plugin, 'index.js'), `
 import { Context } from '@deepseek-ai/cordis'
 export function apply(ctx) {
   if (!(ctx instanceof Context)) throw new Error('desktop runtime: external plugin loaded another Cordis instance')
 }
+`)
+    writeFileSync(join(plugin, 'client.js'), `
+window.__ModuleLoader__.load({
+  id: ${JSON.stringify(pluginName)},
+  factory() {
+    return {
+      inject: ['slots'],
+      apply(ctx) {
+        ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register(
+          { name: 'settings.models.provider-card', key: 'neutral-auth-provider' },
+          () => 'device-code authentication',
+        ))
+      },
+    }
+  },
+})
 `)
     writeFileSync(join(plugin, 'bundle.yml'), '- insert:\n    - id: desktop-runtime-smoke-plugin\n      name: desktop-runtime-smoke-plugin\n')
     const manifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')) as {
@@ -48,8 +71,19 @@ export function apply(ctx) {
     const ready = await host.start()
     if (ready.dshVersion !== runtime.release.version) throw new Error('desktop runtime: Host reported another dsh release')
     const response = await host.fetch(new Request('dsh-app://app/'))
-    if (response.status !== 200 || !(await response.text()).includes('<html')) {
+    const index = await response.text()
+    if (response.status !== 200 || !index.includes('<html') || !index.includes(pluginName)) {
       throw new Error('desktop runtime: packaged frontend smoke failed')
+    }
+    const pluginUrl = [...index.matchAll(/"(\/plugins\/\?\?[^"]+)"/gu)]
+      .map(match => match[1]?.replaceAll('\\u0026', '&'))
+      .find(url => url?.includes(`${pluginName}/client.js`))
+    if (pluginUrl === undefined) throw new Error('desktop runtime: external client plugin was not composed')
+    const client = await host.fetch(new Request(`dsh-app://app${pluginUrl}`))
+    const clientSource = await client.text()
+    if (client.status !== 200 || !clientSource.includes('settings.models.provider-card')
+      || !clientSource.includes('device-code authentication')) {
+      throw new Error('desktop runtime: external provider settings client bundle was not served')
     }
   } finally {
     await host.stop()

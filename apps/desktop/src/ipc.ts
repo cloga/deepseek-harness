@@ -6,6 +6,7 @@ import {
   type DesktopPluginProvisionReceipt,
   type DesktopPluginSource,
 } from './plugin-source.ts'
+import { DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY } from './plugin-provisioning.ts'
 import type { DesktopLocale } from './locale.ts'
 import type { DesktopBackendState } from './backend-controller.ts'
 
@@ -69,7 +70,10 @@ export interface DesktopUpdateState {
 /** Narrow bridge exposed through context isolation. */
 export interface DshDesktopApi {
   readonly protocolVersion: 2
-  capabilities(): Promise<readonly [typeof DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY]>
+  capabilities(): Promise<readonly [
+    typeof DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
+    typeof DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+  ]>
   locale(): Promise<DesktopLocale>
   readonly plugins: {
     list(): Promise<readonly DesktopPluginRecord[]>

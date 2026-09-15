@@ -68,27 +68,45 @@ function packageArchive(
 }
 
 function sourceFor(archive: Buffer): DesktopGithubReleasePluginSource {
+  const asset = 'dsh-github-copilot-0.4.0-alpha.18.tgz'
+  const checksumAsset = 'SHA256SUMS'
+  const artifactSha256 = createHash('sha256').update(archive).digest('hex')
+  const checksum = Buffer.from(`${artifactSha256}  ${asset}\n`)
   return {
     schemaVersion: 1,
     type: 'githubRelease',
     owner: 'cloga',
     repo: 'dsh-github-copilot',
     tag: 'v0.4.0-alpha.18',
-    asset: 'dsh-github-copilot-0.4.0-alpha.18.tgz',
+    asset,
+    assetId: 563672719,
     packageName: 'dsh-github-copilot',
     version: '0.4.0-alpha.18',
     size: archive.byteLength,
-    sha256: createHash('sha256').update(archive).digest('hex'),
-    integrity: `sha512-${createHash('sha512').update(archive).digest('base64')}`,
+    sha256: artifactSha256,
     targetCommit,
     dependencyRegistry: 'https://packagefeedproxy.microsoft.io/npm/',
+    checksumManifest: {
+      format: 'sha256sums',
+      asset: checksumAsset,
+      assetId: 563672720,
+      url: `https://github.com/cloga/dsh-github-copilot/releases/download/v0.4.0-alpha.18/${checksumAsset}`,
+      size: checksum.byteLength,
+      sha256: createHash('sha256').update(checksum).digest('hex'),
+    },
   }
+}
+
+function checksumManifest(source: DesktopGithubReleasePluginSource): Buffer {
+  return Buffer.from(`${source.sha256}  ${source.asset}\n`)
 }
 
 interface GithubFixtureOptions {
   readonly archive?: Buffer
   readonly release?: Record<string, unknown>
   readonly asset?: Record<string, unknown>
+  readonly checksumAsset?: Record<string, unknown>
+  readonly checksumBody?: string
   readonly tagObject?: Record<string, unknown>
   readonly redirect?: string
 }
@@ -104,11 +122,20 @@ function githubFixture(source: DesktopGithubReleasePluginSource, options: Github
     assets: [{
       id: 563672719,
       name: source.asset,
+      browser_download_url: `https://github.com/${source.owner}/${source.repo}/releases/download/${source.tag}/${source.asset}`,
       size: source.size,
       state: 'uploaded',
       digest: `sha256:${source.sha256}`,
       ...options.asset,
-    }],
+    }, ...(source.checksumManifest === undefined ? [] : [{
+      id: 563672720,
+      name: source.checksumManifest.asset,
+      browser_download_url: source.checksumManifest.url,
+      size: source.checksumManifest.size,
+      state: 'uploaded',
+      digest: `sha256:${source.checksumManifest.sha256}`,
+      ...options.checksumAsset,
+    }])],
     ...options.release,
   }
   const fetchFixture: typeof fetch = async (input) => {
@@ -124,6 +151,15 @@ function githubFixture(source: DesktopGithubReleasePluginSource, options: Github
         status: 302,
         headers: { location: options.redirect ?? 'https://release-assets.githubusercontent.com/asset.tgz' },
       })
+    }
+    if (url.pathname.endsWith('/releases/assets/563672720')) {
+      return new Response(null, {
+        status: 302,
+        headers: { location: 'https://release-assets.githubusercontent.com/checksums.json' },
+      })
+    }
+    if (url.hostname === 'release-assets.githubusercontent.com' && url.pathname.endsWith('checksums.json')) {
+      return new Response(options.checksumBody ?? checksumManifest(source).toString('utf8'))
     }
     if (url.hostname === 'release-assets.githubusercontent.com') return new Response(Uint8Array.from(archive))
     throw new Error(`unexpected request ${url.href}`)
@@ -172,6 +208,7 @@ describe('desktop verified plugin source', () => {
     ['wrong target', { release: { target_commitish: '1111111111111111111111111111111111111111' } }, /tag or target commit/u],
     ['wrong tag commit', { tagObject: { type: 'commit', sha: '1111111111111111111111111111111111111111' } }, /tag commit/u],
     ['missing asset', { release: { assets: [] } }, /asset is missing/u],
+    ['wrong asset id', { asset: { id: 563672718 } }, /asset metadata/u],
     ['wrong asset size', { asset: { size: 1 } }, /asset metadata/u],
     ['wrong asset digest', { asset: { digest: `sha256:${'1'.repeat(64)}` } }, /asset digest/u],
     ['redirect host', { redirect: 'https://example.test/asset.tgz' }, /redirect host/u],
@@ -202,11 +239,82 @@ describe('desktop verified plugin source', () => {
     const sameSizeSource = {
       ...source,
       sha256: createHash('sha256').update(sameSize).digest('hex'),
+      integrity: `sha512-${createHash('sha512').update(archive).digest('base64')}`,
     }
     await expect(acquireDesktopPluginArtifact(
       sameSizeSource,
       root(),
       githubFixture(sameSizeSource, { archive: sameSize }),
+    )).rejects.toThrow(/SRI/u)
+  })
+
+  it.each([
+    ['missing package entry', `${'1'.repeat(64)}  other.tgz\n`, /exactly one package asset entry/u],
+    ['wrong filename', `${'1'.repeat(64)}  renamed.tgz\n`, /exactly one package asset entry/u],
+    ['wrong hash', `${'1'.repeat(64)}  dsh-github-copilot-0.4.0-alpha.18.tgz\n`, /package hash/u],
+    ['duplicate entry', `${'1'.repeat(64)}  dsh-github-copilot-0.4.0-alpha.18.tgz\n${'2'.repeat(64)}  dsh-github-copilot-0.4.0-alpha.18.tgz\n`, /exactly one/u],
+    ['malformed entry', 'not-a-hash  dsh-github-copilot-0.4.0-alpha.18.tgz\n', /malformed SHA256SUMS/u],
+  ] as const)('rejects a SHA256SUMS manifest with a %s', async (_name, checksumBody, error) => {
+    const archive = packageArchive()
+    const source = sourceFor(archive)
+    const body = Buffer.from(checksumBody)
+    const locked = {
+      ...source,
+      checksumManifest: {
+        ...source.checksumManifest!,
+        size: body.byteLength,
+        sha256: createHash('sha256').update(body).digest('hex'),
+      },
+    }
+    await expect(acquireDesktopPluginArtifact(
+      locked,
+      root(),
+      githubFixture(locked, { archive, checksumBody }),
+    )).rejects.toThrow(error)
+  })
+
+  it.each([
+    ['checksum asset id', { id: 563672721 }, /asset metadata/u],
+    ['checksum asset URL', { browser_download_url: 'https://github.com/cloga/dsh-github-copilot/releases/download/v0.4.0-alpha.18/OTHER' }, /asset metadata/u],
+    ['checksum asset size', { size: 1 }, /asset metadata/u],
+    ['checksum asset digest', { digest: `sha256:${'1'.repeat(64)}` }, /asset digest/u],
+  ] as const)('rejects %s drift', async (_name, checksumAsset, error) => {
+    const archive = packageArchive()
+    const source = sourceFor(archive)
+    await expect(acquireDesktopPluginArtifact(
+      source,
+      root(),
+      githubFixture(source, { archive, checksumAsset }),
+    )).rejects.toThrow(error)
+  })
+
+  it('enforces optional artifact and checksum SRI when supplied', async () => {
+    const archive = packageArchive()
+    const source = sourceFor(archive)
+    const checksum = checksumManifest(source)
+    const locked = {
+      ...source,
+      integrity: `sha512-${createHash('sha512').update(archive).digest('base64')}`,
+      checksumManifest: {
+        ...source.checksumManifest!,
+        integrity: `sha512-${createHash('sha512').update(checksum).digest('base64')}`,
+      },
+    }
+    await expect(acquireDesktopPluginArtifact(
+      { ...locked, integrity: `sha512-${Buffer.alloc(64, 1).toString('base64')}` },
+      root(),
+      githubFixture(locked, { archive }),
+    )).rejects.toThrow(/SRI/u)
+    await expect(acquireDesktopPluginArtifact(
+      {
+        ...locked,
+        checksumManifest: {
+          ...locked.checksumManifest,
+          integrity: `sha512-${Buffer.alloc(64, 1).toString('base64')}`,
+        },
+      },
+      root(),
+      githubFixture(locked, { archive }),
     )).rejects.toThrow(/SRI/u)
   })
 
@@ -231,6 +339,10 @@ describe('desktop verified plugin source', () => {
       { ...source, schemaVersion: 2 },
       { ...source, tag: 'latest' },
       { ...source, integrity: 'sha512-AAAA' },
+      { ...source, assetId: 0 },
+      { ...source, checksumManifest: { ...source.checksumManifest!, format: 'json' } },
+      { ...source, checksumManifest: { ...source.checksumManifest!, assetId: 0 } },
+      { ...source, checksumManifest: { ...source.checksumManifest!, url: 'https://example.test/SHA256SUMS' } },
       { ...source, dependencyRegistry: 'https://token@example.test/npm/' },
       { ...source, type: 'url', url: 'https://example.test/plugin.tgz' },
       { ...source, externalProvisioned: true },

@@ -85,7 +85,10 @@ export function createElectronBuilderConfig(
       { from: 'lib/managed-update-helper.js', to: 'managed-update/helper.mjs' },
       ...(forkRelease === undefined
         ? []
-        : [{ from: forkRelease.capabilityPath, to: 'managed-update/capability.json' }]),
+        : [
+            { from: forkRelease.capabilityPath, to: 'managed-update/capability.json' },
+            { from: forkRelease.provisioningPath, to: 'desktop-provisioning/plan.json' },
+          ]),
       // electron-builder excludes a source directory's root node_modules.
       { from: join(buildPaths.dsh, 'node_modules'), to: 'dsh/node_modules' },
     ],

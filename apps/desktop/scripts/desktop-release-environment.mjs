@@ -3,6 +3,7 @@
 /** Environment variable that supplies the Electron application identifier. */
 export const DESKTOP_APP_ID_ENV = 'DSH_DESKTOP_APP_ID'
 export const DESKTOP_MANAGED_UPDATE_CAPABILITY_ENV = 'DSH_DESKTOP_MANAGED_UPDATE_CAPABILITY'
+export const DESKTOP_PLUGIN_PROVISIONING_PLAN_ENV = 'DSH_DESKTOP_PLUGIN_PROVISIONING_PLAN'
 export const DESKTOP_FORK_RELEASE_VERSION_ENV = 'DSH_DESKTOP_FORK_RELEASE_VERSION'
 export const DESKTOP_PACKAGE_REGISTRY_ENV = 'DSH_DESKTOP_PACKAGE_REGISTRY'
 const DEFAULT_DESKTOP_PACKAGE_REGISTRY = 'https://registry.npmjs.org/'
@@ -64,12 +65,16 @@ export function resolveDesktopAppId(env) {
 export function resolveDesktopForkReleaseEnvironment(env) {
   const version = env[DESKTOP_FORK_RELEASE_VERSION_ENV]?.trim()
   const capabilityPath = env[DESKTOP_MANAGED_UPDATE_CAPABILITY_ENV]?.trim()
-  if (version === undefined && capabilityPath === undefined) return undefined
+  const provisioningPath = env[DESKTOP_PLUGIN_PROVISIONING_PLAN_ENV]?.trim()
+  if (version === undefined && capabilityPath === undefined && provisioningPath === undefined) return undefined
   if (version === undefined || version === '' || capabilityPath === undefined || capabilityPath === '') {
     throw new Error(
       `desktop release environment: ${DESKTOP_FORK_RELEASE_VERSION_ENV} and `
       + `${DESKTOP_MANAGED_UPDATE_CAPABILITY_ENV} must be set together`,
     )
+  }
+  if (provisioningPath === undefined || provisioningPath === '') {
+    throw new Error(`desktop release environment: ${DESKTOP_PLUGIN_PROVISIONING_PLAN_ENV} must be set for managed fork releases`)
   }
 
   if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.test(version)) {
@@ -79,7 +84,7 @@ export function resolveDesktopForkReleaseEnvironment(env) {
   if (appId !== CLOGA_FORK_IDENTITY.appId) {
     throw new Error(`desktop release environment: managed fork releases require app id ${CLOGA_FORK_IDENTITY.appId}`)
   }
-  return { ...CLOGA_FORK_IDENTITY, version, capabilityPath }
+  return { ...CLOGA_FORK_IDENTITY, version, capabilityPath, provisioningPath }
 }
 
 /**

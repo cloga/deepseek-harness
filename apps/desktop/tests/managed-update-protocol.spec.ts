@@ -25,6 +25,15 @@ describe('Desktop managed update protocol', () => {
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
       currentSequence: MANAGED_SEQUENCE,
+      provisioning: {
+        capability: {
+          id: 'desktopNativePluginProvisioning',
+          schemaVersion: 1,
+          planSchemaVersion: 1,
+          stateSchemaVersion: 1,
+        },
+        planSha256: 'b'.repeat(64),
+      },
     })
     expect(parseDesktopManagedUpdateManifest(managedManifest(), capability, 1)).toMatchObject({
       owner: 'cloga/deepseek-harness',
