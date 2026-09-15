@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -44,11 +44,40 @@ it('installs a real pnpm graph, then executes approved scripts with the shared h
     const dsh = join(root, 'dsh')
     runtimeFixture(dsh)
     const pnpm = join(root, 'pnpm.mjs')
+    const pnpmLog = join(root, 'pnpm-args.jsonl')
     const realPnpm = join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs')
-    writeFileSync(pnpm, `process.argv = process.argv.map(arg => arg === '--config.registry=https://registry.npmjs.org/' ? ${JSON.stringify(`--config.registry=${origin}`)} : arg); await import(${JSON.stringify(pathToFileURL(realPnpm).href)})`)
+    writeFileSync(pnpm, `import {appendFileSync} from 'node:fs'
+process.argv = process.argv.map(arg => arg === '--config.registry=https://registry.npmjs.org/' ? ${JSON.stringify(`--config.registry=${origin}`)} : arg)
+appendFileSync(${JSON.stringify(pnpmLog)}, JSON.stringify(process.argv.slice(2)) + '\\n')
+await import(${JSON.stringify(pathToFileURL(realPnpm).href)})
+`)
     const manager = new DesktopProjectManager(resolveDesktopPaths(join(root, '.dsh')), { node: process.execPath, pnpm, dsh })
-    const hooks: DesktopProjectHooks = { beforeChange: async () => {}, afterChange: async () => {} }
+    const hooks: DesktopProjectHooks = {
+      beforeChange: async () => {},
+      healthCheck: async () => {},
+      afterChange: async () => {},
+    }
     await manager.applyRelease()
+    const manifestPath = join(manager.paths.profile, 'package.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dependencies: Record<string, string> }
+    manifest.dependencies['fixture-plugin'] = '1.0.0'
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+    await new Promise<void>((resolve, reject) => {
+      execFile(process.execPath, [
+        pnpm,
+        '--config.registry=https://registry.npmjs.org/',
+        `--config.store-dir=${join(root, 'fixture-store')}`,
+        'install',
+        '--no-frozen-lockfile',
+        '--ignore-scripts',
+      ], { cwd: manager.paths.profile }, (error) => {
+        if (error === null) resolve()
+        else reject(new Error(error.message, { cause: error }))
+      })
+    })
+    expect(readFileSync(join(manager.paths.profile, 'pnpm-lock.yaml'), 'utf8')).toMatch(
+      /fixture-plugin:\s+specifier: 1\.0\.0\s+version: 1\.0\.0/u,
+    )
     await manager.mutate({ type: 'plugin-add', spec: 'fixture-plugin@1.0.0' }, hooks)
     expect(manager.listPlugins()).toEqual([{ name: 'fixture-plugin', version: '1.0.0', enabled: true }])
     const built = JSON.parse(readFileSync(join(manager.paths.profile, 'node_modules/node-pty/built.json'), 'utf8')) as { node: string; host: string }
@@ -59,6 +88,15 @@ it('installs a real pnpm graph, then executes approved scripts with the shared h
     expect(execFileSync(process.execPath, [entry], { encoding: 'utf8' }).trim()).toBe('true')
     await manager.mutate({ type: 'plugin-remove', name: 'fixture-plugin' }, hooks)
     expect(manager.listPlugins()).toEqual([])
+    const pnpmCalls = readFileSync(pnpmLog, 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[])
+    const initialInstall = pnpmCalls.find(args => args.includes('--no-frozen-lockfile'))
+    expect(initialInstall?.slice(initialInstall.indexOf('install'))).toEqual([
+      'install', '--no-frozen-lockfile', '--ignore-scripts',
+    ])
+    const frozenRelocation = pnpmCalls.find(args => args.includes('install') && args.includes('--frozen-lockfile'))
+    expect(frozenRelocation?.slice(frozenRelocation.indexOf('install'))).toEqual([
+      'install', '--frozen-lockfile', '--ignore-scripts',
+    ])
   } finally {
     server.closeAllConnections()
     if (server.listening) await new Promise<void>((resolve, reject) => {

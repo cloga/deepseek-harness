@@ -14,6 +14,7 @@ import {
 } from 'electron'
 import { resolveDesktopPaths } from './paths.ts'
 import { DesktopProjectManager, type DesktopProjectHooks } from './project-manager.ts'
+import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, parseDesktopPluginSource } from './plugin-source.ts'
 import { DesktopHostProcess } from './host-process.ts'
 import { DesktopBackendController, type DesktopBackendState } from './backend-controller.ts'
 import { DESKTOP_IPC, type DesktopUpdateState } from './ipc.ts'
@@ -226,6 +227,15 @@ async function main(): Promise<void> {
 
   const hooks: DesktopProjectHooks = {
     beforeChange: () => backend.stop(),
+    healthCheck: async (projectDir) => {
+      manager.assertProfileRuntime(projectDir)
+      const host = new DesktopHostProcess(resources.node, resources.dsh, projectDir)
+      try {
+        await host.start()
+      } finally {
+        await host.stop()
+      }
+    },
     afterChange: () => backend.start(async () => {}),
   }
 
@@ -295,7 +305,10 @@ async function main(): Promise<void> {
     return active.fetch(request)
   })
 
-  const mutate = async (event: IpcMainInvokeEvent, mutation: Parameters<DesktopProjectManager['mutate']>[0]): Promise<void> => {
+  const mutate = async (
+    event: IpcMainInvokeEvent,
+    mutation: Parameters<DesktopProjectManager['mutate']>[0],
+  ): ReturnType<DesktopProjectManager['mutate']> => {
     assertDesktopSender(event, ['shell'])
     if (development !== undefined) {
       throw new Error('dsh desktop: plugin package changes require a packaged application')
@@ -304,8 +317,9 @@ async function main(): Promise<void> {
     pageError = undefined
     await navigateMain(startupUrl)
     try {
-      await manager.mutate(mutation, hooks)
+      const receipt = await manager.mutate(mutation, hooks)
       await navigateMain(applicationUrl)
+      return receipt
     } catch (error) {
       await showStartupError(error)
       throw error
@@ -323,6 +337,13 @@ async function main(): Promise<void> {
   ipcMain.handle(DESKTOP_IPC.pluginsAdd, (event, spec: unknown) => {
     if (typeof spec !== 'string') throw new Error('dsh desktop: plugin spec must be a string')
     return mutate(event, { type: 'plugin-add', spec })
+  })
+  ipcMain.handle(DESKTOP_IPC.pluginsInstall, (event, source: unknown) => (
+    mutate(event, { type: 'plugin-install', source: parseDesktopPluginSource(source) })
+  ))
+  ipcMain.handle(DESKTOP_IPC.capabilitiesGet, (event) => {
+    assertDesktopSender(event, ['shell'])
+    return [DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY] as const
   })
   ipcMain.handle(DESKTOP_IPC.pluginsRemove, (event, name: unknown) => {
     if (typeof name !== 'string') throw new Error('dsh desktop: plugin name must be a string')

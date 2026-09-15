@@ -1,14 +1,70 @@
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
 import { resolveDesktopPaths } from '../src/paths.ts'
 import { DesktopProjectManager, packageNameFromSpec, type DesktopProjectHooks } from '../src/project-manager.ts'
+import type { DesktopGithubReleasePluginSource } from '../src/plugin-source.ts'
 import { runtimeFixture } from './runtime-fixture.ts'
 
 const roots: string[] = []
 const releaseWorkers: Array<() => Promise<void>> = []
+const targetCommit = '08bfccc3b5930b93ef2fe31d9cf9e509f34a8704'
+
+function octal(value: number, width: number): Buffer {
+  return Buffer.from(value.toString(8).padStart(width - 1, '0') + '\0')
+}
+
+function verifiedPluginArchive(): Buffer {
+  const entries = [
+    ['package/package.json', JSON.stringify({
+      name: 'dsh-github-copilot',
+      version: '0.4.0-alpha.18',
+      dsh: { bundle: { patch: './cordis.patch.yml' } },
+    })],
+    ['package/cordis.patch.yml', '[]\n'],
+  ] as const
+  const blocks: Buffer[] = []
+  for (const [name, content] of entries) {
+    const body = Buffer.from(content)
+    const header = Buffer.alloc(512)
+    header.write(name, 0, 100, 'utf8')
+    octal(0o644, 8).copy(header, 100)
+    octal(0, 8).copy(header, 108)
+    octal(0, 8).copy(header, 116)
+    octal(body.byteLength, 12).copy(header, 124)
+    octal(0, 12).copy(header, 136)
+    header.fill(0x20, 148, 156)
+    header.write('0', 156, 1, 'ascii')
+    header.write('ustar\0', 257, 6, 'ascii')
+    header.write('00', 263, 2, 'ascii')
+    octal([...header].reduce((sum, byte) => sum + byte, 0), 8).copy(header, 148)
+    blocks.push(header, body, Buffer.alloc((512 - body.byteLength % 512) % 512))
+  }
+  return gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]))
+}
+
+function verifiedSource(archive: Buffer): DesktopGithubReleasePluginSource {
+  return {
+    schemaVersion: 1,
+    type: 'githubRelease',
+    owner: 'cloga',
+    repo: 'dsh-github-copilot',
+    tag: 'v0.4.0-alpha.18',
+    asset: 'dsh-github-copilot-0.4.0-alpha.18.tgz',
+    packageName: 'dsh-github-copilot',
+    version: '0.4.0-alpha.18',
+    size: archive.byteLength,
+    sha256: createHash('sha256').update(archive).digest('hex'),
+    integrity: `sha512-${createHash('sha512').update(archive).digest('base64')}`,
+    targetCommit,
+    dependencyRegistry: 'https://packagefeedproxy.microsoft.io/npm/',
+  }
+}
+
 function temporaryRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'dsh-desktop-test-'))
   roots.push(root)
@@ -19,26 +75,57 @@ function writeFakePnpm(root: string): string {
   writeFileSync(path, `
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { gunzipSync } from 'node:zlib'
 const args = process.argv.slice(2)
 const project = process.cwd()
 const command = args.find(value => ['install', 'add', 'remove', 'rebuild'].includes(value))
-appendFileSync(${JSON.stringify(join(root, 'pnpm-log.jsonl'))}, JSON.stringify({args, registry: process.env.NPM_CONFIG_REGISTRY}) + '\\n')
+function archiveManifest(path) {
+  const archive = gunzipSync(readFileSync(path))
+  for (let offset = 0; offset + 512 <= archive.byteLength;) {
+    const header = archive.subarray(offset, offset + 512)
+    const name = header.subarray(0, 100).toString('utf8').replace(/\\0.*$/u, '')
+    if (name === '') break
+    const size = Number.parseInt(header.subarray(124, 136).toString('ascii').replace(/\\0.*$/u, '').trim() || '0', 8)
+    const body = archive.subarray(offset + 512, offset + 512 + size)
+    if (name === 'package/package.json') return JSON.parse(body.toString('utf8'))
+    offset += 512 + Math.ceil(size / 512) * 512
+  }
+  throw new Error('fixture archive has no package manifest')
+}
+appendFileSync(${JSON.stringify(join(root, 'pnpm-log.jsonl'))}, JSON.stringify({
+  args,
+  registry: process.env.NPM_CONFIG_REGISTRY,
+  credentials: {
+    npmToken: process.env.NPM_TOKEN,
+    corepackToken: process.env.COREPACK_NPM_TOKEN,
+    userConfig: process.env.NPM_CONFIG_USERCONFIG,
+    secret: process.env.DESKTOP_FIXTURE_SECRET,
+  },
+}) + '\\n')
 if (command !== 'rebuild') {
   const manifestPath = join(project, 'package.json')
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   if (command === 'add') {
     const spec = args[args.indexOf(command) + 1]
-    const index = spec.lastIndexOf('@')
-    const name = index > 0 ? spec.slice(0, index) : spec
-    manifest.dependencies[name] = index > 0 ? spec.slice(index + 1) : '1.0.0'
+    if (spec.startsWith('./.desktop-plugin-artifacts/')) {
+      const installed = archiveManifest(join(project, spec))
+      manifest.dependencies[installed.name] = installed.version
+    } else {
+      const index = spec.lastIndexOf('@')
+      const name = index > 0 ? spec.slice(0, index) : spec
+      manifest.dependencies[name] = index > 0 ? spec.slice(index + 1) : '1.0.0'
+    }
   }
   if (command === 'remove') delete manifest.dependencies[args[args.indexOf(command) + 1]]
   writeFileSync(manifestPath, JSON.stringify(manifest))
   rmSync(join(project, 'node_modules'), { recursive: true, force: true })
   for (const [name, version] of Object.entries(manifest.dependencies)) {
+    const installedVersion = typeof version === 'string' && version.startsWith('file:.desktop-plugin-artifacts/')
+      ? archiveManifest(join(project, version.slice('file:'.length))).version
+      : version
     const packageRoot = join(project, 'node_modules', name)
     mkdirSync(packageRoot, { recursive: true })
-    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({name, version,
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({name, version: installedVersion,
       peerDependencies: {'@deepseek-ai/cordis': '^1.0.0'}, dsh: {bundle: {patch: './bundle.yml'}}}))
     writeFileSync(join(packageRoot, 'bundle.yml'), '[]\\n')
   }
@@ -48,7 +135,7 @@ if (command !== 'rebuild') {
   return path
 }
 function hooks(overrides: Partial<DesktopProjectHooks> = {}): DesktopProjectHooks {
-  return { beforeChange: async () => {}, afterChange: async () => {}, ...overrides }
+  return { beforeChange: async () => {}, healthCheck: async () => {}, afterChange: async () => {}, ...overrides }
 }
 function setup(): { root: string; manager: DesktopProjectManager } {
   const root = temporaryRoot()
@@ -56,9 +143,13 @@ function setup(): { root: string; manager: DesktopProjectManager } {
   runtimeFixture(dsh)
   return { root, manager: new DesktopProjectManager(resolveDesktopPaths(join(root, '.dsh')), { node: process.execPath, pnpm: writeFakePnpm(root), dsh }) }
 }
-function calls(root: string): { args: string[]; registry: string }[] {
+function calls(root: string): { args: string[]; registry: string; credentials: Record<string, string | undefined> }[] {
   const path = join(root, 'pnpm-log.jsonl')
-  return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { args: string[]; registry: string }) : []
+  return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line) as {
+    args: string[]
+    registry: string
+    credentials: Record<string, string | undefined>
+  }) : []
 }
 afterEach(async () => {
   const cleanups = releaseWorkers.splice(0)
@@ -104,12 +195,12 @@ describe('desktop external plugin profile', () => {
     await expect(manager.applyRelease()).resolves.toBe(false)
   })
 
-  it('resets the entire profile without backups while retaining its lock and shared data', async () => {
+  it('resets the entire profile without backups while retaining its external lock and shared data', async () => {
     const { root, manager } = setup()
     await manager.applyRelease()
     await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
     const profile = manager.paths.profile
-    expect(manager.paths.lock).toBe(join(profile, 'lock'))
+    expect(manager.paths.lock).toBe(join(root, '.dsh', 'desktop', 'profile.lock'))
     const task = join(root, '.dsh', 'task-sentinel')
     const homeEnvironment = join(root, '.dsh', '.env')
     writeFileSync(homeEnvironment, 'HOME_SETTING=retained')
@@ -205,6 +296,15 @@ describe('desktop external plugin profile', () => {
       await worker.applyRelease()
       await expect(worker.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())).rejects.toThrow('pnpm exited with 1')
     } else await expect(worker.applyRelease()).rejects.toThrow('pnpm exited with 1')
+    if (operation === 'plugin-add') {
+      expect(() => { worker.assertProfileRuntime(worker.paths.profile) }).not.toThrow()
+      expect(worker.listPlugins()).toEqual([])
+      await expect(worker.applyRelease()).resolves.toBe(false)
+      const retry = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+      await retry.applyRelease()
+      await expect(retry.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())).resolves.toBeUndefined()
+      return
+    }
     expect(() => { worker.assertProfileRuntime(worker.paths.profile) }).toThrow('package preparation is incomplete')
     const count = calls(root).length
     const retry = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
@@ -265,7 +365,126 @@ describe('desktop external plugin profile', () => {
     expect(JSON.parse(readFileSync(join(manager.paths.profile, 'package.json'), 'utf8'))).toMatchObject({ dependencies: { '@scope/plugin': '2.0.0' } })
     await expect(manager.mutate({ type: 'plugin-add', spec: '@deepseek-ai/cordis' }, hooks())).rejects.toThrow(/host-owned/u)
     await expect(manager.applyRelease()).resolves.toBe(false)
-    expect(calls(root)).toHaveLength(2)
+    expect(calls(root)).toHaveLength(4)
+  })
+
+  it('retains exact npm installation through the versioned source API', async () => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    await manager.mutate({
+      type: 'plugin-install',
+      source: { schemaVersion: 1, type: 'npmRegistry', spec: 'plugin@1.0.0' },
+    }, hooks())
+    expect(manager.listPlugins()).toEqual([{ name: 'plugin', version: '1.0.0', enabled: true }])
+  })
+
+  it('installs an exact verified release through the dependency proxy and records its source', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const archive = verifiedPluginArchive()
+    const source = verifiedSource(archive)
+    const originalFetch = globalThis.fetch
+    const fetchFixture: typeof fetch = async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input)
+      if (url.pathname.endsWith(`/releases/tags/${source.tag}`)) {
+        return Response.json({
+          id: 388508318,
+          draft: false,
+          immutable: true,
+          tag_name: source.tag,
+          target_commitish: targetCommit,
+          assets: [{
+            id: 563672719,
+            name: source.asset,
+            state: 'uploaded',
+            size: source.size,
+            digest: `sha256:${source.sha256}`,
+          }],
+        })
+      }
+      if (url.pathname.endsWith(`/git/ref/tags/${source.tag}`)) {
+        return Response.json({ object: { type: 'commit', sha: targetCommit } })
+      }
+      if (url.pathname.endsWith('/releases/assets/563672719')) {
+        return new Response(Uint8Array.from(archive), { headers: { 'content-length': String(archive.byteLength) } })
+      }
+      throw new Error(`unexpected GitHub request ${url.href}`)
+    }
+    globalThis.fetch = fetchFixture
+    try {
+      const receipt = await manager.mutate({ type: 'plugin-install', source }, hooks())
+      expect(receipt).toMatchObject({
+        schemaVersion: 1,
+        packageName: source.packageName,
+        artifactSha256: source.sha256,
+        states: { health: 'passed', activated: true, rolledBack: false, verified: true },
+      })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+    expect(manager.listPlugins()).toEqual([{
+      name: source.packageName,
+      version: source.version,
+      enabled: true,
+      source,
+    }])
+    expect(calls(root).every(call => call.registry === source.dependencyRegistry)).toBe(true)
+    expect(JSON.parse(readFileSync(join(manager.paths.profile, 'package.json'), 'utf8'))).toMatchObject({
+      dependencies: {
+        [source.packageName]: `file:.desktop-plugin-artifacts/${source.sha256}.tgz`,
+      },
+    })
+    const artifact = join(manager.paths.profile, '.desktop-plugin-artifacts', `${source.sha256}.tgz`)
+    expect(existsSync(artifact)).toBe(true)
+    await manager.mutate({ type: 'plugin-remove', name: source.packageName }, hooks())
+    expect(manager.listPlugins()).toEqual([])
+    expect(existsSync(artifact)).toBe(false)
+    expect(JSON.parse(readFileSync(join(manager.paths.profile, 'desktop-plugin-receipts.json'), 'utf8')))
+      .toEqual({ schemaVersion: 1, receipts: {} })
+  })
+
+  it('restarts the active Host when staged health fails', async () => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    let stops = 0
+    let starts = 0
+    await expect(manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks({
+      healthCheck: async (projectDir) => {
+        expect(projectDir).not.toBe(manager.paths.profile)
+        expect(manager.listPlugins()).toEqual([])
+        expect(existsSync(join(projectDir, 'node_modules', 'plugin', 'package.json'))).toBe(true)
+        throw new Error('staged health failed')
+      },
+      beforeChange: async () => { stops++ },
+      afterChange: async () => { starts++ },
+    }))).rejects.toThrow('staged health failed')
+    expect(stops).toBe(1)
+    expect(starts).toBe(1)
+    expect(manager.listPlugins()).toEqual([])
+  })
+
+  it('does not inherit package-manager credentials or secret environment values', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const names = ['NPM_TOKEN', 'COREPACK_NPM_TOKEN', 'npm_config_userconfig', 'DESKTOP_FIXTURE_SECRET'] as const
+    const previous = new Map(names.map(name => [name, process.env[name]]))
+    try {
+      process.env.NPM_TOKEN = 'npm-secret'
+      process.env.COREPACK_NPM_TOKEN = 'corepack-secret'
+      process.env.npm_config_userconfig = 'credentialed-npmrc'
+      process.env.DESKTOP_FIXTURE_SECRET = 'generic-secret'
+      await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
+    } finally {
+      for (const name of names) {
+        const value = previous.get(name)
+        if (value === undefined) Reflect.deleteProperty(process.env, name)
+        else process.env[name] = value
+      }
+    }
+    expect(calls(root).map(call => call.credentials)).toEqual([
+      { userConfig: join(manager.paths.pnpm.config, 'npmrc') },
+      { userConfig: join(manager.paths.pnpm.config, 'npmrc') },
+    ])
   })
 
   it('retains disabled plugin versions through updates and enables them explicitly', async () => {
@@ -328,25 +547,33 @@ describe('desktop external plugin profile', () => {
     expect(next.listPlugins()).toEqual([{ name: 'plugin', version: '1.0.0', enabled: false }])
   })
 
-  it.each(['before', 'after'] as const)('retains direct writes when the %s change hook fails', async (phase) => {
+  it.each(['before', 'after'] as const)('keeps the active profile when the %s change hook fails', async (phase) => {
     const { manager } = setup()
     await manager.applyRelease()
+    let stops = 0
     let starts = 0
     await expect(manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks({
       beforeChange: async () => {
-        expect(manager.listPlugins()).toEqual([])
-        if (phase === 'before') throw new Error('before failed')
+        stops++
+        if (stops === 1) {
+          expect(manager.listPlugins()).toEqual([])
+          if (phase === 'before') throw new Error('before failed')
+        }
       },
-      afterChange: async () => { starts++; throw new Error('after failed') },
+      afterChange: async () => {
+        starts++
+        if (starts === 1) throw new Error('after failed')
+      },
     }))).rejects.toThrow(`${phase} failed`)
-    expect(manager.listPlugins()).toEqual(phase === 'before' ? [] : [{ name: 'plugin', version: '1.0.0', enabled: true }])
-    expect(starts).toBe(phase === 'before' ? 0 : 1)
+    expect(manager.listPlugins()).toEqual([])
+    expect(stops).toBe(phase === 'before' ? 1 : 2)
+    expect(starts).toBe(phase === 'before' ? 0 : 2)
     expect(existsSync(join(manager.paths.root, 'staging'))).toBe(false)
     expect(existsSync(join(manager.paths.root, 'rollback'))).toBe(false)
     expect(existsSync(join(manager.paths.root, 'pending.json'))).toBe(false)
   })
 
-  it('keeps partial package changes and restores host links after pnpm fails', async () => {
+  it('discards staged package changes and preserves active host links after pnpm fails', async () => {
     const { root, manager } = setup()
     await manager.applyRelease()
     const failingPnpm = join(root, 'failing.mjs')
@@ -357,13 +584,13 @@ describe('desktop external plugin profile', () => {
     await expect(worker.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks({
       afterChange: async () => { starts++ },
     }))).rejects.toThrow(/pnpm exited with 1/u)
-    expect(worker.listPlugins()).toEqual([{ name: 'plugin', version: '1.0.0', enabled: false }])
+    expect(worker.listPlugins()).toEqual([])
     expect(starts).toBe(0)
     expect(existsSync(manager.paths.lock)).toBe(false)
     expect(realpathSync(join(manager.paths.profile, 'node_modules/@deepseek-ai/cordis')))
       .toBe(realpathSync(join(manager.runtime.dsh, 'node_modules/@deepseek-ai/cordis')))
-    await manager.mutate({ type: 'plugin-remove', name: 'plugin' }, hooks())
-    expect(manager.listPlugins()).toEqual([])
+    await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
+    expect(manager.listPlugins()).toEqual([{ name: 'plugin', version: '1.0.0', enabled: true }])
   })
 
   it('holds the transaction lock until the pnpm worker exits', async ({ task, signal }) => {

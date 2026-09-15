@@ -4,7 +4,7 @@ Status: implemented
 
 [English](2026-09-09-desktop-immediate-window-and-direct-start.md) | 中文
 
-profile 修改与恢复遵循[直接修改 profile 决策](2026-09-09-desktop-in-place-profile.zh.md)。
+插件修改与恢复遵循[验证 Release 事务决策](2026-09-15-desktop-verified-release-plugin-transactions.zh.md)。
 
 ## 问题
 
