@@ -111,7 +111,7 @@ function githubFixture(source: DesktopGithubReleasePluginSource, options: Github
     }],
     ...options.release,
   }
-  return (async (input: string | URL | Request) => {
+  const fetchFixture: typeof fetch = async (input) => {
     const url = new URL(input instanceof Request ? input.url : input)
     if (url.pathname.endsWith(`/releases/tags/${encodeURIComponent(source.tag)}`)) {
       return Response.json(release)
@@ -127,7 +127,8 @@ function githubFixture(source: DesktopGithubReleasePluginSource, options: Github
     }
     if (url.hostname === 'release-assets.githubusercontent.com') return new Response(archive)
     throw new Error(`unexpected request ${url.href}`)
-  }) as typeof fetch
+  }
+  return fetchFixture
 }
 
 function root(): string {

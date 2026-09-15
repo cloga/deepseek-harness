@@ -284,7 +284,7 @@ async function inspectPackageArchive(
   let archiveError: Error | undefined
   await t({
     file: artifact,
-    onentry(entry) {
+    onReadEntry(entry) {
       if (archiveError !== undefined) return
       try {
         assertArchivePath(entry.path)
