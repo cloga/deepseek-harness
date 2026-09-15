@@ -136,6 +136,6 @@ kind: "package-reference"
 <details>
 <summary>维护者的工作上下文——点击展开</summary>
 
-无。
+持久化测试通过 [`waitForProjectionCheckpoint`](tests/durable-observation.ts) 观察 `cachedSnapshot` 中预期的已提交检查点状态，再独立读取 JSON 记录。带序号的用例要求精确水位；seeded creation 保留基于值的约定。后台检查点尚未完成时，不要轮询该文件：Windows 上打开的读取句柄可能使原子替换报 `EPERM`。创建时的切面不能满足后续 `turn/end` 的断言，测试也不能通过触发额外写入来完成观察。参见[完成观察决策](../../../.agents/notes/implemented/testing/2026-09-08-ci-completion-observations.zh.md)。
 
 </details>
