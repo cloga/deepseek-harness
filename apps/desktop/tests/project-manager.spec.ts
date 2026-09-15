@@ -120,9 +120,12 @@ if (command !== 'rebuild') {
   writeFileSync(manifestPath, JSON.stringify(manifest))
   rmSync(join(project, 'node_modules'), { recursive: true, force: true })
   for (const [name, version] of Object.entries(manifest.dependencies)) {
+    const installedVersion = typeof version === 'string' && version.startsWith('file:.desktop-plugin-artifacts/')
+      ? archiveManifest(join(project, version.slice('file:'.length))).version
+      : version
     const packageRoot = join(project, 'node_modules', name)
     mkdirSync(packageRoot, { recursive: true })
-    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({name, version,
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({name, version: installedVersion,
       peerDependencies: {'@deepseek-ai/cordis': '^1.0.0'}, dsh: {bundle: {patch: './bundle.yml'}}}))
     writeFileSync(join(packageRoot, 'bundle.yml'), '[]\\n')
   }
@@ -427,6 +430,13 @@ describe('desktop external plugin profile', () => {
     expect(calls(root).every(call => call.registry === source.dependencyRegistry)).toBe(true)
     expect(JSON.parse(readFileSync(join(manager.paths.profile, 'package.json'), 'utf8')).dependencies[source.packageName])
       .toBe(`file:.desktop-plugin-artifacts/${source.sha256}.tgz`)
+    const artifact = join(manager.paths.profile, '.desktop-plugin-artifacts', `${source.sha256}.tgz`)
+    expect(existsSync(artifact)).toBe(true)
+    await manager.mutate({ type: 'plugin-remove', name: source.packageName }, hooks())
+    expect(manager.listPlugins()).toEqual([])
+    expect(existsSync(artifact)).toBe(false)
+    expect(JSON.parse(readFileSync(join(manager.paths.profile, 'desktop-plugin-receipts.json'), 'utf8')))
+      .toEqual({ schemaVersion: 1, receipts: {} })
   })
 
   it('health-checks staged changes before stopping the active Host', async () => {

@@ -705,7 +705,7 @@ export class DesktopProjectManager {
     if (!existsSync(npmrc)) writeFileSync(npmrc, '', { mode: 0o600 })
     const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => (
       name !== 'NODE_OPTIONS' && name !== 'NODE_PATH' && !/^DSH_DESKTOP_/u.test(name)
-      && !/^(?:npm|pnpm|corepack)_/iu.test(name) && !/(?:KEY|SECRET|TOKEN|PASSWORD)/iu.test(name)
+      && !/^(?:npm|pnpm|corepack)_/iu.test(name) && !/(?:AUTH|KEY|SECRET|TOKEN|PASSWORD)/iu.test(name)
     )))
     writeFileSync(this.pendingPackages(projectDir), '')
     await new Promise<void>((settle, reject) => {
@@ -721,12 +721,17 @@ export class DesktopProjectManager {
         cwd: projectDir,
         env: {
           ...inherited,
+          APPDATA: this.paths.pnpm.config,
           COREPACK_HOME: this.paths.pnpm.home,
+          HOME: this.paths.pnpm.home,
+          LOCALAPPDATA: this.paths.pnpm.state,
+          NPM_CONFIG_GLOBALCONFIG: npmrc,
           NPM_CONFIG_REGISTRY: registry,
           NPM_CONFIG_STORE_DIR: this.paths.pnpm.store,
           NPM_CONFIG_USERCONFIG: npmrc,
           PATH: `${dirname(this.runtime.node)}${delimiter}${process.env.PATH ?? ''}`,
           PNPM_HOME: this.paths.pnpm.home,
+          USERPROFILE: this.paths.pnpm.home,
           XDG_CACHE_HOME: this.paths.pnpm.cache,
           XDG_CONFIG_HOME: this.paths.pnpm.config,
           XDG_STATE_HOME: this.paths.pnpm.state,
