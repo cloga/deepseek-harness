@@ -16,9 +16,14 @@ import {
 import { resolveDesktopPaths } from './paths.ts'
 import { DesktopProjectManager, type DesktopProjectHooks } from './project-manager.ts'
 import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, parseDesktopPluginSource } from './plugin-source.ts'
-import { DesktopHostProcess } from './host-process.ts'
+import { DesktopHostProcess, type DesktopUpdateImpact } from './host-process.ts'
 import { DesktopBackendController, type DesktopBackendState } from './backend-controller.ts'
-import { DESKTOP_IPC, parseDesktopRendererUpdateImpact, type DesktopUpdateState } from './ipc.ts'
+import {
+  DESKTOP_IPC,
+  parseDesktopRendererUpdateImpact,
+  type DesktopRendererUpdateImpact,
+  type DesktopUpdateState,
+} from './ipc.ts'
 import { formatDesktopMessage, resolveDesktopLocale } from './locale.ts'
 import { claimDesktopSingleInstance } from './single-instance.ts'
 import { DesktopUpdateCoordinator } from './update-coordinator.ts'
@@ -354,7 +359,10 @@ async function main(): Promise<void> {
             installedSequence: managedInstalledSequence,
             waitPids: [process.pid, hostPid],
           }),
-          () => { shellInstallerOwnsQuit = true },
+          () => {
+            shellInstallerOwnsQuit = true
+            return () => { shellInstallerOwnsQuit = false }
+          },
           () => backend.stop(),
           () => { app.quit() },
         )
@@ -484,33 +492,64 @@ async function main(): Promise<void> {
     updateConfirmation = (async () => {
       const state = updateState.phase === 'available' ? updateState : await updates.check()
       if (state.phase !== 'available') return state
-      const hostImpact = await backend.host?.updateImpact() ?? {
-        runningSessions: 0,
-        queuedMessages: 0,
-        runningJobs: 0,
-      }
-      const managedDetail = state.mode === 'windows-ops-managed'
-        ? formatDesktopMessage(messages.managedUpdateDetail, {
-          version: state.version ?? '',
-          runningSessions: String(hostImpact.runningSessions),
-          queuedMessages: String(hostImpact.queuedMessages),
-          runningJobs: String(hostImpact.runningJobs),
-          draft: rendererUpdateImpact.hasDraft ? messages.yes : messages.no,
-          attachments: String(rendererUpdateImpact.attachmentCount),
-          submitting: rendererUpdateImpact.submitting ? messages.yes : messages.no,
+      if (state.mode !== 'windows-ops-managed') {
+        const result = await dialog.showMessageBox({
+          type: 'info',
+          title: messages.updateTitle,
+          message: messages.updateAvailable,
+          detail: formatDesktopMessage(messages.updateDetail, { version: state.version ?? '' }),
+          buttons: [messages.installAndRestart, messages.later],
+          defaultId: 0,
+          cancelId: 1,
         })
-        : formatDesktopMessage(messages.updateDetail, { version: state.version ?? '' })
-      const result = await dialog.showMessageBox({
-        type: 'info',
-        title: messages.updateTitle,
-        message: messages.updateAvailable,
-        detail: managedDetail,
-        buttons: [state.mode === 'windows-ops-managed' ? messages.installInteractive : messages.installAndRestart, messages.later],
-        defaultId: 0,
-        cancelId: 1,
+        if (result.response !== 0) return undefined
+        return updates.install()
+      }
+      const readImpact = async (): Promise<{
+        host: DesktopUpdateImpact
+        renderer: DesktopRendererUpdateImpact
+      }> => ({
+        host: await backend.host?.updateImpact() ?? {
+          runningSessions: 0,
+          queuedMessages: 0,
+          runningJobs: 0,
+        },
+        renderer: rendererUpdateImpact,
       })
-      if (result.response !== 0) return undefined
-      return updates.install()
+      const sameImpact = (
+        left: { host: DesktopUpdateImpact; renderer: DesktopRendererUpdateImpact },
+        right: { host: DesktopUpdateImpact; renderer: DesktopRendererUpdateImpact },
+      ): boolean => left.host.runningSessions === right.host.runningSessions
+        && left.host.queuedMessages === right.host.queuedMessages
+        && left.host.runningJobs === right.host.runningJobs
+        && left.renderer.hasDraft === right.renderer.hasDraft
+        && left.renderer.attachmentCount === right.renderer.attachmentCount
+        && left.renderer.submitting === right.renderer.submitting
+      let impact = await readImpact()
+      for (;;) {
+        const detail = formatDesktopMessage(messages.managedUpdateDetail, {
+          version: state.version ?? '',
+          runningSessions: String(impact.host.runningSessions),
+          queuedMessages: String(impact.host.queuedMessages),
+          runningJobs: String(impact.host.runningJobs),
+          draft: impact.renderer.hasDraft ? messages.yes : messages.no,
+          attachments: String(impact.renderer.attachmentCount),
+          submitting: impact.renderer.submitting ? messages.yes : messages.no,
+        })
+        const result = await dialog.showMessageBox({
+          type: 'info',
+          title: messages.updateTitle,
+          message: messages.updateAvailable,
+          detail,
+          buttons: [messages.installInteractive, messages.later],
+          defaultId: 0,
+          cancelId: 1,
+        })
+        if (result.response !== 0) return undefined
+        const currentImpact = await readImpact()
+        if (sameImpact(impact, currentImpact)) return updates.install()
+        impact = currentImpact
+      }
     })().finally(() => { updateConfirmation = undefined })
     return updateConfirmation
   }
@@ -621,7 +660,9 @@ async function main(): Promise<void> {
   mainWindow = createMainWindow()
   await reconcileBackend().catch(() => undefined)
   // Window lifecycle callbacks run while backend startup is pending.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   if (quitting) return
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   if (mainWindow !== undefined && development !== undefined && process.env.DSH_DESKTOP_OPEN_DEVTOOLS !== '0') {
     mainWindow.webContents.openDevTools({ mode: 'detach' })
   }

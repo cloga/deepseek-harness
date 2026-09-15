@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { promisify } from 'node:util'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   managedUpdateChildEnvironment,
   runDesktopManagedUpdateHelper,
+  verifyAndStartManagedInstaller,
   waitForDesktopProcesses,
   type DesktopManagedUpdateHelperOperations,
 } from '../src/managed-update-helper.ts'
@@ -20,6 +23,7 @@ function response(body: Uint8Array, status = 200, headers: Record<string, string
 }
 
 const temporaryRoots: string[] = []
+const execFileAsync = promisify(execFile)
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map(path => rm(path, { recursive: true, force: true })))
@@ -46,6 +50,12 @@ describe('Desktop managed update helper', () => {
       sleep: async () => { now = 20 },
       now: () => now,
     })).rejects.toThrow(/timed out/u)
+
+    await expect(waitForDesktopProcesses([12], 20, {
+      processRunning: () => true,
+      sleep: async () => {},
+      now: () => 0,
+    }, async () => true)).rejects.toThrow(/cancelled/u)
   })
 
   it('removes inherited credentials from installer subprocesses', () => {
@@ -54,7 +64,39 @@ describe('Desktop managed update helper', () => {
       GH_TOKEN: 'github-secret',
       DEEPSEEK_API_KEY: 'model-secret',
       DESKTOP_PASSWORD: 'desktop-secret',
+      HTTPS_PROXY: 'https://proxy-user:proxy-password@example.test',
     })).toEqual({ SystemRoot: 'C:\\Windows' })
+  })
+
+  const windowsIt = process.platform === 'win32' ? it : it.skip
+  windowsIt('rehashes and starts an unsigned executable through the locked Windows path', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-managed-installer-launch-'))
+    temporaryRoots.push(root)
+    const executable = join(root, 'fixture.exe')
+    const source = join(root, 'fixture.cs')
+    await writeFile(source, 'public static class Program { public static int Main() { return 7; } }\n')
+    const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    await execFileAsync(powershell, [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      'Add-Type -Path $env:DSH_TEST_SOURCE -OutputAssembly $env:DSH_TEST_EXECUTABLE -OutputType ConsoleApplication',
+    ], {
+      env: {
+        ...process.env,
+        DSH_TEST_SOURCE: source,
+        DSH_TEST_EXECUTABLE: executable,
+      },
+    })
+    const body = await readFile(executable)
+
+    await expect(verifyAndStartManagedInstaller(executable, {
+      bytes: body.byteLength,
+      sha256: createHash('sha256').update(body).digest('hex'),
+      sha512: createHash('sha512').update(body).digest('base64'),
+      signature: 'NotSigned',
+    })).resolves.toBe(7)
   })
 
   it('acknowledges validated metadata before waiting, stages verified files, and passes no installer arguments', async () => {
@@ -116,10 +158,18 @@ describe('Desktop managed update helper', () => {
       return response(Buffer.alloc(0), 404)
     })
     let acknowledged = false
-    const startInstaller = vi.fn(async (path: string, args: readonly string[]) => {
+    const verifyAndStartInstaller = vi.fn(async (
+      path: string,
+      expected: { bytes: number; sha256: string; sha512: string; signature: 'NotSigned' },
+    ) => {
       expect(acknowledged).toBe(true)
       expect(await readFile(path)).toEqual(installer)
-      expect(args).toEqual([])
+      expect(expected).toEqual({
+        bytes: installer.byteLength,
+        sha256: sha256(installer),
+        sha512: createHash('sha512').update(installer).digest('base64'),
+        signature: 'NotSigned',
+      })
       return 0
     })
     const operations: DesktopManagedUpdateHelperOperations = {
@@ -130,8 +180,7 @@ describe('Desktop managed update helper', () => {
       },
       sleep: async () => {},
       now: () => 0,
-      getInstallerSignature: async () => 'NotSigned',
-      startInstaller,
+      verifyAndStartInstaller,
     }
     const handoff = {
       schemaVersion: 1,
@@ -154,7 +203,7 @@ describe('Desktop managed update helper', () => {
       status: 'installer-exited',
       pendingCompletion: true,
     })
-    expect(startInstaller).toHaveBeenCalledOnce()
+    expect(verifyAndStartInstaller).toHaveBeenCalledOnce()
     expect(JSON.parse(await readFile(join(root, 'ack.json'), 'utf8'))).toMatchObject({
       token: 'e'.repeat(64),
       manifestSha256: manifestValue.manifestSha256,
@@ -163,7 +212,20 @@ describe('Desktop managed update helper', () => {
       .toMatchObject({ status: 'installer-exited' })
   })
 
-  it('does not start an installer whose bytes fail the manifest hash', async () => {
+  it.each([
+    {
+      name: 'hash does not match',
+      servedInstaller: Buffer.from('installer'),
+      expectedSha256: 'f'.repeat(64),
+      reason: /hash or size/u,
+    },
+    {
+      name: 'lengthless response exceeds the declared size',
+      servedInstaller: Buffer.from('installer-extra'),
+      expectedSha256: sha256(Buffer.from('installer')),
+      reason: /stream exceeds/u,
+    },
+  ])('does not start an installer when its $name', async ({ servedInstaller, expectedSha256, reason }) => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-managed-update-hash-'))
     temporaryRoots.push(root)
     const installer = Buffer.from('installer')
@@ -181,7 +243,7 @@ describe('Desktop managed update helper', () => {
       installer: {
         file: 'installer.exe',
         bytes: installer.byteLength,
-        sha256: 'f'.repeat(64),
+        sha256: expectedSha256,
         sha512: createHash('sha512').update(installer).digest('base64'),
         signature: 'NotSigned',
       },
@@ -208,16 +270,15 @@ describe('Desktop managed update helper', () => {
     }
     const manifestValue = { ...payload, manifestSha256: managedUpdateJsonSha256(payload) }
     const manifest = Buffer.from(JSON.stringify(manifestValue))
-    const startInstaller = vi.fn(async () => 0)
+    const verifyAndStartInstaller = vi.fn(async () => 0)
     const operations: DesktopManagedUpdateHelperOperations = {
       fetch: vi.fn(async (url: string) => url.endsWith('release.json')
         ? response(manifest)
-        : url.endsWith('build-receipt.json') ? response(receipt) : response(installer)),
+        : url.endsWith('build-receipt.json') ? response(receipt) : response(servedInstaller)),
       processRunning: () => false,
       sleep: async () => {},
       now: () => 0,
-      getInstallerSignature: async () => 'NotSigned',
-      startInstaller,
+      verifyAndStartInstaller,
     }
     const result = await runDesktopManagedUpdateHelper({
       schemaVersion: 1,
@@ -238,9 +299,9 @@ describe('Desktop managed update helper', () => {
     }, operations)
     expect(result.status).toBe('blocked')
     if (result.status !== 'blocked') throw new Error('expected blocked helper result')
-    expect(result.reason).toMatch(/hash or size/u)
+    expect(result.reason).toMatch(reason)
     const persisted: unknown = JSON.parse(await readFile(join(root, 'helper-result.json'), 'utf8'))
     expect(persisted).toEqual(expect.objectContaining({ status: 'blocked' }))
-    expect(startInstaller).not.toHaveBeenCalled()
+    expect(verifyAndStartInstaller).not.toHaveBeenCalled()
   })
 })

@@ -164,3 +164,36 @@ it.each([
     async () => { throw new Error('provisioning must not run') },
   )).resolves.toMatchObject({ status: 'recovery-required', message })
 })
+
+it('ignores an operation explicitly cancelled by its owning Desktop process', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-managed-completion-'))
+  roots.push(root)
+  const token = 'a'.repeat(64)
+  const operation = join(root, 'operations', token)
+  await mkdir(operation, { recursive: true })
+  await writeFile(join(operation, 'cancelled.json'), JSON.stringify({ schemaVersion: 1, token }))
+  await writeFile(join(operation, 'helper-result.json'), JSON.stringify({
+    schemaVersion: 1,
+    status: 'blocked',
+    manifestSha256: 'b'.repeat(64),
+    sequence: 2,
+    reason: 'desktop managed update: operation was cancelled',
+  }))
+
+  await expect(completeDesktopManagedUpdate(
+    join(root, 'operations'),
+    join(root, 'completion.json'),
+    {
+      schemaVersion: 1,
+      mode: 'windows-ops-managed',
+      manifestUrl: 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/release.json',
+      manifestSha256: 'b'.repeat(64),
+      minimumSequence: 2,
+      expectedSource: { version: '1.2.3', commit: 'c'.repeat(40) },
+    },
+    1,
+    join(root, 'unused.exe'),
+    join(root, 'unused-runtime.json'),
+    async () => { throw new Error('provisioning must not run') },
+  )).resolves.toEqual({ status: 'none' })
+})

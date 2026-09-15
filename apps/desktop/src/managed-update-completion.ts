@@ -99,6 +99,14 @@ export async function completeDesktopManagedUpdate(
     const operationRoot = join(operationsRoot, name)
     const root = join(operationRoot, 'stage')
     try {
+      const cancellation = await readJsonIfExists(join(operationRoot, 'cancelled.json'))
+      if (cancellation !== undefined) {
+        exactKeys(cancellation, ['schemaVersion', 'token'], 'cancellation marker')
+        if (cancellation.schemaVersion !== 1 || cancellation.token !== name) {
+          throw new Error('desktop managed update: cancellation marker does not match its operation')
+        }
+        continue
+      }
       const blocked = await readJsonIfExists(join(operationRoot, 'helper-result.json'))
       if (blocked?.status === 'blocked'
         && Number.isSafeInteger(blocked.sequence) && Number(blocked.sequence) > installedSequence) {

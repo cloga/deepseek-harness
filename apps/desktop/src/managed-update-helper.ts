@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { spawn } from 'node:child_process'
 import {
@@ -18,7 +19,7 @@ import {
 const MAX_MANIFEST_BYTES = 1024 * 1024
 const MAX_RECEIPT_BYTES = 16 * 1024 * 1024
 const REDIRECTS = new Set([301, 302, 303, 307, 308])
-const SENSITIVE_ENVIRONMENT_NAME = /(?:AUTH|KEY|SECRET|TOKEN|PASSWORD)/iu
+const SENSITIVE_ENVIRONMENT_NAME = /(?:AUTH|KEY|SECRET|TOKEN|PASSWORD)|^(?:ALL|HTTP|HTTPS|NO)_PROXY$/iu
 
 /** Result persisted for the newly installed Desktop to validate and complete. */
 export type DesktopManagedUpdateHelperResult =
@@ -45,14 +46,104 @@ export interface DesktopManagedUpdateHelperOperations {
   processRunning(pid: number): boolean
   sleep(milliseconds: number): Promise<void>
   now(): number
-  getInstallerSignature(path: string): Promise<string>
-  startInstaller(path: string, args: readonly string[]): Promise<number>
+  verifyAndStartInstaller(
+    path: string,
+    expected: { readonly bytes: number; readonly sha256: string; readonly sha512: string; readonly signature: 'NotSigned' },
+  ): Promise<number>
 }
 
 /** Remove credential-shaped variables before starting PowerShell or downloaded installer code. */
 export function managedUpdateChildEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(environment)
     .filter(([name]) => !SENSITIVE_ENVIRONMENT_NAME.test(name)))
+}
+
+/**
+ * Hold a non-writable file handle while PowerShell rehashes and starts the interactive installer.
+ * @param path - Validated staged installer path.
+ * @param expected - Manifest-owned file evidence and signature state.
+ * @returns Installer exit code after the interactive process finishes.
+ */
+export function verifyAndStartManagedInstaller(
+  path: string,
+  expected: { readonly bytes: number; readonly sha256: string; readonly sha512: string; readonly signature: 'NotSigned' },
+): Promise<number> {
+  const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(powershell, [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      [
+        '$ErrorActionPreference = "Stop"',
+        '$path = $env:DSH_MANAGED_UPDATE_INSTALLER',
+        '$expectedBytes = [int64]$env:DSH_MANAGED_UPDATE_BYTES',
+        '$expectedSha256 = $env:DSH_MANAGED_UPDATE_SHA256',
+        '$expectedSha512 = $env:DSH_MANAGED_UPDATE_SHA512',
+        '$expectedSignature = $env:DSH_MANAGED_UPDATE_SIGNATURE',
+        '$env:DSH_MANAGED_UPDATE_INSTALLER = $null',
+        '$env:DSH_MANAGED_UPDATE_BYTES = $null',
+        '$env:DSH_MANAGED_UPDATE_SHA256 = $null',
+        '$env:DSH_MANAGED_UPDATE_SHA512 = $null',
+        '$env:DSH_MANAGED_UPDATE_SIGNATURE = $null',
+        '$stream = [System.IO.File]::Open($path, "Open", "Read", "Read")',
+        'try {',
+        '  if ($stream.Length -ne $expectedBytes) { throw "installer size changed before launch" }',
+        '  $sha256 = [System.Security.Cryptography.SHA256]::Create()',
+        '  try { $actualSha256 = [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace("-", "").ToLowerInvariant() } finally { $sha256.Dispose() }',
+        '  $stream.Position = 0',
+        '  $sha512 = [System.Security.Cryptography.SHA512]::Create()',
+        '  try { $actualSha512 = [Convert]::ToBase64String($sha512.ComputeHash($stream)) } finally { $sha512.Dispose() }',
+        '  if ($actualSha256 -ne $expectedSha256 -or $actualSha512 -ne $expectedSha512) { throw "installer hash changed before launch" }',
+        '  Import-Module (Join-Path $env:SystemRoot "System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1")',
+        '  $actualSignature = (Get-AuthenticodeSignature -LiteralPath $path).Status.ToString()',
+        '  if ($actualSignature -ne $expectedSignature) { throw "installer signature state changed before launch" }',
+        '  $installer = Start-Process -FilePath $path -PassThru',
+        '} finally { $stream.Dispose() }',
+        '$installer.WaitForExit()',
+        '[Console]::Out.Write((ConvertTo-Json -Compress @{ exitCode = $installer.ExitCode }))',
+      ].join('\n'),
+    ], {
+      env: {
+        ...managedUpdateChildEnvironment(process.env),
+        DSH_MANAGED_UPDATE_INSTALLER: path,
+        DSH_MANAGED_UPDATE_BYTES: String(expected.bytes),
+        DSH_MANAGED_UPDATE_SHA256: expected.sha256,
+        DSH_MANAGED_UPDATE_SHA512: expected.sha512,
+        DSH_MANAGED_UPDATE_SIGNATURE: expected.signature,
+      },
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let output = ''
+    let errorOutput = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => { output += chunk })
+    child.stderr.on('data', (chunk: string) => { errorOutput += chunk })
+    child.once('error', reject)
+    child.once('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`desktop managed update: installer verification or launch failed: ${errorOutput.trim()}`))
+        return
+      }
+      let result: unknown
+      try {
+        result = JSON.parse(output)
+      } catch {
+        reject(new Error('desktop managed update: installer launcher returned invalid JSON'))
+        return
+      }
+      if (typeof result !== 'object' || result === null || Array.isArray(result)
+        || Object.keys(result).join(',') !== 'exitCode'
+        || !Number.isSafeInteger((result as Record<string, unknown>).exitCode)) {
+        reject(new Error('desktop managed update: installer launcher returned invalid result'))
+        return
+      }
+      resolvePromise(Number((result as Record<string, unknown>).exitCode))
+    })
+  })
 }
 
 const defaultOperations: DesktopManagedUpdateHelperOperations = {
@@ -67,49 +158,7 @@ const defaultOperations: DesktopManagedUpdateHelperOperations = {
   },
   sleep: milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
   now: () => Date.now(),
-  getInstallerSignature(path) {
-    const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-    return new Promise((resolvePromise, reject) => {
-      const child = spawn(powershell, [
-        '-NoLogo',
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        '(Get-AuthenticodeSignature -LiteralPath $args[0]).Status.ToString()',
-        path,
-      ], {
-        env: managedUpdateChildEnvironment(process.env),
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      })
-      let output = ''
-      let errorOutput = ''
-      child.stdout.setEncoding('utf8')
-      child.stderr.setEncoding('utf8')
-      child.stdout.on('data', (chunk: string) => { output += chunk })
-      child.stderr.on('data', (chunk: string) => { errorOutput += chunk })
-      child.once('error', reject)
-      child.once('close', (code) => {
-        if (code !== 0) reject(new Error(`desktop managed update: Authenticode check failed: ${errorOutput.trim()}`))
-        else resolvePromise(output.trim())
-      })
-    })
-  },
-  startInstaller(path, args) {
-    if (args.length !== 0) throw new Error('desktop managed update: interactive installer arguments must be empty')
-    return new Promise((resolvePromise, reject) => {
-      const child = spawn(path, [], {
-        env: managedUpdateChildEnvironment(process.env),
-        stdio: 'ignore',
-        windowsHide: false,
-      })
-      child.once('error', reject)
-      child.once('close', (code, signal) => {
-        if (code === null) reject(new Error(`desktop managed update: installer ended by ${String(signal)}`))
-        else resolvePromise(code)
-      })
-    })
-  },
+  verifyAndStartInstaller: verifyAndStartManagedInstaller,
 }
 
 function selectedManifestUrl(handoff: DesktopManagedUpdateHandoff): string {
@@ -233,7 +282,18 @@ async function downloadInstaller(
   if (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) !== expected.bytes)) {
     throw new Error('desktop managed update: installer Content-Length does not match the manifest')
   }
-  await pipeline(response.body, createWriteStream(path, { flags: 'wx', mode: 0o600 }))
+  let streamedBytes = 0
+  const enforceSize = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      streamedBytes += chunk.length
+      if (streamedBytes > expected.bytes) {
+        callback(new Error('desktop managed update: installer stream exceeds the manifest size'))
+      } else {
+        callback(undefined, chunk)
+      }
+    },
+  })
+  await pipeline(response.body, enforceSize, createWriteStream(path, { flags: 'wx', mode: 0o600 }))
   const actual = await hashFile(path)
   if (actual.bytes !== expected.bytes || actual.sha256 !== expected.sha256 || actual.sha512 !== expected.sha512) {
     throw new Error('desktop managed update: installer hash or size does not match the manifest')
@@ -245,9 +305,11 @@ export async function waitForDesktopProcesses(
   pids: readonly number[],
   timeoutMs: number,
   operations: Pick<DesktopManagedUpdateHelperOperations, 'processRunning' | 'sleep' | 'now'>,
+  cancelled: () => Promise<boolean> = () => Promise.resolve(false),
 ): Promise<void> {
   const started = operations.now()
   for (;;) {
+    if (await cancelled()) throw new Error('desktop managed update: operation was cancelled')
     if (pids.every(pid => !operations.processRunning(pid))) return
     if (operations.now() - started >= timeoutMs) {
       throw new Error('desktop managed update: timed out waiting for Desktop processes to exit')
@@ -279,6 +341,12 @@ export async function runDesktopManagedUpdateHelper(
     throw new Error('desktop managed update: selected manifest kind does not match its owner')
   }
   const operationRoot = dirname(handoff.stageRoot)
+  const cancellationPath = join(operationRoot, 'cancelled.json')
+  const cancelled = async () => stat(cancellationPath).then(() => true, (error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  })
+  if (await cancelled()) throw new Error('desktop managed update: operation was cancelled')
   await writeJsonAtomic(join(operationRoot, 'ack.json'), {
     schemaVersion: 1,
     token: handoff.token,
@@ -287,7 +355,8 @@ export async function runDesktopManagedUpdateHelper(
   })
   const temporary = `${handoff.stageRoot}.tmp-${handoff.token}`
   try {
-    await waitForDesktopProcesses(handoff.waitPids, handoff.waitTimeoutMs, operations)
+    await waitForDesktopProcesses(handoff.waitPids, handoff.waitTimeoutMs, operations, cancelled)
+    if (await cancelled()) throw new Error('desktop managed update: operation was cancelled')
     await rm(temporary, { recursive: true, force: true })
     await mkdir(temporary, { recursive: true })
     const buildReceipt = manifest.buildReceipt
@@ -336,10 +405,13 @@ export async function runDesktopManagedUpdateHelper(
       || beforeLaunch.sha512 !== installer.sha512 || basename(stagedInstaller) !== installer.file) {
       throw new Error('desktop managed update: staged installer changed before launch')
     }
-    if (await operations.getInstallerSignature(stagedInstaller) !== 'NotSigned') {
-      throw new Error('desktop managed update: staged installer signature state does not match the manifest')
-    }
-    const installerExitCode = await operations.startInstaller(stagedInstaller, [])
+    if (await cancelled()) throw new Error('desktop managed update: operation was cancelled')
+    const installerExitCode = await operations.verifyAndStartInstaller(stagedInstaller, {
+      bytes: expectedBytes,
+      sha256: installer.sha256,
+      sha512: installer.sha512,
+      signature: 'NotSigned',
+    })
     const result: DesktopManagedUpdateHelperResult = installerExitCode === 0
       ? {
         schemaVersion: 1,
