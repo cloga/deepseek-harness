@@ -13,5 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
+      - name: Skip weighted approval outside canonical upstream
+        if: github.repository != 'deepseek-ai/deepseek-harness'
+        run: echo 'Weighted approval is owned by the canonical upstream repository.'
       - name: Record review event
+        if: github.repository == 'deepseek-ai/deepseek-harness'
         run: echo 'Recorded a weighted approval review event.'

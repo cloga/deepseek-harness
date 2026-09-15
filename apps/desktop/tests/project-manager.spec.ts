@@ -98,7 +98,7 @@ appendFileSync(${JSON.stringify(join(root, 'pnpm-log.jsonl'))}, JSON.stringify({
   credentials: {
     npmToken: process.env.NPM_TOKEN,
     corepackToken: process.env.COREPACK_NPM_TOKEN,
-    userConfig: process.env.npm_config_userconfig,
+    userConfig: process.env.NPM_CONFIG_USERCONFIG,
     secret: process.env.DESKTOP_FIXTURE_SECRET,
   },
 }) + '\\n')
@@ -384,9 +384,9 @@ describe('desktop external plugin profile', () => {
     const archive = verifiedPluginArchive()
     const source = verifiedSource(archive)
     const originalFetch = globalThis.fetch
-    globalThis.fetch = (async (input) => {
-      const url = String(input)
-      if (url.endsWith(`/releases/tags/${source.tag}`)) {
+    const fetchFixture: typeof fetch = async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input)
+      if (url.pathname.endsWith(`/releases/tags/${source.tag}`)) {
         return Response.json({
           id: 388508318,
           draft: false,
@@ -402,14 +402,15 @@ describe('desktop external plugin profile', () => {
           }],
         })
       }
-      if (url.endsWith(`/git/ref/tags/${source.tag}`)) {
+      if (url.pathname.endsWith(`/git/ref/tags/${source.tag}`)) {
         return Response.json({ object: { type: 'commit', sha: targetCommit } })
       }
-      if (url.endsWith('/releases/assets/563672719')) {
-        return new Response(archive, { headers: { 'content-length': String(archive.byteLength) } })
+      if (url.pathname.endsWith('/releases/assets/563672719')) {
+        return new Response(Uint8Array.from(archive), { headers: { 'content-length': String(archive.byteLength) } })
       }
-      throw new Error(`unexpected GitHub request ${url}`)
-    }) as typeof fetch
+      throw new Error(`unexpected GitHub request ${url.href}`)
+    }
+    globalThis.fetch = fetchFixture
     try {
       const receipt = await manager.mutate({ type: 'plugin-install', source }, hooks())
       expect(receipt).toMatchObject({
@@ -428,8 +429,11 @@ describe('desktop external plugin profile', () => {
       source,
     }])
     expect(calls(root).every(call => call.registry === source.dependencyRegistry)).toBe(true)
-    expect(JSON.parse(readFileSync(join(manager.paths.profile, 'package.json'), 'utf8')).dependencies[source.packageName])
-      .toBe(`file:.desktop-plugin-artifacts/${source.sha256}.tgz`)
+    expect(JSON.parse(readFileSync(join(manager.paths.profile, 'package.json'), 'utf8'))).toMatchObject({
+      dependencies: {
+        [source.packageName]: `file:.desktop-plugin-artifacts/${source.sha256}.tgz`,
+      },
+    })
     const artifact = join(manager.paths.profile, '.desktop-plugin-artifacts', `${source.sha256}.tgz`)
     expect(existsSync(artifact)).toBe(true)
     await manager.mutate({ type: 'plugin-remove', name: source.packageName }, hooks())

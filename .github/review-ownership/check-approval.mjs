@@ -5,6 +5,7 @@ import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 
 const API_VERSION = '2026-03-10'
+const CANONICAL_REPOSITORY = 'deepseek-ai/deepseek-harness'
 const MAX_PULL_REQUEST_REVIEWS = 3_000
 const PAGE_SIZE = 100
 const STATUS_CONTEXT = 'weighted approval'
@@ -32,6 +33,7 @@ export function parseApprovalPolicy(source) {
   if (fields.join(',') !== 'defaultPoints,requiredPoints,reviewerPoints') {
     throw new Error('approval policy must contain only defaultPoints, requiredPoints, and reviewerPoints')
   }
+
   const requiredPoints = positiveInteger(value.requiredPoints, 'requiredPoints')
   const defaultPoints = positiveInteger(value.defaultPoints, 'defaultPoints')
   if (!isRecord(value.reviewerPoints)) throw new Error('reviewerPoints must be an object')
@@ -43,6 +45,15 @@ export function parseApprovalPolicy(source) {
     reviewerPoints.set(key, positiveInteger(pointsValue, `reviewerPoints.${login}`))
   }
   return { requiredPoints, defaultPoints, reviewerPoints }
+}
+
+/**
+ * Whether an event belongs to the repository that owns weighted approval.
+ * @param {unknown} event GitHub workflow event.
+ * @returns {boolean} True only for the canonical upstream repository.
+ */
+export function isCanonicalApprovalRepository(event) {
+  return repositoryFromEvent(event).toLowerCase() === CANONICAL_REPOSITORY
 }
 
 /**
@@ -344,6 +355,10 @@ async function main() {
   const eventPath = process.env.GITHUB_EVENT_PATH
   if (!eventPath) throw new Error('GITHUB_EVENT_PATH is not set')
   let event = JSON.parse(readFileSync(eventPath, 'utf8'))
+  if (!isCanonicalApprovalRepository(event)) {
+    process.stdout.write('Skipped weighted approval outside the canonical upstream repository.\n')
+    return
+  }
   const policySource = readFileSync(new URL('approval-policy.json', import.meta.url), 'utf8')
   const api = createGitHubApi({
     token: process.env.GITHUB_TOKEN ?? '',
