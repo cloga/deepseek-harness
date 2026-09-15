@@ -406,7 +406,7 @@ describe('desktop external plugin profile', () => {
         return Response.json({ object: { type: 'commit', sha: targetCommit } })
       }
       if (url.pathname.endsWith('/releases/assets/563672719')) {
-        return new Response(archive, { headers: { 'content-length': String(archive.byteLength) } })
+        return new Response(Uint8Array.from(archive), { headers: { 'content-length': String(archive.byteLength) } })
       }
       throw new Error(`unexpected GitHub request ${url.href}`)
     }

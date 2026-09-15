@@ -21,7 +21,7 @@ function startup(locale = 'en', status: Promise<DesktopBackendState> = Promise.r
   const restart = vi.fn(async () => {})
   const queried = Promise.withResolvers<undefined>()
   const api: DshDesktopStartupApi = {
-    protocolVersion: 1,
+    protocolVersion: 2,
     locale: async () => resolveDesktopLocale(locale),
     backend: {
       status: () => { queried.resolve(undefined); return status },

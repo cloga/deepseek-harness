@@ -125,7 +125,7 @@ function githubFixture(source: DesktopGithubReleasePluginSource, options: Github
         headers: { location: options.redirect ?? 'https://release-assets.githubusercontent.com/asset.tgz' },
       })
     }
-    if (url.hostname === 'release-assets.githubusercontent.com') return new Response(archive)
+    if (url.hostname === 'release-assets.githubusercontent.com') return new Response(Uint8Array.from(archive))
     throw new Error(`unexpected request ${url.href}`)
   }
   return fetchFixture
@@ -196,7 +196,9 @@ describe('desktop verified plugin source', () => {
       githubFixture({ ...source, sha256: createHash('sha256').update(changed).digest('hex') }, { archive: changed }),
     )).rejects.toThrow(/locked size/u)
     const sameSize = Buffer.from(archive)
-    sameSize[sameSize.byteLength - 1] ^= 1
+    const lastByte = sameSize.at(-1)
+    if (lastByte === undefined) throw new Error('test archive must not be empty')
+    sameSize[sameSize.byteLength - 1] = lastByte ^ 1
     const sameSizeSource = {
       ...source,
       sha256: createHash('sha256').update(sameSize).digest('hex'),
