@@ -98,6 +98,7 @@ appendFileSync(${JSON.stringify(join(root, 'pnpm-log.jsonl'))}, JSON.stringify({
   credentials: {
     npmToken: process.env.NPM_TOKEN,
     corepackToken: process.env.COREPACK_NPM_TOKEN,
+    frozenLockfile: process.env.NPM_CONFIG_FROZEN_LOCKFILE,
     userConfig: process.env.NPM_CONFIG_USERCONFIG,
     secret: process.env.DESKTOP_FIXTURE_SECRET,
   },
@@ -482,8 +483,8 @@ describe('desktop external plugin profile', () => {
       }
     }
     expect(calls(root).map(call => call.credentials)).toEqual([
-      { userConfig: join(manager.paths.pnpm.config, 'npmrc') },
-      { userConfig: join(manager.paths.pnpm.config, 'npmrc') },
+      { frozenLockfile: 'false', userConfig: join(manager.paths.pnpm.config, 'npmrc') },
+      { frozenLockfile: 'false', userConfig: join(manager.paths.pnpm.config, 'npmrc') },
     ])
   })
 
