@@ -19,9 +19,9 @@ describe('Desktop fork release plan', () => {
     const plan = parseDesktopForkReleasePlan(planValue())
     expect(plan).toMatchObject({
       channel: 'cloga-windows-x64',
-      version: '0.1.5-rc.3.cloga.1',
-      sequence: 2,
-      upstreamVersion: '0.1.5-rc.2',
+      version: '0.1.6-alpha.1.cloga.1',
+      sequence: 3,
+      upstreamVersion: '0.1.6-alpha.1',
       migration: {
         owner: 'cloga/dsh-windows-ops',
         maximumSequence: 1,
@@ -33,7 +33,7 @@ describe('Desktop fork release plan', () => {
       mode: 'github-release-managed',
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
-      currentSequence: 2,
+      currentSequence: 3,
       minimumSequence: 2,
     })
   })

@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "channel": "cloga-windows-x64",
-  "version": "0.1.5-rc.3.cloga.1",
-  "sequence": 2,
-  "upstreamVersion": "0.1.5-rc.2",
+  "version": "0.1.6-alpha.1.cloga.1",
+  "sequence": 3,
+  "upstreamVersion": "0.1.6-alpha.1",
   "identity": {
     "appId": "io.github.cloga.deepseek-harness.desktop",
     "productName": "DeepSeek Harness (cloga)",
