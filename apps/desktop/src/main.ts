@@ -660,11 +660,12 @@ async function main(): Promise<void> {
   mainWindow = createMainWindow()
   await reconcileBackend().catch(() => undefined)
   // Window lifecycle callbacks run while backend startup is pending.
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-  if (quitting) return
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-  if (mainWindow !== undefined && development !== undefined && process.env.DSH_DESKTOP_OPEN_DEVTOOLS !== '0') {
-    mainWindow.webContents.openDevTools({ mode: 'detach' })
+  const startupWasCancelled = (): boolean => quitting
+  if (startupWasCancelled()) return
+  const startupWindow = (): BrowserWindow | undefined => mainWindow
+  const window = startupWindow()
+  if (window !== undefined && development !== undefined && process.env.DSH_DESKTOP_OPEN_DEVTOOLS !== '0') {
+    window.webContents.openDevTools({ mode: 'detach' })
   }
   publishUpdate(updateState)
   setTimeout(() => { void checkAndPrompt(false) }, 10_000)
