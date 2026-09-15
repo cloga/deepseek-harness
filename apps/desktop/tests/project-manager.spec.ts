@@ -49,47 +49,35 @@ function verifiedPluginArchive(): Buffer {
 
 function verifiedSource(archive: Buffer): DesktopGithubReleasePluginSource {
   const artifactSha256 = createHash('sha256').update(archive).digest('hex')
-  const artifactIntegrity = `sha512-${createHash('sha512').update(archive).digest('base64')}`
-  const checksum = Buffer.from(`${JSON.stringify({
-    schemaVersion: 1,
-    packageName: 'dsh-github-copilot',
-    version: '0.4.0-alpha.18',
-    asset: 'dsh-github-copilot-0.4.0-alpha.18.tgz',
-    sha256: artifactSha256,
-    integrity: artifactIntegrity,
-  })}\n`)
+  const asset = 'dsh-github-copilot-0.4.0-alpha.18.tgz'
+  const checksum = Buffer.from(`${artifactSha256}  ${asset}\n`)
   return {
     schemaVersion: 1,
     type: 'githubRelease',
     owner: 'cloga',
     repo: 'dsh-github-copilot',
     tag: 'v0.4.0-alpha.18',
-    asset: 'dsh-github-copilot-0.4.0-alpha.18.tgz',
+    asset,
+    assetId: 563672719,
     packageName: 'dsh-github-copilot',
     version: '0.4.0-alpha.18',
     size: archive.byteLength,
     sha256: artifactSha256,
-    integrity: artifactIntegrity,
     targetCommit,
     dependencyRegistry: 'https://packagefeedproxy.microsoft.io/npm/',
     checksumManifest: {
-      asset: 'dsh-github-copilot-0.4.0-alpha.18.checksums.json',
+      format: 'sha256sums',
+      asset: 'SHA256SUMS',
+      assetId: 563672720,
+      url: 'https://github.com/cloga/dsh-github-copilot/releases/download/v0.4.0-alpha.18/SHA256SUMS',
       size: checksum.byteLength,
       sha256: createHash('sha256').update(checksum).digest('hex'),
-      integrity: `sha512-${createHash('sha512').update(checksum).digest('base64')}`,
     },
   }
 }
 
 function checksumManifest(source: DesktopGithubReleasePluginSource): Buffer {
-  return Buffer.from(`${JSON.stringify({
-    schemaVersion: 1,
-    packageName: source.packageName,
-    version: source.version,
-    asset: source.asset,
-    sha256: source.sha256,
-    integrity: source.integrity,
-  })}\n`)
+  return Buffer.from(`${source.sha256}  ${source.asset}\n`)
 }
 
 function verifiedFetch(source: DesktopGithubReleasePluginSource, archive: Buffer): typeof fetch {
@@ -105,12 +93,14 @@ function verifiedFetch(source: DesktopGithubReleasePluginSource, archive: Buffer
         assets: [{
           id: 563672719,
           name: source.asset,
+          browser_download_url: `https://github.com/${source.owner}/${source.repo}/releases/download/${source.tag}/${source.asset}`,
           state: 'uploaded',
           size: source.size,
           digest: `sha256:${source.sha256}`,
         }, {
           id: 563672720,
           name: source.checksumManifest?.asset,
+          browser_download_url: source.checksumManifest?.url,
           state: 'uploaded',
           size: source.checksumManifest?.size,
           digest: `sha256:${source.checksumManifest?.sha256}`,
