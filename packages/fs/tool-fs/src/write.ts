@@ -69,19 +69,14 @@ export function applyWriteTool(ctx: Context, sandbox: FsSandboxController): void
         + '.',
   })
 
-  const parameters = (escalationFields = sandbox.escalationModes.length > 0 ? sandbox.schemaFields() : {}) => ({
-    file_path: { type: 'string' as const, required: true as const, description: 'Path to write, resolved by the filesystem backend.' },
-    content: { type: 'string' as const, required: true as const, description: 'Full UTF-8 text content to write.' },
-    ...escalationFields,
-  })
   ctx.tools.register(defineTool({
     name: 'write',
     description: 'Create or fully replace a UTF-8 text file.',
-    parameters: parameters(),
-    modelSchema: agent => ({
-      description: 'Create or fully replace a UTF-8 text file.',
-      parameters: parameters(sandbox.escalationModesFor(agent).length > 0 ? sandbox.schemaFields(agent) : {}),
-    }),
+    parameters: {
+      file_path: { type: 'string', required: true, description: 'Path to write, resolved by the filesystem backend.' },
+      content: { type: 'string', required: true, description: 'Full UTF-8 text content to write.' },
+      ...sandbox.escalationModes.length > 0 ? sandbox.schemaFields() : {},
+    },
     output: {
       schema: {
         type: 'object',

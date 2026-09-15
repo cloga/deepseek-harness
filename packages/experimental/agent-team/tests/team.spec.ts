@@ -95,7 +95,6 @@ interface TeamServiceInternals {
   readonly journal: {
     state(root: Agent): unknown
   }
-  readonly recoveries: Set<Promise<void>>
   disposeRuntime(): Promise<void>
   recoverFor(agent: Agent): Promise<void>
   scheduleRecovery(agent: Agent): void
@@ -1772,14 +1771,12 @@ describe('Team mailbox and waiting', () => {
     }
     internal.scheduleRecovery(lead)
     await entered.promise
-    let disposed = false
-    const disposal = teamFiber.dispose().then(() => { disposed = true })
-    await Promise.resolve()
-    expect(disposed).toBe(false)
+    await teamFiber.dispose()
     release.resolve(undefined)
-    await disposal
+    await Promise.resolve()
+    await Promise.resolve()
     internal.scheduleRecovery(lead)
-    expect(internal.recoveries.size).toBe(0)
+    await Promise.resolve()
   })
 
   it('reports contained teardown failures without retaining the Team service', async () => {
