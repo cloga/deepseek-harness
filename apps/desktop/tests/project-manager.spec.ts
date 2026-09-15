@@ -439,10 +439,11 @@ describe('desktop external plugin profile', () => {
       .toEqual({ schemaVersion: 1, receipts: {} })
   })
 
-  it('health-checks staged changes before stopping the active Host', async () => {
+  it('restarts the active Host when staged health fails', async () => {
     const { manager } = setup()
     await manager.applyRelease()
     let stops = 0
+    let starts = 0
     await expect(manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks({
       healthCheck: async (projectDir) => {
         expect(projectDir).not.toBe(manager.paths.profile)
@@ -451,8 +452,10 @@ describe('desktop external plugin profile', () => {
         throw new Error('staged health failed')
       },
       beforeChange: async () => { stops++ },
+      afterChange: async () => { starts++ },
     }))).rejects.toThrow('staged health failed')
-    expect(stops).toBe(0)
+    expect(stops).toBe(1)
+    expect(starts).toBe(1)
     expect(manager.listPlugins()).toEqual([])
   })
 

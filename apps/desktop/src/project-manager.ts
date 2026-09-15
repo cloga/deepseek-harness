@@ -451,7 +451,17 @@ export class DesktopProjectManager {
           }
           await this.reconcileProfile(staging, previous, packagesChanged, registry)
         }
-        await hooks.healthCheck(staging)
+        await hooks.beforeChange()
+        try {
+          await hooks.healthCheck(staging)
+        } catch (healthError) {
+          try {
+            await hooks.afterChange()
+          } catch (restartError) {
+            throw new AggregateError([healthError, restartError], 'desktop project: staged health check and active Host restart failed')
+          }
+          throw healthError
+        }
         let receipt: DesktopPluginProvisionReceipt | undefined
         if (provision !== undefined) {
           receipt = {
@@ -464,7 +474,6 @@ export class DesktopProjectManager {
             receipts: { ...store.receipts, [receipt.packageName]: receipt },
           })
         }
-        await hooks.beforeChange()
         let previousMoved = false
         let stagedActivated = false
         try {
