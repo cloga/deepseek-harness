@@ -11,51 +11,13 @@ import {
   type DesktopManagedUpdateCapability,
   type DesktopManagedUpdateManifest,
 } from '../src/managed-update-protocol.ts'
-import {
-  DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
-  type DesktopGithubReleasePluginSource,
-  type DesktopPluginProvisionReceipt,
-} from '../src/plugin-source.ts'
-import { managedPluginProvisionReceiptSha256 } from '../src/managed-update-completion.ts'
+import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY } from '../src/plugin-source.ts'
 
 export const MANAGED_VERSION = '1.2.3'
 export const MANAGED_SEQUENCE = 2
 export const MANAGED_COMMIT = 'a'.repeat(40)
 export const MANAGED_TREE = 'b'.repeat(40)
 export const MANAGED_TAG = `${DESKTOP_MANAGED_UPDATE_TAG_PREFIX}${MANAGED_VERSION}`
-
-export const managedPluginSource: DesktopGithubReleasePluginSource = {
-  schemaVersion: 1,
-  type: 'githubRelease',
-  owner: 'cloga',
-  repo: 'dsh-github-copilot',
-  tag: 'v0.4.0-alpha.18',
-  asset: 'dsh-github-copilot-0.4.0-alpha.18.tgz',
-  packageName: 'dsh-github-copilot',
-  version: '0.4.0-alpha.18',
-  size: 1,
-  sha256: '2'.repeat(64),
-  integrity: `sha512-${'A'.repeat(86)}==`,
-  targetCommit: '3'.repeat(40),
-}
-
-export const managedPluginReceipt: DesktopPluginProvisionReceipt = {
-  schemaVersion: 1,
-  capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
-  source: managedPluginSource,
-  releaseId: 10,
-  assetId: 20,
-  packageName: managedPluginSource.packageName,
-  version: managedPluginSource.version,
-  artifactSha256: managedPluginSource.sha256,
-  states: {
-    staged: true,
-    health: 'passed',
-    activated: true,
-    rolledBack: false,
-    verified: true,
-  },
-}
 
 export function managedCapability(
   overrides: Partial<DesktopManagedUpdateCapability> = {},
@@ -119,15 +81,9 @@ export function managedManifest(
       executableSha256: '9'.repeat(64),
       runtimeSha256: 'a'.repeat(64),
     },
-    pluginProvisioning: {
+    pluginCompatibility: {
       capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
-      source: managedPluginSource,
-      expectedReceipt: {
-        schemaVersion: 1 as const,
-        releaseId: managedPluginReceipt.releaseId,
-        assetId: managedPluginReceipt.assetId,
-      },
-      receiptSha256: managedPluginProvisionReceiptSha256(managedPluginReceipt),
+      automaticProvisioning: false as const,
     },
     network: {
       manifestOrigin: 'https://github.com' as const,
@@ -142,7 +98,7 @@ export function managedManifest(
       interaction: 'required' as const,
       installerArguments: [] as const,
       uac: 'installer-controlled' as const,
-      completion: 'post-restart-evidence-and-plugin-activation' as const,
+      completion: 'post-restart-installed-evidence' as const,
     },
     ...overrides,
   }

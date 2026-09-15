@@ -181,13 +181,14 @@ describe('Desktop managed update protocol', () => {
         pnpmVersion: '11.7.0',
         packageRegistry: 'https://registry.npmjs.org/',
       },
-      pluginProvisioning: {
+      pluginCompatibility: {
         capability: {
           id: 'desktopNativeVerifiedRelease',
           schemaVersion: 1,
           sourceSchemaVersion: 1,
           receiptSchemaVersion: 1,
         },
+        automaticProvisioning: false,
       },
       network: {
         manifestOrigin: 'https://github.com',
@@ -196,7 +197,7 @@ describe('Desktop managed update protocol', () => {
       installation: {
         interaction: 'required',
         installerArguments: [],
-        completion: 'post-restart-evidence-and-plugin-activation',
+        completion: 'post-restart-installed-evidence',
       },
     })
   })

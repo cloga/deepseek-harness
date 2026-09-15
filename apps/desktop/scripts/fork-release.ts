@@ -30,11 +30,7 @@ import {
 } from '../src/managed-update-protocol.ts'
 import {
   DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
-  parseDesktopPluginSource,
-  type DesktopGithubReleasePluginSource,
-  type DesktopPluginProvisionReceipt,
 } from '../src/plugin-source.ts'
-import { managedPluginProvisionReceiptSha256 } from '../src/managed-update-completion.ts'
 import { discoverDesktopManagedSourceRelease } from '../src/managed-update-coordinator.ts'
 import { resolveDesktopPackageRegistry } from './desktop-release-environment.mjs'
 
@@ -57,14 +53,6 @@ export interface DesktopForkReleasePlan {
   readonly sequence: number
   readonly upstreamVersion: string
   readonly identity: typeof IDENTITY
-  readonly pluginProvisioning: {
-    readonly source: DesktopGithubReleasePluginSource
-    readonly expectedReceipt: {
-      readonly schemaVersion: 1
-      readonly releaseId: number
-      readonly assetId: number
-    }
-  }
   readonly migration: NonNullable<DesktopManagedUpdateCapability['migration']> & {
     readonly channelVersion: string
   }
@@ -124,8 +112,7 @@ function pnpmVersion(): string {
 export function parseDesktopForkReleasePlan(value: unknown): DesktopForkReleasePlan {
   const plan = record(value, 'plan')
   exactKeys(plan, [
-    'schemaVersion', 'channel', 'version', 'sequence', 'upstreamVersion', 'identity',
-    'pluginProvisioning', 'migration',
+    'schemaVersion', 'channel', 'version', 'sequence', 'upstreamVersion', 'identity', 'migration',
   ], 'plan')
   if (plan.schemaVersion !== 1 || plan.channel !== DESKTOP_MANAGED_UPDATE_CHANNEL
     || typeof plan.version !== 'string' || valid(plan.version) !== plan.version
@@ -136,17 +123,6 @@ export function parseDesktopForkReleasePlan(value: unknown): DesktopForkReleaseP
   exactKeys(identity, ['appId', 'productName', 'packageName', 'executableName'], 'plan.identity')
   if (JSON.stringify(identity) !== JSON.stringify(IDENTITY)) {
     throw new Error('desktop fork release: plan identity must use the cloga fork identity')
-  }
-  const pluginProvisioning = record(plan.pluginProvisioning, 'plan.pluginProvisioning')
-  exactKeys(pluginProvisioning, ['source', 'expectedReceipt'], 'plan.pluginProvisioning')
-  const source = parseDesktopPluginSource(pluginProvisioning.source)
-  if (source.type !== 'githubRelease') {
-    throw new Error('desktop fork release: plugin source must be a verified GitHub Release')
-  }
-  const expectedReceipt = record(pluginProvisioning.expectedReceipt, 'plan.pluginProvisioning.expectedReceipt')
-  exactKeys(expectedReceipt, ['schemaVersion', 'releaseId', 'assetId'], 'plan.pluginProvisioning.expectedReceipt')
-  if (expectedReceipt.schemaVersion !== 1) {
-    throw new Error('desktop fork release: plugin receipt schema is invalid')
   }
   const migration = record(plan.migration, 'plan.migration')
   exactKeys(migration, [
@@ -186,14 +162,6 @@ export function parseDesktopForkReleasePlan(value: unknown): DesktopForkReleaseP
     sequence,
     upstreamVersion: plan.upstreamVersion,
     identity: IDENTITY,
-    pluginProvisioning: {
-      source,
-      expectedReceipt: {
-        schemaVersion: 1,
-        releaseId: positiveInteger(expectedReceipt.releaseId, 'plugin releaseId'),
-        assetId: positiveInteger(expectedReceipt.assetId, 'plugin assetId'),
-      },
-    },
     migration: {
       ...capability.migration,
       channelVersion: migration.channelVersion,
@@ -222,26 +190,6 @@ export function createDesktopForkReleaseCapability(
       expectedSource: plan.migration.expectedSource,
     },
   })
-}
-
-function expectedPluginReceipt(plan: DesktopForkReleasePlan): DesktopPluginProvisionReceipt {
-  return {
-    schemaVersion: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY.receiptSchemaVersion,
-    capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
-    source: plan.pluginProvisioning.source,
-    releaseId: plan.pluginProvisioning.expectedReceipt.releaseId,
-    assetId: plan.pluginProvisioning.expectedReceipt.assetId,
-    packageName: plan.pluginProvisioning.source.packageName,
-    version: plan.pluginProvisioning.source.version,
-    artifactSha256: plan.pluginProvisioning.source.sha256,
-    states: {
-      staged: true,
-      health: 'passed',
-      activated: true,
-      rolledBack: false,
-      verified: true,
-    },
-  }
 }
 
 function writeJson(path: string, value: unknown): void {
@@ -358,7 +306,6 @@ export function finalizeDesktopForkRelease(
   mkdirSync(outputRoot, { recursive: true })
   const publishedInstaller = join(outputRoot, installerName)
   copyFileSync(installerPath, publishedInstaller)
-  const pluginReceipt = expectedPluginReceipt(plan)
   const receiptPayload = {
     schemaVersion: 1,
     action: 'desktop-fork-release',
@@ -414,13 +361,11 @@ export function finalizeDesktopForkRelease(
       interaction: 'required',
       installerArguments: [],
       uac: 'installer-controlled',
-      completion: 'post-restart-evidence-and-plugin-activation',
+      completion: 'post-restart-installed-evidence',
     },
-    pluginProvisioning: {
+    pluginCompatibility: {
       capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
-      source: plan.pluginProvisioning.source,
-      expectedReceipt: plan.pluginProvisioning.expectedReceipt,
-      receiptSha256: managedPluginProvisionReceiptSha256(pluginReceipt),
+      automaticProvisioning: false,
     },
   }
   const receipt = { ...receiptPayload, receiptSha256: managedUpdateJsonSha256(receiptPayload) }
@@ -459,7 +404,7 @@ export function finalizeDesktopForkRelease(
       executableSha256: receipt.artifacts.executableSha256,
       runtimeSha256: receipt.artifacts.runtimeSha256,
     },
-    pluginProvisioning: receipt.pluginProvisioning,
+    pluginCompatibility: receipt.pluginCompatibility,
     network: receipt.network,
     installation: receipt.installation,
   }

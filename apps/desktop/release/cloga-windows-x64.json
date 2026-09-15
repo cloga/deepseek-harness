@@ -10,28 +10,6 @@
     "packageName": "cloga-deepseek-harness-desktop",
     "executableName": "cloga-deepseek-harness"
   },
-  "pluginProvisioning": {
-    "source": {
-      "schemaVersion": 1,
-      "type": "githubRelease",
-      "owner": "cloga",
-      "repo": "dsh-github-copilot",
-      "tag": "v0.4.0-alpha.18",
-      "asset": "dsh-github-copilot-0.4.0-alpha.18.tgz",
-      "packageName": "dsh-github-copilot",
-      "version": "0.4.0-alpha.18",
-      "size": 538911,
-      "sha256": "2ca4f604e89eda3000cf2a51d79871cee3cb721fa6f4324fc9a1197926c359a8",
-      "integrity": "sha512-FZdWZbb/K8jmE64Gwb9ZU+UADAqakAfqLXrru/qpLFSS4qC4LMO0uIcU1Kbsw1Cg55xf0q+ZSbn0y3cdyDzLXw==",
-      "targetCommit": "08bfccc3b5930b93ef2fe31d9cf9e509f34a8704",
-      "dependencyRegistry": "https://packagefeedproxy.microsoft.io/npm/"
-    },
-    "expectedReceipt": {
-      "schemaVersion": 1,
-      "releaseId": 388508318,
-      "assetId": 563672719
-    }
-  },
   "migration": {
     "owner": "cloga/dsh-windows-ops",
     "manifestUrl": "https://github.com/cloga/dsh-windows-ops/releases/download/dsh-local-0.1.5-rc.2.local.1/release.json",

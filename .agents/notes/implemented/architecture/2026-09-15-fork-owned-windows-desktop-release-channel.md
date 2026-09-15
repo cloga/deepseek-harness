@@ -6,7 +6,7 @@ English | [中文](2026-09-15-fork-owned-windows-desktop-release-channel.zh.md)
 
 ## Problem
 
-The cloga Windows Desktop fork needs an unsigned installer and managed update path without claiming the official vendor's application identity, signature, or native update trust. Release definitions split between the source repository and Windows Ops can diverge in version, source commit, installer hashes, plugin provisioning, or completion semantics.
+The cloga Windows Desktop fork needs an unsigned installer and managed update path without claiming the official vendor's application identity, signature, or native update trust. Release definitions split between the source repository and Windows Ops can diverge in version, source commit, installer hashes, plugin capability compatibility, or completion semantics.
 
 A fixed future manifest URL cannot support continuing updates because a packaged application cannot know the next release's hash. A mutable arbitrary feed URL would move release authority outside reviewed source and allow rollback or origin changes.
 
@@ -22,9 +22,9 @@ The reviewed plan advances a semantic channel version and integer sequence. The 
 
 Manifest schema 3 self-hashes canonical JSON and records the source repository, commit, tree, tag, upstream version, sequence, workflow path, lockfile hash, plan hash, pinned Node and pnpm versions, dependency materialization registry, fork identities, installer filename, byte size, SHA-256, SHA-512, unsigned Authenticode state, build-receipt hashes, installed executable and runtime hashes, network policy, and interactive post-restart completion semantics.
 
-Plugin provisioning records the complete `desktopNativeVerifiedRelease` capability, including capability schema 1 and structured source and receipt schema versions 1. It locks the `dsh-github-copilot` GitHub Release source and the expected release and asset identifiers. The expected native transaction receipt hash includes staging, health, activation, rollback, and verification states.
+Plugin compatibility records the complete generic `desktopNativeVerifiedRelease` capability, including capability schema 1 and structured source and receipt schema versions 1, with `automaticProvisioning: false`. The release does not name, bundle, lock, install, or update any plugin repository, version, or artifact. Independent plugins use their own releases and are installed on demand through the Desktop UI.
 
-The build receipt self-hashes independently and records the same source, build inputs, identity, artifact evidence, helper and capability hashes, native-updater exclusion, network policy, installation policy, and plugin receipt expectation. `SHA256SUMS` and `SHA512SUMS` cover the installer, manifest, and receipt.
+The build receipt self-hashes independently and records the same source, build inputs, identity, artifact evidence, helper and capability hashes, native-updater exclusion, network policy, installation policy, and generic plugin schema compatibility. `SHA256SUMS` and `SHA512SUMS` cover the installer, manifest, and receipt.
 
 ## Discovery and installation
 
@@ -32,7 +32,7 @@ Capability schema 2 contains only the fixed `cloga/deepseek-harness` owner, `dsh
 
 Check lists the fixed repository's GitHub Releases. Every matching release must be published, immutable, commit-pinned, and carry exactly one uploaded manifest asset with a GitHub SHA-256 digest. Desktop resolves the tag to the same commit, verifies the raw asset digest, parses the self-hashed manifest, and selects the highest non-conflicting sequence. The packaged sequence prevents self-selection after enterprise deployment; the durable completion receipt prevents rollback.
 
-The selected handoff locks both the manifest's canonical self-hash and its raw release-asset SHA-256. The detached helper revalidates both before it downloads the receipt and installer. Completion verifies the running executable, runtime descriptor, expected GitHub release and asset identifiers, and complete native plugin transaction receipt before it records the new sequence.
+The selected handoff locks both the manifest's canonical self-hash and its raw release-asset SHA-256. The detached helper revalidates both before it downloads the receipt and installer. Completion verifies the running executable, runtime descriptor, expected GitHub release and asset identifiers before it records the new sequence. It does not mutate plugin state.
 
 The immutable `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest remains an exact sequence-zero migration only when the source repository has no matching release. Any malformed, mutable, conflicting, or unreachable source release fails closed instead of falling back. Once a source release exists, Windows Ops cannot act as a second channel.
 

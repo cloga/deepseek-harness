@@ -2,17 +2,12 @@ import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, expect, it, vi } from 'vitest'
-import {
-  completeDesktopManagedUpdate,
-  managedPluginProvisionReceiptSha256,
-} from '../src/managed-update-completion.ts'
+import { afterEach, expect, it } from 'vitest'
+import { completeDesktopManagedUpdate } from '../src/managed-update-completion.ts'
 import {
   MANAGED_COMMIT,
   managedCapability,
   managedManifest,
-  managedPluginReceipt,
-  managedPluginSource,
 } from './managed-update-fixture.ts'
 
 const roots: string[] = []
@@ -22,7 +17,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true })))
 })
 
-it('verifies installed evidence and plugin provisioning before recording completion', async () => {
+it('verifies installed evidence before recording completion without provisioning plugins', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-managed-completion-'))
   roots.push(root)
   const operation = join(root, 'operations', 'a'.repeat(64), 'stage')
@@ -33,10 +28,6 @@ it('verifies installed evidence and plugin provisioning before recording complet
   const runtimePath = join(root, 'desktop-runtime.json')
   await writeFile(executablePath, executable)
   await writeFile(runtimePath, runtime)
-  const provisionReceipt = {
-    ...managedPluginReceipt,
-    source: managedPluginSource,
-  }
   const manifest = managedManifest({
     source: {
       repository: 'cloga/deepseek-harness',
@@ -53,16 +44,6 @@ it('verifies installed evidence and plugin provisioning before recording complet
     },
     buildReceipt: { file: 'build-receipt.json', sha256: 'd'.repeat(64), receiptSha256: 'e'.repeat(64) },
     installedEvidence: { executableSha256: sha256(executable), runtimeSha256: sha256(runtime) },
-    pluginProvisioning: {
-      capability: managedPluginReceipt.capability,
-      source: managedPluginSource,
-      expectedReceipt: {
-        schemaVersion: 1,
-        releaseId: provisionReceipt.releaseId,
-        assetId: provisionReceipt.assetId,
-      },
-      receiptSha256: managedPluginProvisionReceiptSha256(provisionReceipt),
-    },
   })
   await writeFile(join(operation, 'release.json'), JSON.stringify(manifest))
   await writeFile(join(operation, 'helper-result.json'), JSON.stringify({
@@ -78,9 +59,7 @@ it('verifies installed evidence and plugin provisioning before recording complet
     manifestSha256: manifest.manifestSha256,
     sequence: 2,
     installedEvidence: manifest.installedEvidence,
-    pluginProvisioning: manifest.pluginProvisioning,
   }))
-  const provision = vi.fn(async () => provisionReceipt)
   const completionPath = join(root, 'completion.json')
   await expect(completeDesktopManagedUpdate(
     join(root, 'operations'),
@@ -89,9 +68,7 @@ it('verifies installed evidence and plugin provisioning before recording complet
     1,
     executablePath,
     runtimePath,
-    provision,
   )).resolves.toEqual({ status: 'complete', sequence: 2, version: '1.2.3' })
-  expect(provision).toHaveBeenCalledOnce()
   expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({ status: 'complete', sequence: 2 })
 })
 
@@ -115,7 +92,6 @@ it('requires recovery when a helper acknowledgement has no terminal state', asyn
     1,
     join(root, 'unused.exe'),
     join(root, 'unused-runtime.json'),
-    async () => { throw new Error('provisioning must not run') },
   )).resolves.toMatchObject({
     status: 'recovery-required',
     message: /acknowledged the handoff/u,
@@ -150,7 +126,6 @@ it.each([
     manifestSha256: 'a'.repeat(64),
     sequence: 2,
     installedEvidence: {},
-    pluginProvisioning: {},
   }))
   if (result !== undefined) {
     await writeFile(join(operation, 'helper-result.json'), JSON.stringify(result))
@@ -163,7 +138,6 @@ it.each([
     1,
     join(root, 'unused.exe'),
     join(root, 'unused-runtime.json'),
-    async () => { throw new Error('provisioning must not run') },
   )).resolves.toMatchObject({ status: 'recovery-required', message })
 })
 
@@ -189,6 +163,5 @@ it('ignores an operation explicitly cancelled by its owning Desktop process', as
     1,
     join(root, 'unused.exe'),
     join(root, 'unused-runtime.json'),
-    async () => { throw new Error('provisioning must not run') },
   )).resolves.toEqual({ status: 'none' })
 })

@@ -407,9 +407,6 @@ export async function runDesktopManagedUpdateHelper(
       manifestSha256: manifest.manifestSha256,
       sequence: manifest.sequence,
       installedEvidence: manifest.installedEvidence,
-      pluginProvisioning: manifest.owner === 'cloga/deepseek-harness'
-        ? manifest.pluginProvisioning
-        : { capability: 'windows-ops-legacy-complete' },
     })
     if (await stat(handoff.stageRoot).then(() => true, () => false)) {
       throw new Error('desktop managed update: stage root already exists')

@@ -2,11 +2,7 @@
 
 import { createHash } from 'node:crypto'
 import { isAbsolute, win32 } from 'node:path'
-import {
-  DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
-  parseDesktopPluginSource,
-  type DesktopGithubReleasePluginSource,
-} from './plugin-source.ts'
+import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY } from './plugin-source.ts'
 
 export const DESKTOP_MANAGED_UPDATE_SOURCE_REPOSITORY = 'cloga/deepseek-harness' as const
 export const DESKTOP_MANAGED_UPDATE_TAG_PREFIX = 'dsh-desktop-v' as const
@@ -100,15 +96,9 @@ export interface DesktopManagedUpdateManifest {
     readonly executableSha256: string
     readonly runtimeSha256: string
   }
-  readonly pluginProvisioning: {
+  readonly pluginCompatibility: {
     readonly capability: typeof DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY
-    readonly source: DesktopGithubReleasePluginSource
-    readonly expectedReceipt: {
-      readonly schemaVersion: 1
-      readonly releaseId: number
-      readonly assetId: number
-    }
-    readonly receiptSha256: string
+    readonly automaticProvisioning: false
   }
   readonly network: {
     readonly manifestOrigin: 'https://github.com'
@@ -123,7 +113,7 @@ export interface DesktopManagedUpdateManifest {
     readonly interaction: 'required'
     readonly installerArguments: readonly []
     readonly uac: 'installer-controlled'
-    readonly completion: 'post-restart-evidence-and-plugin-activation'
+    readonly completion: 'post-restart-installed-evidence'
   }
   readonly manifestSha256: string
 }
@@ -356,7 +346,7 @@ export function parseDesktopManagedUpdateCapability(value: unknown): DesktopMana
 function parseSourceManifest(item: Record<string, unknown>): DesktopManagedUpdateManifest {
   exactKeys(item, [
     'schemaVersion', 'owner', 'mode', 'channel', 'version', 'upstreamVersion', 'sequence', 'source', 'build',
-    'identity', 'installer', 'buildReceipt', 'installedEvidence', 'pluginProvisioning', 'network', 'installation',
+    'identity', 'installer', 'buildReceipt', 'installedEvidence', 'pluginCompatibility', 'network', 'installation',
     'manifestSha256',
   ], 'manifest')
   if (item.schemaVersion !== DESKTOP_MANAGED_UPDATE_MANIFEST_SCHEMA_VERSION
@@ -420,24 +410,11 @@ function parseSourceManifest(item: Record<string, unknown>): DesktopManagedUpdat
   exactKeys(evidence, ['executableSha256', 'runtimeSha256'], 'manifest.installedEvidence')
   const buildReceipt = record(item.buildReceipt, 'manifest.buildReceipt')
   exactKeys(buildReceipt, ['file', 'sha256', 'receiptSha256'], 'manifest.buildReceipt')
-  const provisioning = record(item.pluginProvisioning, 'manifest.pluginProvisioning')
-  exactKeys(provisioning, ['capability', 'source', 'expectedReceipt', 'receiptSha256'], 'manifest.pluginProvisioning')
-  if (JSON.stringify(provisioning.capability) !== JSON.stringify(DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY)) {
-    throw new Error('desktop managed update: unsupported plugin provisioning capability')
-  }
-  const pluginSource = parseDesktopPluginSource(provisioning.source)
-  if (pluginSource.type !== 'githubRelease') {
-    throw new Error('desktop managed update: plugin provisioning requires a verified GitHub release')
-  }
-  const expectedReceipt = record(provisioning.expectedReceipt, 'manifest.pluginProvisioning.expectedReceipt')
-  exactKeys(expectedReceipt, ['schemaVersion', 'releaseId', 'assetId'], 'manifest.pluginProvisioning.expectedReceipt')
-  if (expectedReceipt.schemaVersion !== 1) {
-    throw new Error('desktop managed update: plugin receipt schema is invalid')
-  }
-  const releaseId = integer(expectedReceipt.releaseId, 'manifest.pluginProvisioning.expectedReceipt.releaseId')
-  const assetId = integer(expectedReceipt.assetId, 'manifest.pluginProvisioning.expectedReceipt.assetId')
-  if (releaseId < 1 || assetId < 1) {
-    throw new Error('desktop managed update: plugin receipt identifiers must be positive')
+  const pluginCompatibility = record(item.pluginCompatibility, 'manifest.pluginCompatibility')
+  exactKeys(pluginCompatibility, ['capability', 'automaticProvisioning'], 'manifest.pluginCompatibility')
+  if (JSON.stringify(pluginCompatibility.capability) !== JSON.stringify(DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY)
+    || pluginCompatibility.automaticProvisioning !== false) {
+    throw new Error('desktop managed update: plugin compatibility is invalid')
   }
   const network = record(item.network, 'manifest.network')
   exactKeys(network, ['manifestOrigin', 'apiOrigin', 'allowedRedirectHosts'], 'manifest.network')
@@ -451,7 +428,7 @@ function parseSourceManifest(item: Record<string, unknown>): DesktopManagedUpdat
   if (installation.interaction !== 'required'
     || !Array.isArray(installation.installerArguments) || installation.installerArguments.length !== 0
     || installation.uac !== 'installer-controlled'
-    || installation.completion !== 'post-restart-evidence-and-plugin-activation') {
+    || installation.completion !== 'post-restart-installed-evidence') {
     throw new Error('desktop managed update: manifest installation policy is invalid')
   }
   const manifestSha256 = hash(item.manifestSha256, 'manifest.manifestSha256')
@@ -503,11 +480,9 @@ function parseSourceManifest(item: Record<string, unknown>): DesktopManagedUpdat
       executableSha256: hash(evidence.executableSha256, 'manifest.installedEvidence.executableSha256'),
       runtimeSha256: hash(evidence.runtimeSha256, 'manifest.installedEvidence.runtimeSha256'),
     },
-    pluginProvisioning: {
+    pluginCompatibility: {
       capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
-      source: pluginSource,
-      expectedReceipt: { schemaVersion: 1, releaseId, assetId },
-      receiptSha256: hash(provisioning.receiptSha256, 'manifest.pluginProvisioning.receiptSha256'),
+      automaticProvisioning: false,
     },
     network: {
       manifestOrigin: 'https://github.com',
@@ -522,7 +497,7 @@ function parseSourceManifest(item: Record<string, unknown>): DesktopManagedUpdat
       interaction: 'required',
       installerArguments: [],
       uac: 'installer-controlled',
-      completion: 'post-restart-evidence-and-plugin-activation',
+      completion: 'post-restart-installed-evidence',
     },
     manifestSha256,
   }

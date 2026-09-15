@@ -6,7 +6,7 @@ Status: implemented
 
 ## 问题
 
-cloga Windows Desktop fork 需要未签名 installer 与托管更新路径，同时不能声称官方供应商的应用身份、签名或原生更新信任。发布定义如果分散在源码仓库与 Windows Ops，版本、源码 commit、installer hash、插件 provisioning 或 completion 语义可能发生分歧。
+cloga Windows Desktop fork 需要未签名 installer 与托管更新路径，同时不能声称官方供应商的应用身份、签名或原生更新信任。发布定义如果分散在源码仓库与 Windows Ops，版本、源码 commit、installer hash、插件 capability 兼容性或 completion 语义可能发生分歧。
 
 固定未来 manifest URL 无法支持持续更新，因为打包应用无法预知下一个 release 的 hash。可变的任意 feed URL 会把发布权威移出经过评审的源码，并允许回滚或 origin 变化。
 
@@ -22,9 +22,9 @@ fork 身份为 `io.github.cloga.deepseek-harness.desktop`，产品为 `DeepSeek 
 
 Manifest schema 3 对规范 JSON 进行 self-hash，并记录源码 repository、commit、tree、tag、upstream version、sequence、workflow path、lockfile hash、plan hash、固定 Node 与 pnpm 版本、依赖物化 registry、fork identities、installer filename、byte size、SHA-256、SHA-512、未签名 Authenticode 状态、build-receipt hashes、已安装 executable 与 runtime hashes、网络策略和交互式重启后 completion 语义。
 
-插件 provisioning 记录完整 `desktopNativeVerifiedRelease` capability，包括 capability schema 1 与结构化 source 和 receipt schema version 1。它锁定 `dsh-github-copilot` GitHub Release source，以及预期 release 与 asset identifiers。预期 native transaction receipt hash 包含 staging、health、activation、rollback 与 verification states。
+插件兼容性记录完整的通用 `desktopNativeVerifiedRelease` capability，包括 capability schema 1 与结构化 source 和 receipt schema version 1，并设置 `automaticProvisioning: false`。Release 不点名、内置、锁定、安装或更新任何插件 repository、version 或 artifact。独立插件使用自己的 release，并由用户通过 Desktop UI 按需安装。
 
-Build receipt 独立 self-hash，并记录相同的 source、build inputs、identity、artifact evidence、helper 与 capability hashes、native-updater exclusion、network policy、installation policy 与 plugin receipt expectation。`SHA256SUMS` 与 `SHA512SUMS` 覆盖 installer、manifest 与 receipt。
+Build receipt 独立 self-hash，并记录相同的 source、build inputs、identity、artifact evidence、helper 与 capability hashes、native-updater exclusion、network policy、installation policy 与通用插件 schema 兼容性。`SHA256SUMS` 与 `SHA512SUMS` 覆盖 installer、manifest 与 receipt。
 
 ## 发现与安装
 
@@ -32,7 +32,7 @@ Capability schema 2 只包含固定的 `cloga/deepseek-harness` owner、`dsh-des
 
 Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须已经发布、不可变、锁定 commit，并携带恰好一个具有 GitHub SHA-256 digest 的已上传 manifest asset。Desktop 把 tag 解析到同一 commit，验证 raw asset digest，解析 self-hashed manifest，并选择最高且不冲突的 sequence。包内 sequence 防止企业部署后的 self-selection；durable completion receipt 防止回滚。
 
-所选 handoff 同时锁定 manifest 的规范 self-hash 与 raw release-asset SHA-256。独立 helper 在下载 receipt 与 installer 前重新验证二者。Completion 在记录新 sequence 前验证运行中的 executable、runtime descriptor、预期 GitHub release 与 asset identifiers，以及完整 native plugin transaction receipt。
+所选 handoff 同时锁定 manifest 的规范 self-hash 与 raw release-asset SHA-256。独立 helper 在下载 receipt 与 installer 前重新验证二者。Completion 在记录新 sequence 前验证运行中的 executable、runtime descriptor 与预期 GitHub release 和 asset identifiers。它不修改插件状态。
 
 不可变 `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest 仅在源码 repository 没有匹配 release 时作为精确 sequence-zero migration 保留。任何格式错误、可变、冲突或不可达的 source release 都会 fail closed，不会 fallback。一旦 source release 存在，Windows Ops 不能充当第二通道。
 
