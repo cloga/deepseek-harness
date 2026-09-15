@@ -126,8 +126,7 @@ export async function completeDesktopManagedUpdate(
         const acknowledgedManifest = acknowledgement.manifestSha256
         if (acknowledgement.schemaVersion !== 1 || acknowledgement.token !== name
           || !Number.isSafeInteger(acknowledgement.helperPid) || Number(acknowledgement.helperPid) <= 0
-          || (acknowledgedManifest !== capability.manifestSha256
-            && acknowledgedManifest !== capability.migration?.manifestSha256)) {
+          || typeof acknowledgedManifest !== 'string' || !/^[a-f0-9]{64}$/u.test(acknowledgedManifest)) {
           throw new Error('desktop managed update: helper acknowledgement does not match its operation')
         }
         if (result === undefined && pending === undefined) {
@@ -225,6 +224,10 @@ export async function completeDesktopManagedUpdate(
       throw new Error('desktop managed update: installed application evidence does not match the release')
     }
     const provisionReceipt = await provision(manifest)
+    if (provisionReceipt.releaseId !== manifest.pluginProvisioning.expectedReceipt.releaseId
+      || provisionReceipt.assetId !== manifest.pluginProvisioning.expectedReceipt.assetId) {
+      throw new Error('desktop managed update: plugin provision receipt identities do not match the release')
+    }
     if (managedPluginProvisionReceiptSha256(provisionReceipt) !== manifest.pluginProvisioning.receiptSha256) {
       throw new Error('desktop managed update: plugin provision receipt does not match the release')
     }

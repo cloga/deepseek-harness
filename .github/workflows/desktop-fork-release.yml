@@ -1,0 +1,240 @@
+name: Desktop fork release (Windows x64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_version:
+        description: Exact reviewed version from apps/desktop/release/cloga-windows-x64.json
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-fork-release
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '24.17.0'
+  PNPM_VERSION: '11.7.0'
+  DSH_TELEMETRY_DISABLED: '1'
+  RELEASE_PLAN: apps/desktop/release/cloga-windows-x64.json
+  CAPABILITY_PATH: apps/desktop/.desktop-build/fork-release/capability.json
+  RELEASE_ASSETS: dist/desktop-fork-release
+
+jobs:
+  build:
+    name: Build unsigned fork installer
+    if: github.ref == 'refs/heads/master'
+    runs-on: windows-2025
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+      asset_set_sha256: ${{ steps.asset-set.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          dest: ${{ runner.temp }}/setup-pnpm
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+
+      - name: Require current master and reviewed version
+        id: plan
+        shell: pwsh
+        env:
+          CONFIRM_VERSION: ${{ inputs.confirm_version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git fetch --no-tags origin master
+          $master = git rev-parse origin/master
+          $head = git rev-parse HEAD
+          if ($head -ne $master) { throw "Release must run from current master: HEAD=$head origin/master=$master" }
+          $plan = Get-Content -LiteralPath $env:RELEASE_PLAN -Raw | ConvertFrom-Json
+          if ($env:CONFIRM_VERSION -ne $plan.version) {
+            throw "Confirmation version does not match reviewed plan version $($plan.version)"
+          }
+          "version=$($plan.version)" >> $env:GITHUB_OUTPUT
+          "tag=dsh-desktop-v$($plan.version)" >> $env:GITHUB_OUTPUT
+          "source_sha=$head" >> $env:GITHUB_OUTPUT
+
+      - name: Install from frozen lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify Desktop release code
+        run: pnpm exec vitest run apps/desktop apps/desktop-host --maxWorkers=1
+
+      - name: Prepare reviewed managed capability
+        run: >-
+          pnpm exec tsx apps/desktop/scripts/fork-release.ts prepare
+          --plan ${{ env.RELEASE_PLAN }}
+          --out ${{ env.CAPABILITY_PATH }}
+          --remote
+
+      - name: Build unsigned interactive NSIS installer
+        env:
+          DSH_DESKTOP_APP_ID: io.github.cloga.deepseek-harness.desktop
+          DSH_DESKTOP_FORK_RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+          DSH_DESKTOP_MANAGED_UPDATE_CAPABILITY: ${{ github.workspace }}\${{ env.CAPABILITY_PATH }}
+        run: pnpm run package:desktop:win:x64:unsigned
+
+      - name: Finalize release manifest and receipts
+        run: >-
+          pnpm exec tsx apps/desktop/scripts/fork-release.ts finalize
+          --plan ${{ env.RELEASE_PLAN }}
+          --capability ${{ env.CAPABILITY_PATH }}
+          --artifacts apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts
+          --out ${{ env.RELEASE_ASSETS }}
+
+      - name: Verify release asset checksums
+        id: asset-set
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location $env:RELEASE_ASSETS
+          try {
+            foreach ($line in Get-Content -LiteralPath SHA256SUMS) {
+              $hash, $name = $line -split '  ', 2
+              if ((Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) {
+                throw "SHA-256 mismatch for $name"
+              }
+            }
+            foreach ($line in Get-Content -LiteralPath SHA512SUMS) {
+              $hash, $name = $line -split '  ', 2
+              $actual = [Convert]::ToBase64String([Security.Cryptography.SHA512]::HashData(
+                [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $name))))
+              if ($actual -ne $hash) { throw "SHA-512 mismatch for $name" }
+            }
+            $inventory = Get-ChildItem -File | Sort-Object Name | ForEach-Object {
+              "$($_.Name):$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())"
+            }
+            $bytes = [Text.Encoding]::UTF8.GetBytes(($inventory -join "`n"))
+            $setHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+            "sha256=$setHash" >> $env:GITHUB_OUTPUT
+          } finally {
+            Pop-Location
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-fork-release-${{ steps.plan.outputs.version }}
+          path: ${{ env.RELEASE_ASSETS }}/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish immutable GitHub Release
+    needs: build
+    runs-on: windows-2025
+    environment: desktop-fork-release
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      release_url: ${{ steps.publish.outputs.release_url }}
+      manifest_url: ${{ steps.publish.outputs.manifest_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-fork-release-${{ needs.build.outputs.version }}
+          path: release-assets
+
+      - name: Cross-check downloaded artifact set
+        shell: pwsh
+        env:
+          EXPECTED_SET_SHA256: ${{ needs.build.outputs.asset_set_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $inventory = Get-ChildItem -LiteralPath release-assets -File | Sort-Object Name | ForEach-Object {
+            "$($_.Name):$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())"
+          }
+          $bytes = [Text.Encoding]::UTF8.GetBytes(($inventory -join "`n"))
+          $actual = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+          if ($actual -ne $env:EXPECTED_SET_SHA256) { throw 'Downloaded artifact set does not match the build job' }
+
+      - name: Publish reviewed release
+        id: publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY 2>$null) {
+            throw "Immutable tag or release already exists: $env:RELEASE_TAG"
+          }
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          @"
+          Unsigned fork-owned Windows x64 Desktop release.
+
+          - Identity: `io.github.cloga.deepseek-harness.desktop` / `DeepSeek Harness (cloga)`
+          - Installer: interactive NSIS; Windows warnings and UAC remain user-controlled
+          - Update mode: source-owned immutable GitHub Release discovery
+          - Native `electron-updater`: disabled; no `app-update.yml`
+          - Source commit: `$env:SOURCE_SHA`
+          "@ | Set-Content -LiteralPath $notes -Encoding utf8NoBOM
+          $assets = Get-ChildItem -LiteralPath release-assets -File | ForEach-Object FullName
+          gh release create $env:RELEASE_TAG @assets `
+            --repo $env:GITHUB_REPOSITORY `
+            --target $env:SOURCE_SHA `
+            --title "Desktop fork $env:RELEASE_VERSION (Windows x64)" `
+            --notes-file $notes `
+            --draft `
+            --prerelease
+          gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          if ($release.immutable -ne $true) { throw 'Published GitHub Release is not immutable' }
+          if ($release.target_commitish -ne $env:SOURCE_SHA) { throw 'Release target commit does not match the build commit' }
+          $tagSha = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG" --jq .object.sha
+          if ($tagSha -ne $env:SOURCE_SHA) { throw 'Release tag does not resolve to the build commit' }
+          foreach ($asset in $release.assets) {
+            $path = Join-Path 'release-assets' $asset.name
+            if (-not (Test-Path -LiteralPath $path)) { throw "Unexpected release asset $($asset.name)" }
+            $expected = "sha256:$((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant())"
+            if ($asset.digest -ne $expected) { throw "Release asset digest mismatch for $($asset.name)" }
+          }
+          "release_url=$($release.html_url)" >> $env:GITHUB_OUTPUT
+          "manifest_url=https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/release.json" >> $env:GITHUB_OUTPUT
+
+  remote-check:
+    name: Verify remote managed Check
+    needs: [build, release]
+    runs-on: windows-2025
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+          persist-credentials: false
+          clean: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          dest: ${{ runner.temp }}/setup-pnpm
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Run the shipped source discovery against GitHub
+        run: >-
+          pnpm exec tsx apps/desktop/scripts/fork-release.ts verify-remote
+          --plan ${{ env.RELEASE_PLAN }}

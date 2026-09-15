@@ -62,7 +62,7 @@ export interface DesktopUpdateState {
   readonly phase: 'idle' | 'checking' | 'available' | 'installing' | 'ready' | 'error'
   readonly version?: string
   readonly message?: string
-  readonly mode?: 'native' | 'windows-ops-managed'
+  readonly mode?: 'native' | 'github-release-managed'
   readonly interactiveInstaller?: boolean
 }
 

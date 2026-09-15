@@ -162,15 +162,6 @@ const defaultOperations: DesktopManagedUpdateHelperOperations = {
   verifyAndStartInstaller: verifyAndStartManagedInstaller,
 }
 
-function selectedManifestUrl(handoff: DesktopManagedUpdateHandoff): string {
-  if (handoff.selectedManifest === 'source') {
-    return handoff.capability.manifestUrl
-  }
-  const migration = handoff.capability.migration
-  if (migration === undefined) throw new Error('desktop managed update: selected migration is unavailable')
-  return migration.manifestUrl
-}
-
 async function fetchResponse(
   url: string,
   operations: DesktopManagedUpdateHelperOperations,
@@ -246,11 +237,15 @@ function verifyBuildReceipt(
     throw new Error('desktop managed update: build receipt omits source identity')
   }
   const identity = source as Record<string, unknown>
-  const expected = manifest.owner === 'cloga/deepseek-harness'
-    ? handoff.capability.expectedSource
-    : handoff.capability.migration?.expectedSource
-  if (expected === undefined || identity.commit !== expected.commit
-    || (identity.tag !== `dsh-v${expected.version}` && identity.version !== expected.version)) {
+  const expectedCommit = manifest.owner === 'cloga/deepseek-harness'
+    ? manifest.source.commit
+    : handoff.capability.migration?.expectedSource.commit
+  const expectedVersion = manifest.owner === 'cloga/deepseek-harness'
+    ? manifest.version
+    : handoff.capability.migration?.expectedSource.version
+  if (expectedCommit === undefined || expectedVersion === undefined || identity.commit !== expectedCommit
+    || (identity.tag !== (manifest.owner === 'cloga/deepseek-harness' ? manifest.source.tag : undefined)
+      && identity.version !== expectedVersion)) {
     throw new Error('desktop managed update: build receipt source does not match the local capability')
   }
   const repositories = manifest.owner === 'cloga/deepseek-harness'
@@ -258,6 +253,9 @@ function verifyBuildReceipt(
     : ['deepseek-ai/deepseek-harness', 'https://github.com/deepseek-ai/deepseek-harness.git']
   if (!repositories.includes(String(identity.repository))) {
     throw new Error('desktop managed update: build receipt repository does not match the manifest owner')
+  }
+  if (manifest.owner === 'cloga/deepseek-harness' && identity.tree !== manifest.source.tree) {
+    throw new Error('desktop managed update: build receipt tree does not match the manifest')
   }
   const expectedReceiptHash = manifest.buildReceipt.receiptSha256
   if (receipt.receiptSha256 !== expectedReceiptHash) {
@@ -341,9 +339,12 @@ export async function runDesktopManagedUpdateHelper(
   operations: DesktopManagedUpdateHelperOperations = defaultOperations,
 ): Promise<DesktopManagedUpdateHelperResult> {
   const handoff = parseDesktopManagedUpdateHandoff(handoffValue)
-  const manifestUrl = selectedManifestUrl(handoff)
+  const manifestUrl = handoff.selection.manifestUrl
   await mkdir(dirname(handoff.stageRoot), { recursive: true })
   const manifestBody = await fetchBytes(manifestUrl, MAX_MANIFEST_BYTES, operations)
+  if (sha256(manifestBody) !== handoff.selection.assetSha256) {
+    throw new Error('desktop managed update: selected manifest hash does not match')
+  }
   let manifestValue: unknown
   try {
     manifestValue = JSON.parse(manifestBody.toString('utf8'))
@@ -351,7 +352,10 @@ export async function runDesktopManagedUpdateHelper(
     throw new Error('desktop managed update: manifest is not JSON')
   }
   const manifest = parseDesktopManagedUpdateManifest(manifestValue, handoff.capability, handoff.installedSequence)
-  if ((handoff.selectedManifest === 'source') !== (manifest.owner === 'cloga/deepseek-harness')) {
+  if (manifest.manifestSha256 !== handoff.selection.manifestSha256) {
+    throw new Error('desktop managed update: selected manifest self-hash does not match')
+  }
+  if ((handoff.selection.kind === 'source') !== (manifest.owner === 'cloga/deepseek-harness')) {
     throw new Error('desktop managed update: selected manifest kind does not match its owner')
   }
   const operationRoot = dirname(handoff.stageRoot)

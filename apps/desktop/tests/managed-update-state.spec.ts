@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { loadDesktopManagedUpdateConfiguration } from '../src/managed-update-state.ts'
+import { managedCapability } from './managed-update-fixture.ts'
 
 const roots: string[] = []
 
@@ -16,14 +17,7 @@ async function fixture(): Promise<{ resources: string; userData: string }> {
   const resources = join(root, 'resources')
   const userData = join(root, 'user-data')
   await mkdir(join(resources, 'managed-update'), { recursive: true })
-  await writeFile(join(resources, 'managed-update', 'capability.json'), JSON.stringify({
-    schemaVersion: 1,
-    mode: 'windows-ops-managed',
-    manifestUrl: 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/release.json',
-    manifestSha256: 'a'.repeat(64),
-    minimumSequence: 2,
-    expectedSource: { version: '1.2.3', commit: 'b'.repeat(40) },
-  }))
+  await writeFile(join(resources, 'managed-update', 'capability.json'), JSON.stringify(managedCapability()))
   await writeFile(join(resources, 'managed-update', 'helper.mjs'), 'export {}\n')
   return { resources, userData }
 }
@@ -32,8 +26,22 @@ describe('managed update configuration', () => {
   it('selects the packaged Windows capability', async () => {
     const { resources, userData } = await fixture()
     await expect(loadDesktopManagedUpdateConfiguration(resources, userData, 'win32')).resolves.toMatchObject({
-      installedSequence: 0,
-      capability: { mode: 'windows-ops-managed' },
+      installedSequence: 2,
+      capability: { mode: 'github-release-managed' },
+    })
+  })
+
+  it('advances beyond the packaged sequence only after durable completion', async () => {
+    const { resources, userData } = await fixture()
+    await mkdir(join(userData, 'managed-update'), { recursive: true })
+    await writeFile(join(userData, 'managed-update', 'completion.json'), JSON.stringify({
+      schemaVersion: 1,
+      status: 'complete',
+      sequence: 3,
+      manifestSha256: 'a'.repeat(64),
+    }))
+    await expect(loadDesktopManagedUpdateConfiguration(resources, userData, 'win32')).resolves.toMatchObject({
+      installedSequence: 3,
     })
   })
 

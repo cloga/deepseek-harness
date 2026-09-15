@@ -3,11 +3,20 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, win32 } from 'node:path'
 import {
+  DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
   parseDesktopPluginSource,
   type DesktopGithubReleasePluginSource,
 } from './plugin-source.ts'
 
-const SOURCE_REPOSITORY = 'cloga/deepseek-harness'
+export const DESKTOP_MANAGED_UPDATE_SOURCE_REPOSITORY = 'cloga/deepseek-harness' as const
+export const DESKTOP_MANAGED_UPDATE_TAG_PREFIX = 'dsh-desktop-v' as const
+export const DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET = 'release.json' as const
+export const DESKTOP_MANAGED_UPDATE_CHANNEL = 'cloga-windows-x64' as const
+export const DESKTOP_MANAGED_UPDATE_WORKFLOW = '.github/workflows/desktop-fork-release.yml' as const
+export const DESKTOP_MANAGED_UPDATE_CAPABILITY_SCHEMA_VERSION = 2 as const
+export const DESKTOP_MANAGED_UPDATE_MANIFEST_SCHEMA_VERSION = 3 as const
+
+const SOURCE_REPOSITORY = DESKTOP_MANAGED_UPDATE_SOURCE_REPOSITORY
 const LEGACY_REPOSITORY = 'cloga/dsh-windows-ops'
 // oxlint-disable-next-line @stylistic/max-len -- Keep the complete SemVer grammar as one auditable literal.
 const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|(?:\d*[A-Za-z-][0-9A-Za-z-]*))(?:\.(?:0|[1-9]\d*|(?:\d*[A-Za-z-][0-9A-Za-z-]*)))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u
@@ -26,19 +35,18 @@ function legacyAcknowledgementField(value: unknown): string {
 
 /** Immutable local selection of one source-owned release manifest. */
 export interface DesktopManagedUpdateCapability {
-  readonly schemaVersion: 1
-  readonly mode: 'windows-ops-managed'
-  readonly manifestUrl: string
-  readonly manifestSha256: string
+  readonly schemaVersion: typeof DESKTOP_MANAGED_UPDATE_CAPABILITY_SCHEMA_VERSION
+  readonly mode: 'github-release-managed'
+  readonly owner: typeof SOURCE_REPOSITORY
+  readonly tagPrefix: typeof DESKTOP_MANAGED_UPDATE_TAG_PREFIX
+  readonly manifestAsset: typeof DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET
+  readonly currentSequence: number
   readonly minimumSequence: number
-  readonly expectedSource: {
-    readonly version: string
-    readonly commit: string
-  }
   readonly migration?: {
     readonly owner: typeof LEGACY_REPOSITORY
     readonly manifestUrl: string
     readonly manifestSha256: string
+    readonly assetSha256: string
     readonly maximumSequence: 1
     readonly expectedSource: {
       readonly version: string
@@ -49,15 +57,31 @@ export interface DesktopManagedUpdateCapability {
 
 /** Source identity and installation evidence published with one Desktop release. */
 export interface DesktopManagedUpdateManifest {
-  readonly schemaVersion: 2
+  readonly schemaVersion: typeof DESKTOP_MANAGED_UPDATE_MANIFEST_SCHEMA_VERSION
   readonly owner: typeof SOURCE_REPOSITORY
   readonly mode: 'interactive-windows-installer'
+  readonly channel: typeof DESKTOP_MANAGED_UPDATE_CHANNEL
   readonly version: string
+  readonly upstreamVersion: string
   readonly sequence: number
   readonly source: {
     readonly repository: typeof SOURCE_REPOSITORY
     readonly commit: string
+    readonly tree: string
     readonly tag: string
+  }
+  readonly build: {
+    readonly workflow: typeof DESKTOP_MANAGED_UPDATE_WORKFLOW
+    readonly lockfileSha256: string
+    readonly planSha256: string
+    readonly nodeVersion: string
+    readonly pnpmVersion: string
+  }
+  readonly identity: {
+    readonly appId: 'io.github.cloga.deepseek-harness.desktop'
+    readonly productName: 'DeepSeek Harness (cloga)'
+    readonly packageName: 'cloga-deepseek-harness-desktop'
+    readonly executableName: 'cloga-deepseek-harness'
   }
   readonly installer: {
     readonly file: string
@@ -76,9 +100,29 @@ export interface DesktopManagedUpdateManifest {
     readonly runtimeSha256: string
   }
   readonly pluginProvisioning: {
-    readonly capability: 'verified-github-release'
+    readonly capability: typeof DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY
     readonly source: DesktopGithubReleasePluginSource
+    readonly expectedReceipt: {
+      readonly schemaVersion: 1
+      readonly releaseId: number
+      readonly assetId: number
+    }
     readonly receiptSha256: string
+  }
+  readonly network: {
+    readonly manifestOrigin: 'https://github.com'
+    readonly apiOrigin: 'https://api.github.com'
+    readonly allowedRedirectHosts: readonly [
+      'github.com',
+      'objects.githubusercontent.com',
+      'release-assets.githubusercontent.com',
+    ]
+  }
+  readonly installation: {
+    readonly interaction: 'required'
+    readonly installerArguments: readonly []
+    readonly uac: 'installer-controlled'
+    readonly completion: 'post-restart-evidence-and-plugin-activation'
   }
   readonly manifestSha256: string
 }
@@ -121,7 +165,12 @@ export interface DesktopManagedUpdateHandoff {
   readonly schemaVersion: 1
   readonly token: string
   readonly capability: DesktopManagedUpdateCapability
-  readonly selectedManifest: 'source' | 'migration'
+  readonly selection: {
+    readonly kind: 'source' | 'migration'
+    readonly manifestUrl: string
+    readonly manifestSha256: string
+    readonly assetSha256: string
+  }
   readonly stageRoot: string
   readonly waitPids: readonly number[]
   readonly waitTimeoutMs: number
@@ -188,6 +237,21 @@ function githubReleaseManifestUrl(value: unknown, repository: string, label: str
   return url.href
 }
 
+function sourceReleaseManifestUrl(value: unknown, label: string): string {
+  const result = githubReleaseManifestUrl(value, SOURCE_REPOSITORY, label)
+  const tag = decodeURIComponent(
+    new URL(result).pathname.slice(
+      `/${SOURCE_REPOSITORY}/releases/download/`.length,
+      -`/${DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET}`.length,
+    ),
+  )
+  if (!tag.startsWith(DESKTOP_MANAGED_UPDATE_TAG_PREFIX)
+    || !SEMVER.test(tag.slice(DESKTOP_MANAGED_UPDATE_TAG_PREFIX.length))) {
+    throw new Error(`desktop managed update: ${label} must select a versioned Desktop release tag`)
+  }
+  return result
+}
+
 function canonical(value: unknown): string {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value)
   if (typeof value === 'number') {
@@ -235,23 +299,29 @@ function verifySelfHash(value: Record<string, unknown>, expected: string): void 
 /** Parse the local capability without accepting user-selected repositories or mutable release aliases. */
 export function parseDesktopManagedUpdateCapability(value: unknown): DesktopManagedUpdateCapability {
   const item = record(value, 'capability')
-  exactKeys(item, ['schemaVersion', 'mode', 'manifestUrl', 'manifestSha256', 'minimumSequence', 'expectedSource',
+  exactKeys(item, ['schemaVersion', 'mode', 'owner', 'tagPrefix', 'manifestAsset', 'currentSequence', 'minimumSequence',
     ...(item.migration === undefined ? [] : ['migration'])], 'capability')
-  if (item.schemaVersion !== 1 || item.mode !== 'windows-ops-managed') {
+  if (item.schemaVersion !== DESKTOP_MANAGED_UPDATE_CAPABILITY_SCHEMA_VERSION
+    || item.mode !== 'github-release-managed'
+    || item.owner !== SOURCE_REPOSITORY
+    || item.tagPrefix !== DESKTOP_MANAGED_UPDATE_TAG_PREFIX
+    || item.manifestAsset !== DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET) {
     throw new Error('desktop managed update: unsupported capability identity')
   }
-  const expectedSourceValue = record(item.expectedSource, 'capability.expectedSource')
-  exactKeys(expectedSourceValue, ['version', 'commit'], 'capability.expectedSource')
-  const expectedVersion = string(expectedSourceValue.version, 'capability.expectedSource.version')
-  if (!SEMVER.test(expectedVersion) || typeof expectedSourceValue.commit !== 'string'
-    || !COMMIT.test(expectedSourceValue.commit)) {
-    throw new Error('desktop managed update: capability expected source is invalid')
+  const currentSequence = integer(item.currentSequence, 'capability.currentSequence')
+  const minimumSequence = integer(item.minimumSequence, 'capability.minimumSequence')
+  if (minimumSequence < 1 || currentSequence < minimumSequence) {
+    throw new Error('desktop managed update: capability sequence baseline is invalid')
   }
   const migrationValue = item.migration
   let migration: DesktopManagedUpdateCapability['migration']
   if (migrationValue !== undefined) {
     const legacy = record(migrationValue, 'capability.migration')
-    exactKeys(legacy, ['owner', 'manifestUrl', 'manifestSha256', 'maximumSequence', 'expectedSource'], 'capability.migration')
+    exactKeys(
+      legacy,
+      ['owner', 'manifestUrl', 'manifestSha256', 'assetSha256', 'maximumSequence', 'expectedSource'],
+      'capability.migration',
+    )
     if (legacy.owner !== LEGACY_REPOSITORY || legacy.maximumSequence !== 1) {
       throw new Error('desktop managed update: unsupported migration capability')
     }
@@ -265,38 +335,64 @@ export function parseDesktopManagedUpdateCapability(value: unknown): DesktopMana
       owner: LEGACY_REPOSITORY,
       manifestUrl: githubReleaseManifestUrl(legacy.manifestUrl, LEGACY_REPOSITORY, 'capability.migration.manifestUrl'),
       manifestSha256: hash(legacy.manifestSha256, 'capability.migration.manifestSha256'),
+      assetSha256: hash(legacy.assetSha256, 'capability.migration.assetSha256'),
       maximumSequence: 1,
       expectedSource: { version: legacyVersion, commit: legacySource.commit },
     }
   }
-  const manifestUrl = githubReleaseManifestUrl(item.manifestUrl, SOURCE_REPOSITORY, 'capability.manifestUrl')
-  if (new URL(manifestUrl).pathname
-    !== `/${SOURCE_REPOSITORY}/releases/download/dsh-v${expectedVersion}/release.json`) {
-    throw new Error('desktop managed update: source manifest URL does not match the expected version')
-  }
   return {
-    schemaVersion: 1,
-    mode: 'windows-ops-managed',
-    manifestUrl,
-    manifestSha256: hash(item.manifestSha256, 'capability.manifestSha256'),
-    minimumSequence: integer(item.minimumSequence, 'capability.minimumSequence'),
-    expectedSource: { version: expectedVersion, commit: expectedSourceValue.commit },
+    schemaVersion: DESKTOP_MANAGED_UPDATE_CAPABILITY_SCHEMA_VERSION,
+    mode: 'github-release-managed',
+    owner: SOURCE_REPOSITORY,
+    tagPrefix: DESKTOP_MANAGED_UPDATE_TAG_PREFIX,
+    manifestAsset: DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET,
+    currentSequence,
+    minimumSequence,
     ...(migration === undefined ? {} : { migration }),
   }
 }
 
 function parseSourceManifest(item: Record<string, unknown>): DesktopManagedUpdateManifest {
-  exactKeys(item, ['schemaVersion', 'owner', 'mode', 'version', 'sequence', 'source', 'installer', 'buildReceipt',
-    'installedEvidence', 'pluginProvisioning', 'manifestSha256'], 'manifest')
-  if (item.schemaVersion !== 2 || item.owner !== SOURCE_REPOSITORY || item.mode !== 'interactive-windows-installer') {
+  exactKeys(item, [
+    'schemaVersion', 'owner', 'mode', 'channel', 'version', 'upstreamVersion', 'sequence', 'source', 'build',
+    'identity', 'installer', 'buildReceipt', 'installedEvidence', 'pluginProvisioning', 'network', 'installation',
+    'manifestSha256',
+  ], 'manifest')
+  if (item.schemaVersion !== DESKTOP_MANAGED_UPDATE_MANIFEST_SCHEMA_VERSION
+    || item.owner !== SOURCE_REPOSITORY
+    || item.mode !== 'interactive-windows-installer'
+    || item.channel !== DESKTOP_MANAGED_UPDATE_CHANNEL) {
     throw new Error('desktop managed update: unsupported source manifest identity')
   }
   const version = string(item.version, 'manifest.version')
-  if (!SEMVER.test(version)) throw new Error('desktop managed update: manifest.version must be semantic')
+  const upstreamVersion = string(item.upstreamVersion, 'manifest.upstreamVersion')
+  if (!SEMVER.test(version) || !SEMVER.test(upstreamVersion)) {
+    throw new Error('desktop managed update: manifest versions must be semantic')
+  }
   const source = record(item.source, 'manifest.source')
-  exactKeys(source, ['repository', 'commit', 'tag'], 'manifest.source')
-  if (source.repository !== SOURCE_REPOSITORY || typeof source.commit !== 'string' || !COMMIT.test(source.commit)) {
+  exactKeys(source, ['repository', 'commit', 'tree', 'tag'], 'manifest.source')
+  if (source.repository !== SOURCE_REPOSITORY || typeof source.commit !== 'string' || !COMMIT.test(source.commit)
+    || typeof source.tree !== 'string' || !COMMIT.test(source.tree)
+    || source.tag !== `${DESKTOP_MANAGED_UPDATE_TAG_PREFIX}${version}`) {
     throw new Error('desktop managed update: manifest source identity is invalid')
+  }
+  const build = record(item.build, 'manifest.build')
+  exactKeys(build, ['workflow', 'lockfileSha256', 'planSha256', 'nodeVersion', 'pnpmVersion'], 'manifest.build')
+  if (build.workflow !== DESKTOP_MANAGED_UPDATE_WORKFLOW) {
+    throw new Error('desktop managed update: manifest build workflow is invalid')
+  }
+  const nodeVersion = string(build.nodeVersion, 'manifest.build.nodeVersion')
+  const pnpmVersion = string(build.pnpmVersion, 'manifest.build.pnpmVersion')
+  if (!/^v24\.\d+\.\d+$/u.test(nodeVersion) || !/^11\.\d+\.\d+$/u.test(pnpmVersion)) {
+    throw new Error('desktop managed update: manifest build tools are invalid')
+  }
+  const identity = record(item.identity, 'manifest.identity')
+  exactKeys(identity, ['appId', 'productName', 'packageName', 'executableName'], 'manifest.identity')
+  if (identity.appId !== 'io.github.cloga.deepseek-harness.desktop'
+    || identity.productName !== 'DeepSeek Harness (cloga)'
+    || identity.packageName !== 'cloga-deepseek-harness-desktop'
+    || identity.executableName !== 'cloga-deepseek-harness') {
+    throw new Error('desktop managed update: manifest fork identity is invalid')
   }
   const installer = record(item.installer, 'manifest.installer')
   exactKeys(installer, ['file', 'bytes', 'sha256', 'sha512', 'signature'], 'manifest.installer')
@@ -309,13 +405,38 @@ function parseSourceManifest(item: Record<string, unknown>): DesktopManagedUpdat
   const buildReceipt = record(item.buildReceipt, 'manifest.buildReceipt')
   exactKeys(buildReceipt, ['file', 'sha256', 'receiptSha256'], 'manifest.buildReceipt')
   const provisioning = record(item.pluginProvisioning, 'manifest.pluginProvisioning')
-  exactKeys(provisioning, ['capability', 'source', 'receiptSha256'], 'manifest.pluginProvisioning')
-  if (provisioning.capability !== 'verified-github-release') {
+  exactKeys(provisioning, ['capability', 'source', 'expectedReceipt', 'receiptSha256'], 'manifest.pluginProvisioning')
+  if (JSON.stringify(provisioning.capability) !== JSON.stringify(DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY)) {
     throw new Error('desktop managed update: unsupported plugin provisioning capability')
   }
   const pluginSource = parseDesktopPluginSource(provisioning.source)
   if (pluginSource.type !== 'githubRelease') {
     throw new Error('desktop managed update: plugin provisioning requires a verified GitHub release')
+  }
+  const expectedReceipt = record(provisioning.expectedReceipt, 'manifest.pluginProvisioning.expectedReceipt')
+  exactKeys(expectedReceipt, ['schemaVersion', 'releaseId', 'assetId'], 'manifest.pluginProvisioning.expectedReceipt')
+  if (expectedReceipt.schemaVersion !== 1) {
+    throw new Error('desktop managed update: plugin receipt schema is invalid')
+  }
+  const releaseId = integer(expectedReceipt.releaseId, 'manifest.pluginProvisioning.expectedReceipt.releaseId')
+  const assetId = integer(expectedReceipt.assetId, 'manifest.pluginProvisioning.expectedReceipt.assetId')
+  if (releaseId < 1 || assetId < 1) {
+    throw new Error('desktop managed update: plugin receipt identifiers must be positive')
+  }
+  const network = record(item.network, 'manifest.network')
+  exactKeys(network, ['manifestOrigin', 'apiOrigin', 'allowedRedirectHosts'], 'manifest.network')
+  if (network.manifestOrigin !== 'https://github.com' || network.apiOrigin !== 'https://api.github.com'
+    || JSON.stringify(network.allowedRedirectHosts)
+      !== JSON.stringify(['github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'])) {
+    throw new Error('desktop managed update: manifest network policy is invalid')
+  }
+  const installation = record(item.installation, 'manifest.installation')
+  exactKeys(installation, ['interaction', 'installerArguments', 'uac', 'completion'], 'manifest.installation')
+  if (installation.interaction !== 'required'
+    || !Array.isArray(installation.installerArguments) || installation.installerArguments.length !== 0
+    || installation.uac !== 'installer-controlled'
+    || installation.completion !== 'post-restart-evidence-and-plugin-activation') {
+    throw new Error('desktop managed update: manifest installation policy is invalid')
   }
   const manifestSha256 = hash(item.manifestSha256, 'manifest.manifestSha256')
   verifySelfHash(item, manifestSha256)
@@ -323,15 +444,31 @@ function parseSourceManifest(item: Record<string, unknown>): DesktopManagedUpdat
   const bytes = integer(installer.bytes, 'manifest.installer.bytes', Number.MAX_SAFE_INTEGER)
   if (sequence < 1 || bytes < 1) throw new Error('desktop managed update: manifest sequence and installer bytes must be positive')
   return {
-    schemaVersion: 2,
+    schemaVersion: DESKTOP_MANAGED_UPDATE_MANIFEST_SCHEMA_VERSION,
     owner: SOURCE_REPOSITORY,
     mode: 'interactive-windows-installer',
+    channel: DESKTOP_MANAGED_UPDATE_CHANNEL,
     version,
+    upstreamVersion,
     sequence,
     source: {
       repository: SOURCE_REPOSITORY,
       commit: source.commit,
+      tree: source.tree,
       tag: string(source.tag, 'manifest.source.tag'),
+    },
+    build: {
+      workflow: DESKTOP_MANAGED_UPDATE_WORKFLOW,
+      lockfileSha256: hash(build.lockfileSha256, 'manifest.build.lockfileSha256'),
+      planSha256: hash(build.planSha256, 'manifest.build.planSha256'),
+      nodeVersion,
+      pnpmVersion,
+    },
+    identity: {
+      appId: 'io.github.cloga.deepseek-harness.desktop',
+      productName: 'DeepSeek Harness (cloga)',
+      packageName: 'cloga-deepseek-harness-desktop',
+      executableName: 'cloga-deepseek-harness',
     },
     installer: {
       file: assetFile(installer.file, 'manifest.installer.file'),
@@ -350,9 +487,25 @@ function parseSourceManifest(item: Record<string, unknown>): DesktopManagedUpdat
       runtimeSha256: hash(evidence.runtimeSha256, 'manifest.installedEvidence.runtimeSha256'),
     },
     pluginProvisioning: {
-      capability: 'verified-github-release',
+      capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
       source: pluginSource,
+      expectedReceipt: { schemaVersion: 1, releaseId, assetId },
       receiptSha256: hash(provisioning.receiptSha256, 'manifest.pluginProvisioning.receiptSha256'),
+    },
+    network: {
+      manifestOrigin: 'https://github.com',
+      apiOrigin: 'https://api.github.com',
+      allowedRedirectHosts: [
+        'github.com',
+        'objects.githubusercontent.com',
+        'release-assets.githubusercontent.com',
+      ],
+    },
+    installation: {
+      interaction: 'required',
+      installerArguments: [],
+      uac: 'installer-controlled',
+      completion: 'post-restart-evidence-and-plugin-activation',
     },
     manifestSha256,
   }
@@ -420,23 +573,13 @@ export function parseDesktopManagedUpdateManifest(
   const item = record(value, 'manifest')
   const owner = item.owner
   const parsed = owner === SOURCE_REPOSITORY ? parseSourceManifest(item) : parseLegacyManifest(item)
-  const selectedHash = parsed.owner === SOURCE_REPOSITORY
-    ? capability.manifestSha256
-    : capability.migration?.manifestSha256
-  if (selectedHash === undefined || parsed.manifestSha256 !== selectedHash) {
+  if (parsed.owner === LEGACY_REPOSITORY
+    && (capability.migration === undefined || parsed.manifestSha256 !== capability.migration.manifestSha256)) {
     throw new Error('desktop managed update: manifest is not selected by the local capability')
   }
   if (parsed.owner === SOURCE_REPOSITORY) {
-    const releaseTag = decodeURIComponent(
-      new URL(capability.manifestUrl).pathname.slice(
-        `/${SOURCE_REPOSITORY}/releases/download/`.length,
-        -'/release.json'.length,
-      ),
-    )
-    if (parsed.version !== capability.expectedSource.version
-      || parsed.source.commit !== capability.expectedSource.commit
-      || parsed.source.tag !== `dsh-v${parsed.version}`
-      || parsed.source.tag !== releaseTag) {
+    if (!parsed.source.tag.startsWith(capability.tagPrefix)
+      || parsed.source.tag !== `${capability.tagPrefix}${parsed.version}`) {
       throw new Error('desktop managed update: manifest source does not match the local capability')
     }
   } else {
@@ -447,7 +590,7 @@ export function parseDesktopManagedUpdateManifest(
   }
   if (parsed.sequence < installedSequence
     || (!allowInstalledSequence && parsed.sequence === installedSequence)
-    || parsed.sequence < capability.minimumSequence) {
+    || (parsed.owner === SOURCE_REPOSITORY && parsed.sequence < capability.minimumSequence)) {
     throw new Error('desktop managed update: manifest sequence does not advance the installed release')
   }
   const migrationMaximumSequence = capability.migration?.maximumSequence ?? 0
@@ -486,7 +629,7 @@ export function assertManagedUpdateRedirect(from: string, to: string): void {
 /** Parse helper input written only by the Electron main process. */
 export function parseDesktopManagedUpdateHandoff(value: unknown): DesktopManagedUpdateHandoff {
   const item = record(value, 'handoff')
-  exactKeys(item, ['schemaVersion', 'token', 'capability', 'selectedManifest', 'stageRoot', 'waitPids',
+  exactKeys(item, ['schemaVersion', 'token', 'capability', 'selection', 'stageRoot', 'waitPids',
     'waitTimeoutMs', 'installedSequence'], 'handoff')
   if (item.schemaVersion !== 1 || typeof item.token !== 'string' || !TOKEN.test(item.token)) {
     throw new Error('desktop managed update: invalid handoff identity')
@@ -500,17 +643,32 @@ export function parseDesktopManagedUpdateHandoff(value: unknown): DesktopManaged
     throw new Error('desktop managed update: handoff.waitPids must contain targeted process ids')
   }
   const capability = parseDesktopManagedUpdateCapability(item.capability)
-  if (item.selectedManifest !== 'source' && item.selectedManifest !== 'migration') {
-    throw new Error('desktop managed update: handoff.selectedManifest is invalid')
+  const selectionValue = record(item.selection, 'handoff.selection')
+  exactKeys(selectionValue, ['kind', 'manifestUrl', 'manifestSha256', 'assetSha256'], 'handoff.selection')
+  if (selectionValue.kind !== 'source' && selectionValue.kind !== 'migration') {
+    throw new Error('desktop managed update: handoff.selection.kind is invalid')
   }
-  if (item.selectedManifest === 'migration' && capability.migration === undefined) {
-    throw new Error('desktop managed update: handoff selected an unavailable migration')
+  const selectedUrl = selectionValue.kind === 'source'
+    ? sourceReleaseManifestUrl(selectionValue.manifestUrl, 'handoff.selection.manifestUrl')
+    : githubReleaseManifestUrl(selectionValue.manifestUrl, LEGACY_REPOSITORY, 'handoff.selection.manifestUrl')
+  if (selectionValue.kind === 'migration') {
+    if (capability.migration === undefined
+      || selectedUrl !== capability.migration.manifestUrl
+      || selectionValue.manifestSha256 !== capability.migration.manifestSha256
+      || selectionValue.assetSha256 !== capability.migration.assetSha256) {
+      throw new Error('desktop managed update: handoff selected an unavailable migration')
+    }
   }
   return {
     schemaVersion: 1,
     token: item.token,
     capability,
-    selectedManifest: item.selectedManifest,
+    selection: {
+      kind: selectionValue.kind,
+      manifestUrl: selectedUrl,
+      manifestSha256: hash(selectionValue.manifestSha256, 'handoff.selection.manifestSha256'),
+      assetSha256: hash(selectionValue.assetSha256, 'handoff.selection.assetSha256'),
+    },
     stageRoot,
     waitPids: [...new Set(item.waitPids as number[])],
     waitTimeoutMs: integer(item.waitTimeoutMs, 'handoff.waitTimeoutMs', 120_000),

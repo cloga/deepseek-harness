@@ -59,10 +59,10 @@ export async function loadDesktopManagedUpdateConfiguration(
     throw new Error('desktop managed update: packaged capability requires the updater helper')
   }
   const stateRoot = join(userDataPath, 'managed-update')
-  const installedSequence = parseCompletedSequence(await readJsonIfPresent(join(stateRoot, 'completion.json')))
+  const completedSequence = parseCompletedSequence(await readJsonIfPresent(join(stateRoot, 'completion.json')))
   return {
     capability,
-    installedSequence,
+    installedSequence: Math.max(capability.currentSequence, completedSequence),
     operationsRoot: join(stateRoot, 'operations'),
     helperBundle,
     completionPath: join(stateRoot, 'completion.json'),

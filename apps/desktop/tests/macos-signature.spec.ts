@@ -136,6 +136,39 @@ describe('desktop macOS release signature', () => {
     })
   })
 
+  it('packages the fixed unsigned cloga identity with managed mode and no native updater', async () => {
+    const { createElectronBuilderConfig } = await import('../electron-builder.config.mjs')
+    const config = createElectronBuilderConfig({
+      DSH_DESKTOP_APP_ID: 'io.github.cloga.deepseek-harness.desktop',
+      DSH_DESKTOP_TARGET_PLATFORM: 'win32',
+      DSH_DESKTOP_TARGET_ARCH: 'x64',
+      DSH_DESKTOP_UNSIGNED: '1',
+      DSH_DESKTOP_FORK_RELEASE_VERSION: '0.1.5-rc.3.cloga.1',
+      DSH_DESKTOP_MANAGED_UPDATE_CAPABILITY: 'C:\\release\\capability.json',
+    }, 'win32', 'x64')
+    expect(config.extraResources).toContainEqual({
+      from: 'C:\\release\\capability.json',
+      to: 'managed-update/capability.json',
+    })
+    expect(config).toMatchObject({
+      appId: 'io.github.cloga.deepseek-harness.desktop',
+      productName: 'DeepSeek Harness (cloga)',
+      executableName: 'cloga-deepseek-harness',
+      artifactName: 'cloga-deepseek-harness-${version}-${os}-${arch}.${ext}',
+      extraMetadata: {
+        name: 'cloga-deepseek-harness-desktop',
+        version: '0.1.5-rc.3.cloga.1',
+      },
+      publish: null,
+      win: { forceCodeSigning: false },
+      nsis: {
+        oneClick: false,
+        allowElevation: true,
+        runAfterFinish: true,
+      },
+    })
+  })
+
   it('rejects unsigned macOS builds and malformed signing modes', async () => {
     const { createElectronBuilderConfig } = await import('../electron-builder.config.mjs')
     expect(() => createElectronBuilderConfig({ ...RELEASE_ENVIRONMENT, DSH_DESKTOP_UNSIGNED: '1' }))

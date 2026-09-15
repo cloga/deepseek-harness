@@ -7,7 +7,13 @@ import {
   completeDesktopManagedUpdate,
   managedPluginProvisionReceiptSha256,
 } from '../src/managed-update-completion.ts'
-import { managedUpdateJsonSha256 } from '../src/managed-update-protocol.ts'
+import {
+  MANAGED_COMMIT,
+  managedCapability,
+  managedManifest,
+  managedPluginReceipt,
+  managedPluginSource,
+} from './managed-update-fixture.ts'
 
 const roots: string[] = []
 const sha256 = (body: Uint8Array): string => createHash('sha256').update(body).digest('hex')
@@ -27,43 +33,17 @@ it('verifies installed evidence and plugin provisioning before recording complet
   const runtimePath = join(root, 'desktop-runtime.json')
   await writeFile(executablePath, executable)
   await writeFile(runtimePath, runtime)
-  const pluginSource = {
-    schemaVersion: 1 as const,
-    type: 'githubRelease' as const,
-    owner: 'cloga',
-    repo: 'dsh-github-copilot',
-    tag: 'v0.4.0-alpha.18',
-    asset: 'dsh-github-copilot-0.4.0-alpha.18.tgz',
-    packageName: 'dsh-github-copilot',
-    version: '0.4.0-alpha.18',
-    size: 1,
-    sha256: '2'.repeat(64),
-    integrity: `sha512-${'A'.repeat(86)}==`,
-    targetCommit: '3'.repeat(40),
-  }
   const provisionReceipt = {
-    schemaVersion: 1 as const,
-    capability: {
-      id: 'desktopNativeVerifiedRelease' as const,
-      schemaVersion: 1 as const,
-      sourceSchemaVersion: 1 as const,
-      receiptSchemaVersion: 1 as const,
-    },
-    source: pluginSource,
-    releaseId: 10,
-    assetId: 20,
-    packageName: pluginSource.packageName,
-    version: pluginSource.version,
-    artifactSha256: pluginSource.sha256,
-    states: { staged: true as const, health: 'passed' as const, activated: true as const, rolledBack: false as const, verified: true as const },
+    ...managedPluginReceipt,
+    source: managedPluginSource,
   }
-  const payload = {
-    schemaVersion: 2,
-    owner: 'cloga/deepseek-harness',
-    mode: 'interactive-windows-installer',
-    version: '1.2.3',
-    sequence: 2,
-    source: { repository: 'cloga/deepseek-harness', commit: 'b'.repeat(40), tag: 'dsh-v1.2.3' },
+  const manifest = managedManifest({
+    source: {
+      repository: 'cloga/deepseek-harness',
+      commit: MANAGED_COMMIT,
+      tree: 'b'.repeat(40),
+      tag: 'dsh-desktop-v1.2.3',
+    },
     installer: {
       file: 'installer.exe',
       bytes: 1,
@@ -74,12 +54,16 @@ it('verifies installed evidence and plugin provisioning before recording complet
     buildReceipt: { file: 'build-receipt.json', sha256: 'd'.repeat(64), receiptSha256: 'e'.repeat(64) },
     installedEvidence: { executableSha256: sha256(executable), runtimeSha256: sha256(runtime) },
     pluginProvisioning: {
-      capability: 'verified-github-release',
-      source: pluginSource,
+      capability: managedPluginReceipt.capability,
+      source: managedPluginSource,
+      expectedReceipt: {
+        schemaVersion: 1,
+        releaseId: provisionReceipt.releaseId,
+        assetId: provisionReceipt.assetId,
+      },
       receiptSha256: managedPluginProvisionReceiptSha256(provisionReceipt),
     },
-  }
-  const manifest = { ...payload, manifestSha256: managedUpdateJsonSha256(payload) }
+  })
   await writeFile(join(operation, 'release.json'), JSON.stringify(manifest))
   await writeFile(join(operation, 'helper-result.json'), JSON.stringify({
     schemaVersion: 1,
@@ -101,14 +85,7 @@ it('verifies installed evidence and plugin provisioning before recording complet
   await expect(completeDesktopManagedUpdate(
     join(root, 'operations'),
     completionPath,
-    {
-      schemaVersion: 1,
-      mode: 'windows-ops-managed',
-      manifestUrl: 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/release.json',
-      manifestSha256: manifest.manifestSha256,
-      minimumSequence: 2,
-      expectedSource: { version: '1.2.3', commit: 'b'.repeat(40) },
-    },
+    managedCapability(),
     1,
     executablePath,
     runtimePath,
@@ -134,14 +111,7 @@ it('requires recovery when a helper acknowledgement has no terminal state', asyn
   await expect(completeDesktopManagedUpdate(
     join(root, 'operations'),
     join(root, 'completion.json'),
-    {
-      schemaVersion: 1,
-      mode: 'windows-ops-managed',
-      manifestUrl: 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/release.json',
-      manifestSha256: 'b'.repeat(64),
-      minimumSequence: 2,
-      expectedSource: { version: '1.2.3', commit: 'c'.repeat(40) },
-    },
+    managedCapability(),
     1,
     join(root, 'unused.exe'),
     join(root, 'unused-runtime.json'),
@@ -189,14 +159,7 @@ it.each([
   await expect(completeDesktopManagedUpdate(
     join(root, 'operations'),
     join(root, 'completion.json'),
-    {
-      schemaVersion: 1,
-      mode: 'windows-ops-managed',
-      manifestUrl: 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/release.json',
-      manifestSha256: 'a'.repeat(64),
-      minimumSequence: 2,
-      expectedSource: { version: '1.2.3', commit: 'b'.repeat(40) },
-    },
+    managedCapability(),
     1,
     join(root, 'unused.exe'),
     join(root, 'unused-runtime.json'),
@@ -222,14 +185,7 @@ it('ignores an operation explicitly cancelled by its owning Desktop process', as
   await expect(completeDesktopManagedUpdate(
     join(root, 'operations'),
     join(root, 'completion.json'),
-    {
-      schemaVersion: 1,
-      mode: 'windows-ops-managed',
-      manifestUrl: 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/release.json',
-      manifestSha256: 'b'.repeat(64),
-      minimumSequence: 2,
-      expectedSource: { version: '1.2.3', commit: 'c'.repeat(40) },
-    },
+    managedCapability(),
     1,
     join(root, 'unused.exe'),
     join(root, 'unused-runtime.json'),

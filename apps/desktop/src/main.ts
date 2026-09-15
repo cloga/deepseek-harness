@@ -355,7 +355,12 @@ async function main(): Promise<void> {
             nodeExecutable: resources.node,
             helperBundle: managedUpdate.helperBundle,
             capability: managedUpdate.capability,
-            selectedManifest: selection.kind,
+            selection: {
+              kind: selection.kind,
+              manifestUrl: selection.manifestUrl,
+              manifestSha256: selection.manifestSha256,
+              assetSha256: selection.assetSha256,
+            },
             installedSequence: managedInstalledSequence,
             waitPids: [process.pid, hostPid],
           }),
@@ -492,7 +497,7 @@ async function main(): Promise<void> {
     updateConfirmation = (async () => {
       const state = updateState.phase === 'available' ? updateState : await updates.check()
       if (state.phase !== 'available') return state
-      if (state.mode !== 'windows-ops-managed') {
+      if (state.mode !== 'github-release-managed') {
         const result = await dialog.showMessageBox({
           type: 'info',
           title: messages.updateTitle,
