@@ -17,11 +17,6 @@ it('omits development artifacts while preserving executable modules, assets and 
     'example/index.js.map', 'example/index.mjs.map', 'example/index.cjs.map',
     'example/style.css.map', 'example/index.d.ts.map', 'example/index.d.mts.map',
     'example/index.d.cts.map', 'example/tsconfig.tsbuildinfo',
-    'fs-ext/build/Release/obj/fs_ext/native.obj', 'fs-ext/build/Release/fs_ext.pdb',
-    'fs-ext/build/Release/fs_ext.lib', 'fs-ext/build/Release/fs_ext.exp',
-    'fs-ext/build/Release/fs_ext.iobj', 'fs-ext/build/Release/fs_ext.ipdb',
-    'fs-ext/build/binding.sln', 'fs-ext/build/config.gypi',
-    'fs-ext/build/fs_ext.vcxproj', 'fs-ext/build/fs_ext.vcxproj.filters',
     'node-pty/prebuilds/win32-arm64/conpty.node',
     'node-pty/prebuilds/linux-x64/pty.node', 'node-pty/prebuilds/darwin-x64/pty.node',
     'node-pty/prebuilds/win32-x64/conpty.pdb',
@@ -35,7 +30,6 @@ it('omits development artifacts while preserving executable modules, assets and 
     'example/locale.json', 'example/data.map', 'example/module.wasm',
     'example/package.json', 'example/LICENSE', 'example/NOTICE', 'example/README.md',
     'example/native.lib', 'example/native.obj', 'example/symbols.pdb',
-    'fs-ext/build/Release/fs_ext.node', 'fs-ext/build/Release/runtime.dll',
     'node-pty/prebuilds/win32-x64/conpty.node',
     'node-pty/prebuilds/win32-x64/conpty_console_list.node',
     'node-pty/prebuilds/win32-x64/conpty/conpty.dll',
@@ -70,7 +64,6 @@ it('applies package-specific rules inside scoped and nested dependency container
   expect(desktopRuntimeFileExclusion('outer/node_modules/@mixmark-io/domino/test/data.html', windows)).toBeDefined()
   expect(desktopRuntimeFileExclusion('outer\\node_modules\\node-pty\\prebuilds\\win32-arm64\\conpty.node', windows)).toBeDefined()
   expect(desktopRuntimeFileExclusion('outer/node_modules/unrelated/test/data.html', windows)).toBeUndefined()
-  expect(desktopRuntimeFileExclusion('outer/fs-ext/build/Release/fs_ext.lib', windows)).toBeUndefined()
 })
 
 it('retains native prebuilds for the selected macOS architecture', () => {

@@ -7,6 +7,14 @@ import {
   completeDesktopManagedUpdateHandoff,
   launchDesktopManagedUpdate,
 } from '../src/managed-update-launcher.ts'
+import { MANAGED_VERSION, managedCapability } from './managed-update-fixture.ts'
+
+const selection = {
+  kind: 'source' as const,
+  manifestUrl: `https://github.com/cloga/deepseek-harness/releases/download/dsh-desktop-v${MANAGED_VERSION}/release.json`,
+  manifestSha256: 'a'.repeat(64),
+  assetSha256: 'b'.repeat(64),
+}
 
 const roots: string[] = []
 
@@ -40,15 +48,8 @@ it('returns only after the detached helper acknowledges the one-time handoff', a
     operationsRoot: join(root, 'operations'),
     nodeExecutable: node,
     helperBundle: helper,
-    capability: {
-      schemaVersion: 1,
-      mode: 'windows-ops-managed',
-      manifestUrl: 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/release.json',
-      manifestSha256: 'a'.repeat(64),
-      minimumSequence: 2,
-      expectedSource: { version: '1.2.3', commit: 'b'.repeat(40) },
-    },
-    selectedManifest: 'source',
+    capability: managedCapability(),
+    selection,
     installedSequence: 1,
     waitPids: [12, 34],
   }, {
@@ -131,15 +132,8 @@ it('rejects an acknowledgement for a different manifest', async () => {
     operationsRoot: join(root, 'operations'),
     nodeExecutable: node,
     helperBundle: helper,
-    capability: {
-      schemaVersion: 1,
-      mode: 'windows-ops-managed',
-      manifestUrl: 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/release.json',
-      manifestSha256: 'a'.repeat(64),
-      minimumSequence: 2,
-      expectedSource: { version: '1.2.3', commit: 'b'.repeat(40) },
-    },
-    selectedManifest: 'source',
+    capability: managedCapability(),
+    selection,
     installedSequence: 1,
     waitPids: [12],
   }, {
@@ -185,15 +179,8 @@ it('cancels the exact helper when acknowledgement times out', async () => {
     operationsRoot: join(root, 'operations'),
     nodeExecutable: node,
     helperBundle: helper,
-    capability: {
-      schemaVersion: 1,
-      mode: 'windows-ops-managed',
-      manifestUrl: 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/release.json',
-      manifestSha256: 'a'.repeat(64),
-      minimumSequence: 2,
-      expectedSource: { version: '1.2.3', commit: 'b'.repeat(40) },
-    },
-    selectedManifest: 'source',
+    capability: managedCapability(),
+    selection,
     installedSequence: 1,
     waitPids: [12],
   }, {

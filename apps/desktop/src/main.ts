@@ -257,12 +257,6 @@ async function main(): Promise<void> {
     },
     afterChange: () => backend.start(async () => {}),
   }
-  const completionHooks: DesktopProjectHooks = {
-    beforeChange: async () => {},
-    healthCheck: projectDir => hooks.healthCheck(projectDir),
-    afterChange: async () => {},
-  }
-
   recoverApplication = async (action): Promise<void> => {
     await startup?.catch(() => undefined)
     await backend.stop()
@@ -304,16 +298,6 @@ async function main(): Promise<void> {
               managedUpdate.installedSequence,
               process.execPath,
               join(resources.dsh, 'desktop-runtime.json'),
-              async (manifest) => {
-                const receipt = await manager.mutate({
-                  type: 'plugin-install',
-                  source: manifest.pluginProvisioning.source,
-                }, completionHooks)
-                if (receipt === undefined) {
-                  throw new Error('desktop managed update: plugin transaction returned no verified receipt')
-                }
-                return receipt
-              },
             )
             if (completion.status === 'recovery-required') {
               throw new Error(`${completion.message}\n\nRecovery: ${completion.command}`)
@@ -355,7 +339,12 @@ async function main(): Promise<void> {
             nodeExecutable: resources.node,
             helperBundle: managedUpdate.helperBundle,
             capability: managedUpdate.capability,
-            selectedManifest: selection.kind,
+            selection: {
+              kind: selection.kind,
+              manifestUrl: selection.manifestUrl,
+              manifestSha256: selection.manifestSha256,
+              assetSha256: selection.assetSha256,
+            },
             installedSequence: managedInstalledSequence,
             waitPids: [process.pid, hostPid],
           }),
@@ -492,7 +481,7 @@ async function main(): Promise<void> {
     updateConfirmation = (async () => {
       const state = updateState.phase === 'available' ? updateState : await updates.check()
       if (state.phase !== 'available') return state
-      if (state.mode !== 'windows-ops-managed') {
+      if (state.mode !== 'github-release-managed') {
         const result = await dialog.showMessageBox({
           type: 'info',
           title: messages.updateTitle,

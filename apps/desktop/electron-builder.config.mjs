@@ -1,7 +1,9 @@
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   resolveDesktopAppId,
+  resolveDesktopForkReleaseEnvironment,
   resolveMacOSNotarizationEnvironment,
   resolveMacOSSigningEnvironment,
 } from './scripts/desktop-release-environment.mjs'
@@ -26,7 +28,8 @@ export function createElectronBuilderConfig(
   hostPlatform = process.platform,
   hostArch = process.arch,
 ) {
-  const appId = resolveDesktopAppId(env)
+  const forkRelease = resolveDesktopForkReleaseEnvironment(env)
+  const appId = forkRelease?.appId ?? resolveDesktopAppId(env)
   const targetPlatform = env.DSH_DESKTOP_TARGET_PLATFORM
   const resolvedPlatform = targetPlatform ?? hostPlatform
   const resolvedArch = env.DSH_DESKTOP_TARGET_ARCH ?? hostArch
@@ -35,6 +38,9 @@ export function createElectronBuilderConfig(
   }
   const unsigned = env.DSH_DESKTOP_UNSIGNED === '1'
   if (unsigned && resolvedPlatform !== 'win32') throw new Error('desktop package: unsigned builds require Windows')
+  if (forkRelease !== undefined && (!unsigned || resolvedPlatform !== 'win32' || resolvedArch !== 'x64')) {
+    throw new Error('desktop package: managed fork releases require unsigned Windows x64 packaging')
+  }
   const packagesMacOS = targetPlatform === 'darwin' || (targetPlatform === undefined && hostPlatform === 'darwin')
   const packagesWindows = targetPlatform === 'win32'
   const macOSSigning = packagesMacOS ? resolveMacOSSigningEnvironment(env) : undefined
@@ -50,12 +56,21 @@ export function createElectronBuilderConfig(
   if (windowsSigner !== undefined) {
     installWindowsNsisBootstrapSigner({ sign: windowsSigner })
   }
-  const update = unsigned ? undefined : resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
+  const update = unsigned || forkRelease !== undefined
+    ? undefined
+    : resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
   const buildPaths = desktopTargetBuildPaths(resolveDesktopBuildTarget(env, hostPlatform, hostArch))
+  const runtimeVersion = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
   return {
     appId,
-    productName: 'DeepSeek Harness',
-    artifactName: 'deepseek-harness-${version}-${os}-${arch}.${ext}',
+    productName: forkRelease?.productName ?? 'DeepSeek Harness',
+    executableName: forkRelease?.executableName,
+    artifactName: forkRelease === undefined
+      ? 'deepseek-harness-${version}-${os}-${arch}.${ext}'
+      : 'cloga-deepseek-harness-${version}-${os}-${arch}.${ext}',
+    extraMetadata: forkRelease === undefined
+      ? undefined
+      : { name: forkRelease.packageName, version: forkRelease.version },
     directories: { output: unsigned ? join(buildPaths.root, 'unsigned-artifacts') : buildPaths.artifacts },
     asar: true,
     files: [
@@ -68,6 +83,9 @@ export function createElectronBuilderConfig(
       { from: buildPaths.runtime, to: 'runtime' },
       { from: buildPaths.dsh, to: 'dsh' },
       { from: 'lib/managed-update-helper.js', to: 'managed-update/helper.mjs' },
+      ...(forkRelease === undefined
+        ? []
+        : [{ from: forkRelease.capabilityPath, to: 'managed-update/capability.json' }]),
       // electron-builder excludes a source directory's root node_modules.
       { from: join(buildPaths.dsh, 'node_modules'), to: 'dsh/node_modules' },
     ],
@@ -88,13 +106,13 @@ export function createElectronBuilderConfig(
     afterPack: async context => {
       const { verifyDesktopRuntime } = await import('./lib/types/runtime-tree.js')
       await verifyDesktopRuntime(join(context.packager.getResourcesDir(context.appOutDir), 'dsh'),
-        context.packager.appInfo.version, { platform: resolvedPlatform, arch: resolvedArch })
+        runtimeVersion, { platform: resolvedPlatform, arch: resolvedArch })
     },
     afterSign: async context => {
       if (context.electronPlatformName !== 'darwin') return
       const { verifyDesktopRuntime } = await import('./lib/types/runtime-tree.js')
       await verifyDesktopRuntime(join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, 'Contents', 'Resources', 'dsh'),
-        context.packager.appInfo.version, { platform: 'darwin', arch: resolvedArch })
+        runtimeVersion, { platform: 'darwin', arch: resolvedArch })
       verifyMacOSSignatureAfterSign(context, macOSSigning ?? resolveMacOSSigningEnvironment(env))
     },
     artifactBuildCompleted: artifact => {
@@ -121,6 +139,8 @@ export function createElectronBuilderConfig(
       include: fileURLToPath(new URL('./scripts/installer.nsh', import.meta.url)),
       oneClick: false,
       allowToChangeInstallationDirectory: true,
+      allowElevation: true,
+      runAfterFinish: true,
       differentialPackage: true,
     },
     publish: update === undefined ? null : [{ provider: 'generic', url: update.publicUrl }],

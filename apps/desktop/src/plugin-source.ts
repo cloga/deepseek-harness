@@ -13,6 +13,11 @@ import {
 import { join, posix } from 'node:path'
 import { valid } from 'semver'
 import { t, x, type ReadEntry } from 'tar'
+import {
+  readDesktopGithubReleaseJson,
+  requestDesktopGithubRelease,
+  resolveDesktopGithubTagCommit,
+} from './github-release.ts'
 
 /** Structured plugin source schema accepted by Desktop. */
 export const DESKTOP_PLUGIN_SOURCE_SCHEMA_VERSION = 1 as const
@@ -91,15 +96,7 @@ const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._~-]*\/[a-z0-9][a-z0-9._~-]*|
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/u
 const MAX_RELEASE_ASSET_BYTES = 64 * 1024 * 1024
-const MAX_REDIRECTS = 5
-const REQUEST_TIMEOUT_MS = 30_000
 const API_HOST = 'api.github.com'
-const DOWNLOAD_HOSTS = new Set([
-  API_HOST,
-  'github.com',
-  'objects.githubusercontent.com',
-  'release-assets.githubusercontent.com',
-])
 const LIFECYCLE_SCRIPTS = ['preinstall', 'install', 'postinstall', 'prepare'] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -187,64 +184,18 @@ export function parseDesktopPluginSource(value: unknown): DesktopPluginSource {
   }
 }
 
-function validateRequestUrl(url: URL, download: boolean): void {
-  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '') {
-    throw new Error('desktop plugin source: GitHub request must use credential-free HTTPS')
-  }
-  const allowed = download ? DOWNLOAD_HOSTS : new Set([API_HOST])
-  if (!allowed.has(url.hostname)) throw new Error(`desktop plugin source: rejected redirect host ${url.hostname}`)
-}
-
-async function githubRequest(
-  initial: URL,
-  accept: string,
-  download: boolean,
-  fetcher: typeof fetch,
-): Promise<Response> {
-  let url = initial
-  for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect++) {
-    validateRequestUrl(url, download)
-    const response = await fetcher(url, {
-      headers: {
-        accept,
-        'user-agent': 'deepseek-harness-desktop',
-        'x-github-api-version': '2026-03-10',
-      },
-      redirect: 'manual',
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    })
-    if (![301, 302, 303, 307, 308].includes(response.status)) {
-      if (!response.ok) throw new Error(`desktop plugin source: GitHub request failed with ${String(response.status)}`)
-      return response
-    }
-    if (redirect === MAX_REDIRECTS) throw new Error('desktop plugin source: GitHub redirect limit exceeded')
-    const location = response.headers.get('location')
-    if (location === null) throw new Error('desktop plugin source: GitHub redirect omitted its location')
-    url = new URL(location, url)
-  }
-  throw new Error('desktop plugin source: unreachable redirect state')
-}
-
 async function githubJson(url: URL, fetcher: typeof fetch): Promise<Record<string, unknown>> {
-  const response = await githubRequest(url, 'application/vnd.github+json', false, fetcher)
-  const value: unknown = await response.json()
-  if (!isRecord(value)) throw new Error('desktop plugin source: GitHub returned invalid JSON')
-  return value
+  return readDesktopGithubReleaseJson(url, fetcher, 'desktop plugin source')
 }
 
 async function resolveTagCommit(source: DesktopGithubReleasePluginSource, fetcher: typeof fetch): Promise<string> {
-  const base = `https://${API_HOST}/repos/${encodeURIComponent(source.owner)}/${encodeURIComponent(source.repo)}`
-  const reference = await githubJson(new URL(`${base}/git/ref/tags/${encodeURIComponent(source.tag)}`), fetcher)
-  let object = reference.object
-  for (let depth = 0; depth < 4; depth++) {
-    if (!isRecord(object)) throw new Error('desktop plugin source: GitHub tag reference has no object')
-    assertString(object.sha, 'GitHub tag object SHA', COMMIT_PATTERN)
-    if (object.type === 'commit') return object.sha
-    if (object.type !== 'tag') throw new Error('desktop plugin source: GitHub tag does not resolve to a commit')
-    const tag = await githubJson(new URL(`${base}/git/tags/${object.sha}`), fetcher)
-    object = tag.object
-  }
-  throw new Error('desktop plugin source: GitHub tag indirection limit exceeded')
+  return resolveDesktopGithubTagCommit(
+    source.owner,
+    source.repo,
+    source.tag,
+    fetcher,
+    'desktop plugin source',
+  )
 }
 
 function assertArchivePath(path: string): void {
@@ -330,7 +281,13 @@ async function downloadArtifact(
   source: DesktopGithubReleasePluginSource,
   fetcher: typeof fetch,
 ): Promise<void> {
-  const response = await githubRequest(url, 'application/octet-stream', true, fetcher)
+  const response = await requestDesktopGithubRelease(
+    url,
+    'application/octet-stream',
+    true,
+    fetcher,
+    'desktop plugin source',
+  )
   if (response.body === null) throw new Error('desktop plugin source: release asset response has no body')
   const descriptor = openSync(destination, 'wx', 0o600)
   const sha256 = createHash('sha256')

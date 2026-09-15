@@ -19,6 +19,7 @@ import { smokeDesktopRuntime } from './smoke-runtime.ts'
 import { writeDesktopRuntime, verifyDesktopRuntime } from '../src/runtime-tree.ts'
 import {
   resolveDesktopAppId,
+  resolveDesktopPackageRegistry,
   resolveMacOSSigningEnvironment,
 } from './desktop-release-environment.mjs'
 import {
@@ -68,9 +69,10 @@ function runPnpm(args: readonly string[]): Promise<void> {
     const userConfig = join(config, 'npmrc')
     mkdirSync(config, { recursive: true })
     writeFileSync(userConfig, '')
+    const registry = resolveDesktopPackageRegistry(process.env)
     const child = spawn(NODE, [
       PNPM,
-      '--config.registry=https://registry.npmjs.org/',
+      `--config.registry=${registry}`,
       `--config.store-dir=${STORE_ROOT}`,
       '--config.enable-global-virtual-store=false',
       `--config.userconfig=${userConfig}`,
@@ -82,7 +84,7 @@ function runPnpm(args: readonly string[]): Promise<void> {
         ...Object.fromEntries(Object.entries(process.env).filter(([name]) => (
           name !== 'NODE_OPTIONS' && name !== 'NODE_PATH' && !/^DSH_DESKTOP_/u.test(name) && !/^(?:npm|pnpm|corepack)_/iu.test(name)
         ))),
-        NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org/',
+        NPM_CONFIG_REGISTRY: registry,
         NPM_CONFIG_STORE_DIR: STORE_ROOT,
         NPM_CONFIG_USERCONFIG: userConfig,
         PATH: `${dirname(NODE)}${delimiter}${process.env.PATH ?? ''}`,

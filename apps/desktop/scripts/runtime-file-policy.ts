@@ -23,12 +23,6 @@ export function desktopRuntimeFileExclusion(
   const nameParts = packageParts[0]?.startsWith('@') ? 2 : 1
   const name = packageParts.slice(0, nameParts).join('/')
   const entry = packageParts.slice(nameParts).join('/')
-  if (name === 'fs-ext' && /^build\/(?:Release|Debug)\/(?:obj(?:\/|$)|fs_ext\.(?:exp|lib|pdb|iobj|ipdb)$)/u.test(entry)) {
-    return 'fs-ext compiler output'
-  }
-  if (name === 'fs-ext' && /^build\/(?:binding\.sln|config\.gypi|fs_ext\.vcxproj(?:\.filters)?)$/u.test(entry)) {
-    return 'fs-ext build configuration'
-  }
   if (name === '@mixmark-io/domino' && (entry === 'test' || entry.startsWith('test/'))) return 'Domino test fixtures'
   if (name === 'node-pty' && entry.startsWith('prebuilds/')) {
     const platform = packageParts[nameParts + 1]

@@ -4,7 +4,7 @@ Status: implemented
 
 [English](2026-08-25-electron-desktop-packaging-and-updates.md) | 中文
 
-插件修改与恢复遵循[验证 Release 事务决策](2026-09-15-desktop-verified-release-plugin-transactions.zh.md)。
+插件修改与恢复遵循[验证 Release 事务决策](2026-09-15-desktop-verified-release-plugin-transactions.zh.md)。未签名 fork 流遵循[fork 拥有的 Windows 发布决策](2026-09-15-fork-owned-windows-desktop-release-channel.zh.md)。
 
 ## 问题
 
@@ -73,13 +73,13 @@ Desktop 在停止活动 Host 前，先在私有 staging profile 中准备并 hea
 
 ## 更新与恢复
 
-Desktop 根据打包资源精确选择一种更新实现。包含 `app-update.yml` 的已签名包使用 `electron-updater`，并保留平台发布者验证。不包含 `app-update.yml` 的 Windows Ops 包可以携带 `managed-update/capability.json` 与独立的 `managed-update/helper.mjs`；启动会拒绝同时携带两种配置的包。两种实现都替换完整 Desktop 发布，因此不存在仅更新 dsh 的操作或独立运行时兼容范围。
+Desktop 根据打包资源精确选择一种更新实现。包含 `app-update.yml` 的已签名包使用 `electron-updater`，并保留平台发布者验证。不包含 `app-update.yml` 的未签名 cloga 包可以携带 `managed-update/capability.json` 与独立的 `managed-update/helper.mjs`；启动会拒绝同时携带两种配置的包。两种实现都替换完整 Desktop 发布，因此不存在仅更新 dsh 的操作或独立运行时兼容范围。
 
-托管 capability 通过带版本 HTTPS URL、规范 JSON SHA-256、最小 sequence、预期 Desktop 版本和预期源码 commit 锁定一个不可变的 `cloga/deepseek-harness` GitHub Release manifest。Parser 只把可选的 `cloga/dsh-windows-ops` manifest 作为 sequence-zero migration 接受。检查会验证精确 manifest fields、规范 self-hash、source repository、tag、commit、sequence、build receipt、installer hashes、installed evidence 与经过验证的 GitHub Release plugin source。手动 redirect 保持为不带凭据的 HTTPS，并限制在 GitHub release asset hosts。Renderer IPC 只提供有界 composer-impact fields，不能选择 URL、executable、path、process id 或 arguments。
+托管 capability 固定源码 repository、Desktop tag 前缀、manifest asset 名、包内 sequence 与最小 sequence，不携带可变 URL。检查会列出该 repository 的 GitHub Releases，要求 release 不可变且 tag 锁定 commit，验证 manifest asset digest，再检查带版本 manifest 的规范 self-hash、源码 commit 与 tree、sequence、构建输入、fork 身份、installer hashes、installed evidence、网络与 completion 策略，以及通用 `desktopNativeVerifiedRelease` capability、source-schema 与 receipt-schema 兼容性。Manifest 禁止自动插件 provisioning。包内 sequence 防止已部署构建选择自身；durable completion sequence 防止回滚。当源码通道没有 release 时，parser 只把精确 `cloga/dsh-windows-ops` release 作为 sequence-zero migration 接受。Renderer IPC 只提供有界 composer-impact fields，不能选择 repository、URL、executable、path、process id 或 arguments。
 
 安装确认会报告 Host 拥有的运行中 Sessions、排队消息、活动 jobs 与 renderer 拥有的未保存输入；如果安装开始前这些影响发生变化，应用会重新要求确认。Electron 创建随机 operation directory，复制内置 Node.js executable 与独立 helper，写入一个由 main process 拥有的 handoff，并等待包含一次性 token、所选 manifest hash 与已启动 helper process id 的 acknowledgement。缺失、格式错误、不匹配或超时的 acknowledgement 会让 Desktop 保持运行、写入 cancellation marker、仅结束 owned helper，并等待它退出。Host 停止失败会回滚 updater-owned quit，并通过同一路径取消已确认的 helper。Helper 在 acknowledgement 前、等待 process 期间及 installer 启动前检查 cancellation。它只等待 handoff 中的 Electron 与 Host process ids，为每个网络请求设置固定超时，拒绝超出 manifest size 的流式字节，下载并重新验证 build receipt 与 installer，并写入 pending marker。PowerShell 在重新计算 installer hash、检查声明的 Authenticode 状态及启动无参数交互式 NSIS 期间持有不可写 handle；子进程环境会排除凭据型变量。Helper 绝不结束其他进程，也不抑制 Windows warning 或 UAC。
 
-下一个 Desktop 启动只扫描自己的 operation directory。成功 helper result 不等于 completion：运行中 executable 与 `desktop-runtime.json` hashes、manifest sequence、pending marker 与经过验证的 plugin-provision receipt 必须全部匹配发布。Desktop 在启动活动 Host 前执行发布锁定的 GitHub Release plugin transaction，并且只在 activation 成功后写入 durable completion sequence。已确认但没有终态的 handoff、中断 operation、非零 installer exit、格式错误或冲突 records、installed-evidence mismatch 与 plugin failure 会进入 startup recovery，而不是启动新 Host 或报告成功。Windows Ops `Complete` 保持为外部 recovery owner，并消费同一 manifest 与 receipt identities。
+下一个 Desktop 启动只扫描自己的 operation directory。成功 helper result 不等于 completion：运行中 executable 与 `desktop-runtime.json` hashes、manifest sequence 与 pending marker 必须全部匹配发布。Desktop 保持已安装插件不变，并在 installed evidence 成功后写入 durable completion sequence。已确认但没有终态的 handoff、中断 operation、非零 installer exit、格式错误或冲突 records 与 installed-evidence mismatch 会进入 startup recovery，而不是启动新 Host 或报告成功。Windows Ops `Complete` 仅作为旧 migration 的外部 recovery owner，并消费同一 manifest 与 receipt identities。
 
 [立即显示窗口决策](2026-09-09-desktop-immediate-window-and-direct-start.zh.md)负责本地加载页、直接启动 Host 和主窗口恢复。profile 协调遵循[内置运行时决策](2026-09-08-desktop-bundled-runtime-and-external-plugins.zh.md)。
 
@@ -89,7 +89,7 @@ Desktop 根据打包资源精确选择一种更新实现。包含 `app-update.ym
 
 核心 dsh 和私有 Desktop Host 只来自签名应用的资源树。插件安装接受桌面策略允许的 registry 包规格，不接受原始 pnpm 命令。激活前要求精确版本、锁文件完整性、经过审查的 `allowBuilds` 集合和仅限用户访问的目录权限。
 
-Electron 发布产物必须签名；macOS 产物必须公证。发布自动化必须通过明确的环境变量提供应用 ID、macOS Developer ID 限定名、预期 Team ID 与一套完整的 notarytool 凭据。配置加载会拒绝缺失或格式错误的标识符和不完整的公证凭据，macOS 打包还会强制签名，避免证书发现过程静默选择其他已安装身份或生成未签名发布。运行时准备会验证每个内嵌 Mach-O 文件的精确 Authority 与 Team ID，以及时间戳和 hardened-runtime 标记。签名后钩子会执行 Apple 的深度严格应用验证，并要求同一叶证书 Authority 与 Team ID 完全匹配，验证通过后才继续生成产物。固定目标安装包命令使用[隔离的 App 副本并行公证](../process/2026-09-09-parallel-macos-notarization.zh.md)：ZIP 包含已钉票的 App，签名 DMG 则携带覆盖其中未钉票 App 的票据。DMG 的 artifact-completion hook 要求其使用配置的身份、具备有效票据并通过 Gatekeeper。只有两条产物流都成功，命令才会移入其输出并写入发布完成记录；仅生成目录的命令仍会公证 App 并钉票。macOS 更新使用签名 ZIP，因此 DMG 不生成 blockmap；否则钉票会让已经生成的 DMG blockmap 失效。自定义协议提供已安装的前端分发目录和活跃模块图点名的客户端文件，并拒绝路径穿越或访问这些根目录之外的内容。插件安装器 API 只对 Electron 拥有的管理 GUI 可用，不存在于浏览器应用或后端 RPC 中。
+官方 Electron 发布产物必须签名；macOS 产物必须公证。cloga fork 是明确的未签名 Windows 例外，并使用不同的应用、产品、包、可执行文件、tag 与 artifact 身份，不声称官方签名。发布自动化必须通过明确的环境变量提供应用 ID、macOS Developer ID 限定名、预期 Team ID 与一套完整的 notarytool 凭据。配置加载会拒绝缺失或格式错误的标识符和不完整的公证凭据，macOS 打包还会强制签名，避免证书发现过程静默选择其他已安装身份或生成未签名发布。运行时准备会验证每个内嵌 Mach-O 文件的精确 Authority 与 Team ID，以及时间戳和 hardened-runtime 标记。签名后钩子会执行 Apple 的深度严格应用验证，并要求同一叶证书 Authority 与 Team ID 完全匹配，验证通过后才继续生成产物。固定目标安装包命令使用[隔离的 App 副本并行公证](../process/2026-09-09-parallel-macos-notarization.zh.md)：ZIP 包含已钉票的 App，签名 DMG 则携带覆盖其中未钉票 App 的票据。DMG 的 artifact-completion hook 要求其使用配置的身份、具备有效票据并通过 Gatekeeper。只有两条产物流都成功，命令才会移入其输出并写入发布完成记录；仅生成目录的命令仍会公证 App 并钉票。macOS 更新使用签名 ZIP，因此 DMG 不生成 blockmap；否则钉票会让已经生成的 DMG blockmap 失效。自定义协议提供已安装的前端分发目录和活跃模块图点名的客户端文件，并拒绝路径穿越或访问这些根目录之外的内容。插件安装器 API 只对 Electron 拥有的管理 GUI 可用，不存在于浏览器应用或后端 RPC 中。
 
 [固定版本的 osx-sign 补丁](../../../../patches/@electron__osx-sign@1.3.3.patch)在两种已发布模块构建中使用 `lstat`，因此 Framework 的文件和目录别名不会触发重复签名。选定的上游版本能够跳过这些别名前，仍需保留该补丁。PAK 文件由外层 bundle 签名记录完整性；逐个签名会增加串行时间戳请求，但不会增加资源完整性保护。Desktop 保留全部语言文件，只跳过其单独签名。可执行代码仍使用 Developer ID 签名、安全时间戳和 hardened runtime。[签名器遍历回归测试](../../../../apps/desktop/tests/macos-signing-walk.spec.ts)使用真实 Framework 别名执行已安装依赖；发布验收仍要求严格应用验证、公证和启动。
 
@@ -98,6 +98,8 @@ Windows 发布打包通过 `/f` 向已配置且与 SafeNet 兼容的 SignTool �
 Windows 打包调用强制设置 `ELECTRON_BUILDER_7Z_FILTER=BCJ`。内置的 7-Zip 24.09 编码器会为 ARM64 PE 文件自动选择 ARM64 过滤器，但 `nsis-resources-3.4.1` 中的 NSIS 解码器会在解压时遗漏这些条目。使用实际 NSIS 插件的原生解压验证表明，自动过滤会丢失两个 `node-pty` ARM64 二进制文件，而 BCJ 可以逐字节还原二者。使用兼容的过滤器能够保留依赖内容与运行时完整性，无需删除特定架构的文件或削弱校验。
 
 本地 Windows 安装测试使用显式的 `--unsigned` 打包调用，并执行相同的构建和运行时准备。它清除证书输入，将产物隔离到 `unsigned-artifacts`，并省略更新器配置和发布完成记录。即使父进程环境请求未签名模式，常规打包命令也会显式选择签名模式。这样既能在没有 EV Token 时诊断安装问题，也能防止本地测试产物通过发布上传校验。
+
+cloga fork release workflow 是唯一的未签名发布路径。Windows Ops 每次选择一个受支持的 upstream baseline，经过评审的 source plan 记录该 baseline，并同时推进语义版本与整数 sequence。Workflow 提供固定 fork 身份与托管 capability，验证独立 helper 与不存在 `app-update.yml`，并从干净且固定工具版本的 Windows 构建发布 installer、manifest、receipt 与 checksums。受保护 release job 是唯一具有 repository 写权限的 job；它在结束 draft 前发布所有资产，随后要求 GitHub immutable 状态、精确 tag commit 与匹配的远程 asset digest。
 
 NSIS 先解压到私有的 `7z-out` 目录，再把文件复制到应用目录。Finish 启动应用后，默认退出清理可能与后端的文件读取重叠。[安装器 hook](../../../../apps/desktop/scripts/installer.nsh) 在 `customInstall` 阶段仅删除该解压目录，早于交互和静默启动分支。它保留包归档、插件 DLL、回滚目录、寄存器和错误状态；[原生清理 smoke](../../../../apps/desktop/tests/fixtures/installer-cleanup-smoke.nsi) 检查这些约束。把清理移入安装阶段并不会减少文件系统工作，因此必须分别测量安装总耗时与点击 Finish 到窗口出现的耗时。
 

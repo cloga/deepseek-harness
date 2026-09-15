@@ -5,23 +5,11 @@ import { createReadStream } from 'node:fs'
 import { readdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
-  managedUpdateJsonSha256,
   parseDesktopManagedUpdateManifest,
   type DesktopManagedUpdateCapability,
-  type DesktopManagedUpdateManifest,
 } from './managed-update-protocol.ts'
-import type { DesktopPluginProvisionReceipt } from './plugin-source.ts'
 
 const RECOVERY_COMMAND = 'pwsh -NoProfile -File .\\Install-DshOfficialDesktop.ps1 -Action Complete'
-
-/** Hash domain for one verified plugin transaction receipt referenced by a release manifest. */
-export function managedPluginProvisionReceiptSha256(receipt: DesktopPluginProvisionReceipt): string {
-  return managedUpdateJsonSha256({
-    domain: 'desktop-managed-plugin-provision-receipt',
-    schemaVersion: 1,
-    receipt,
-  })
-}
 
 /** Startup result shown by Desktop instead of claiming an incomplete update succeeded. */
 export type DesktopManagedUpdateCompletion =
@@ -75,7 +63,6 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[], labe
  * @param installedSequence - Last previously completed sequence.
  * @param executable - Running installed Desktop executable.
  * @param runtimeDescriptor - Installed Desktop runtime descriptor.
- * @param provision - Verified plugin staging, health, activation, and rollback transaction.
  */
 export async function completeDesktopManagedUpdate(
   operationsRoot: string,
@@ -84,7 +71,6 @@ export async function completeDesktopManagedUpdate(
   installedSequence: number,
   executable: string,
   runtimeDescriptor: string,
-  provision: (manifest: DesktopManagedUpdateManifest) => Promise<DesktopPluginProvisionReceipt>,
 ): Promise<DesktopManagedUpdateCompletion> {
   let operationNames: string[]
   try {
@@ -126,8 +112,7 @@ export async function completeDesktopManagedUpdate(
         const acknowledgedManifest = acknowledgement.manifestSha256
         if (acknowledgement.schemaVersion !== 1 || acknowledgement.token !== name
           || !Number.isSafeInteger(acknowledgement.helperPid) || Number(acknowledgement.helperPid) <= 0
-          || (acknowledgedManifest !== capability.manifestSha256
-            && acknowledgedManifest !== capability.migration?.manifestSha256)) {
+          || typeof acknowledgedManifest !== 'string' || !/^[a-f0-9]{64}$/u.test(acknowledgedManifest)) {
           throw new Error('desktop managed update: helper acknowledgement does not match its operation')
         }
         if (result === undefined && pending === undefined) {
@@ -209,11 +194,10 @@ export async function completeDesktopManagedUpdate(
       throw new Error('desktop managed update: helper result does not match the staged manifest')
     }
     const pending = await readJson(join(candidate.root, 'pending-completion.json'))
-    exactKeys(pending, ['schemaVersion', 'manifestSha256', 'sequence', 'installedEvidence', 'pluginProvisioning'], 'pending completion')
+    exactKeys(pending, ['schemaVersion', 'manifestSha256', 'sequence', 'installedEvidence'], 'pending completion')
     if (pending.schemaVersion !== 1 || pending.manifestSha256 !== manifest.manifestSha256
       || pending.sequence !== manifest.sequence
-      || JSON.stringify(pending.installedEvidence) !== JSON.stringify(manifest.installedEvidence)
-      || JSON.stringify(pending.pluginProvisioning) !== JSON.stringify(manifest.pluginProvisioning)) {
+      || JSON.stringify(pending.installedEvidence) !== JSON.stringify(manifest.installedEvidence)) {
       throw new Error('desktop managed update: pending completion does not match the staged manifest')
     }
     const [executableSha256, runtimeSha256] = await Promise.all([
@@ -223,10 +207,6 @@ export async function completeDesktopManagedUpdate(
     if (executableSha256 !== manifest.installedEvidence.executableSha256
       || runtimeSha256 !== manifest.installedEvidence.runtimeSha256) {
       throw new Error('desktop managed update: installed application evidence does not match the release')
-    }
-    const provisionReceipt = await provision(manifest)
-    if (managedPluginProvisionReceiptSha256(provisionReceipt) !== manifest.pluginProvisioning.receiptSha256) {
-      throw new Error('desktop managed update: plugin provision receipt does not match the release')
     }
     await writeJsonAtomic(completionPath, {
       schemaVersion: 1,

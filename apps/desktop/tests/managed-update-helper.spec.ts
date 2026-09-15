@@ -12,7 +12,13 @@ import {
   waitForDesktopProcesses,
   type DesktopManagedUpdateHelperOperations,
 } from '../src/managed-update-helper.ts'
-import { managedUpdateJsonSha256 } from '../src/managed-update-protocol.ts'
+import {
+  MANAGED_COMMIT,
+  MANAGED_TAG,
+  MANAGED_TREE,
+  managedCapability,
+  managedManifest,
+} from './managed-update-fixture.ts'
 
 function sha256(body: Uint8Array): string {
   return createHash('sha256').update(body).digest('hex')
@@ -105,17 +111,17 @@ describe('Desktop managed update helper', () => {
     const stageRoot = join(root, 'stage')
     const installer = Buffer.from('installer')
     const receiptValue = {
-      source: { repository: 'cloga/deepseek-harness', tag: 'dsh-v1.2.3', commit: 'a'.repeat(40) },
+      source: {
+        repository: 'cloga/deepseek-harness',
+        tag: MANAGED_TAG,
+        version: '1.2.3',
+        commit: MANAGED_COMMIT,
+        tree: MANAGED_TREE,
+      },
       receiptSha256: '1'.repeat(64),
     }
     const receipt = Buffer.from(JSON.stringify(receiptValue))
-    const payload = {
-      schemaVersion: 2,
-      owner: 'cloga/deepseek-harness',
-      mode: 'interactive-windows-installer',
-      version: '1.2.3',
-      sequence: 2,
-      source: { repository: 'cloga/deepseek-harness', commit: 'a'.repeat(40), tag: 'dsh-v1.2.3' },
+    const manifestValue = managedManifest({
       installer: {
         file: 'installer.exe',
         bytes: installer.byteLength,
@@ -128,29 +134,9 @@ describe('Desktop managed update helper', () => {
         sha256: sha256(receipt),
         receiptSha256: receiptValue.receiptSha256,
       },
-      installedEvidence: { executableSha256: 'b'.repeat(64), runtimeSha256: 'c'.repeat(64) },
-      pluginProvisioning: {
-        capability: 'verified-github-release',
-        source: {
-          schemaVersion: 1,
-          type: 'githubRelease',
-          owner: 'cloga',
-          repo: 'dsh-github-copilot',
-          tag: 'v0.4.0-alpha.18',
-          asset: 'dsh-github-copilot-0.4.0-alpha.18.tgz',
-          packageName: 'dsh-github-copilot',
-          version: '0.4.0-alpha.18',
-          size: 1,
-          sha256: '2'.repeat(64),
-          integrity: `sha512-${'A'.repeat(86)}==`,
-          targetCommit: '3'.repeat(40),
-        },
-        receiptSha256: 'd'.repeat(64),
-      },
-    }
-    const manifestValue = { ...payload, manifestSha256: managedUpdateJsonSha256(payload) }
+    })
     const manifest = Buffer.from(JSON.stringify(manifestValue))
-    const base = 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/'
+    const base = `https://github.com/cloga/deepseek-harness/releases/download/${MANAGED_TAG}/`
     const fetch = vi.fn(async (url: string, init: RequestInit) => {
       expect(init.signal).toBeInstanceOf(AbortSignal)
       if (url === `${base}release.json`) return response(manifest)
@@ -186,15 +172,13 @@ describe('Desktop managed update helper', () => {
     const handoff = {
       schemaVersion: 1,
       token: 'e'.repeat(64),
-      capability: {
-        schemaVersion: 1,
-        mode: 'windows-ops-managed',
+      capability: managedCapability(),
+      selection: {
+        kind: 'source',
         manifestUrl: `${base}release.json`,
         manifestSha256: manifestValue.manifestSha256,
-        minimumSequence: 2,
-        expectedSource: { version: '1.2.3', commit: 'a'.repeat(40) },
+        assetSha256: sha256(manifest),
       },
-      selectedManifest: 'source',
       stageRoot,
       waitPids: [12],
       waitTimeoutMs: 1000,
@@ -231,16 +215,16 @@ describe('Desktop managed update helper', () => {
     temporaryRoots.push(root)
     const installer = Buffer.from('installer')
     const receipt = Buffer.from(JSON.stringify({
-      source: { repository: 'cloga/deepseek-harness', tag: 'dsh-v1.2.3', commit: 'a'.repeat(40) },
+      source: {
+        repository: 'cloga/deepseek-harness',
+        tag: MANAGED_TAG,
+        version: '1.2.3',
+        commit: MANAGED_COMMIT,
+        tree: MANAGED_TREE,
+      },
       receiptSha256: '1'.repeat(64),
     }))
-    const payload = {
-      schemaVersion: 2,
-      owner: 'cloga/deepseek-harness',
-      mode: 'interactive-windows-installer',
-      version: '1.2.3',
-      sequence: 2,
-      source: { repository: 'cloga/deepseek-harness', commit: 'a'.repeat(40), tag: 'dsh-v1.2.3' },
+    const manifestValue = managedManifest({
       installer: {
         file: 'installer.exe',
         bytes: installer.byteLength,
@@ -249,27 +233,7 @@ describe('Desktop managed update helper', () => {
         signature: 'NotSigned',
       },
       buildReceipt: { file: 'build-receipt.json', sha256: sha256(receipt), receiptSha256: '1'.repeat(64) },
-      installedEvidence: { executableSha256: 'b'.repeat(64), runtimeSha256: 'c'.repeat(64) },
-      pluginProvisioning: {
-        capability: 'verified-github-release',
-        source: {
-          schemaVersion: 1,
-          type: 'githubRelease',
-          owner: 'cloga',
-          repo: 'dsh-github-copilot',
-          tag: 'v0.4.0-alpha.18',
-          asset: 'dsh-github-copilot-0.4.0-alpha.18.tgz',
-          packageName: 'dsh-github-copilot',
-          version: '0.4.0-alpha.18',
-          size: 1,
-          sha256: '2'.repeat(64),
-          integrity: `sha512-${'A'.repeat(86)}==`,
-          targetCommit: '3'.repeat(40),
-        },
-        receiptSha256: 'd'.repeat(64),
-      },
-    }
-    const manifestValue = { ...payload, manifestSha256: managedUpdateJsonSha256(payload) }
+    })
     const manifest = Buffer.from(JSON.stringify(manifestValue))
     const verifyAndStartInstaller = vi.fn(async () => 0)
     const operations: DesktopManagedUpdateHelperOperations = {
@@ -284,15 +248,13 @@ describe('Desktop managed update helper', () => {
     const result = await runDesktopManagedUpdateHelper({
       schemaVersion: 1,
       token: 'e'.repeat(64),
-      capability: {
-        schemaVersion: 1,
-        mode: 'windows-ops-managed',
-        manifestUrl: 'https://github.com/cloga/deepseek-harness/releases/download/dsh-v1.2.3/release.json',
+      capability: managedCapability(),
+      selection: {
+        kind: 'source',
+        manifestUrl: `https://github.com/cloga/deepseek-harness/releases/download/${MANAGED_TAG}/release.json`,
         manifestSha256: manifestValue.manifestSha256,
-        minimumSequence: 2,
-        expectedSource: { version: '1.2.3', commit: 'a'.repeat(40) },
+        assetSha256: sha256(manifest),
       },
-      selectedManifest: 'source',
       stageRoot: join(root, 'stage'),
       waitPids: [12],
       waitTimeoutMs: 1000,
