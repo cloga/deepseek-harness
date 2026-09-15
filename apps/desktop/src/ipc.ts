@@ -1,6 +1,11 @@
 /** Typed preload operations exposed only by the Electron shell. */
 
 import type { DesktopPluginRecord } from './project-manager.ts'
+import {
+  DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
+  type DesktopPluginProvisionReceipt,
+  type DesktopPluginSource,
+} from './plugin-source.ts'
 import type { DesktopLocale } from './locale.ts'
 import type { DesktopBackendState } from './backend-controller.ts'
 
@@ -8,6 +13,7 @@ import type { DesktopBackendState } from './backend-controller.ts'
 export const DESKTOP_IPC = {
   localeGet: 'dsh-desktop:locale-get',
   pluginsList: 'dsh-desktop:plugins-list',
+  pluginsInstall: 'dsh-desktop:plugins-install',
   pluginsAdd: 'dsh-desktop:plugins-add',
   pluginsRemove: 'dsh-desktop:plugins-remove',
   pluginsUpdate: 'dsh-desktop:plugins-update',
@@ -21,6 +27,7 @@ export const DESKTOP_IPC = {
   updatesCheck: 'dsh-desktop:updates-check',
   updatesInstall: 'dsh-desktop:updates-install',
   updatesState: 'dsh-desktop:updates-state',
+  capabilitiesGet: 'dsh-desktop:capabilities-get',
 } as const
 
 /** Desktop release update state rendered by desktop-owned UI. */
@@ -32,11 +39,13 @@ export interface DesktopUpdateState {
 
 /** Narrow bridge exposed through context isolation. */
 export interface DshDesktopApi {
-  readonly protocolVersion: 1
+  readonly protocolVersion: 2
+  capabilities(): Promise<readonly [typeof DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY]>
   locale(): Promise<DesktopLocale>
   readonly plugins: {
     list(): Promise<readonly DesktopPluginRecord[]>
     add(spec: string): Promise<void>
+    install(source: DesktopPluginSource): Promise<DesktopPluginProvisionReceipt | undefined>
     remove(name: string): Promise<void>
     update(name: string, version: string): Promise<void>
     toggle(name: string, enabled: boolean): Promise<void>

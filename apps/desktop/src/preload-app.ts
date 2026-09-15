@@ -5,7 +5,7 @@ import { DESKTOP_IPC, type DshDesktopStartupApi } from './ipc.ts'
 import type { DesktopBackendState } from './backend-controller.ts'
 
 const startup: DshDesktopStartupApi = {
-  protocolVersion: 1,
+  protocolVersion: 2,
   locale: () => ipcRenderer.invoke(DESKTOP_IPC.localeGet) as ReturnType<DshDesktopStartupApi['locale']>,
   backend: {
     status: () => ipcRenderer.invoke(DESKTOP_IPC.backendStatus) as ReturnType<DshDesktopStartupApi['backend']['status']>,

@@ -5,11 +5,13 @@ import { DESKTOP_IPC, type DshDesktopApi, type DesktopUpdateState } from './ipc.
 import type { DesktopBackendState } from './backend-controller.ts'
 
 const api: DshDesktopApi = {
-  protocolVersion: 1,
+  protocolVersion: 2,
+  capabilities: () => ipcRenderer.invoke(DESKTOP_IPC.capabilitiesGet) as ReturnType<DshDesktopApi['capabilities']>,
   locale: () => ipcRenderer.invoke(DESKTOP_IPC.localeGet) as Promise<ReturnType<DshDesktopApi['locale']> extends Promise<infer T> ? T : never>,
   plugins: {
     list: () => ipcRenderer.invoke(DESKTOP_IPC.pluginsList) as Promise<ReturnType<DshDesktopApi['plugins']['list']> extends Promise<infer T> ? T : never>,
     add: spec => ipcRenderer.invoke(DESKTOP_IPC.pluginsAdd, spec) as Promise<void>,
+    install: source => ipcRenderer.invoke(DESKTOP_IPC.pluginsInstall, source) as ReturnType<DshDesktopApi['plugins']['install']>,
     remove: name => ipcRenderer.invoke(DESKTOP_IPC.pluginsRemove, name) as Promise<void>,
     toggle: (name, enabled) => ipcRenderer.invoke(DESKTOP_IPC.pluginsToggle, name, enabled) as Promise<void>,
     disableAll: () => ipcRenderer.invoke(DESKTOP_IPC.pluginsDisableAll) as Promise<void>,

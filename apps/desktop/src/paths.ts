@@ -29,7 +29,7 @@ export function resolveDesktopPaths(dshHome: string = resolveDshHome()): Desktop
   return {
     root,
     profile: join(dshHome, 'profiles', 'desktop'),
-    lock: join(dshHome, 'profiles', 'desktop', 'lock'),
+    lock: join(root, 'profile.lock'),
     pnpm: {
       root: pnpm,
       store: join(pnpm, 'store'),
