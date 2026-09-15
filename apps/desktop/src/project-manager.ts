@@ -141,7 +141,8 @@ function readPluginReceipts(projectDir: string): DesktopPluginReceiptStore {
       || source?.type !== 'githubRelease'
       || receipt.packageName !== name || receipt.packageName !== source.packageName
       || receipt.version !== source.version || receipt.artifactSha256 !== source.sha256
-      || !Number.isSafeInteger(receipt.releaseId) || !Number.isSafeInteger(receipt.assetId)
+      || typeof receipt.releaseId !== 'number' || !Number.isSafeInteger(receipt.releaseId) || receipt.releaseId <= 0
+      || typeof receipt.assetId !== 'number' || !Number.isSafeInteger(receipt.assetId) || receipt.assetId <= 0
       || !isRecord(receipt.states) || receipt.states.staged !== true || receipt.states.health !== 'passed'
       || receipt.states.activated !== true || receipt.states.rolledBack !== false || receipt.states.verified !== true) {
       throw new Error(`desktop project: invalid plugin receipt for ${name}`)

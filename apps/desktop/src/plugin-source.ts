@@ -160,6 +160,11 @@ export function parseDesktopPluginSource(value: unknown): DesktopPluginSource {
   if (!/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(value.integrity)) {
     throw new Error('desktop plugin source: integrity must be SHA-512 SRI')
   }
+  const encodedIntegrity = value.integrity.slice('sha512-'.length)
+  const integrityBytes = Buffer.from(encodedIntegrity, 'base64')
+  if (integrityBytes.byteLength !== 64 || integrityBytes.toString('base64') !== encodedIntegrity) {
+    throw new Error('desktop plugin source: integrity must encode one SHA-512 digest')
+  }
   assertString(value.targetCommit, 'target commit', COMMIT_PATTERN)
   if (value.dependencyRegistry !== undefined) {
     assertString(value.dependencyRegistry, 'dependency registry')
@@ -233,7 +238,7 @@ async function resolveTagCommit(source: DesktopGithubReleasePluginSource, fetche
   let object = reference.object
   for (let depth = 0; depth < 4; depth++) {
     if (!isRecord(object)) throw new Error('desktop plugin source: GitHub tag reference has no object')
-    assertString(object.sha, 'GitHub tag object SHA')
+    assertString(object.sha, 'GitHub tag object SHA', COMMIT_PATTERN)
     if (object.type === 'commit') return object.sha
     if (object.type !== 'tag') throw new Error('desktop plugin source: GitHub tag does not resolve to a commit')
     const tag = await githubJson(new URL(`${base}/git/tags/${object.sha}`), fetcher)
@@ -383,14 +388,17 @@ export async function acquireDesktopPluginArtifact(
   if (release.tag_name !== source.tag || release.target_commitish !== source.targetCommit) {
     throw new Error('desktop plugin source: GitHub release tag or target commit does not match the lock')
   }
-  if (!Number.isSafeInteger(release.id)) throw new Error('desktop plugin source: GitHub release has no valid id')
+  if (!Number.isSafeInteger(release.id) || (release.id as number) <= 0) {
+    throw new Error('desktop plugin source: GitHub release has no valid id')
+  }
   const tagCommit = await resolveTagCommit(source, fetcher)
   if (tagCommit !== source.targetCommit) throw new Error('desktop plugin source: GitHub tag commit does not match the lock')
   if (!Array.isArray(release.assets)) throw new Error('desktop plugin source: GitHub release has no asset list')
   const assets = release.assets.filter((asset): asset is Record<string, unknown> => isRecord(asset) && asset.name === source.asset)
   if (assets.length !== 1) throw new Error('desktop plugin source: GitHub release asset is missing or duplicated')
   const asset = assets[0]
-  if (asset?.state !== 'uploaded' || asset.size !== source.size || !Number.isSafeInteger(asset.id)) {
+  if (asset?.state !== 'uploaded' || asset.size !== source.size
+    || !Number.isSafeInteger(asset.id) || (asset.id as number) <= 0) {
     throw new Error('desktop plugin source: GitHub release asset metadata does not match the lock')
   }
   if (asset.digest !== undefined && asset.digest !== null && asset.digest !== `sha256:${source.sha256}`) {

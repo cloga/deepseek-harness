@@ -227,6 +227,7 @@ describe('desktop verified plugin source', () => {
     for (const value of [
       { ...source, schemaVersion: 2 },
       { ...source, tag: 'latest' },
+      { ...source, integrity: 'sha512-AAAA' },
       { ...source, dependencyRegistry: 'https://token@example.test/npm/' },
       { ...source, type: 'url', url: 'https://example.test/plugin.tgz' },
       { ...source, externalProvisioned: true },
