@@ -36,6 +36,7 @@ import {
 } from '../src/plugin-source.ts'
 import { managedPluginProvisionReceiptSha256 } from '../src/managed-update-completion.ts'
 import { discoverDesktopManagedSourceRelease } from '../src/managed-update-coordinator.ts'
+import { resolveDesktopPackageRegistry } from './desktop-release-environment.mjs'
 
 const APP_ROOT = resolve(import.meta.dirname, '..')
 const REPOSITORY_ROOT = resolve(APP_ROOT, '..', '..')
@@ -371,6 +372,7 @@ export function finalizeDesktopForkRelease(
       workflow: DESKTOP_MANAGED_UPDATE_WORKFLOW,
       nodeVersion: process.version,
       pnpmVersion: PNPM_VERSION,
+      packageRegistry: resolveDesktopPackageRegistry(process.env),
       lockfileSha256: source.lockfileSha256,
       planSha256: source.planSha256,
     },
@@ -441,6 +443,7 @@ export function finalizeDesktopForkRelease(
       planSha256: source.planSha256,
       nodeVersion: process.version,
       pnpmVersion: PNPM_VERSION,
+      packageRegistry: resolveDesktopPackageRegistry(process.env),
     },
     identity: IDENTITY,
     installer: receipt.artifacts.installer,

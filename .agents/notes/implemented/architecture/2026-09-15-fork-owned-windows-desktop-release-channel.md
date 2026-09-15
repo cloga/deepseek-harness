@@ -20,7 +20,7 @@ The reviewed plan advances a semantic channel version and integer sequence. The 
 
 ## Release records
 
-Manifest schema 3 self-hashes canonical JSON and records the source repository, commit, tree, tag, upstream version, sequence, workflow path, lockfile hash, plan hash, pinned Node and pnpm versions, fork identities, installer filename, byte size, SHA-256, SHA-512, unsigned Authenticode state, build-receipt hashes, installed executable and runtime hashes, network policy, and interactive post-restart completion semantics.
+Manifest schema 3 self-hashes canonical JSON and records the source repository, commit, tree, tag, upstream version, sequence, workflow path, lockfile hash, plan hash, pinned Node and pnpm versions, dependency materialization registry, fork identities, installer filename, byte size, SHA-256, SHA-512, unsigned Authenticode state, build-receipt hashes, installed executable and runtime hashes, network policy, and interactive post-restart completion semantics.
 
 Plugin provisioning records the complete `desktopNativeVerifiedRelease` capability, including capability schema 1 and structured source and receipt schema versions 1. It locks the `dsh-github-copilot` GitHub Release source and the expected release and asset identifiers. The expected native transaction receipt hash includes staging, health, activation, rollback, and verification states.
 

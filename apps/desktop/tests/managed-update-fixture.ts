@@ -95,6 +95,7 @@ export function managedManifest(
       planSha256: '5'.repeat(64),
       nodeVersion: 'v24.13.0',
       pnpmVersion: '11.7.0',
+      packageRegistry: 'https://registry.npmjs.org/',
     },
     identity: {
       appId: 'io.github.cloga.deepseek-harness.desktop' as const,

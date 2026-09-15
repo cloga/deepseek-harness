@@ -4,6 +4,8 @@
 export const DESKTOP_APP_ID_ENV = 'DSH_DESKTOP_APP_ID'
 export const DESKTOP_MANAGED_UPDATE_CAPABILITY_ENV = 'DSH_DESKTOP_MANAGED_UPDATE_CAPABILITY'
 export const DESKTOP_FORK_RELEASE_VERSION_ENV = 'DSH_DESKTOP_FORK_RELEASE_VERSION'
+export const DESKTOP_PACKAGE_REGISTRY_ENV = 'DSH_DESKTOP_PACKAGE_REGISTRY'
+const DEFAULT_DESKTOP_PACKAGE_REGISTRY = 'https://registry.npmjs.org/'
 
 const CLOGA_FORK_IDENTITY = {
   appId: 'io.github.cloga.deepseek-harness.desktop',
@@ -69,6 +71,7 @@ export function resolveDesktopForkReleaseEnvironment(env) {
       + `${DESKTOP_MANAGED_UPDATE_CAPABILITY_ENV} must be set together`,
     )
   }
+
   if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.test(version)) {
     throw new Error(`desktop release environment: ${DESKTOP_FORK_RELEASE_VERSION_ENV} must be semantic`)
   }
@@ -77,6 +80,28 @@ export function resolveDesktopForkReleaseEnvironment(env) {
     throw new Error(`desktop release environment: managed fork releases require app id ${CLOGA_FORK_IDENTITY.appId}`)
   }
   return { ...CLOGA_FORK_IDENTITY, version, capabilityPath }
+}
+
+/**
+ * Resolve the credential-free HTTPS registry used only while materializing locked Desktop dependencies.
+ * @param {NodeJS.ProcessEnv} env - Packaging environment.
+ * @returns {string} Normalized registry URL with a trailing slash.
+ */
+export function resolveDesktopPackageRegistry(env) {
+  const value = env[DESKTOP_PACKAGE_REGISTRY_ENV]?.trim() || DEFAULT_DESKTOP_PACKAGE_REGISTRY
+  let url
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error(`desktop release environment: ${DESKTOP_PACKAGE_REGISTRY_ENV} must be an absolute HTTPS URL`)
+  }
+  if (url.protocol !== 'https:' || url.username !== '' || url.password !== ''
+    || url.search !== '' || url.hash !== '') {
+    throw new Error(
+      `desktop release environment: ${DESKTOP_PACKAGE_REGISTRY_ENV} must be credential-free HTTPS without query or fragment`,
+    )
+  }
+  return url.href
 }
 
 /**

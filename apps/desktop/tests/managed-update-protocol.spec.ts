@@ -179,6 +179,7 @@ describe('Desktop managed update protocol', () => {
         workflow: '.github/workflows/desktop-fork-release.yml',
         nodeVersion: 'v24.13.0',
         pnpmVersion: '11.7.0',
+        packageRegistry: 'https://registry.npmjs.org/',
       },
       pluginProvisioning: {
         capability: {

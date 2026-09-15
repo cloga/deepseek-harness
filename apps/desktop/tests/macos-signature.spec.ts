@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { NotarizeOptions } from '@electron/notarize'
 import {
   resolveDesktopAppId,
+  resolveDesktopPackageRegistry,
   resolveMacOSNotarizationEnvironment,
   resolveMacOSSigningEnvironment,
 } from '../scripts/desktop-release-environment.mjs'
@@ -236,6 +237,19 @@ describe('desktop macOS release signature', () => {
       DSH_DESKTOP_MACOS_SIGNING_IDENTITY: 'Example Company (TEAMID1234)',
       DSH_DESKTOP_MACOS_TEAM_ID: 'short',
     })).toThrow(/10 uppercase/u)
+  })
+
+  it('uses a credential-free HTTPS dependency materialization registry', () => {
+    expect(resolveDesktopPackageRegistry({})).toBe('https://registry.npmjs.org/')
+    expect(resolveDesktopPackageRegistry({
+      DSH_DESKTOP_PACKAGE_REGISTRY: 'https://packagefeedproxy.microsoft.io/npm/',
+    })).toBe('https://packagefeedproxy.microsoft.io/npm/')
+    expect(() => resolveDesktopPackageRegistry({
+      DSH_DESKTOP_PACKAGE_REGISTRY: 'http://registry.example.com/',
+    })).toThrow(/credential-free HTTPS/u)
+    expect(() => resolveDesktopPackageRegistry({
+      DSH_DESKTOP_PACKAGE_REGISTRY: 'https://user:secret@registry.example.com/',
+    })).toThrow(/credential-free HTTPS/u)
   })
 
   it('requires one complete notarization credential strategy', () => {

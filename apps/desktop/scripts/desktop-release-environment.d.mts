@@ -7,6 +7,9 @@ export const DESKTOP_MANAGED_UPDATE_CAPABILITY_ENV: 'DSH_DESKTOP_MANAGED_UPDATE_
 /** Environment variable that supplies the fork release semantic version. */
 export const DESKTOP_FORK_RELEASE_VERSION_ENV: 'DSH_DESKTOP_FORK_RELEASE_VERSION'
 
+/** Environment variable that supplies the dependency materialization registry. */
+export const DESKTOP_PACKAGE_REGISTRY_ENV: 'DSH_DESKTOP_PACKAGE_REGISTRY'
+
 /** Environment variable that supplies electron-builder's macOS certificate qualifier. */
 export const MACOS_SIGNING_IDENTITY_ENV: 'DSH_DESKTOP_MACOS_SIGNING_IDENTITY'
 
@@ -70,6 +73,13 @@ export interface DesktopForkReleaseEnvironment {
 export function resolveDesktopForkReleaseEnvironment(
   env: NodeJS.ProcessEnv,
 ): DesktopForkReleaseEnvironment | undefined
+
+/**
+ * Resolve the credential-free HTTPS registry used while materializing locked Desktop dependencies.
+ * @param env - Packaging environment.
+ * @returns Normalized registry URL with a trailing slash.
+ */
+export function resolveDesktopPackageRegistry(env: NodeJS.ProcessEnv): string
 
 /**
  * Resolve and validate the public identity expected on a macOS release.

@@ -76,6 +76,7 @@ export interface DesktopManagedUpdateManifest {
     readonly planSha256: string
     readonly nodeVersion: string
     readonly pnpmVersion: string
+    readonly packageRegistry: string
   }
   readonly identity: {
     readonly appId: 'io.github.cloga.deepseek-harness.desktop'
@@ -377,7 +378,11 @@ function parseSourceManifest(item: Record<string, unknown>): DesktopManagedUpdat
     throw new Error('desktop managed update: manifest source identity is invalid')
   }
   const build = record(item.build, 'manifest.build')
-  exactKeys(build, ['workflow', 'lockfileSha256', 'planSha256', 'nodeVersion', 'pnpmVersion'], 'manifest.build')
+  exactKeys(
+    build,
+    ['workflow', 'lockfileSha256', 'planSha256', 'nodeVersion', 'pnpmVersion', 'packageRegistry'],
+    'manifest.build',
+  )
   if (build.workflow !== DESKTOP_MANAGED_UPDATE_WORKFLOW) {
     throw new Error('desktop managed update: manifest build workflow is invalid')
   }
@@ -385,6 +390,17 @@ function parseSourceManifest(item: Record<string, unknown>): DesktopManagedUpdat
   const pnpmVersion = string(build.pnpmVersion, 'manifest.build.pnpmVersion')
   if (!/^v24\.\d+\.\d+$/u.test(nodeVersion) || !/^11\.\d+\.\d+$/u.test(pnpmVersion)) {
     throw new Error('desktop managed update: manifest build tools are invalid')
+  }
+  const packageRegistry = string(build.packageRegistry, 'manifest.build.packageRegistry')
+  let registryUrl: URL
+  try {
+    registryUrl = new URL(packageRegistry)
+  } catch {
+    throw new Error('desktop managed update: manifest build registry is invalid')
+  }
+  if (registryUrl.protocol !== 'https:' || registryUrl.username !== '' || registryUrl.password !== ''
+    || registryUrl.search !== '' || registryUrl.hash !== '' || registryUrl.href !== packageRegistry) {
+    throw new Error('desktop managed update: manifest build registry is invalid')
   }
   const identity = record(item.identity, 'manifest.identity')
   exactKeys(identity, ['appId', 'productName', 'packageName', 'executableName'], 'manifest.identity')
@@ -463,6 +479,7 @@ function parseSourceManifest(item: Record<string, unknown>): DesktopManagedUpdat
       planSha256: hash(build.planSha256, 'manifest.build.planSha256'),
       nodeVersion,
       pnpmVersion,
+      packageRegistry,
     },
     identity: {
       appId: 'io.github.cloga.deepseek-harness.desktop',

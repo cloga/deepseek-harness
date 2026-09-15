@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-15-fork-owned-windows-desktop-release-channel.md
-2026-09-15-fork-owned-windows-desktop-release-channel.md: 9a8c288290a908efc6c4927b30252548c201a204
-2026-09-15-fork-owned-windows-desktop-release-channel.zh.md: 4702d0b4389ad2b9ec16b080b56389f7ce2ed006
+2026-09-15-fork-owned-windows-desktop-release-channel.md: 96b57948f54e6c72c3a26a138e4cea9484f09043
+2026-09-15-fork-owned-windows-desktop-release-channel.zh.md: b6d22666df4ead9f4870114894164f5b73760bd0
