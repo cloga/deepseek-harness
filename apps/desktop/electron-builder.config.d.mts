@@ -13,7 +13,16 @@ export interface DesktopElectronBuilderConfig {
     { readonly from: string, readonly to: 'dsh/node_modules', readonly filter: readonly ['**/*'] },
   ]
   readonly asarUnpack: readonly string[]
-  readonly extraResources: readonly [{ readonly from: string, readonly to: 'runtime' }]
+  readonly extraResources:
+    | readonly [
+      { readonly from: string, readonly to: 'runtime' },
+      { readonly from: string, readonly to: 'managed-update/helper.mjs' },
+    ]
+    | readonly [
+      { readonly from: string, readonly to: 'runtime' },
+      { readonly from: string, readonly to: 'managed-update/helper.mjs' },
+      { readonly from: string, readonly to: 'managed-update/capability.json' },
+    ]
   readonly mac: {
     readonly identity: string | undefined
     readonly forceCodeSigning: boolean
