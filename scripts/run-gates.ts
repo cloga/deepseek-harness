@@ -1507,7 +1507,7 @@ export function taskkillArgs(rootPid: number, descendants: number[]): string[][]
 }
 
 /** Breadth-first walk of the pid/ppid rows starting at `root`. */
-function collectDescendants(root: number, rows: Array<[number, number]>): number[] {
+export function collectDescendants(root: number, rows: Array<[number, number]>): number[] {
   const byParent = new Map<number, number[]>()
   for (const [pid, ppid] of rows) {
     const children = byParent.get(ppid) ?? []
@@ -1515,12 +1515,16 @@ function collectDescendants(root: number, rows: Array<[number, number]>): number
     byParent.set(ppid, children)
   }
   const result: number[] = []
-  const queue = byParent.get(root) ?? []
+  const queue = [...(byParent.get(root) ?? [])]
+  const visited = new Set([root])
   for (let index = 0; index < queue.length; index += 1) {
     const pid = queue[index]
-    if (pid === undefined) continue
+    if (pid === undefined || visited.has(pid)) continue
+    visited.add(pid)
     result.push(pid)
-    queue.push(...(byParent.get(pid) ?? []))
+    for (const child of byParent.get(pid) ?? []) {
+      if (!visited.has(child)) queue.push(child)
+    }
   }
   return result
 }
