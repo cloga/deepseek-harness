@@ -72,7 +72,7 @@ await import(${JSON.stringify(pathToFileURL(realPnpm).href)})
         '--ignore-scripts',
       ], { cwd: manager.paths.profile }, (error) => {
         if (error === null) resolve()
-        else reject(error)
+        else reject(new Error(error.message, { cause: error }))
       })
     })
     expect(readFileSync(join(manager.paths.profile, 'pnpm-lock.yaml'), 'utf8')).toMatch(
