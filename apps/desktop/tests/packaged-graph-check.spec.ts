@@ -12,7 +12,7 @@ import { runtimeFixture, writePackage } from './runtime-fixture.ts'
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
-it('rejects a runner-injected optional peer but permits absence and a profile-owned copy', () => {
+it('treats an external optional peer as absent but rejects a required peer', () => {
   const root = mkdtempSync(join(tmpdir(), 'desktop-graph-plane-'))
   roots.push(root)
   const home = join(root, 'home')
@@ -30,15 +30,15 @@ it('rejects a runner-injected optional peer but permits absence and a profile-ow
   const runnerModules = join(root, 'runner-modules')
   writePackage(runnerModules, peer)
   const environment = desktopSmokeEnvironment(home)
-  const run = (env: NodeJS.ProcessEnv) => spawnSync(process.execPath, [
-    resolve(import.meta.dirname, 'fixtures', 'packaged-graph-check.ts'), profile, runtimeRoot, 'plugin',
+  const run = (env: NodeJS.ProcessEnv, plugin = 'plugin') => spawnSync(process.execPath, [
+    resolve(import.meta.dirname, 'fixtures', 'packaged-graph-check.ts'), profile, runtimeRoot, plugin,
   ], { cwd: profile, env, encoding: 'utf8', timeout: 30_000 })
 
   const polluted = run({ ...environment, NODE_PATH: runnerModules })
   expect(polluted.error).toBeUndefined()
   expect(polluted.signal).toBeNull()
-  expect(polluted.status).toBe(1)
-  expect(polluted.stdout).toContain(`plugin resolves ${peer} outside its owned packages`)
+  expect(polluted.status, polluted.stderr).toBe(0)
+  expect(JSON.parse(polluted.stdout)).toMatchObject({ valid: true })
 
   const clean = run(environment)
   expect(clean.error).toBeUndefined()
@@ -47,6 +47,15 @@ it('rejects a runner-injected optional peer but permits absence and a profile-ow
   expect(JSON.parse(clean.stdout)).toMatchObject({
     valid: true, nodePath: null, nodeOptionsPresent: false, nodeVersion: process.versions.node,
   })
+
+  writePackage(join(profile, 'node_modules'), 'required-plugin', {
+    peerDependencies: { [peer]: '^1.0.0' },
+  })
+  const required = run({ ...environment, NODE_PATH: runnerModules }, 'required-plugin')
+  expect(required.error).toBeUndefined()
+  expect(required.signal).toBeNull()
+  expect(required.status).toBe(1)
+  expect(required.stdout).toContain(`required-plugin resolves ${peer} outside its owned packages`)
 
   writePackage(join(profile, 'node_modules'), peer)
   const privatePeer = run({ ...environment, NODE_PATH: runnerModules })

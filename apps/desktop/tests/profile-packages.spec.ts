@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { lstatSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -91,6 +91,52 @@ it('rejects an ancestor React peer even when React is a Client external', () => 
   })
   expect(() => { validateDesktopPluginGraph(profile, dsh, runtime, ['plugin']) })
     .toThrow('plugin resolves react outside its owned packages')
+})
+it('treats an ancestor optional peer as absent without weakening required package ownership', () => {
+  const root = mkdtempSync(join(tmpdir(), 'desktop-profile-ancestor-'))
+  roots.push(root)
+  const dsh = join(root, 'dsh')
+  const runtime = runtimeFixture(dsh)
+  const profile = join(root, '.dsh', 'profiles', 'desktop')
+  createPluginProfile(profile)
+  linkDesktopHostPackages(profile, dsh, runtime)
+  writePackage(join(profile, 'node_modules'), 'dsh-github-copilot', {
+    dependencies: { '@earendil-works/pi-ai': '0.85.1' },
+  })
+  const adapter = writePackage(join(profile, 'node_modules'), '@earendil-works/pi-ai', {
+    dependencies: { '@google/genai': '1.52.0' },
+  })
+  writePackage(join(profile, 'node_modules'), '@google/genai', {
+    peerDependencies: { '@modelcontextprotocol/sdk': '^1.0.0' },
+    peerDependenciesMeta: { '@modelcontextprotocol/sdk': { optional: true } },
+  })
+  const legacy = writePackage(join(root, 'legacy'), '@modelcontextprotocol/sdk')
+  mkdirSync(join(root, '.dsh', 'profiles', 'node_modules', '@modelcontextprotocol'), { recursive: true })
+  symlinkSync(
+    legacy,
+    join(root, '.dsh', 'profiles', 'node_modules', '@modelcontextprotocol', 'sdk'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  )
+  expect(() => { validateDesktopPluginGraph(profile, dsh, runtime, ['dsh-github-copilot']) }).not.toThrow()
+  writeFileSync(join(adapter, 'package.json'), JSON.stringify({
+    name: '@earendil-works/pi-ai',
+    version: '0.85.1',
+    dependencies: { '@google/genai': '1.52.0', '@modelcontextprotocol/sdk': '^1.0.0' },
+  }))
+  expect(() => { validateDesktopPluginGraph(profile, dsh, runtime, ['dsh-github-copilot']) })
+    .toThrow('@earendil-works/pi-ai resolves @modelcontextprotocol/sdk outside its owned packages')
+  writeFileSync(join(adapter, 'package.json'), JSON.stringify({
+    name: '@earendil-works/pi-ai',
+    version: '0.85.1',
+    dependencies: { '@google/genai': '1.52.0' },
+  }))
+  writeFileSync(join(profile, 'node_modules', '@google', 'genai', 'package.json'), JSON.stringify({
+    name: '@google/genai',
+    version: '1.0.0',
+    peerDependencies: { '@modelcontextprotocol/sdk': '^1.0.0' },
+  }))
+  expect(() => { validateDesktopPluginGraph(profile, dsh, runtime, ['dsh-github-copilot']) })
+    .toThrow('@google/genai resolves @modelcontextprotocol/sdk outside its owned packages')
 })
 it('keeps Client-only externals outside the Node dependency graph', () => {
   const { dsh, runtime, profile } = fixture()

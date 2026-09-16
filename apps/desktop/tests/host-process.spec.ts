@@ -1,8 +1,10 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DesktopHostProcess } from '../src/host-process.ts'
+import { writePackage } from './runtime-fixture.ts'
 
 const roots: string[] = []
 
@@ -66,6 +68,10 @@ function projectWithHost(source: string): string {
   const packageRoot = join(project, 'node_modules', '@deepseek-ai', 'dsh-desktop-host')
   mkdirSync(join(packageRoot, 'lib'), { recursive: true })
   writeFileSync(join(packageRoot, 'package.json'), '{"name":"@deepseek-ai/dsh-desktop-host","type":"module"}\n')
+  copyFileSync(
+    resolve(import.meta.dirname, '..', '..', 'desktop-host', 'register-module-resolution-policy.mjs'),
+    join(packageRoot, 'register-module-resolution-policy.mjs'),
+  )
   writeFileSync(join(packageRoot, 'lib', 'index.js'), `${HOST_WIRE}\n${source}`)
   return project
 }
@@ -117,6 +123,72 @@ function onRequestFrame(frame) {
     try {
       const response = await host.fetch(new Request('dsh-app://app/environment'))
       expect(await response.json()).toEqual({ runtime, profile, cwd: realpathSync(profile), runAsNode: '1' })
+    } finally { await host.stop() }
+  })
+
+  it('isolates profile package requests from ancestor modules without blocking shared or workspace files', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desktop-ancestor-policy-'))
+    roots.push(home)
+    const profile = join(home, 'profiles', 'desktop')
+    const workspace = join(home, 'workspace.mjs')
+    writeFileSync(workspace, 'export const marker = "workspace"\n')
+    const ancestor = writePackage(join(home, 'legacy'), '@modelcontextprotocol/sdk', {}, 'export const marker = "ancestor"\n')
+    mkdirSync(join(home, 'profiles', 'node_modules', '@modelcontextprotocol'), { recursive: true })
+    symlinkSync(
+      ancestor,
+      join(home, 'profiles', 'node_modules', '@modelcontextprotocol', 'sdk'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    )
+    const plugin = writePackage(join(profile, 'node_modules'), 'plugin')
+    symlinkSync(
+      ancestor,
+      join(profile, 'node_modules', 'legacy-sdk-alias'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    )
+    writeFileSync(join(plugin, 'esm.mjs'), 'export { marker } from "@modelcontextprotocol/sdk"\n')
+    writeFileSync(join(plugin, 'alias.mjs'), 'export { marker } from "legacy-sdk-alias"\n')
+    writeFileSync(join(plugin, 'cjs.cjs'), 'module.exports = require("@modelcontextprotocol/sdk")\n')
+    writeFileSync(join(plugin, 'builtin.mjs'), 'export { sep } from "node:path"\n')
+    writeFileSync(join(plugin, 'workspace.mjs'), 'export const load = url => import(url)\n')
+
+    const runtime = projectWithHost(`
+import { createRequire } from 'node:module'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+const plugin = join(process.argv[3], 'node_modules', 'plugin')
+async function rejected(path) {
+  try { await import(pathToFileURL(path).href); return null } catch (error) { return error.code }
+}
+const esm = await rejected(join(plugin, 'esm.mjs'))
+const alias = await rejected(join(plugin, 'alias.mjs'))
+let cjs
+try { createRequire(import.meta.url)(join(plugin, 'cjs.cjs')); cjs = null } catch (error) { cjs = error.code }
+const builtin = await import(pathToFileURL(join(plugin, 'builtin.mjs')).href)
+const shared = await import(pathToFileURL(join(plugin, 'shared.mjs')).href)
+const loader = await import(pathToFileURL(join(plugin, 'workspace.mjs')).href)
+const workspace = await loader.load(${JSON.stringify(pathToFileURL(workspace).href)})
+process.send({ type: 'ready', protocolVersion: 3, dshVersion: 'isolated-resolution' })
+function onRequestFrame(frame) {
+  if (frame.type !== 1) return
+  responseStart(frame.streamId)
+  responseData(frame.streamId, JSON.stringify({ esm, alias, cjs, builtin: builtin.sep, shared: shared.marker, workspace: workspace.marker }))
+  responseEnd(frame.streamId)
+}
+`)
+    const shared = writePackage(join(runtime, 'node_modules'), 'shared-peer', {}, 'export const marker = "runtime"\n')
+    symlinkSync(shared, join(profile, 'node_modules', 'shared-peer'), process.platform === 'win32' ? 'junction' : 'dir')
+    writeFileSync(join(plugin, 'shared.mjs'), 'export { marker } from "shared-peer"\n')
+    const host = new DesktopHostProcess(process.execPath, runtime, profile)
+    try {
+      const response = await host.fetch(new Request('dsh-app://app/resolution'))
+      expect(await response.json()).toEqual({
+        esm: 'ERR_MODULE_NOT_FOUND',
+        alias: 'ERR_MODULE_NOT_FOUND',
+        cjs: 'MODULE_NOT_FOUND',
+        builtin: process.platform === 'win32' ? '\\' : '/',
+        shared: 'runtime',
+        workspace: 'workspace',
+      })
     } finally { await host.stop() }
   })
 

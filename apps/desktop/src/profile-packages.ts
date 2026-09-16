@@ -252,6 +252,7 @@ export function validateDesktopPluginGraph(
       if (target === undefined && optional) continue
       if (target === undefined) throw new Error(`desktop profile: ${chain} requires missing ${name}@${range}`)
       if (!inside(profileRoot, target)) {
+        if (peer && optional) continue
         throw new Error(`desktop profile: ${chain} resolves ${name} outside its owned packages`)
       }
       const dependency = manifest(target)
