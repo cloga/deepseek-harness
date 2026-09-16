@@ -44,6 +44,8 @@ provider      dsh-fs-local      local implementation of ctx.fs
 - 「该所有者最近观测到了什么？」是 `dsh-fs-observation-policy` 在本地决定的唯一事项——一次 `WeakMap` 查找，无 I/O。无记录表示未见；缺失记录只允许带防护的创建；存在记录携带替换/编辑基准。
 - 「版本是否仍然有效，或者创建目标是否仍然缺失？」由**提供方的原子变更边界内部**决定。`dsh-fs-observation-policy` 提供 `replaceIfVersion` 或 `createIfAbsent`；对于已经变化的版本，提供方抛出 `FS_STALE_VERSION`；带防护的创建若败给另一个创建者，则抛出 `FS_NOT_OBSERVED`。
 
+本地提供方的版本令牌组合设备、inode、大小和纳秒级 mtime，并在 POSIX 上使用 ctime、在 Windows 上使用 birthtime。NTFS 可能在一次成功读取期间推进 ctime，因此在 Windows 上使用它会使读取前记录的版本立即陈旧，即使没有写入者改动文件。原子替换仍会改变文件身份，普通内容重写也会改变大小或 mtime。
+
 这是有意为之的。如果 `dsh-fs-observation-policy` 在其 waterfall（瀑布式事件）处理器中 stat 并比较版本，该检查与工具实际写入之间会存在 TOCTOU 间隙——文件可能在此期间变化，因此该检查只是一个虚假保证，提供方的锁无论如何都要兜底。将版本检查放在提供方的临界区中既无竞态又无额外 `stat`。所以 `dsh-fs-observation-policy` **不做**任何文件系统 I/O；「必须基于最近一次读取」的保证由 CAS *实现*，`dsh-fs-observation-policy` 只负责选择基准（`vObserved`）并对先前观测进行门控。
 
 ## 提供方约定变更：版本守卫变为可选

@@ -161,6 +161,15 @@ describe('stat', () => {
     expect(await versionOf(target)).not.toBe(beforeVersion)
   })
 
+  it.skipIf(process.platform !== 'win32')('keeps the version stable when reading advances NTFS ctime', async () => {
+    await writeFile(join(dir, 'read-stable.txt'), 'content')
+    const target = await fs.resolve('read-stable.txt')
+    const before = await versionOf(target)
+
+    expect(await fs.readText(target)).toBe('content')
+    expect(await versionOf(target)).toBe(before)
+  })
+
   it('honors a pre-aborted signal', async () => {
     await expect(fs.stat(await fs.resolve('a.txt'), AbortSignal.abort())).rejects.toMatchObject({ code: 'FS_ABORTED' })
   })

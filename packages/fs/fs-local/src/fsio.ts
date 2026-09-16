@@ -73,7 +73,8 @@ async function readFileAbortable(absolutePath: string, verb: 'read' | 'edit', si
 
 /** Opaque version token from high-resolution identity and freshness metadata. */
 function versionOf(info: BigIntStats): FsVersion {
-  return FsVersion(`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`)
+  const stableMetadataNs = process.platform === 'win32' ? info.birthtimeNs : info.ctimeNs
+  return FsVersion(`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${stableMetadataNs}`)
 }
 
 /**

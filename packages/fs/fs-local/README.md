@@ -127,7 +127,7 @@ No direct invalidation; the named consumer owns any request-prefix changes.
 These limits define when the local backend is a poor fit or needs special operational care. They are current package constraints, not a general filesystem comparison or a task backlog.
 
 - **`config.cwd` is not a sandbox** — it is a resolution default, not containment: absolute paths and `..` escape it. Enforce containment with a stricter `ctx.fs` backend or a permission plugin on the `tools/execute` waterfall.
-- **Version tokens depend on filesystem metadata** — they combine device, inode, size, nanosecond mtime, and nanosecond ctime; a storage layer that cannot update any of those facts for a rewrite can still defeat the stale guard.
+- **Version tokens depend on filesystem metadata** — they combine device, inode, size, and nanosecond mtime with birth time on Windows or change time elsewhere. Windows excludes change time because NTFS may advance it during a read; a storage layer that preserves every selected fact across a rewrite can still defeat the stale guard.
 - **`editText` holds the whole file (plus the edited copy) in memory** — streaming exists only on the read path.
 - **A sub-limit overwrite still buffers a contextual basis** — `writeText` may retain up to just below `config.diffBasisMaxBytes` of prior text in addition to the caller-owned replacement; the bound does not cap the returned `after` value or the whole-file presentation fallback.
 - **Binary detection is asymmetric** — reads NUL-sample only the first 8192 bytes while edits scan the whole buffer, so a file with a late NUL reads fine but rejects edits.
