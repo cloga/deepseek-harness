@@ -2,10 +2,10 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
-import { _electron as electron, type ElectronApplication } from 'playwright'
+import { _electron as electron, type ElectronApplication, type Page } from 'playwright'
 import { desktopSmokeEnvironment } from '../../scripts/smoke-environment.ts'
 import { parseDesktopForkReleasePlan } from '../../scripts/fork-release.ts'
 import { assertDesktopProvisioningInventory } from '../../src/project-manager.ts'
@@ -43,20 +43,43 @@ writeFileSync(join(home, 'settings.yaml'), 'ui-onboarding:\n  welcomeNoticeVersi
 const environment = desktopSmokeEnvironment(home)
 const userData = join(home, 'electron-user-data')
 const inventories: string[] = []
+const started = performance.now()
+const timeline: { event: string; milliseconds: number }[] = []
+const record = (event: string): void => { timeline.push({ event, milliseconds: performance.now() - started }) }
+const safeDiagnostic = (text: string): string => text
+  .replace(/(https?:\/\/[^?\s"'<>]+)\?[^\s"'<>]*/gu, '$1?[redacted]')
+  .replace(/(authorization:\s*(?:bearer|token)\s+)\S+/giu, '$1[redacted]')
+let stderr = ''
+let stderrTruncated = false
+let page: Page | undefined
 let app: ElectronApplication | undefined
 let failure: unknown
 try {
   for (const phase of ['initial', 'restart'] as const) {
+    record(`${phase}:launch`)
     app = await electron.launch({
       executablePath: application,
       args: [`--user-data-dir=${userData}`],
       env: environment,
       timeout: 120_000,
     })
+    app.process().stderr?.on('data', (chunk: Buffer | string) => {
+      const combined = stderr + chunk.toString()
+      stderrTruncated ||= combined.length > 65_536
+      stderr = combined.slice(-65_536)
+    })
     assert.equal(resolve(await app.evaluate(({ app }) => app.getPath('userData'))), userData)
-    const page = await app.firstWindow()
+    page = await app.firstWindow()
     page.setDefaultTimeout(120_000)
-    await page.waitForURL('dsh-app://app/index.html', { timeout: 300_000 })
+    await page.waitForFunction(() => {
+      const error = document.querySelector<HTMLElement>('#error')
+      return location.href === 'dsh-app://app/index.html'
+        || Boolean(error !== null && !error.hidden && error.textContent?.trim())
+    }, undefined, { timeout: 300_000 })
+    if (page.url() !== 'dsh-app://app/index.html') {
+      throw new Error(`Packaged Desktop startup failed: ${safeDiagnostic(await page.locator('#error').innerText())}`)
+    }
+    record(`${phase}:application`)
     await page.getByRole('button', { name: 'Settings', exact: true }).click()
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
     await settings.getByRole('button', { name: 'Models', exact: true }).click()
@@ -64,6 +87,7 @@ try {
     await account.waitFor({ state: 'visible' })
     const signIn = account.getByRole('button', { name: 'Sign in with GitHub', exact: true })
     await signIn.waitFor({ state: 'visible' })
+    record(`${phase}:account`)
     assert(await signIn.isEnabled(), 'The account must expose a writable device-authorization entry')
     assert.equal(await account.locator('[data-dsh-github-copilot-account-error]').count(), 0)
     await page.screenshot({ path: join(output, `${phase}-models.png`) })
@@ -80,6 +104,8 @@ try {
     }
     await app.close()
     app = undefined
+    page = undefined
+    record(`${phase}:closed`)
   }
   assert.equal(inventories[0], inventories[1], 'Restart must reuse the verified plugin receipts')
   writeFileSync(join(output, 'acceptance.json'), JSON.stringify({
@@ -96,9 +122,36 @@ try {
     realOAuth: false,
     realModelRound: false,
     installerUpgradeVerified: false,
+    timeline,
   }, undefined, 2) + '\n')
 } catch (error) {
   failure = error
+  record('failure')
+  let visibleText: string | undefined
+  let captureError: string | undefined
+  if (page !== undefined && !page.isClosed()) {
+    try {
+      const rawText = await page.locator('body').innerText({ timeout: 5000 })
+      visibleText = safeDiagnostic(rawText)
+      if (rawText === visibleText) {
+        await page.screenshot({ path: join(output, 'failure.png'), timeout: 5000 })
+      } else {
+        captureError = 'Screenshot omitted because visible diagnostics required redaction'
+      }
+    } catch (diagnosticError) {
+      captureError = safeDiagnostic(String(diagnosticError))
+    }
+  }
+  const diagnostic = {
+    error: safeDiagnostic(String(error)), visibleText, captureError,
+    stderrTail: safeDiagnostic(stderr), stderrTruncated, timeline,
+    profileFilesPresent: Object.fromEntries([
+      'package.json', 'desktop-plugin-receipts.json', 'desktop-plugin-provisioning-state.json',
+    ].map(file => [file, existsSync(join(profile, file))])),
+    realOAuth: false, realModelRound: false,
+  }
+  writeFileSync(join(output, 'failure.json'), JSON.stringify(diagnostic, undefined, 2) + '\n')
+  console.error(JSON.stringify(diagnostic))
   throw error
 } finally {
   try {

@@ -96,6 +96,13 @@ describe('CI workflow', () => {
       && isRecord(step.with) && step.with.name === 'desktop-fork-release-${{ steps.plan.outputs.version }}')
     if (!isRecord(upload?.with)) throw new TypeError('Desktop fork release workflow must upload its build artifact')
     expect(upload.with).toMatchObject({ 'retention-days': 7, 'if-no-files-found': 'error' })
+    const diagnostics = steps.find(step => isRecord(step.with)
+      && step.with.name === 'desktop-copilot-acceptance-${{ steps.plan.outputs.version }}')
+    expect(diagnostics?.if).toBe(
+      "${{ !cancelled() && (steps.copilot_acceptance.outcome == 'success' || steps.copilot_acceptance.outcome == 'failure') }}",
+    )
+    expect(steps.find(step => step.id === 'copilot_acceptance')?.['continue-on-error']).toBeUndefined()
+    expect(steps.find(step => step.name === 'Finalize release manifest and receipts')?.if).toBeUndefined()
 
     const publishCondition = "${{ !inputs.rehearsal && github.ref == 'refs/heads/master' }}"
     expect(release.if).toBe(publishCondition)

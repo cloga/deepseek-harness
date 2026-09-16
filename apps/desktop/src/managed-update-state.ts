@@ -5,10 +5,13 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parseDesktopManagedUpdateCapability, type DesktopManagedUpdateCapability } from './managed-update-protocol.ts'
 
-/** Managed mode selected by a packaged build and its last completed sequence. */
+/** Packaged managed-update policy with separate discovery and durable completion sequences. */
 export interface DesktopManagedUpdateConfiguration {
   readonly capability: DesktopManagedUpdateCapability
+  /** Discovery and handoff floor, including the currently packaged release. */
   readonly installedSequence: number
+  /** Sequence verified in the durable completion receipt, or zero when no receipt exists. */
+  readonly completedSequence: number
   readonly operationsRoot: string
   readonly helperBundle: string
   readonly completionPath: string
@@ -63,6 +66,7 @@ export async function loadDesktopManagedUpdateConfiguration(
   return {
     capability,
     installedSequence: Math.max(capability.currentSequence, completedSequence),
+    completedSequence,
     operationsRoot: join(stateRoot, 'operations'),
     helperBundle,
     completionPath: join(stateRoot, 'completion.json'),

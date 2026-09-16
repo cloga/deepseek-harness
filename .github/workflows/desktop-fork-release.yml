@@ -121,12 +121,14 @@ jobs:
         run: pnpm run package:desktop:win:x64:unsigned
 
       - name: Verify packaged Copilot account and restart
+        id: copilot_acceptance
         run: >-
           pnpm exec tsx apps/desktop/tests/fixtures/copilot-release-smoke.ts
           --application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe
           --output dist/desktop-copilot-acceptance
 
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && (steps.copilot_acceptance.outcome == 'success' || steps.copilot_acceptance.outcome == 'failure') }}
         with:
           name: desktop-copilot-acceptance-${{ steps.plan.outputs.version }}
           path: dist/desktop-copilot-acceptance/*

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import { completeDesktopManagedUpdate } from '../src/managed-update-completion.ts'
+import { loadDesktopManagedUpdateConfiguration } from '../src/managed-update-state.ts'
 import { createPluginProfile } from '../src/project-manager.ts'
 import {
   MANAGED_COMMIT,
@@ -25,11 +26,16 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true })))
 })
 
-const inventories = ['valid', 'missing-state', 'required-valid', 'required-artifact-drift'] as const
+const inventories = [
+  'valid', 'missing-state', 'required-valid', 'required-artifact-drift',
+  'required-receipt-drift', 'required-first-install', 'required-already-higher',
+] as const
 it.each(inventories)('requires active inventory before completion: %s', async (inventory) => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-managed-completion-'))
   roots.push(root)
-  const operation = join(root, 'operations', 'a'.repeat(64), 'stage')
+  const userData = join(root, 'user-data')
+  const operationsRoot = join(userData, 'managed-update', 'operations')
+  const operation = join(operationsRoot, 'a'.repeat(64), 'stage')
   await mkdir(operation, { recursive: true })
   const executable = Buffer.from('desktop')
   const runtime = Buffer.from('runtime')
@@ -103,6 +109,9 @@ it.each(inventories)('requires active inventory before completion: %s', async (i
       composition: 'active', plugins: results, removed: [], rolledBack: false, verified: true,
     }))
   }
+  if (inventory === 'required-receipt-drift') {
+    await writeFile(join(profile, 'desktop-plugin-receipts.json'), JSON.stringify({ schemaVersion: 1, receipts: {} }))
+  }
   const manifest = managedManifest({
     version, sequence, upstreamVersion: required ? '0.1.5-rc.2' : '1.2.2',
     source: {
@@ -136,29 +145,58 @@ it.each(inventories)('requires active inventory before completion: %s', async (i
     sequence,
     installedEvidence: manifest.installedEvidence,
   }))
-  const completionPath = join(root, 'completion.json')
+  const resources = join(root, 'resources')
+  await mkdir(join(resources, 'managed-update'), { recursive: true })
+  await writeFile(join(resources, 'managed-update', 'helper.mjs'), 'export {}\n')
+  await writeFile(join(resources, 'managed-update', 'capability.json'), JSON.stringify(managedCapability({
+    currentSequence: sequence,
+    provisioning: {
+      capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+      planSha256: desktopPluginProvisioningPlanSha256(provisioning),
+    },
+  })))
+  const completionPath = join(userData, 'managed-update', 'completion.json')
+  const previousSequence = inventory === 'required-first-install' ? 0
+    : inventory === 'required-already-higher' ? 4 : sequence - 1
+  if (previousSequence > 0) {
+    await writeFile(completionPath, JSON.stringify({
+      schemaVersion: 1, status: 'complete', sequence: previousSequence, manifestSha256: 'f'.repeat(64),
+    }))
+  }
+  const configuration = await loadDesktopManagedUpdateConfiguration(resources, userData, 'win32')
+  if (configuration === undefined) throw new Error('Fixture must select managed updates')
+  expect(configuration.installedSequence).toBe(Math.max(sequence, previousSequence))
+  expect(configuration.completedSequence).toBe(previousSequence)
   const result = await completeDesktopManagedUpdate(
-    join(root, 'operations'),
+    configuration.operationsRoot,
     completionPath,
-    managedCapability({
-      currentSequence: sequence,
-      provisioning: {
-        capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
-        planSha256: desktopPluginProvisioningPlanSha256(provisioning),
-      },
-    }),
-    sequence - 1,
+    configuration.capability,
+    configuration.completedSequence,
     executablePath,
     runtimePath,
     provisioningPath,
     profile,
   )
-  if (inventory === 'valid' || inventory === 'required-valid') {
+  if (inventory === 'valid' || inventory === 'required-valid' || inventory === 'required-first-install') {
     expect(result).toEqual({ status: 'complete', sequence, version })
     expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({ status: 'complete', sequence })
+    const completedBytes = await readFile(completionPath, 'utf8')
+    const restarted = await loadDesktopManagedUpdateConfiguration(resources, userData, 'win32')
+    if (restarted === undefined) throw new Error('Restart must retain managed updates')
+    expect(restarted.completedSequence).toBe(sequence)
+    await expect(completeDesktopManagedUpdate(
+      restarted.operationsRoot, restarted.completionPath, restarted.capability, restarted.completedSequence,
+      executablePath, runtimePath, provisioningPath, profile,
+    )).resolves.toEqual({ status: 'none' })
+    expect(await readFile(completionPath, 'utf8')).toBe(completedBytes)
+  } else if (inventory === 'required-already-higher') {
+    expect(result).toEqual({ status: 'none' })
+    expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({ status: 'complete', sequence: 4 })
   } else {
     expect(result.status).toBe('recovery-required')
-    await expect(readFile(completionPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({
+      status: 'complete', sequence: previousSequence,
+    })
   }
 })
 

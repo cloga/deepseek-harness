@@ -176,6 +176,7 @@ vi.mock('../src/managed-update-state.ts', () => ({
         minimumSequence: 2,
       },
       installedSequence: 2,
+      completedSequence: 1,
       operationsRoot: 'desktop-test-operations',
       completionPath: 'desktop-test-completion.json',
       helperBundle: 'desktop-test-helper.mjs',
@@ -265,6 +266,7 @@ describe('desktop main startup', () => {
       host.ready.resolve()
       await harness.navigated.promise
       expect(harness.completeUpdate).toHaveBeenCalledOnce()
+      expect(harness.completeUpdate.mock.calls[0]?.[3]).toBe(1)
       expect(harness.completeUpdate.mock.calls[0]?.at(-1)).toBe('desktop-test-profile')
     }
   })
