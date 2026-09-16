@@ -61,19 +61,23 @@ describe('desktop package-set selection', () => {
     ]))).toThrow(/omit @deepseek-ai\/dsh-desktop-host/u)
   })
 
-  it('requires the Desktop Host entry and its packaged overlay', () => {
+  it('requires the Desktop Host entry, resolution policy, and packaged overlay', () => {
     const files = [
       'package/lib/index.js',
+      'package/register-module-resolution-policy.mjs',
       'package/config/desktop.cordis.patch.yml',
     ]
     expect(() => {
       assertDesktopHostPackageFiles(files)
     }).not.toThrow()
     expect(() => {
-      assertDesktopHostPackageFiles(files.slice(0, 1))
+      assertDesktopHostPackageFiles(files.filter(file => !file.endsWith('desktop.cordis.patch.yml')))
     }).toThrow(/desktop\.cordis\.patch\.yml/u)
     expect(() => {
-      assertDesktopHostPackageFiles(files.slice(1))
+      assertDesktopHostPackageFiles(files.filter(file => !file.endsWith('lib/index.js')))
     }).toThrow(/lib\/index\.js/u)
+    expect(() => {
+      assertDesktopHostPackageFiles(files.filter(file => !file.endsWith('register-module-resolution-policy.mjs')))
+    }).toThrow(/register-module-resolution-policy\.mjs/u)
   })
 })

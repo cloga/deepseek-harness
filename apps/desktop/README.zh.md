@@ -21,7 +21,7 @@
 
 ## 安装归属
 
-Electron 拥有 `$DSH_HOME/profiles/desktop`。其 `dependencies` 只包含精确版本的 registry 插件或由 receipt 证明的本地 tgz 文件；`dsh.profile.bundles` 包含内置 bundle，后接已启用插件。签名应用从 `resources/dsh` 提供 dsh、私有 Desktop Host 及其生产依赖。共享包链接解析到这些实际目录。宿主与插件在同一个内置上游 Node 进程中执行，使用正常的 realpath 解析；Desktop 不启用 `--preserve-symlinks`。CLI 不能启动或修改此 profile。
+Electron 拥有 `$DSH_HOME/profiles/desktop`。其 `dependencies` 只包含精确版本的 registry 插件或由 receipt 证明的本地 tgz 文件；`dsh.profile.bundles` 包含内置 bundle，后接已启用插件。签名应用从 `resources/dsh` 提供 dsh、私有 Desktop Host 及其生产依赖。共享包链接解析到这些实际目录。宿主与插件在同一个内置上游 Node 进程中执行，使用正常的 realpath 解析；Desktop 不启用 `--preserve-symlinks`。在 profile 组合前，Host 把 profile `node_modules` 下物理模块发起的 bare package 请求限制到该 profile，或打包 runtime 中与 profile link 匹配的 package real path。祖先 package 与未链接的 runtime package 对这些请求不可用，而内置模块及显式 relative、absolute 或 URL file load 保持 Node.js 行为。CLI 不能启动或修改此 profile。
 
 本地启动页提供启动状态和可用恢复操作；加载后的 dsh 渲染进程仅接收桌面协议标记。独立插件窗口接收结构化的列表、锁定来源安装、删除、更新、capability 和更新检查操作；两个渲染进程都无法访问文件系统、原始 Electron IPC、shell、任意下载 URL 或任意 pnpm 参数。
 
