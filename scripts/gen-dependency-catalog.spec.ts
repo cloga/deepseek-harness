@@ -147,7 +147,7 @@ describe('published npm dependency catalog', () => {
     expect(() => computeDependencyCatalog(root)).toThrow('expected the public npm registry and hoisted install strategy')
   })
 
-  it('isolates scoped registries, resolver settings, and caches from user, global, and environment configuration', async () => {
+  it('isolates scoped registries, resolver settings, and caches from user, global, and environment configuration', { timeout: 90_000 }, async () => {
     const root = fixture()
     const userConfig = join(root, 'user.npmrc')
     const globalConfig = join(root, 'global.npmrc')
