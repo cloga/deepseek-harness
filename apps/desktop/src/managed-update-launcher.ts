@@ -4,7 +4,8 @@ import { randomBytes } from 'node:crypto'
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
-import type { ChildProcess } from 'node:child_process'
+import type { ChildProcess, SpawnOptions } from 'node:child_process'
+import { Socket } from 'node:net'
 import type { DesktopManagedUpdateCapability, DesktopManagedUpdateHandoff } from './managed-update-protocol.ts'
 
 /** Fixed inputs owned by the packaged Electron main process. */
@@ -32,7 +33,7 @@ export interface DesktopManagedUpdateAcknowledgement {
 }
 
 interface LaunchOperations {
-  readonly spawn: typeof spawn
+  readonly spawn: (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess
   readonly sleep: (milliseconds: number) => Promise<void>
   readonly now: () => number
   readonly platform: NodeJS.Platform
@@ -63,6 +64,15 @@ const defaultOperations: LaunchOperations = {
 function helperEnvironment(): NodeJS.ProcessEnv {
   const names = ['SystemRoot', 'TEMP', 'TMP', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'HTTPS_PROXY', 'NO_PROXY']
   return Object.fromEntries(names.flatMap(name => process.env[name] === undefined ? [] : [[name, process.env[name]]]))
+}
+
+const STDERR_LIMIT = 16 * 1024
+
+function diagnosticText(text: string, token: string): string {
+  return text.replaceAll(token, '[operation]')
+    .replace(/(https?:\/\/)[^/\s@]+:[^/\s@]+@/giu, '$1[redacted]@')
+    .replace(/(https?:\/\/[^?\s"'<>]+)\?[^\s"'<>]*/gu, '$1?[redacted]')
+    .replace(/((?:authorization|token|password|secret|api[_-]?key)\s*[:=]\s*)(?:bearer\s+)?[^\s"',;]+/giu, '$1[redacted]')
 }
 
 async function readAcknowledgement(
@@ -150,17 +160,25 @@ export async function launchDesktopManagedUpdate(
     cwd: operationRoot,
     detached: true,
     windowsHide: true,
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', 'pipe'],
     env: helperEnvironment(),
   })
-  if (child.pid === undefined) {
-    child.kill()
-    throw new Error('desktop managed update: helper process did not start')
-  }
+  let spawnFailure: Error | undefined
+  child.on('error', (error) => { spawnFailure = error })
   child.unref()
+  let stderr = Buffer.alloc(0)
+  const capture = { truncated: false }
+  child.stderr?.on('data', (chunk: Buffer) => {
+    const combined = Buffer.concat([stderr, chunk])
+    capture.truncated ||= combined.byteLength > STDERR_LIMIT
+    stderr = combined.subarray(Math.max(0, combined.byteLength - STDERR_LIMIT))
+  })
+  if (child.stderr instanceof Socket) child.stderr.unref()
   try {
+    if (child.pid === undefined) throw new Error('desktop managed update: helper process did not start')
     const deadline = operations.now() + 15_000
     for (;;) {
+      if (spawnFailure !== undefined) throw spawnFailure
       const helperPid = await readAcknowledgement(
         join(operationRoot, 'ack.json'),
         token,
@@ -181,14 +199,29 @@ export async function launchDesktopManagedUpdate(
     }
   } catch (error) {
     try {
-      await abandonHelper(operationRoot, token, child, operations)
+      if (child.pid !== undefined) await abandonHelper(operationRoot, token, child, operations)
     } catch (cancellationError) {
       throw new AggregateError(
         [error, cancellationError],
         'desktop managed update: helper handoff failed and cancellation did not complete',
       )
     }
-    throw error
+    child.stderr?.destroy()
+    const diagnosticPath = join(operationRoot, 'helper-startup-error.json')
+    const captured = stderr.toString('utf8')
+    const completeLines = capture.truncated
+      ? (captured.includes('\n') ? captured.slice(captured.indexOf('\n') + 1) : '')
+      : captured
+    await writeFile(diagnosticPath, `${JSON.stringify({
+      schemaVersion: 1,
+      phase: 'before-acknowledgement',
+      exitCode: child.exitCode,
+      reason: diagnosticText(error instanceof Error ? error.message : String(error), token),
+      stderr: diagnosticText(completeLines, token),
+      stderrTruncated: capture.truncated,
+    }, undefined, 2)}\n`, { flag: 'wx', mode: 0o600 })
+    throw new Error(`${diagnosticText(error instanceof Error ? error.message : String(error), token)}; `
+      + 'see helper-startup-error.json in the managed-update operation directory', { cause: error })
   }
 }
 
