@@ -63,6 +63,10 @@ Windows Ops 验证 `resources/managed-update/capability.json` 中的 `desktopNat
 
 Desktop 在启动十秒后自动检查更新。你也可以使用应用菜单中的 **Check for updates**。发现更新后，Desktop 会先要求确认，再下载、验证并打开安装程序；选择 **Later** 不会安装。你无需手动下载安装程序。这是交互式更新，而非无人值守安装：Windows 警告、安装选项与 UAC 仍需你批准。
 
+发现更新、helper acknowledgement、安装完成与经过认证的模型使用是独立检查。复制后的 helper 必须仅凭其 Node 可执行文件与 bundle 启动，才能确认 handoff。确认前失败会保持 Desktop 运行，并在所属 managed-update operation 目录中的 `helper-startup-error.json` 记录有界、脱敏的 stderr。
+
+已发布的 `0.1.5-rc.3.cloga.1` 和 `.cloga.2` helper 包含无法解析的 `semver` import，无法通过失效的 handoff 自我修复。恢复需要通过更新器之外的途径取得较新的已验证 installer。先保存或完成活动工作，明确关闭 Desktop，并验证其精确应用与 Host 进程均已退出，再启动经过 hash 验证的交互式 installer。不要重跑旧 handoff、修改已安装 helper 文件、复制 `node_modules` 或在活动 Desktop profile 中运行 pnpm。Windows 警告与 UAC 仍由用户决定。
+
 包含 `resources/app-update.yml` 的已签名包使用 `electron-updater`，并保留其发布者与平台签名检查。未签名 cloga 包仅在同时携带 `resources/managed-update/capability.json` 与已打包的 `resources/managed-update/helper.mjs` 时选择托管模式；启动会拒绝同时启用两种模式的包。Capability schema 3 固定 `cloga/deepseek-harness`、`dsh-desktop-v` tag 前缀、`release.json` 资产名、包内 sequence、最小 sequence 与规范插件 provisioning plan hash，不接受 URL。一个精确的 `cloga/dsh-windows-ops` manifest 只作为 sequence 为零时的迁移入口。
 
 **Check for updates** 通过固定 GitHub API 仓库列出 release，要求 release 不可变且 tag 锁定 commit，验证 release asset digest，然后检查 manifest schema 3、规范 self-hash、单调 sequence、源码 commit 与 tree、构建输入、fork 身份、installer hash、installed evidence、网络策略、交互式 completion 策略，以及通用 `desktopNativeVerifiedRelease` capability、source-schema 与 receipt-schema 兼容性。Schema 3 保留 `automaticProvisioning: false`，使现有 0.1.5 Desktop 客户端仍能解析并安装该 release；已安装 capability 与 build receipt 负责该 release 的启动 provisioning 证据。包内 sequence 防止企业部署后的 release 选择自身，已完成 sequence 防止回滚。Renderer 消息不能提供 repository、URL、executable、process id、path 或 installer argument。
@@ -196,6 +200,8 @@ pnpm run package:desktop:win:x64:unsigned
 在 finalization 前，[打包 Copilot 验收](tests/fixtures/copilot-release-smoke.ts) 使用全新的 Harness 与 Electron 数据目录启动 unpacked Electron 应用。它要求真实 Settings > Models 账户、登录入口与 Manage 面板可见，验证已安装插件依赖图和 provisioning 清单，并在退出后重新启动时重复这些观察。独立的七天 workflow artifact 记录截图、receipt、打包 runtime/capability/plan 记录、可执行文件元数据与精确源码身份。失败运行保留脱敏启动诊断和 receipt/state 是否存在，不保留凭据或 profile 副本。它既不点击登录，也不调用模型。这些检查不证明 OAuth 成功、模型可用或旧版本到新版本的 installer 升级；rehearsal artifact 不是不可变 Release。
 
 独立依赖图检查在内置 Node 中运行未修改的 validator，以活动 profile 为工作目录，不继承 `NODE_PATH`、`NODE_OPTIONS` 或 tsx loader。结果绑定同一个运行时 descriptor hash。源码 runner 的查找路径与错误仅用于对比：pnpm/tsx virtual-store 路径不代表应用实际拥有的包。缺失的 optional peer 仍被允许；解析到 profile 之外的 optional peer 仍会报错。
+
+Release workflow 还会把实际打包的 Node 与 helper 复制到无依赖的临时目录。Helper 专用 bundle 包含所有非 builtin 依赖；finalization 拒绝非 builtin 的静态、动态与 CommonJS 模块引用。复制字节 smoke 先在无 handoff 时到达参数验证，再通过有效合成 manifest transport 要求真实 acknowledgement，并在 fixture 进程仍存活时取消。它禁止 receipt/installer 请求，绝不执行 installer。失败会阻止 finalization 与 publication；仅源码 helper 测试不能替代此已打包字节检查。
 
 ### Windows EV 签名
 

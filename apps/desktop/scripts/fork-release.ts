@@ -39,6 +39,7 @@ import {
 } from '../src/plugin-provisioning.ts'
 import { discoverDesktopManagedSourceRelease } from '../src/managed-update-coordinator.ts'
 import { resolveDesktopPackageRegistry } from './desktop-release-environment.mjs'
+import { assertStandaloneDesktopHelper } from './helper-standalone.ts'
 
 const APP_ROOT = resolve(import.meta.dirname, '..')
 const REPOSITORY_ROOT = resolve(APP_ROOT, '..', '..')
@@ -283,10 +284,6 @@ function assertUnsignedInstaller(path: string): void {
   if (status !== 'NotSigned') throw new Error(`desktop fork release: installer signature status is ${status}`)
 }
 
-function relativeImportPresent(source: string): boolean {
-  return /(?:\bfrom\s*|\bimport\s*\()\s*['"]\.\.?\//u.test(source)
-}
-
 /**
  * Finalize installer, receipt, manifest, and checksum assets after unsigned packaging.
  * Reject inconsistent reviewed, input, packaged, or published identities before writing checksums.
@@ -328,9 +325,7 @@ export function finalizeDesktopForkRelease(
     throw new Error('desktop fork release: native app-update.yml must not accompany managed mode')
   }
   const helperBytes = readFileSync(helperPath)
-  if (relativeImportPresent(helperBytes.toString('utf8'))) {
-    throw new Error('desktop fork release: standalone helper contains a relative import')
-  }
+  assertStandaloneDesktopHelper(helperBytes.toString('utf8'))
   const inputCapability = parseDesktopManagedUpdateCapability(readJson(capabilityPath))
   if (JSON.stringify(inputCapability) !== JSON.stringify(capability)) {
     throw new Error('desktop fork release: input capability does not match the reviewed release plan')

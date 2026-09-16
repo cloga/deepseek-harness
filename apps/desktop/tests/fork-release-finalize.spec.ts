@@ -143,6 +143,14 @@ afterEach(() => {
 })
 
 describe('Desktop fork release finalization identities', () => {
+  it.each(['import "semver";', 'export { value } from "./chunk.mjs";'])(
+    'rejects packaged external dependencies before release finalization: %s', (source) => {
+      const f = fixture()
+      writeFileSync(join(dirname(f.packagedCapability), 'helper.mjs'), source)
+      expect(f.finalize).toThrow(/nonbuiltin external/u)
+      expect(existsSync(f.output)).toBe(false)
+    },
+  )
   it('binds the published plan and receipt hashes to the packaged bytes', () => {
     const f = fixture()
     writeFileSync(f.packagedProvisioning, JSON.stringify(f.plan.desktopProvisioning))
