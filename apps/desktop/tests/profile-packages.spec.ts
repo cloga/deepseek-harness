@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -57,12 +58,23 @@ it('rejects incompatible peers only when the plugin is enabled', () => {
 })
 it('does not satisfy a required Node peer through a Client external declaration', () => {
   const { dsh, runtime, profile } = fixture()
+  const external = `desktop-client-external-${randomUUID()}`
+  writePackage(join(profile, 'node_modules'), 'plugin', {
+    peerDependencies: { [external]: '1.0.0' },
+    dsh: { client: { external: [external] } },
+  })
+  expect(() => { validateDesktopPluginGraph(profile, dsh, runtime, ['plugin']) })
+    .toThrow(`plugin requires missing ${external}@1.0.0`)
+})
+it('rejects an ancestor React peer even when React is a Client external', () => {
+  const { root, dsh, runtime, profile } = fixture()
+  writePackage(join(root, 'node_modules'), 'react', { version: '18.3.1' })
   writePackage(join(profile, 'node_modules'), 'plugin', {
     peerDependencies: { react: '^18.2.0' },
     dsh: { client: { external: ['react'] } },
   })
   expect(() => { validateDesktopPluginGraph(profile, dsh, runtime, ['plugin']) })
-    .toThrow('plugin requires missing react@^18.2.0')
+    .toThrow('plugin resolves react outside its owned packages')
 })
 it('keeps Client-only externals outside the Node dependency graph', () => {
   const { dsh, runtime, profile } = fixture()
