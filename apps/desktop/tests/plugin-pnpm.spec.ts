@@ -3,14 +3,25 @@ import { execFile, execFileSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { load } from 'js-yaml'
 import { c } from 'tar'
 import { expect, it } from 'vitest'
 import { DesktopProjectManager, type DesktopProjectHooks } from '../src/project-manager.ts'
 import type { DesktopPluginProvisioningEntry } from '../src/plugin-provisioning.ts'
 import { resolveDesktopPaths } from '../src/paths.ts'
 import { runtimeFixture, writePackage } from './runtime-fixture.ts'
+
+interface FixturePnpmLock {
+  readonly importers: Record<string, {
+    readonly dependencies?: Record<string, { readonly specifier: string; readonly version: string }>
+  }>
+  readonly packages: Record<string, {
+    readonly version: string
+    readonly resolution: { readonly integrity: string; readonly tarball: string }
+  }>
+}
 
 it.each(['activate', 'health-failure', 'activation-failure'] as const)(
   'preserves real pnpm verified file provenance through %s',
@@ -65,6 +76,33 @@ it.each(['activate', 'health-failure', 'activation-failure'] as const)(
       })
       await manager.applyRelease()
       const before = readFileSync(join(manager.paths.profile, 'package.json'), 'utf8')
+      const verifyPrivateArtifact = (): void => {
+        const profile = manager.paths.profile
+        const artifactPath = join(profile, '.desktop-plugin-artifacts', `${sha256}.tgz`)
+        expect(createHash('sha256').update(readFileSync(artifactPath)).digest('hex')).toBe(sha256)
+        const installed = realpathSync(join(profile, 'node_modules', name))
+        expect(installed.startsWith(realpathSync(profile) + sep)).toBe(true)
+        expect(readFileSync(join(installed, 'index.js'), 'utf8')).toBe(readFileSync(join(packageDir, 'index.js'), 'utf8'))
+        const lock = load(readFileSync(join(profile, 'pnpm-lock.yaml'), 'utf8')) as FixturePnpmLock
+        const entries = Object.values(lock.importers).flatMap(importer => (
+          importer.dependencies?.[name] === undefined ? [] : [importer.dependencies[name]]
+        ))
+        expect(entries).toHaveLength(1)
+        const entry = entries[0]
+        if (entry === undefined) throw new Error('fixture lock has no installed dependency')
+        expect(entry.specifier.startsWith('file:')).toBe(true)
+        // Windows pnpm can serialize backslashes and a relocated, non-dot importer key.
+        for (const specifier of new Set([entry.specifier, entry.specifier.replaceAll('/', '\\')])) {
+          const resolved = resolve(profile, specifier.slice('file:'.length).replaceAll('\\', '/'))
+          expect(realpathSync(resolved)).toBe(realpathSync(artifactPath))
+        }
+        const locked = lock.packages[`${name}@${entry.version}`]
+        if (locked === undefined) throw new Error('fixture lock has no matching package resolution')
+        expect(locked.version).toBe(source.version)
+        expect(locked.resolution.integrity).toBe(`sha512-${createHash('sha512').update(bytes).digest('base64')}`)
+        expect(locked.resolution.tarball.startsWith('file:')).toBe(true)
+        expect(basename(locked.resolution.tarball.slice('file:'.length).replaceAll('\\', '/'))).toBe(`${sha256}.tgz`)
+      }
       let starts = 0
       const pending = manager.reconcileProvisioning({
         schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source }],
@@ -81,7 +119,7 @@ it.each(['activate', 'health-failure', 'activation-failure'] as const)(
           dependencies: Record<string, string>
         }
         expect(manifest.dependencies[name]).toBe(`file:.desktop-plugin-artifacts/${sha256}.tgz`)
-        expect(readFileSync(join(manager.paths.profile, 'pnpm-lock.yaml'), 'utf8')).toContain(`file:.desktop-plugin-artifacts/${sha256}.tgz`)
+        verifyPrivateArtifact()
         const previousSha256 = sha256
         writeFileSync(join(packageDir, 'index.js'), 'export const replacement = true\n')
         await c({ file: artifact, cwd: root, gzip: true }, ['package/package.json', 'package/index.js', 'package/bundle.yml'])
@@ -102,6 +140,7 @@ it.each(['activate', 'health-failure', 'activation-failure'] as const)(
         expect(sha256).not.toBe(previousSha256)
         expect(replacement.plugins[0]?.receipt?.source).toEqual(source)
         expect(manager.listPlugins()).toMatchObject([{ name, version: '1.0.0', enabled: true, source }])
+        verifyPrivateArtifact()
       } else {
         await expect(pending).rejects.toThrow(outcome === 'health-failure' ? 'fixture health rejected' : 'fixture activation rejected')
         expect(readFileSync(join(manager.paths.profile, 'package.json'), 'utf8')).toBe(before)
