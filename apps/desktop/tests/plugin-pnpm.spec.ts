@@ -1,15 +1,120 @@
 import { createHash } from 'node:crypto'
 import { execFile, execFileSync } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { c } from 'tar'
 import { expect, it } from 'vitest'
 import { DesktopProjectManager, type DesktopProjectHooks } from '../src/project-manager.ts'
+import type { DesktopPluginProvisioningEntry } from '../src/plugin-provisioning.ts'
 import { resolveDesktopPaths } from '../src/paths.ts'
 import { runtimeFixture, writePackage } from './runtime-fixture.ts'
+
+it.each(['activate', 'health-failure', 'activation-failure'] as const)(
+  'preserves real pnpm verified file provenance through %s',
+  async (outcome) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'desktop-verified-pnpm-')))
+    const originalFetch = globalThis.fetch
+    try {
+      const name = 'verified-fixture-plugin'
+      const packageDir = writePackage(root, 'package', {
+        name,
+        peerDependencies: { '@deepseek-ai/cordis': '^1.0.0' },
+        dsh: { bundle: { patch: 'bundle.yml' } },
+      })
+      writeFileSync(join(packageDir, 'bundle.yml'), '[]\n')
+      const artifact = join(root, 'plugin.tgz')
+      await c({ file: artifact, cwd: root, gzip: true }, ['package/package.json', 'package/index.js', 'package/bundle.yml'])
+      let bytes = readFileSync(artifact)
+      let sha256 = createHash('sha256').update(bytes).digest('hex')
+      let checksum = Buffer.from(`${sha256}  plugin.tgz\n`)
+      let source: DesktopPluginProvisioningEntry['source'] = {
+        schemaVersion: 1, type: 'githubRelease', owner: 'example', repo: name,
+        tag: 'v1.0.0', targetCommit: 'a'.repeat(40),
+        asset: 'plugin.tgz', assetId: 1, packageName: name, version: '1.0.0',
+        size: bytes.length, sha256,
+        checksumManifest: {
+          format: 'sha256sums', asset: 'SHA256SUMS', assetId: 2,
+          url: `https://github.com/example/${name}/releases/download/v1.0.0/SHA256SUMS`,
+          size: checksum.length, sha256: createHash('sha256').update(checksum).digest('hex'),
+        },
+      }
+      globalThis.fetch = async (input) => {
+        const url = new URL(input instanceof Request ? input.url : input)
+        if (url.pathname.endsWith('/releases/tags/v1.0.0')) {
+          return Response.json({
+            id: 3, draft: false, immutable: true, tag_name: source.tag, target_commitish: source.targetCommit,
+            assets: [
+              { id: source.assetId, name: source.asset, state: 'uploaded', size: bytes.length, digest: `sha256:${sha256}` },
+              { id: source.checksumManifest.assetId, name: 'SHA256SUMS', state: 'uploaded', size: checksum.length,
+                browser_download_url: source.checksumManifest.url, digest: `sha256:${source.checksumManifest.sha256}` },
+            ],
+          })
+        }
+        if (url.pathname.endsWith('/git/ref/tags/v1.0.0')) return Response.json({ object: { type: 'commit', sha: source.targetCommit } })
+        if (url.pathname.endsWith(`/releases/assets/${source.assetId}`)) return new Response(Uint8Array.from(bytes))
+        if (url.pathname.endsWith(`/releases/assets/${source.checksumManifest.assetId}`)) return new Response(Uint8Array.from(checksum))
+        throw new Error(`unexpected fixture request ${url.href}`)
+      }
+      const dsh = join(root, 'dsh')
+      runtimeFixture(dsh)
+      const manager = new DesktopProjectManager(resolveDesktopPaths(join(root, '.dsh')), {
+        node: process.execPath, pnpm: join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs'), dsh,
+      })
+      await manager.applyRelease()
+      const before = readFileSync(join(manager.paths.profile, 'package.json'), 'utf8')
+      let starts = 0
+      const pending = manager.reconcileProvisioning({
+        schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source }],
+      }, {
+        beforeChange: async () => {},
+        healthCheck: async () => { if (outcome === 'health-failure') throw new Error('fixture health rejected') },
+        afterChange: async () => { if (++starts === 1 && outcome === 'activation-failure') throw new Error('fixture activation rejected') },
+      })
+      if (outcome === 'activate') {
+        const state = await pending
+        expect(state.plugins[0]?.receipt?.source).toEqual(source)
+        expect(manager.listPlugins()).toMatchObject([{ name, version: '1.0.0', enabled: true, source }])
+        const manifest = JSON.parse(readFileSync(join(manager.paths.profile, 'package.json'), 'utf8')) as {
+          dependencies: Record<string, string>
+        }
+        expect(manifest.dependencies[name]).toBe(`file:.desktop-plugin-artifacts/${sha256}.tgz`)
+        expect(readFileSync(join(manager.paths.profile, 'pnpm-lock.yaml'), 'utf8')).toContain(`file:.desktop-plugin-artifacts/${sha256}.tgz`)
+        const previousSha256 = sha256
+        writeFileSync(join(packageDir, 'index.js'), 'export const replacement = true\n')
+        await c({ file: artifact, cwd: root, gzip: true }, ['package/package.json', 'package/index.js', 'package/bundle.yml'])
+        bytes = readFileSync(artifact)
+        sha256 = createHash('sha256').update(bytes).digest('hex')
+        checksum = Buffer.from(`${sha256}  plugin.tgz\n`)
+        source = {
+          ...source, owner: 'replacement-owner', assetId: 11, size: bytes.length, sha256,
+          checksumManifest: {
+            ...source.checksumManifest, assetId: 12, size: checksum.length,
+            sha256: createHash('sha256').update(checksum).digest('hex'),
+            url: source.checksumManifest.url.replace('/example/', '/replacement-owner/'),
+          },
+        }
+        const replacement = await manager.reconcileProvisioning({
+          schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source }],
+        }, { beforeChange: async () => {}, healthCheck: async () => {}, afterChange: async () => {} })
+        expect(sha256).not.toBe(previousSha256)
+        expect(replacement.plugins[0]?.receipt?.source).toEqual(source)
+        expect(manager.listPlugins()).toMatchObject([{ name, version: '1.0.0', enabled: true, source }])
+      } else {
+        await expect(pending).rejects.toThrow(outcome === 'health-failure' ? 'fixture health rejected' : 'fixture activation rejected')
+        expect(readFileSync(join(manager.paths.profile, 'package.json'), 'utf8')).toBe(before)
+        expect(manager.listPlugins()).toEqual([])
+        expect(existsSync(join(manager.paths.profile, 'desktop-plugin-receipts.json'))).toBe(false)
+      }
+    } finally {
+      globalThis.fetch = originalFetch
+      rmSync(root, { recursive: true, force: true })
+    }
+  },
+  30_000,
+)
 
 it('installs a real pnpm graph, then executes approved scripts with the shared host instance', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'desktop-real-pnpm-')))

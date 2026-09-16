@@ -352,7 +352,7 @@ function writeProfilePlugins(projectDir: string, plugins: readonly DesktopPlugin
   } satisfies DesktopProjectManifest)
 }
 
-function inspectPlugin(projectDir: string, requestedName: string): DesktopPluginRecord {
+function inspectInstalledPlugin(projectDir: string, requestedName: string): Pick<DesktopPluginRecord, 'name' | 'version'> {
   const manifestPath = join(projectDir, 'node_modules', ...requestedName.split('/'), 'package.json')
   if (!existsSync(manifestPath)) {
     throw new Error(`desktop project: installed package ${JSON.stringify(requestedName)} has no manifest`)
@@ -372,7 +372,14 @@ function inspectPlugin(projectDir: string, requestedName: string): DesktopPlugin
   if ((patchPath !== packageDir && !patchPath.startsWith(packageDir + sep)) || !existsSync(patchPath)) {
     throw new Error(`desktop project: ${requestedName}@${manifest.version} declares an invalid bundle patch`)
   }
-  return { name: requestedName, version: manifest.version, enabled: profilePluginNames(projectDir).includes(requestedName) }
+  return { name: requestedName, version: manifest.version }
+}
+
+function inspectPlugin(projectDir: string, requestedName: string): DesktopPluginRecord {
+  return {
+    ...inspectInstalledPlugin(projectDir, requestedName),
+    enabled: profilePluginNames(projectDir).includes(requestedName),
+  }
 }
 
 /** Stages private package graphs and retains the old profile until final Host readiness. */
@@ -494,6 +501,24 @@ export class DesktopProjectManager {
     validateDesktopPluginGraph(projectDir, this.runtime.dsh, runtime, profilePluginNames(projectDir))
   }
 
+  private profileMatchesRuntime(projectDir: string): boolean {
+    const target = this.currentRuntime()
+    const previous = readDesktopProfileState(projectDir)
+    return !existsSync(this.pendingPackages(projectDir))
+      && previous?.runtimeId === desktopRuntimeId(target)
+      && previous.lockHash === desktopPluginLockHash(projectDir)
+      && previous.links.length === target.sharedPackages.length
+      && previous.links.every((link) => {
+        const actual = join(projectDir, 'node_modules', link.name)
+        const expected = join(this.runtime.dsh, 'node_modules', link.name)
+        return target.sharedPackages.some(entry => entry.name === link.name)
+          && existsSync(link.target) && existsSync(actual) && existsSync(expected)
+          && lstatSync(actual).isSymbolicLink()
+          && realpathSync.native(link.target) === realpathSync.native(expected)
+          && realpathSync.native(actual) === realpathSync.native(expected)
+      })
+  }
+
   /**
    * Stage the target runtime and desired plugins together.
    * @param hooks - Staged and final-location Host readiness checks.
@@ -508,14 +533,7 @@ export class DesktopProjectManager {
       const target = this.readRuntime()
       this.descriptor = target
       const previous = readDesktopProfileState(this.paths.profile)
-      if (!existsSync(this.pendingPackages(this.paths.profile)) && previous?.runtimeId === desktopRuntimeId(target)
-        && previous.lockHash === desktopPluginLockHash(this.paths.profile)
-        && previous.links.length === target.sharedPackages.length
-        && previous.links.every(link => existsSync(link.target)
-          && existsSync(join(this.paths.profile, 'node_modules', link.name))
-          && realpathSync.native(link.target) === realpathSync.native(join(this.runtime.dsh, 'node_modules', link.name)))) {
-        return false
-      }
+      if (this.profileMatchesRuntime(this.paths.profile)) return false
       if (previous === undefined) createPluginProfile(this.paths.profile)
       return true
     })
@@ -669,9 +687,7 @@ export class DesktopProjectManager {
     const path = join(this.paths.profile, DESKTOP_PLUGIN_PROVISIONING_STATE_FILE)
     if (existsSync(path)) {
       const state = parseDesktopPluginProvisioningState(readJson(path))
-      if (readDesktopProfileState(this.paths.profile)?.runtimeId === desktopRuntimeId(this.currentRuntime())
-        && !existsSync(this.pendingPackages(this.paths.profile))
-        && matchesProvisioning(this.paths.profile, plan, state)) {
+      if (this.profileMatchesRuntime(this.paths.profile) && matchesProvisioning(this.paths.profile, plan, state)) {
         return state
       }
     }
@@ -729,7 +745,7 @@ export class DesktopProjectManager {
       source.dependencyRegistry ?? DESKTOP_REGISTRY,
       1,
     )
-    const installed = inspectPlugin(projectDir, source.packageName)
+    const installed = inspectInstalledPlugin(projectDir, source.packageName)
     if (installed.version !== source.version) {
       throw new Error('desktop project: installed verified package version does not match the source lock')
     }

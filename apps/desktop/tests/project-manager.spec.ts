@@ -174,7 +174,7 @@ if (command !== 'rebuild') {
       addedArtifact = installed
       const failure = ${JSON.stringify(join(root, 'fail-package'))}
       if (existsSync(failure) && readFileSync(failure, 'utf8') === installed.name) throw new Error('fixture package install failed')
-      manifest.dependencies[installed.name] = installed.version
+      manifest.dependencies[installed.name] = 'file:' + spec.slice(2)
     } else {
       const index = spec.lastIndexOf('@')
       const name = index > 0 ? spec.slice(0, index) : spec
@@ -649,6 +649,42 @@ describe('desktop external plugin profile', () => {
     unlinkSync(join(manager.paths.profile, 'node_modules/@deepseek-ai/cordis'))
     await expect(manager.applyRelease()).resolves.toBe(true)
     expect(calls(root)).toEqual([])
+  })
+
+  it.each([false, true].flatMap(required =>
+    (['missing', 'stale'] as const).map(damage => ({ required, damage })),
+  ))('repairs $damage Host links with required-plan=$required before plan reuse', async ({ required, damage }) => {
+    const { root, manager } = setup()
+    const archive = verifiedPluginArchive()
+    const source = verifiedSource(archive)
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = verifiedFetch(source, archive)
+    try {
+      const plan = { schemaVersion: 1, mode: 'exact', plugins: required ? [{ required: true, source }] : [] }
+      await manager.applyRelease(hooks(), plan)
+      const link = join(manager.paths.profile, 'node_modules', '@deepseek-ai/cordis')
+      const target = realpathSync(join(manager.runtime.dsh, 'node_modules', '@deepseek-ai/cordis'))
+      unlinkSync(link)
+      if (damage === 'stale') {
+        const stale = join(root, 'stale-runtime')
+        runtimeFixture(stale, '0.9.0')
+        symlinkSync(join(stale, 'node_modules', '@deepseek-ai/cordis'), link, process.platform === 'win32' ? 'junction' : 'dir')
+      }
+      const callCount = calls(root).length
+      await expect(manager.applyRelease(hooks({
+        healthCheck: async (projectDir) => {
+          expect(realpathSync(join(projectDir, 'node_modules', '@deepseek-ai/cordis'))).toBe(target)
+        },
+      }), plan)).resolves.toBe(true)
+      expect(existsSync(link)).toBe(true)
+      expect(realpathSync(link)).toBe(target)
+      expect(calls(root).slice(callCount).every(call => call.project !== manager.paths.profile)).toBe(true)
+      if (!required) expect(calls(root)).toHaveLength(callCount)
+      expect(manager.listPlugins()).toHaveLength(required ? 1 : 0)
+      await expect(manager.applyRelease(hooks(), plan)).resolves.toBe(false)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 
   it.skipIf(process.platform !== 'win32')('reuses the profile when the launch path changes only Windows letter casing', async () => {
