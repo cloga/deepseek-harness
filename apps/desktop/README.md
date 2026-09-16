@@ -191,6 +191,8 @@ The reviewed plan at `release/cloga-windows-x64.json` advances both semantic ver
 
 Each release contains the interactive NSIS installer, `release.json`, `build-receipt.json`, `SHA256SUMS`, and `SHA512SUMS`. The manifest and receipt lock the source commit and tree, lockfile and plan hashes, build tools and dependency registry, fork package identity, installer size and hashes, plugin capability and structured source/receipt versions, allowed origins and redirects, and post-restart completion semantics. The workflow never starts the installer.
 
+Before finalization, [packaged Copilot acceptance](tests/fixtures/copilot-release-smoke.ts) launches the unpacked Electron application with fresh Harness and Electron data directories. It requires the real Settings > Models account, sign-in entry, and Manage panel, validates the installed plugin graph and provisioning inventory, and repeats those observations after quitting and restarting. Its separate seven-day workflow artifact records screenshots, receipts, and exact source identity. It neither clicks sign-in nor calls a model. These checks do not establish OAuth success, model availability, or an old-to-new installer upgrade, and rehearsal artifacts are not immutable Releases.
+
 ### Windows EV signing
 
 Windows packaging fixes the 7-Zip filter to `BCJ` for compatibility with the bundled NSIS decoder. This preserves ARM64 binaries carried by dependencies in x64 installers; automatic ARM64 filtering produces entries that this decoder cannot extract.

@@ -191,6 +191,8 @@ pnpm run package:desktop:win:x64:unsigned
 
 每个 release 包含交互式 NSIS installer、`release.json`、`build-receipt.json`、`SHA256SUMS` 与 `SHA512SUMS`。Manifest 与 receipt 锁定源码 commit 与 tree、lockfile 与 plan hash、构建工具与依赖 registry、fork package identity、installer size 与 hash、插件 capability 与结构化 source/receipt 版本、允许的 origin 与 redirect，以及重启后 completion 语义。Workflow 不会启动 installer。
 
+在 finalization 前，[打包 Copilot 验收](tests/fixtures/copilot-release-smoke.ts) 使用全新的 Harness 与 Electron 数据目录启动 unpacked Electron 应用。它要求真实 Settings > Models 账户、登录入口与 Manage 面板可见，验证已安装插件依赖图和 provisioning 清单，并在退出后重新启动时重复这些观察。独立的七天 workflow artifact 记录截图、receipt 与精确源码身份。它既不点击登录，也不调用模型。这些检查不证明 OAuth 成功、模型可用或旧版本到新版本的 installer 升级；rehearsal artifact 不是不可变 Release。
+
 ### Windows EV 签名
 
 Windows 打包将 7-Zip 过滤器固定为 `BCJ`，以兼容内置的 NSIS 解码器。这样可以保留 x64 安装包中由依赖携带的 ARM64 二进制文件；自动 ARM64 过滤会生成该解码器无法解压的条目。

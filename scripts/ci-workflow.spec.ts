@@ -88,10 +88,12 @@ describe('CI workflow', () => {
       'Verify Desktop release code',
       'Prepare reviewed managed capability',
       'Build unsigned interactive NSIS installer',
+      'Verify packaged Copilot account and restart',
       'Finalize release manifest and receipts',
       'Verify release asset checksums',
     ]))
-    const upload = steps.find(step => step.uses === 'actions/upload-artifact@v4')
+    const upload = steps.find(step => step.uses === 'actions/upload-artifact@v4'
+      && isRecord(step.with) && step.with.name === 'desktop-fork-release-${{ steps.plan.outputs.version }}')
     if (!isRecord(upload?.with)) throw new TypeError('Desktop fork release workflow must upload its build artifact')
     expect(upload.with).toMatchObject({ 'retention-days': 7, 'if-no-files-found': 'error' })
 

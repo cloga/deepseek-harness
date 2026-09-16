@@ -13,7 +13,10 @@ import {
 import {
   DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
   desktopPluginProvisioningPlanSha256,
+  parseDesktopPluginProvisioningPlan,
+  type DesktopPluginProvisioningResult,
 } from '../src/plugin-provisioning.ts'
+import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY } from '../src/plugin-source.ts'
 
 const roots: string[] = []
 const sha256 = (body: Uint8Array): string => createHash('sha256').update(body).digest('hex')
@@ -22,7 +25,8 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true })))
 })
 
-it.each(['valid', 'missing-state'] as const)('requires active inventory before completion: %s', async (inventory) => {
+const inventories = ['valid', 'missing-state', 'required-valid', 'required-artifact-drift'] as const
+it.each(inventories)('requires active inventory before completion: %s', async (inventory) => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-managed-completion-'))
   roots.push(root)
   const operation = join(root, 'operations', 'a'.repeat(64), 'stage')
@@ -32,25 +36,80 @@ it.each(['valid', 'missing-state'] as const)('requires active inventory before c
   const executablePath = join(root, 'DeepSeek Harness.exe')
   const runtimePath = join(root, 'desktop-runtime.json')
   const provisioningPath = join(root, 'desktop-provisioning.json')
-  const provisioning = { schemaVersion: 1 as const, mode: 'exact' as const, plugins: [] }
+  const required = inventory.startsWith('required-')
+  const sequence = required ? 3 : 2
+  const version = required ? '0.1.5-rc.3.cloga.2' : '1.2.3'
+  const artifact = Buffer.from('completion fixture artifact')
+  const provisioning = parseDesktopPluginProvisioningPlan({
+    schemaVersion: 1, mode: 'exact',
+    plugins: required ? [{
+      required: true,
+      source: {
+        schemaVersion: 1, type: 'githubRelease', owner: 'cloga', repo: 'fixture-plugin',
+        tag: 'v1.0.0', asset: 'fixture-plugin.tgz', assetId: 1,
+        packageName: 'fixture-plugin', version: '1.0.0', size: artifact.length,
+        sha256: sha256(artifact), targetCommit: MANAGED_COMMIT,
+        checksumManifest: {
+          format: 'sha256sums', asset: 'SHA256SUMS', assetId: 2,
+          url: 'https://github.com/cloga/fixture-plugin/releases/download/v1.0.0/SHA256SUMS',
+          size: 1, sha256: 'f'.repeat(64),
+        },
+      },
+    }] : [],
+  })
   await writeFile(executablePath, executable)
   await writeFile(runtimePath, runtime)
   await writeFile(provisioningPath, JSON.stringify(provisioning))
   const profile = join(root, 'profile')
   createPluginProfile(profile)
-  if (inventory === 'valid') {
+  const results: DesktopPluginProvisioningResult[] = []
+  if (required) {
+    const source = provisioning.plugins[0]!.source
+    const receipt = {
+      schemaVersion: 1, capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
+      source, releaseId: 1, assetId: source.assetId,
+      packageName: source.packageName, version: source.version, artifactSha256: source.sha256,
+      states: { staged: true, health: 'passed', activated: true, rolledBack: false, verified: true },
+    } as const
+    const artifactDirectory = join(profile, '.desktop-plugin-artifacts')
+    await mkdir(artifactDirectory)
+    await writeFile(join(artifactDirectory, `${source.sha256}.tgz`),
+      inventory === 'required-artifact-drift' ? Buffer.from('changed artifact') : artifact)
+    await writeFile(join(profile, 'desktop-plugin-receipts.json'), JSON.stringify({
+      schemaVersion: 1, receipts: { [source.packageName]: receipt },
+    }))
+    const profileManifest = JSON.parse(await readFile(join(profile, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+      dsh: { profile: { bundles: string[] } }
+    }
+    profileManifest.dependencies[source.packageName] = `file:.desktop-plugin-artifacts/${source.sha256}.tgz`
+    profileManifest.dsh.profile.bundles.push(source.packageName)
+    await writeFile(join(profile, 'package.json'), JSON.stringify(profileManifest))
+    const plugin = join(profile, 'node_modules', source.packageName)
+    await mkdir(plugin, { recursive: true })
+    await writeFile(join(plugin, 'package.json'), JSON.stringify({
+      name: source.packageName, version: source.version, dsh: { bundle: { patch: 'cordis.patch.yml' } },
+    }))
+    await writeFile(join(plugin, 'cordis.patch.yml'), '[]\n')
+    results.push({
+      name: source.packageName, version: source.version, required: true,
+      status: 'active', source, receipt,
+    })
+  }
+  if (inventory !== 'missing-state') {
     await writeFile(join(profile, 'desktop-plugin-provisioning-state.json'), JSON.stringify({
       schemaVersion: 1, capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
       planSha256: desktopPluginProvisioningPlanSha256(provisioning),
-      composition: 'active', plugins: [], removed: [], rolledBack: false, verified: true,
+      composition: 'active', plugins: results, removed: [], rolledBack: false, verified: true,
     }))
   }
   const manifest = managedManifest({
+    version, sequence, upstreamVersion: required ? '0.1.5-rc.2' : '1.2.2',
     source: {
       repository: 'cloga/deepseek-harness',
       commit: MANAGED_COMMIT,
       tree: 'b'.repeat(40),
-      tag: 'dsh-desktop-v1.2.3',
+      tag: `dsh-desktop-v${version}`,
     },
     installer: {
       file: 'installer.exe',
@@ -67,14 +126,14 @@ it.each(['valid', 'missing-state'] as const)('requires active inventory before c
     schemaVersion: 1,
     status: 'installer-exited',
     manifestSha256: manifest.manifestSha256,
-    sequence: 2,
+    sequence,
     installerExitCode: 0,
     pendingCompletion: true,
   }))
   await writeFile(join(operation, 'pending-completion.json'), JSON.stringify({
     schemaVersion: 1,
     manifestSha256: manifest.manifestSha256,
-    sequence: 2,
+    sequence,
     installedEvidence: manifest.installedEvidence,
   }))
   const completionPath = join(root, 'completion.json')
@@ -82,20 +141,21 @@ it.each(['valid', 'missing-state'] as const)('requires active inventory before c
     join(root, 'operations'),
     completionPath,
     managedCapability({
+      currentSequence: sequence,
       provisioning: {
         capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
         planSha256: desktopPluginProvisioningPlanSha256(provisioning),
       },
     }),
-    1,
+    sequence - 1,
     executablePath,
     runtimePath,
     provisioningPath,
     profile,
   )
-  if (inventory === 'valid') {
-    expect(result).toEqual({ status: 'complete', sequence: 2, version: '1.2.3' })
-    expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({ status: 'complete', sequence: 2 })
+  if (inventory === 'valid' || inventory === 'required-valid') {
+    expect(result).toEqual({ status: 'complete', sequence, version })
+    expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({ status: 'complete', sequence })
   } else {
     expect(result.status).toBe('recovery-required')
     await expect(readFile(completionPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
