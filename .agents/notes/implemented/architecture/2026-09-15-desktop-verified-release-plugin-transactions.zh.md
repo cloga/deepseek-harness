@@ -10,17 +10,23 @@ Status: implemented
 
 ## Decision
 
-Desktop 接受版本化的 `githubRelease` 来源，其中锁定仓库所有者、仓库、tag、资产名、包名、包版本、字节大小、SHA-256、SHA-512 integrity、目标 commit 与可选依赖 registry。Desktop 根据这些字段构造 GitHub API 与资产请求。它拒绝可变 Release 选择器、未批准的重定向主机、Release 或 tag commit 不匹配、资产元数据不匹配、归档路径逃逸、逃逸链接、异常归档根目录、包身份不匹配与包生命周期脚本。
+Desktop 接受版本化的 `githubRelease` 来源，其中锁定仓库所有者、仓库、tag、artifact asset id 与名称、包名、包版本、字节大小、SHA-256、可选 SHA-512 integrity、目标 commit、可选依赖 registry 与可选 checksum-manifest 资产。由 Release 拥有的自动 provisioning 要求 checksum manifest。它的 lock 包含精确 asset id、规范 GitHub Release URL、名称、字节大小、SHA-256、`sha256sums` 格式与可选 SHA-512 integrity。Desktop 要求存在且只存在一个匹配的 `<sha256>  <artifact>` 行，并拒绝缺失、重复、格式错误、重命名或不匹配的条目。Desktop 根据 repository 与锁定 asset id 构造 GitHub API 请求。它拒绝可变 Release 选择器、未批准的重定向主机、Release 或 tag commit 不匹配、资产元数据不匹配、归档路径逃逸、逃逸链接、异常归档根目录、包身份不匹配与包生命周期脚本。
 
 根包是经过验证的本地 tgz。内置 pnpm 只通过显式、无凭据的 HTTPS registry 解析其传递依赖，忽略生命周期脚本，使用 Desktop 自有的 store 与配置路径，并且不接收继承的包管理器凭据或 secret 环境变量。普通 npm 来源保持其精确 registry 包行为。
 
-每次插件变更都把活动 profile 复制到私有事务目录，在活动 Host 继续运行时准备完整包依赖图、恢复官方 Host 包链接并验证组合。随后 Desktop 停止活动 Host，针对 staged profile 启动临时 Host，把 staged 目录交换到保留 profile 路径，再启动新 Host。health check 失败会在不修改旧 profile 的情况下重启原 Host。激活失败时，它恢复先前 profile，并在报告失败前重启原 Host。事务锁位于可交换 profile 目录之外。
+每次插件变更只把 profile 元数据和保留 artifact 复制到私有事务中，排除所有 `node_modules` 目录。内置 pnpm 在其中重建私有依赖；应用升级绝不在活动 profile 中安装或 rebuild。目标运行时链接和目标插件清单一起准备，然后验证 peer。每个来源 acquisition 使用独立的独占目录，GitHub 必须明确证明 `immutable: true`。
+
+Desktop 保留旧 profile，直到 staged 健康检查、激活重命名、最终位置 Host ready 与活动清单验证全部完成。外部事务锁和经过 fsync 的 activation journal 标识中断的重命名。恢复在该锁下还原未提交的旧 profile。恢复失败保留 journal 与 rollback 目录，而不删除唯一剩余的旧数据。两次重命名是可恢复操作，并非 crash-atomic 目录交换。
 
 经过验证的安装在版本化 receipt 中持久保存锁定来源、GitHub Release 与资产标识、产物 hash、包身份与事务状态，并在 profile 私有目录中保留本地 tgz。类型化 preload API 暴露 source schema version 1 与 capability `{ id: "desktopNativeVerifiedRelease", schemaVersion: 1 }`，但不暴露自由格式下载 URL。一个事务只接受一种来源路径，因此外部 provisioner 与原生安装器不能同时提供根包。
 
+Desktop release 也可以携带通用的 `desktopNativePluginProvisioning` schema 1 精确状态 plan。启动协调 receipt-owned 插件，同时保留无关的手动 registry 插件和应用拥有的 shared package。Required 条目建立经过验证的基线。Optional 条目在独立 candidate 中测试，因此 download、validation、install、graph 或 health 失败只排除对应条目。其持久结果记录阶段与原因，不包含成功 receipt；required 失败保留先前 profile。
+
+活动 profile 存储规范 plan hash、逐插件 source 与 receipt、required 标记、组合状态、被删除的 receipt-owned 包、rollback 状态和 verification 状态。复用要求 desired/result 成员完全一致，已安装版本、启用状态、receipt 与来源、本地 artifact 字节均匹配，且没有多余 receipt-owned 根包，空 plan 也不例外。托管 completion 在最终位置的 Host ready 后独立验证此清单。Neutral browser 证据证明通用 Models 组合与认证 dispatch，而不是某个外部 provider release。
+
 ## Consumer transition
 
-原生 capability 仅存在于包含此决策的 Desktop 构建中。在经过审核的 lock 从 `windowsOpsVerifiedRelease` 切换为 `desktopNativeVerifiedRelease` schema version 1 之前，Windows Ops 仍负责外部 provisioner。完成切换后可以删除外部根包 workaround；传递依赖仍使用企业 registry。
+Windows Ops 在由源码拥有的 Desktop release plan 中选择插件 lock。受保护的 workflow 嵌入规范化 plan，将它与 installer 一起发布，并在 build receipt 中记录文件 hash 与规范 hash。部署只有在 release 包含该 plan 后才能依赖自动 provisioning。传递依赖继续使用 plan 中无凭据的企业 registry。
 
 ## Alternatives considered
 
@@ -30,6 +36,8 @@ Desktop 接受版本化的 `githubRelease` 来源，其中锁定仓库所有者�
 
 **修改活动 profile 并保留部分失败。** 这种方案占用更少磁盘并避免复制 profile，但无法满足外部 verified 产物的无人值守激活与回滚要求。先前的原地修改决策作为冻结历史记录保留。
 
+**把一个硬编码的 GitHub Copilot 包加入 Desktop。** 这只能解决一个 provider，而 restart、removal、rollback 与未来外部 provider 仍然没有由 Release 拥有的机制。
+
 ## Consequences
 
-插件变更需要足够临时磁盘空间保存完整 profile，而且 pnpm 链接由其他事务路径创建时可能重复准备包。health check 会增加耗时，但可以阻止包、组合与 Host 失败进入活动 profile。测试锁定 Release 元数据、重定向、hash、归档安全、包身份、生命周期脚本拒绝、registry 与凭据隔离、官方 Host 链接、staged health、激活回滚、receipt、capability discovery 与单一来源 provisioning。
+插件变更需要临时磁盘空间并重建包，即使只是兼容运行时升级或 bundle toggle。Required 与 optional 健康检查增加启动工作，但阻止失败 candidate 修改活动依赖图。精确状态删除只作用于 receipt-owned 插件；无关手动插件仍由用户拥有。测试覆盖多来源 checksum acquisition、来源与清单漂移、Host peer 替换/删除、按阶段隔离 optional 失败、最终激活失败、rollback 恢复失败、中断重命名以及拒绝提前 completion。实际不可变 `dsh-github-copilot@0.4.0-alpha.19` artifact 和已安装 unified-0.1.6 的 Models、account、discovery、device-code 行为仍需下游 release owner 提供证据。

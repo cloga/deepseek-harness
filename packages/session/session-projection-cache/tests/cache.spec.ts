@@ -36,7 +36,7 @@ import {
 import SessionProjectionCache from '../src/index.ts'
 import { checkpointRecord, projectionCacheDomainSpec } from '../src/spec.ts'
 import type { CheckpointRecord } from '../src/spec.ts'
-import { projectionDurableObservationOptions } from './durable-observation.ts'
+import { projectionDurableObservationOptions, waitForProjectionCheckpoint } from './durable-observation.ts'
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
@@ -206,15 +206,14 @@ describe('SessionProjectionCache write policy', () => {
     // The interval cannot substitute for the mandatory turn/end trigger.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const id = SessionId('turn-end')
-    const created = whenWritten(ctx, id)
     const session = ctx.sessions.create(id)
     mark(session, ['a'])
-    // The mark is throttled, so the creation cut has no marks folded.
-    await created
+    // Creation already wrote the init cut; the mark is throttled, so the
+    // stored row is still the creation-time cut (no marks folded).
+    await waitForProjectionCheckpoint(ctx.sessionProjectionCache, session, -1)
     expect((await storedRows(root, session.id))?.['cache-test/marks']?.seq).toBe(-1)
-    const written = whenWritten(ctx, id)
     const end = endTurn(session)
-    await written
+    await waitForProjectionCheckpoint(ctx.sessionProjectionCache, session, end.seq)
     expect((await storedRows(root, session.id))?.['cache-test/marks'])
       .toEqual({ ver: 1, seq: end.seq, val: { marks: ['a'] } })
   })
@@ -225,11 +224,14 @@ describe('SessionProjectionCache write policy', () => {
     // conversation follows, yet the creation write must capture the fold so
     // a crash or a live-held fork still lists the derived value.
     const id = SessionId('seeded')
-    const created = whenWritten(ctx, id)
     const session = ctx.sessions.create(id, {
       seed: [{ type: 'cache-test/mark', seq: 0, time: 1, data: { marks: ['seed'] } }] as SessionEvent[],
     })
-    await created
+    await waitForProjectionCheckpoint(
+      ctx.sessionProjectionCache,
+      session,
+      snapshot => snapshot?.values['cache-test/marks']?.marks[0] === 'seed',
+    )
     expect((await storedRows(root, session.id))?.['cache-test/marks']?.val)
       .toEqual({ marks: ['seed'] })
   })
@@ -238,36 +240,32 @@ describe('SessionProjectionCache write policy', () => {
     const { ctx, root } = await harness()
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const id = SessionId('detach')
-    const created = whenWritten(ctx, id)
     // Sessions dispose with their owning fiber: create in a child plugin.
     let session: Session | undefined
     const owner = await ctx.plugin(Object.assign((inner: Context) => {
       session = inner.sessions.create(id)
     }, { inject: ['sessions'] }))
     if (session === undefined) throw new Error('session was not created')
-    await created
-    mark(session, ['live'])
-    const written = whenWritten(ctx, id)
+    const event = mark(session, ['live'])
     await owner.dispose()
-    await written
-    expect((await storedRows(root, id))?.['cache-test/marks']?.val).toEqual({ marks: ['live'] })
+    const detached = session
+    await waitForProjectionCheckpoint(ctx.sessionProjectionCache, detached, event.seq)
+    expect((await storedRows(root, detached.id))?.['cache-test/marks']?.val).toEqual({ marks: ['live'] })
   })
 
   it('flushes when the in-turn event count reaches the configured threshold', async () => {
     const { ctx, root } = await harness({ config: { writeEveryEvents: 3, writeIntervalMs: 60_000 } })
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const id = SessionId('count')
-    const created = whenWritten(ctx, id)
     const session = ctx.sessions.create(id)
     mark(session, ['1'])
     mark(session, ['2'])
-    await created
-    expect((await storedRows(root, id))?.['cache-test/marks'])
+    await waitForProjectionCheckpoint(ctx.sessionProjectionCache, session, -1)
+    expect((await storedRows(root, session.id))?.['cache-test/marks'])
       .toEqual({ ver: 1, seq: -1, val: null }) // still the creation cut
-    const written = whenWritten(ctx, id)
-    mark(session, ['3'])
-    await written
-    expect((await storedRows(root, id))?.['cache-test/marks']?.val).toEqual({ marks: ['3'] })
+    const event = mark(session, ['3'])
+    await waitForProjectionCheckpoint(ctx.sessionProjectionCache, session, event.seq)
+    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['3'] })
   })
 
   it('flushes on the configured interval when the count threshold is not reached', async () => {
@@ -347,9 +345,8 @@ describe('SessionProjectionCache write policy', () => {
     await rm(recordPath(root, session.id), { recursive: true })
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     mark(session, ['y'])
-    const written = whenWritten(ctx, session.id)
-    endTurn(session)
-    await written
+    const end = endTurn(session)
+    await waitForProjectionCheckpoint(ctx.sessionProjectionCache, session, end.seq)
     expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['y'] })
   })
 })

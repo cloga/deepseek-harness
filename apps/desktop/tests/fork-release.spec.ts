@@ -18,6 +18,7 @@ describe('Desktop fork release plan', () => {
   it('defines a monotonic source-owned release after the Windows Ops bridge', () => {
     const plan = parseDesktopForkReleasePlan(planValue())
     expect(plan).toMatchObject({
+      schemaVersion: 2,
       channel: 'cloga-windows-x64',
       version: '0.1.6-alpha.1.cloga.1',
       sequence: 3,
@@ -27,15 +28,64 @@ describe('Desktop fork release plan', () => {
         maximumSequence: 1,
         channelVersion: '0.1.5-rc.2.local.1',
       },
+      desktopProvisioning: {
+        schemaVersion: 1,
+        mode: 'exact',
+        plugins: [{
+          required: true,
+          source: {
+            schemaVersion: 1,
+            type: 'githubRelease',
+            owner: 'cloga',
+            repo: 'dsh-github-copilot',
+            tag: 'v0.4.0-alpha.19',
+            asset: 'dsh-github-copilot-0.4.0-alpha.19.tgz',
+            assetId: 566022628,
+            packageName: 'dsh-github-copilot',
+            version: '0.4.0-alpha.19',
+            size: 541663,
+            sha256: '7bd8f18159227968ba46a252d2ec5b0369be5004b68b5edcf8569bf459b1e15a',
+            integrity: 'sha512-OC4s04kc1yDmY8uVqCaS6d9bCSPHu3WDd9H/gIc6ZJGCyp7cPochVHekUGLZh050yYhoUyGPRkXxX6kadtkAnw==',
+            targetCommit: 'f44fd1b15ba93dad3bea0c498648dab3392788d5',
+            dependencyRegistry: 'https://packagefeedproxy.microsoft.io/npm/',
+            checksumManifest: {
+              format: 'sha256sums',
+              asset: 'SHA256SUMS',
+              assetId: 566022655,
+              url: 'https://github.com/cloga/dsh-github-copilot/releases/download/v0.4.0-alpha.19/SHA256SUMS',
+              size: 104,
+              sha256: 'd38f3ac469384c8d0b5154bcc58f7ace86fe8bade86a5432c981a253dc44770c',
+              integrity: 'sha512-UYdYkddwitxaPNAy/OCgxehRwtbBMq5v7Y5tcUWWiZSwD4ijme8nYomTdiKoMzaHMbYHyMRz1YWfqTeNcSN/cw==',
+            },
+          },
+        }],
+      },
     })
     expect(createDesktopForkReleaseCapability(plan)).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       mode: 'github-release-managed',
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
       currentSequence: 3,
       minimumSequence: 2,
+      provisioning: {
+        capability: { id: 'desktopNativePluginProvisioning' },
+      },
     })
+  })
+
+  it('normalizes the version-neutral schema 1 plan to an empty provisioning inventory', () => {
+    const plan = planValue() as Record<string, unknown>
+    const { desktopProvisioning: _desktopProvisioning, ...legacy } = plan
+    expect(parseDesktopForkReleasePlan({ ...legacy, schemaVersion: 1 })).toMatchObject({
+      schemaVersion: 2,
+      desktopProvisioning: { schemaVersion: 1, mode: 'exact', plugins: [] },
+    })
+  })
+
+  it('rejects unsupported fields in the schema 2 plan', () => {
+    const plan = planValue() as Record<string, unknown>
+    expect(() => parseDesktopForkReleasePlan({ ...plan, unexpected: true })).toThrow(/unsupported fields/u)
   })
 
   it('rejects a fork version or sequence that does not advance the bridge', () => {
@@ -57,7 +107,11 @@ describe('Desktop fork release plan', () => {
     )) as {
       permissions: Record<string, string>
       env: Record<string, string>
-      jobs: Record<string, { permissions?: Record<string, string>; environment?: string }>
+      jobs: Record<string, {
+        permissions?: Record<string, string>
+        environment?: string
+        steps?: Array<{ name?: string; run?: string; env?: Record<string, string> }>
+      }>
     }
     expect(workflow.permissions).toEqual({ contents: 'read' })
     expect(workflow.env).toMatchObject({
@@ -73,5 +127,17 @@ describe('Desktop fork release plan', () => {
       },
     })
     expect(workflow.jobs['remote-check']?.permissions).toEqual({ contents: 'read' })
+    const steps = workflow.jobs.build?.steps ?? []
+    const install = steps.findIndex(step => step.name === 'Install from frozen lockfile')
+    const browser = steps.findIndex(step => step.name === 'Prepare browser for isolated Desktop acceptance')
+    const packaging = steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')
+    expect(install).toBeGreaterThanOrEqual(0)
+    expect(browser).toBeGreaterThan(install)
+    expect(packaging).toBeGreaterThan(browser)
+    expect(steps[browser]).toMatchObject({
+      run: 'node apps/desktop/node_modules/playwright/cli.js install chromium',
+      env: { PLAYWRIGHT_BROWSERS_PATH: '${{ runner.temp }}/desktop-playwright' },
+    })
+    expect(steps[packaging]?.env?.PLAYWRIGHT_BROWSERS_PATH).toBe(steps[browser]?.env?.PLAYWRIGHT_BROWSERS_PATH)
   })
 })

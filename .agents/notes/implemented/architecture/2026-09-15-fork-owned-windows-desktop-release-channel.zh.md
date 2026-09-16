@@ -22,23 +22,23 @@ fork 身份为 `io.github.cloga.deepseek-harness.desktop`，产品为 `DeepSeek 
 
 Manifest schema 3 对规范 JSON 进行 self-hash，并记录源码 repository、commit、tree、tag、upstream version、sequence、workflow path、lockfile hash、plan hash、固定 Node 与 pnpm 版本、依赖物化 registry、fork identities、installer filename、byte size、SHA-256、SHA-512、未签名 Authenticode 状态、build-receipt hashes、已安装 executable 与 runtime hashes、网络策略和交互式重启后 completion 语义。
 
-插件兼容性记录完整的通用 `desktopNativeVerifiedRelease` capability，包括 capability schema 1 与结构化 source 和 receipt schema version 1，并设置 `automaticProvisioning: false`。Release 不点名、内置、锁定、安装或更新任何插件 repository、version 或 artifact。独立插件使用自己的 release，并由用户通过 Desktop UI 按需安装。
+插件兼容性保留 manifest schema 3 对完整通用 `desktopNativeVerifiedRelease` capability 的记录，包括 capability schema 1 与结构化 source 和 receipt schema version 1，并设置 `automaticProvisioning: false`。保持该记录不变，使已安装的 0.1.5 client 能够解析并安装包含 provisioning 实现的 release。
 
-Build receipt 独立 self-hash，并记录相同的 source、build inputs、identity、artifact evidence、helper 与 capability hashes、native-updater exclusion、network policy、installation policy 与通用插件 schema 兼容性。`SHA256SUMS` 与 `SHA512SUMS` 覆盖 installer、manifest 与 receipt。
+经过评审的 release plan schema 2 携带通用精确状态 Desktop 插件 plan；schema 1 会规范化为空 plan，使现有且版本中立的 release 定义仍然可读。Build receipt 独立 self-hash，并记录相同的 source、build inputs、identity、artifact evidence、helper 与 capability hashes、已发布 provisioning plan 的文件 hash 与规范 hash、native-updater exclusion、network policy、installation policy 与通用插件 schema 兼容性。`SHA256SUMS` 与 `SHA512SUMS` 覆盖 installer、provisioning plan、manifest 与 receipt。
 
 ## 发现与安装
 
-Capability schema 2 只包含固定的 `cloga/deepseek-harness` owner、`dsh-desktop-v` tag prefix、`release.json` asset name、包内 sequence、minimum sequence 与一个精确 migration record。它不接受用户选择的 repository 或 URL。
+Capability schema 3 包含固定的 `cloga/deepseek-harness` owner、`dsh-desktop-v` tag prefix、`release.json` asset name、包内 sequence、minimum sequence、精确插件 provisioning capability 与规范 plan hash，以及一个精确 migration record。它不接受用户选择的 repository 或 URL。
 
 Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须已经发布、不可变、锁定 commit，并携带恰好一个具有 GitHub SHA-256 digest 的已上传 manifest asset。Desktop 把 tag 解析到同一 commit，验证 raw asset digest，解析 self-hashed manifest，并选择最高且不冲突的 sequence。包内 sequence 防止企业部署后的 self-selection；durable completion receipt 防止回滚。
 
-所选 handoff 同时锁定 manifest 的规范 self-hash 与 raw release-asset SHA-256。独立 helper 在下载 receipt 与 installer 前重新验证二者。Completion 在记录新 sequence 前验证运行中的 executable、runtime descriptor 与预期 GitHub release 和 asset identifiers。它不修改插件状态。
+所选 handoff 同时锁定 manifest 的规范 self-hash 与 raw release-asset SHA-256。独立 helper 在下载 receipt 与 installer 前重新验证二者。下次启动时，Desktop 会在 Host 启动前协调打包的插件 plan。Completion 在记录新 sequence 前验证运行中的 executable、runtime descriptor、预期 GitHub release 与 asset identifiers，并根据 capability schema 3 验证打包 plan。
 
 不可变 `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest 仅在源码 repository 没有匹配 release 时作为精确 sequence-zero migration 保留。Migration record 固定 manifest 与 installer hash，并固定 build receipt 的 `dsh-v0.1.5-rc.2` source tag；由 manifest 固定的 receipt 仍保留 source commit 与 tree。任何格式错误、可变、冲突或不可达的 source release 都会 fail closed，不会 fallback。一旦 source release 存在，Windows Ops 不能充当第二通道。
 
 ## 发布
 
-手动 Windows workflow 只能从当前 `master` 运行，并要求操作员重复经过评审的 plan version。不带凭据的 build job 使用干净 checkout、固定 Node 与 pnpm、冻结 lockfile、focused Desktop tests 与未签名 packaging。它验证独立 helper 没有 relative import、包内 capability 与经过评审的 plan 匹配、`app-update.yml` 不存在，并且 installer 与 installed evidence 匹配生成记录。
+手动 Windows workflow 只能从当前 `master` 运行，并要求操作员重复经过评审的 plan version。不带凭据的 build job 使用干净 checkout、固定 Node 与 pnpm、冻结 lockfile、focused Desktop tests 与未签名 packaging。它验证独立 helper 没有 relative import、包内 capability 与 provisioning plan 匹配经过评审的 plan、`app-update.yml` 不存在，并且 installer 与 installed evidence 匹配生成记录。
 
 受保护 release job 是唯一具有 `contents: write` 的 job。它下载 build artifact，交叉检查完整 asset set，以精确 source commit tag 创建 draft，上传每个 asset，并只在 asset set 完整后发布。随后它要求 GitHub 报告 release immutable，tag 与 release target 解析到 build commit，并且每个 remote asset digest 匹配本地 bytes。最后一个不带凭据的 job 针对 GitHub 运行已发布 discovery，并要求它选择经过评审的 version、sequence、commit 与 tree。
 

@@ -14,6 +14,8 @@ Status: implemented
 
 [PowerShell 执行器测试](../../../../packages/shell/pwsh-local/tests/executor.spec.ts)用私有文件屏障控制启动与消费式读取。测试决定后续输出何时可用；最终 stdin／环境变量输出在 `done` 后读取。轮询使用当前测试预算，每个创建的 Context 都在插件初始化前登记。清理在等待释放前同时取得 Context 与目录，完成释放后才删除目录。
 
+[Projection cache 恢复与写策略测试](../../../../packages/session/session-projection-cache/tests/fixtures.spec.ts)等待 cache domain 的持久化后检查点状态，并在用例拥有序列水位时要求精确序号，再对每条 JSON record 读取一次。Domain memory 仅在原子替换完成后变化，因此该等待可以证明完成，而不会在替换仍待完成时反复打开 Windows 目标文件。断言保留真实的 mandatory write 路径，并独立验证持久化 record。
+
 [排队图片测试](../../../../apps/web/tests/queue-image.e2e.ts)分别阻塞接纳和附件读取，再捕获已接纳行中加载完成的缩略图。清理共享一个 Promise，释放保留的请求，并在关闭浏览器前等待其 handler 完成。
 
 [详情 Session 生命周期测试](../../../../apps/web/tests/details-session-lifecycle.e2e.ts)在关闭状态出现后等待框架已捕获的动画 Promise，再检查轨道宽度为零。取消的过渡同样进入该断言；动画结束不能让持续非零的轨道通过。

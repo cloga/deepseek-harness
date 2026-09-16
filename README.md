@@ -40,6 +40,10 @@ pnpm dsh web
 
 `pnpm run build` prepares the repository artifacts. `pnpm dsh web` uses those built artifacts without rebuilding.
 
+### Desktop
+
+See the [Desktop guide](apps/desktop/README.md) for application packaging, release-owned plugin provisioning, and profile recovery. Provider-specific release acceptance requires the actual installed provider; neutral fixture evidence does not qualify a GitHub Copilot release.
+
 ## Community and support
 
 - Submit feedback or bug reports through [GitHub Discussions](https://github.com/deepseek-ai/deepseek-harness/discussions).

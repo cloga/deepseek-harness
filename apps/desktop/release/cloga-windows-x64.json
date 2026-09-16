@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "channel": "cloga-windows-x64",
   "version": "0.1.6-alpha.1.cloga.1",
   "sequence": 3,
@@ -9,6 +9,40 @@
     "productName": "DeepSeek Harness (cloga)",
     "packageName": "cloga-deepseek-harness-desktop",
     "executableName": "cloga-deepseek-harness"
+  },
+  "desktopProvisioning": {
+    "schemaVersion": 1,
+    "mode": "exact",
+    "plugins": [
+      {
+        "required": true,
+        "source": {
+          "schemaVersion": 1,
+          "type": "githubRelease",
+          "owner": "cloga",
+          "repo": "dsh-github-copilot",
+          "tag": "v0.4.0-alpha.19",
+          "asset": "dsh-github-copilot-0.4.0-alpha.19.tgz",
+          "assetId": 566022628,
+          "packageName": "dsh-github-copilot",
+          "version": "0.4.0-alpha.19",
+          "size": 541663,
+          "sha256": "7bd8f18159227968ba46a252d2ec5b0369be5004b68b5edcf8569bf459b1e15a",
+          "integrity": "sha512-OC4s04kc1yDmY8uVqCaS6d9bCSPHu3WDd9H/gIc6ZJGCyp7cPochVHekUGLZh050yYhoUyGPRkXxX6kadtkAnw==",
+          "targetCommit": "f44fd1b15ba93dad3bea0c498648dab3392788d5",
+          "dependencyRegistry": "https://packagefeedproxy.microsoft.io/npm/",
+          "checksumManifest": {
+            "format": "sha256sums",
+            "asset": "SHA256SUMS",
+            "assetId": 566022655,
+            "url": "https://github.com/cloga/dsh-github-copilot/releases/download/v0.4.0-alpha.19/SHA256SUMS",
+            "size": 104,
+            "sha256": "d38f3ac469384c8d0b5154bcc58f7ace86fe8bade86a5432c981a253dc44770c",
+            "integrity": "sha512-UYdYkddwitxaPNAy/OCgxehRwtbBMq5v7Y5tcUWWiZSwD4ijme8nYomTdiKoMzaHMbYHyMRz1YWfqTeNcSN/cw=="
+          }
+        }
+      }
+    ]
   },
   "migration": {
     "owner": "cloga/dsh-windows-ops",

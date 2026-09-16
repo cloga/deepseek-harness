@@ -22,6 +22,7 @@ export interface DesktopElectronBuilderConfig {
       { readonly from: string, readonly to: 'runtime' },
       { readonly from: string, readonly to: 'managed-update/helper.mjs' },
       { readonly from: string, readonly to: 'managed-update/capability.json' },
+      { readonly from: string, readonly to: 'desktop-provisioning/plan.json' },
     ]
   readonly mac: {
     readonly identity: string | undefined

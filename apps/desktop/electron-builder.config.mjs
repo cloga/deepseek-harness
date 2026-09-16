@@ -93,7 +93,10 @@ export function createElectronBuilderConfig(
       { from: 'lib/managed-update-helper.js', to: 'managed-update/helper.mjs' },
       ...(forkRelease === undefined
         ? []
-        : [{ from: forkRelease.capabilityPath, to: 'managed-update/capability.json' }]),
+        : [
+            { from: forkRelease.capabilityPath, to: 'managed-update/capability.json' },
+            { from: forkRelease.provisioningPath, to: 'desktop-provisioning/plan.json' },
+          ]),
     ],
     mac: {
       category: 'public.app-category.developer-tools',

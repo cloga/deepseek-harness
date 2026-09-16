@@ -31,31 +31,55 @@ Electron 根据应用 locale 选择类型化的英文或中文桌面壳文案，
 
 签名资源中的 `resources/dsh/desktop-runtime.json` 绑定 shell 版本、内置 Node 版本、平台、架构、共享包版本和最终文件清单。启动读取元数据，并检查共享包记录。发布 schema、shell 版本、目标兼容性和文件完整性在打包时验证。首次启动不会把核心包复制到 profile 存储或通过 pnpm 安装核心包。
 
-1. 主窗口在 profile 准备或后端启动前显示本地加载页。新 profile 创建清单和共享包链接，保留无关文件，然后启动一次实际后端。未变化的启动复用 profile，不扫描已安装插件的清单。
-2. 兼容的应用升级在当前 profile 中刷新共享链接，并检查已启用插件的 peer 要求。插件文件、配置、版本和锁文件留在原处；不运行 pnpm。
-3. 内置 Node 版本、平台或架构变化时，禁用脚本重新安装锁定的插件依赖图，验证并链接宿主包，然后运行已批准的待执行构建并再次验证。
+1. 主窗口在 profile 准备或后端启动前显示本地加载页。新 profile 创建清单和共享包链接并保留无关文件。未变化的运行时链接可复用；打包的插件 plan 还必须准确核对已安装版本、receipt、本地 artifact hash 与启用状态。
+2. 应用升级先把目标运行时链接和目标插件清单一起暂存，再检查 peer。过时的 release-owned 插件不会阻止计划中的替换或删除。Profile 配置和手动插件版本会保留。
+3. 每次 profile 变更只复制元数据与保留的 artifact，绝不复制 `node_modules`。内置 pnpm 在 staging 中禁用脚本重建私有依赖，验证并链接宿主包，再运行获准的待执行构建并再次验证。运行时升级绝不在活动的保留 profile 中执行包操作。
 4. 插件添加、更新和删除使用内置 pnpm 及 Desktop 独有的包管理器状态。`githubRelease` 来源绑定精确 Release、资产、commit、大小、hash、integrity、包身份与依赖 registry 元数据；Desktop 只通过批准的 GitHub 主机下载，并在禁用生命周期脚本的情况下从经过验证的本地 tgz 安装根包。保留的宿主包必须声明为 peer；共享包的嵌套副本和别名会被验证拒绝。
-5. 插件变更在活动 Host 继续运行时，于私有 staging 目录中准备完整依赖图、恢复官方 Host 链接并验证组合。随后 Desktop 停止活动后端，针对 staging profile 启动临时 Host，原子激活该 profile，再启动新 Host。health check 失败会在不修改旧 profile 的情况下重启原 Host；激活失败会恢复先前 profile 与 Host。
+5. 插件变更在私有目录中准备并健康检查目标依赖图，再停止活动后端，把 staged profile 重命名到最终位置。旧 profile 一直保留到最终位置的 Host 启动且 required 清单验证完成。激活失败恢复旧 profile；恢复失败保留事务与恢复 journal，而不删除剩余旧数据。
+
+### 由 Release 拥有的插件 provisioning
+
+托管 fork release 可以携带 `resources/desktop-provisioning/plan.json`。该精确状态计划列出外部插件，但不会把它们加入 `desktop-runtime.json.sharedPackages`；Desktop 继续拥有 `@deepseek-ai/cordis` 和 `@deepseek-ai/dsh-*` 包，从经过验证的 Release tgz 安装每个外部根包，并在保留 profile 中启用其 bundle。常规 Host 组合随后加载插件的服务端 patch，而 `dsh.client` 与 `./client` 让其 Client contribution 可供 Settings 使用。该计划是通用机制。Capability smoke 使用 neutral provider fixture 证明 Client module 与 provider-card 组合；后续 0.1.6 release plan 必须 provision `dsh-github-copilot` `0.4.0-alpha.19`，并验证其 Settings > Models provider card 与 device-code authentication UI。
+
+每个条目分为 `required` 或 optional，并包含带 checksum-manifest lock 的 `githubRelease` source。GitHub 必须明确报告 `immutable: true`。Artifact lock 指定精确的 Release asset id、文件名、字节大小与 SHA-256。Checksum lock 指定精确的 asset id、规范 GitHub Release URL、文件名、字节大小、SHA-256 与 `sha256sums` 格式。每次 acquisition 使用独占私有目录，因此多个来源可以使用 `SHA256SUMS`。Desktop 验证恰好一个 `<sha256>  <artifact>` 条目；缺失、重复、格式错误、重命名或不匹配都会拒绝该来源。可选 SHA-512 SRI 字段一旦提供就必须验证。同一个 plan 的所有条目使用相同的无凭据 HTTPS dependency registry。
+
+Windows Ops 修改 [`release/cloga-windows-x64.json`](release/cloga-windows-x64.json) 中的 `desktopProvisioning`，然后运行受保护的 `desktop-fork-release.yml` workflow。直接使用现有不可变的版本化 tgz 与 `SHA256SUMS` 资产，不要重新发布。Prepare 为 packaging 设置 `DSH_DESKTOP_PLUGIN_PROVISIONING_PLAN` 并嵌入 plan 与 capability schema 3。Finalization 拒绝经过评审的输入、打包 capability 与 plan、发布字节和 receipt hash 之间的不一致。它将打包 plan 发布为 `desktop-provisioning.json`，在 `build-receipt.json` 中记录文件 hash 与规范 plan hash，并通过 `SHA256SUMS` 和 `SHA512SUMS` 覆盖 release 文件。部署需要包含实际非空 provider plan 的 release。
+
+Desktop 在启动时把 receipt-owned 插件协调到打包 plan，同时保留无关的手动 registry 插件。Required 条目构成经过验证的基线。每个 optional 条目加入独立 candidate；download、validation、install、graph 或 health 失败只排除该条目，并记录阶段与原因，不保留成功 receipt。Required 失败保留活动 profile。复用要求 desired/result 成员完全一致，来源、receipt、版本、artifact 字节与启用状态匹配，且没有额外 receipt-owned 根包。空 plan 删除所有 receipt-owned 根包。
+
+Windows Ops 验证 `resources/managed-update/capability.json` 中的 `desktopNativePluginProvisioning`、打包和发布的 plan hash、`desktop-plugin-receipts.json` 中的 Release 与 artifact identity，以及 `$DSH_HOME/profiles/desktop/desktop-plugin-provisioning-state.json` 中每个插件的 `active` 或 `optional-failed` 结果和已删除包证据。托管更新 completion 仅在最终位置的 Host ready 后运行，并在记录 sequence 前独立核对实际安装清单、receipt 和打包 plan。仅 staging 健康检查通过不构成 completion 证据。
 
 加载页不依赖 Host。错误页提供重启和重装指导。只有已打包应用的资源支持 profile 恢复时，才提供禁用插件和重置 Desktop；开发模式和早期初始化失败只提供重启。应用菜单仍提供插件管理器入口。每次后端启动前都会检查运行时标识。
 
 重置删除 `$DSH_HOME/profiles/desktop` 中的所有条目，然后在持有外部事务锁时初始化内置 profile。它删除 Desktop 配置和已安装第三方包，不保留备份。共享任务、设置和 Harness-home `.env` 保持不变。壳资源和 preload 失败时使用独立文档显示可用恢复操作和诊断；其控件不依赖 preload。
 
-包事务独占持有 `$DSH_HOME/desktop/profile.lock`，直到 pnpm 进程退出并完成激活。把锁放在 profile 之外可以在 Windows 上原子交换目录。共享链接在 macOS/Linux 使用目录软链接，在 Windows 使用 junction；清理只移除链接，不删除其目标。共享包使用文件系统的规范路径识别，因此 Windows 路径大小写变化不会单独触发 profile 激活。原生构建遵循 profile 中经过审查的 `allowBuilds` 列表；新安装的包如果需要构建但未在列表中获准，事务会失败。
+包事务持有 `$DSH_HOME/desktop/profile.lock`，直到 pnpm 进程退出并完成激活。两次目录重命名记录在 `$DSH_HOME/desktop/profile-activation.json` 中；启动在同一个锁下恢复中断且未提交的 profile。恢复失败时，保留 journal 和其中指定的 `.desktop-transaction-*` 目录及其 `rollback`，不要删除，也不要在保留 profile 中运行 pnpm。共享链接使用 symlink 或 Windows junction，清理绝不跟随链接。原生构建仍受 profile 中经过审查的 `allowBuilds` 列表约束。
 
 ### Fork 拥有的 Windows 托管更新
 
-包含 `resources/app-update.yml` 的已签名包使用 `electron-updater`，并保留其发布者与平台签名检查。未签名 cloga 包仅在同时携带 `resources/managed-update/capability.json` 与已打包的 `resources/managed-update/helper.mjs` 时选择托管模式；启动会拒绝同时启用两种模式的包。Capability schema 2 固定 `cloga/deepseek-harness`、`dsh-desktop-v` tag 前缀、`release.json` 资产名、包内 sequence 与最小 sequence，不接受 URL。一个精确的 `cloga/dsh-windows-ops` manifest 只作为 sequence 为零时的迁移入口。
+包含 `resources/app-update.yml` 的已签名包使用 `electron-updater`，并保留其发布者与平台签名检查。未签名 cloga 包仅在同时携带 `resources/managed-update/capability.json` 与已打包的 `resources/managed-update/helper.mjs` 时选择托管模式；启动会拒绝同时启用两种模式的包。Capability schema 3 固定 `cloga/deepseek-harness`、`dsh-desktop-v` tag 前缀、`release.json` 资产名、包内 sequence、最小 sequence 与规范插件 provisioning plan hash，不接受 URL。一个精确的 `cloga/dsh-windows-ops` manifest 只作为 sequence 为零时的迁移入口。
 
-**Check for updates** 通过固定 GitHub API 仓库列出 release，要求 release 不可变且 tag 锁定 commit，验证 release asset digest，然后检查 manifest schema 3、规范 self-hash、单调 sequence、源码 commit 与 tree、构建输入、fork 身份、installer hash、installed evidence、网络策略、交互式 completion 策略，以及通用 `desktopNativeVerifiedRelease` capability、source-schema 与 receipt-schema 兼容性。Manifest 明确禁用自动插件 provisioning。包内 sequence 防止企业部署后的 release 选择自身，已完成 sequence 防止回滚。Renderer 消息不能提供 repository、URL、executable、process id、path 或 installer argument。
+**Check for updates** 通过固定 GitHub API 仓库列出 release，要求 release 不可变且 tag 锁定 commit，验证 release asset digest，然后检查 manifest schema 3、规范 self-hash、单调 sequence、源码 commit 与 tree、构建输入、fork 身份、installer hash、installed evidence、网络策略、交互式 completion 策略，以及通用 `desktopNativeVerifiedRelease` capability、source-schema 与 receipt-schema 兼容性。Schema 3 保留 `automaticProvisioning: false`，使现有 0.1.5 Desktop 客户端仍能解析并安装该 release；已安装 capability 与 build receipt 负责该 release 的启动 provisioning 证据。包内 sequence 防止企业部署后的 release 选择自身，已完成 sequence 防止回滚。Renderer 消息不能提供 repository、URL、executable、process id、path 或 installer argument。
 
 **Install** 在确认前报告正在运行的 Sessions、排队消息、活动 jobs、当前 composer draft、attachments 与 submission 状态；如果 dialog 打开期间这些影响发生变化，应用会重新要求确认。Electron 在自己的 user-data 目录中写入一次性交接文件，并启动复制的 Node.js 与独立 helper。除非 helper 验证所选 manifest 并确认同一 manifest hash，Electron 会保持应用与 Host 运行。Acknowledgement 失败会把 operation 标记为 cancelled，仅结束该 owned helper 并等待它退出；Host 停止失败会回滚 updater-owned quit，并执行相同取消流程。Acknowledgement 与 Host 停止完成后，Electron 正常退出。Helper 只等待记录的 Electron 与 Host process id，为每个网络请求设置固定超时，把流式下载字节限制为 manifest size，下载并重新验证 build receipt 与 installer，并在 operation 目录下暂存它们。它会在重新计算 hash、检查声明的未签名 Authenticode 状态及启动无参数交互式 NSIS 期间持有不可写 installer handle；子进程不会继承凭据型环境变量。Windows warning 与 UAC 仍由用户交互决定。
 
-下一个 Desktop process 仅在 helper result、pending marker、manifest、已安装 executable、runtime descriptor 与 managed sequence 全部匹配时接受 completion。已安装插件保持不变；用户通过 Desktop UI 使用插件自己的 structured source record 按需安装或更新独立插件。已确认但没有终态的 handoff，以及其他缺失、中断、阻塞、冲突或不匹配的 evidence，都会打开启动 recovery，而不是启动新 Host 或报告成功。从经过验证的 `dsh-windows-ops` checkout 执行旧 migration recovery 时，使用 `pwsh -NoProfile -File .\Install-DshOfficialDesktop.ps1 -Action Complete`。
+下一个 Desktop process 将打包的插件 plan 与运行时一起暂存，启动最终位置的 Host，并且仅在 helper 结果、已安装文件、capability、plan、实际插件清单、receipt 与 sequence 一致时接受 completion。缺失、中断、阻塞、冲突或不匹配的 completion 证据会打开 recovery，不记录成功。从经过验证的 `dsh-windows-ops` checkout 执行旧 migration recovery 时，使用 `pwsh -NoProfile -File .\Install-DshOfficialDesktop.ps1 -Action Complete`。
 
 Windows Ops 每次选择并锁定一个受支持的 upstream baseline。`cloga/deepseek-harness` 在经过评审的 release plan 中记录该选择，并拥有 installer、manifest、receipt、checksums、不可变 tag 与 capability 注入。随后 Windows Ops 锁定、验证并部署这些由源码拥有的资产，不维护另一份 release 定义。旧 `dsh-local-0.1.5-rc.2.local.1` manifest 只能通过显式 migration 条目接受，不能成为第二个持续通道。当 fork 改用带发布者验证的已签名原生产物时，省略 capability 即可删除托管模式，而无需改变原生更新器。
 
 ## 开发
+
+### 隔离 provisioning 验收
+
+在 Windows 上，下列命令构建当前 checkout，并在全新的 headless Edge context 中针对隔离的 workspace-linked Desktop Host 运行真实 Models UI。它们不启动已安装 Desktop，也不使用 live 凭据。Runner 把 provider-card、授权结果和恢复状态截图及 provenance 写入 `output/desktop-provisioning-fixes/`。合成授权 receipt 证明通用组合，不证明不可变 artifact integrity、实际 account/model discovery 或已安装 unified-0.1.6 release。打包 runtime smoke 使用 Playwright Chromium；fork release workflow 在 packaging 前准备该浏览器。
+
+```powershell
+$env:npm_execpath = (Resolve-Path apps\desktop\node_modules\pnpm\bin\pnpm.mjs).Path
+node node_modules\tsx\dist\cli.mjs scripts\build.ts
+node node_modules\tsx\dist\cli.mjs apps\desktop\scripts\smoke-workspace-fixture.ts
+```
+
+### 开发应用
 
 `dev:desktop` 会构建当前 Host、客户端 bundle、Web 前端和 Electron 壳，把已构建的 CLI 包、私有 Desktop Host 包及其 workspace 依赖投影为一次性桌面 npm 项目，然后直接启动 Electron；这条路径不下载安装包内的 Node.js，也不从 npm 解析 dsh：
 

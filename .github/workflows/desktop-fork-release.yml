@@ -21,6 +21,7 @@ env:
   DSH_TELEMETRY_DISABLED: '1'
   RELEASE_PLAN: apps/desktop/release/cloga-windows-x64.json
   CAPABILITY_PATH: apps/desktop/.desktop-build/fork-release/capability.json
+  PROVISIONING_PATH: apps/desktop/.desktop-build/fork-release/provisioning.json
   RELEASE_ASSETS: dist/desktop-fork-release
 
 jobs:
@@ -72,6 +73,11 @@ jobs:
       - name: Install from frozen lockfile
         run: pnpm install --frozen-lockfile
 
+      - name: Prepare browser for isolated Desktop acceptance
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/desktop-playwright
+        run: node apps/desktop/node_modules/playwright/cli.js install chromium
+
       - name: Verify Desktop release code
         run: pnpm exec vitest run apps/desktop apps/desktop-host --maxWorkers=1
 
@@ -80,13 +86,16 @@ jobs:
           pnpm exec tsx apps/desktop/scripts/fork-release.ts prepare
           --plan ${{ env.RELEASE_PLAN }}
           --out ${{ env.CAPABILITY_PATH }}
+          --provisioning ${{ env.PROVISIONING_PATH }}
           --remote
 
       - name: Build unsigned interactive NSIS installer
         env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/desktop-playwright
           DSH_DESKTOP_APP_ID: io.github.cloga.deepseek-harness.desktop
           DSH_DESKTOP_FORK_RELEASE_VERSION: ${{ steps.plan.outputs.version }}
           DSH_DESKTOP_MANAGED_UPDATE_CAPABILITY: ${{ github.workspace }}\${{ env.CAPABILITY_PATH }}
+          DSH_DESKTOP_PLUGIN_PROVISIONING_PLAN: ${{ github.workspace }}\${{ env.PROVISIONING_PATH }}
         run: pnpm run package:desktop:win:x64:unsigned
 
       - name: Finalize release manifest and receipts
@@ -94,6 +103,7 @@ jobs:
           pnpm exec tsx apps/desktop/scripts/fork-release.ts finalize
           --plan ${{ env.RELEASE_PLAN }}
           --capability ${{ env.CAPABILITY_PATH }}
+          --provisioning ${{ env.PROVISIONING_PATH }}
           --artifacts apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts
           --out ${{ env.RELEASE_ASSETS }}
 

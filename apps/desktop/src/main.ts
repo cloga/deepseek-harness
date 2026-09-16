@@ -1,5 +1,6 @@
 /** Electron shell: desktop project ownership, custom protocol, windows, and lifecycle. */
 
+import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -16,6 +17,11 @@ import {
 import { resolveDesktopPaths } from './paths.ts'
 import { DesktopProjectManager, type DesktopProjectHooks } from './project-manager.ts'
 import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, parseDesktopPluginSource } from './plugin-source.ts'
+import {
+  DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+  DESKTOP_PLUGIN_PROVISIONING_PLAN_FILE,
+  readDesktopPluginProvisioningPlan,
+} from './plugin-provisioning.ts'
 import { DesktopHostProcess, type DesktopUpdateImpact } from './host-process.ts'
 import { DesktopBackendController, type DesktopBackendState } from './backend-controller.ts'
 import {
@@ -77,6 +83,7 @@ interface RuntimeResources {
   readonly pnpm: string
   readonly dsh: string
   readonly profileResolution?: 'runtime'
+  readonly provisioning?: string
 }
 
 function runtimeResources(): RuntimeResources {
@@ -89,7 +96,16 @@ function runtimeResources(): RuntimeResources {
     ?? join(process.resourcesPath, 'runtime', 'pnpm', 'bin', 'pnpm.mjs')
   const dsh = (development ? process.env.DSH_DESKTOP_DSH_DIR : undefined)
     ?? (development ? join(process.resourcesPath, 'dsh') : join(app.getAppPath(), 'dsh'))
-  return { node, pnpm, dsh, ...(development ? {} : { profileResolution: 'runtime' }) }
+  const provisioning = development
+    ? undefined
+    : join(process.resourcesPath, 'desktop-provisioning', DESKTOP_PLUGIN_PROVISIONING_PLAN_FILE)
+  return {
+    node,
+    pnpm,
+    dsh,
+    ...(development ? {} : { profileResolution: 'runtime' as const }),
+    ...(provisioning !== undefined && existsSync(provisioning) ? { provisioning } : {}),
+  }
 }
 
 function developmentHostInspectPort(enabled: boolean): number | undefined {
@@ -168,6 +184,9 @@ async function main(): Promise<void> {
   const development = app.isPackaged ? undefined : join(app.getAppPath(), '.desktop-build', 'development', 'project')
   const activeProject = development ?? paths.profile
   const manager = new DesktopProjectManager(paths, resources)
+  const provisioning = resources.provisioning === undefined
+    ? undefined
+    : readDesktopPluginProvisioningPlan(resources.provisioning)
   const managedUpdate = app.isPackaged
     ? await loadDesktopManagedUpdateConfiguration(process.resourcesPath, app.getPath('userData'), process.platform)
     : undefined
@@ -291,26 +310,33 @@ async function main(): Promise<void> {
     startup ??= (async () => {
       pageError = undefined
       await navigateMain(startupUrl)
-      await backend.start(async () => {
-        if (development === undefined) {
-          await manager.applyRelease()
-          if (managedUpdate !== undefined && !managedCompletionChecked) {
-            const completion = await completeDesktopManagedUpdate(
-              managedUpdate.operationsRoot,
-              managedUpdate.completionPath,
-              managedUpdate.capability,
-              managedUpdate.installedSequence,
-              process.execPath,
-              join(resources.dsh, 'desktop-runtime.json'),
-            )
-            if (completion.status === 'recovery-required') {
-              throw new Error(`${completion.message}\n\nRecovery: ${completion.command}`)
-            }
-            if (completion.status === 'complete') managedInstalledSequence = completion.sequence
-            managedCompletionChecked = true
+      if (development === undefined) {
+        await manager.applyRelease(hooks, provisioning)
+      }
+      if (quitting) return
+      await backend.start(async () => {})
+      if (development === undefined) {
+        if (managedUpdate !== undefined && !managedCompletionChecked) {
+          if (resources.provisioning === undefined) {
+            throw new Error('desktop managed update: packaged plugin provisioning plan is missing')
           }
+          const completion = await completeDesktopManagedUpdate(
+            managedUpdate.operationsRoot,
+            managedUpdate.completionPath,
+            managedUpdate.capability,
+            managedUpdate.installedSequence,
+            process.execPath,
+            join(resources.dsh, 'desktop-runtime.json'),
+            resources.provisioning,
+            manager.paths.profile,
+          )
+          if (completion.status === 'recovery-required') {
+            throw new Error(`${completion.message}\n\nRecovery: ${completion.command}`)
+          }
+          if (completion.status === 'complete') managedInstalledSequence = completion.sequence
+          managedCompletionChecked = true
         }
-      })
+      }
       if (backend.host !== undefined) await navigateMain(applicationUrl)
     })().catch(async (error: unknown) => {
       await showStartupError(error)
@@ -415,7 +441,7 @@ async function main(): Promise<void> {
   ))
   ipcMain.handle(DESKTOP_IPC.capabilitiesGet, (event) => {
     assertDesktopSender(event, ['shell'])
-    return [DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY] as const
+    return [DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY] as const
   })
   ipcMain.handle(DESKTOP_IPC.pluginsRemove, (event, name: unknown) => {
     if (typeof name !== 'string') throw new Error('dsh desktop: plugin name must be a string')
@@ -647,7 +673,11 @@ async function main(): Promise<void> {
     if (shellInstallerOwnsQuit || quitting) return
     event.preventDefault()
     quitting = true
-    void backend.close().catch((error: unknown) => { console.error(error) }).finally(() => { app.quit() })
+    void Promise.allSettled([backend.close(), startup]).then((results) => {
+      for (const result of results) {
+        if (result.status === 'rejected') console.error(result.reason)
+      }
+    }).finally(() => { app.quit() })
   })
 
   mainWindow = createMainWindow()

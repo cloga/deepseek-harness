@@ -8,6 +8,11 @@ import {
   parseDesktopManagedUpdateManifest,
   type DesktopManagedUpdateCapability,
 } from './managed-update-protocol.ts'
+import {
+  desktopPluginProvisioningPlanSha256,
+  parseDesktopPluginProvisioningPlan,
+} from './plugin-provisioning.ts'
+import { assertDesktopProvisioningInventory } from './project-manager.ts'
 
 const RECOVERY_COMMAND = 'pwsh -NoProfile -File .\\Install-DshOfficialDesktop.ps1 -Action Complete'
 
@@ -63,6 +68,8 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[], labe
  * @param installedSequence - Last previously completed sequence.
  * @param executable - Running installed Desktop executable.
  * @param runtimeDescriptor - Installed Desktop runtime descriptor.
+ * @param provisioningPlan - Installed release-owned Desktop plugin plan.
+ * @param activeProfile - Final-location profile, after its Host has reached readiness.
  */
 export async function completeDesktopManagedUpdate(
   operationsRoot: string,
@@ -71,6 +78,8 @@ export async function completeDesktopManagedUpdate(
   installedSequence: number,
   executable: string,
   runtimeDescriptor: string,
+  provisioningPlan: string,
+  activeProfile: string,
 ): Promise<DesktopManagedUpdateCompletion> {
   let operationNames: string[]
   try {
@@ -208,6 +217,12 @@ export async function completeDesktopManagedUpdate(
       || runtimeSha256 !== manifest.installedEvidence.runtimeSha256) {
       throw new Error('desktop managed update: installed application evidence does not match the release')
     }
+    const installedPlan = parseDesktopPluginProvisioningPlan(await readJson(provisioningPlan))
+    if (desktopPluginProvisioningPlanSha256(installedPlan)
+      !== capability.provisioning.planSha256) {
+      throw new Error('desktop managed update: installed plugin provisioning plan does not match the release')
+    }
+    assertDesktopProvisioningInventory(activeProfile, installedPlan)
     await writeJsonAtomic(completionPath, {
       schemaVersion: 1,
       status: 'complete',

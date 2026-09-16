@@ -3,6 +3,8 @@ export const DESKTOP_APP_ID_ENV: 'DSH_DESKTOP_APP_ID'
 
 /** Environment variable that supplies the managed update capability file. */
 export const DESKTOP_MANAGED_UPDATE_CAPABILITY_ENV: 'DSH_DESKTOP_MANAGED_UPDATE_CAPABILITY'
+/** Environment variable that supplies the release-owned plugin provisioning plan. */
+export const DESKTOP_PLUGIN_PROVISIONING_PLAN_ENV: 'DSH_DESKTOP_PLUGIN_PROVISIONING_PLAN'
 
 /** Environment variable that supplies the fork release semantic version. */
 export const DESKTOP_FORK_RELEASE_VERSION_ENV: 'DSH_DESKTOP_FORK_RELEASE_VERSION'
@@ -63,6 +65,7 @@ export interface DesktopForkReleaseEnvironment {
   readonly executableName: 'cloga-deepseek-harness'
   readonly version: string
   readonly capabilityPath: string
+  readonly provisioningPath: string
 }
 
 /**

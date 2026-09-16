@@ -1,5 +1,39 @@
-import { describe, expect, it } from 'vitest'
-import { projectionDurableObservationOptions } from './durable-observation.ts'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
+import type { Session } from '@deepseek-ai/dsh-session'
+import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
+import { projectionDurableObservationOptions, waitForProjectionCheckpoint } from './durable-observation.ts'
+
+afterEach(() => vi.useRealTimers())
+
+describe('projection durable checkpoint observation', () => {
+  it('rejects missing and creation-time cuts before observing the requested cut', async () => {
+    vi.useFakeTimers()
+    const session: Pick<Session, 'header' | 'inheritedEventCount'> = {
+      header: { version: SESSION_FORMAT_VERSION, id: SessionId('observed'), createdAt: 1, isSeeded: false },
+      inheritedEventCount: SessionLogOffset(0),
+    }
+    let snapshot: ProjectionSnapshot | undefined
+    const cache = { cachedSnapshot: vi.fn(() => snapshot) }
+    const observed = vi.fn()
+    const wait = waitForProjectionCheckpoint(cache, session, SessionSeq(1)).then(observed)
+
+    try {
+      await vi.advanceTimersByTimeAsync(50)
+      expect(observed).not.toHaveBeenCalled()
+      snapshot = { asOfSeq: -1, values: {} }
+      await vi.advanceTimersByTimeAsync(50)
+      expect(observed).not.toHaveBeenCalled()
+    } finally {
+      snapshot = { asOfSeq: SessionSeq(1), values: {} }
+      await vi.advanceTimersByTimeAsync(50)
+      await wait
+    }
+
+    expect(observed).toHaveBeenCalledOnce()
+    expect(cache.cachedSnapshot).toHaveBeenLastCalledWith(session.header, session.inheritedEventCount)
+  })
+})
 
 describe('projection durable observation budget', () => {
   it('keeps the local floor and inherits a bounded coverage-lane budget', () => {

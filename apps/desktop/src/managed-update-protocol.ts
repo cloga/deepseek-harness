@@ -3,13 +3,14 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, win32 } from 'node:path'
 import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY } from './plugin-source.ts'
+import { DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY } from './plugin-provisioning.ts'
 
 export const DESKTOP_MANAGED_UPDATE_SOURCE_REPOSITORY = 'cloga/deepseek-harness' as const
 export const DESKTOP_MANAGED_UPDATE_TAG_PREFIX = 'dsh-desktop-v' as const
 export const DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET = 'release.json' as const
 export const DESKTOP_MANAGED_UPDATE_CHANNEL = 'cloga-windows-x64' as const
 export const DESKTOP_MANAGED_UPDATE_WORKFLOW = '.github/workflows/desktop-fork-release.yml' as const
-export const DESKTOP_MANAGED_UPDATE_CAPABILITY_SCHEMA_VERSION = 2 as const
+export const DESKTOP_MANAGED_UPDATE_CAPABILITY_SCHEMA_VERSION = 3 as const
 export const DESKTOP_MANAGED_UPDATE_MANIFEST_SCHEMA_VERSION = 3 as const
 
 const SOURCE_REPOSITORY = DESKTOP_MANAGED_UPDATE_SOURCE_REPOSITORY
@@ -38,6 +39,10 @@ export interface DesktopManagedUpdateCapability {
   readonly manifestAsset: typeof DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET
   readonly currentSequence: number
   readonly minimumSequence: number
+  readonly provisioning: {
+    readonly capability: typeof DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY
+    readonly planSha256: string
+  }
   readonly migration?: {
     readonly owner: typeof LEGACY_REPOSITORY
     readonly manifestUrl: string
@@ -291,7 +296,7 @@ function verifySelfHash(value: Record<string, unknown>, expected: string): void 
 export function parseDesktopManagedUpdateCapability(value: unknown): DesktopManagedUpdateCapability {
   const item = record(value, 'capability')
   exactKeys(item, ['schemaVersion', 'mode', 'owner', 'tagPrefix', 'manifestAsset', 'currentSequence', 'minimumSequence',
-    ...(item.migration === undefined ? [] : ['migration'])], 'capability')
+    'provisioning', ...(item.migration === undefined ? [] : ['migration'])], 'capability')
   if (item.schemaVersion !== DESKTOP_MANAGED_UPDATE_CAPABILITY_SCHEMA_VERSION
     || item.mode !== 'github-release-managed'
     || item.owner !== SOURCE_REPOSITORY
@@ -303,6 +308,15 @@ export function parseDesktopManagedUpdateCapability(value: unknown): DesktopMana
   const minimumSequence = integer(item.minimumSequence, 'capability.minimumSequence')
   if (minimumSequence < 1 || currentSequence < minimumSequence) {
     throw new Error('desktop managed update: capability sequence baseline is invalid')
+  }
+  const provisioningValue = record(item.provisioning, 'capability.provisioning')
+  exactKeys(provisioningValue, ['capability', 'planSha256'], 'capability.provisioning')
+  if (JSON.stringify(provisioningValue.capability) !== JSON.stringify(DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY)) {
+    throw new Error('desktop managed update: unsupported plugin provisioning capability')
+  }
+  const provisioning = {
+    capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+    planSha256: hash(provisioningValue.planSha256, 'capability.provisioning.planSha256'),
   }
   const migrationValue = item.migration
   let migration: DesktopManagedUpdateCapability['migration']
@@ -340,6 +354,7 @@ export function parseDesktopManagedUpdateCapability(value: unknown): DesktopMana
     manifestAsset: DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET,
     currentSequence,
     minimumSequence,
+    provisioning,
     ...(migration === undefined ? {} : { migration }),
   }
 }
