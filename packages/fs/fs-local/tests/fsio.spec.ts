@@ -159,6 +159,42 @@ describe('probe', () => {
     expect(typeof info?.version).toBe('string')
   })
 
+  it('uses birthtime on Windows and ctime on other platforms for version metadata', async () => {
+    const file = join(dir, 'version.txt')
+    await writeFile(file, 'version')
+    const metadata = await stat(file, { bigint: true })
+    Object.assign(metadata, {
+      dev: 1n,
+      ino: 2n,
+      size: 3n,
+      mtimeNs: 4n,
+      birthtimeNs: 5n,
+      ctimeNs: 6n,
+    })
+
+    vi.resetModules()
+    try {
+      vi.doMock('node:fs/promises', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('node:fs/promises')>()
+        return { ...actual, stat: async () => metadata }
+      })
+      const { probe: isolatedProbe } = await import('../src/fsio.ts')
+      const platform = vi.spyOn(process, 'platform', 'get')
+      try {
+        platform.mockReturnValue('win32')
+        expect((await isolatedProbe(file))?.version).toBe('1:2:3:4:5')
+
+        platform.mockReturnValue('linux')
+        expect((await isolatedProbe(file))?.version).toBe('1:2:3:4:6')
+      } finally {
+        platform.mockRestore()
+      }
+    } finally {
+      vi.doUnmock('node:fs/promises')
+      vi.resetModules()
+    }
+  })
+
   it('reports a directory and a non-regular type', async () => {
     const sub = join(dir, 'sub')
     await mkdir(sub)
