@@ -71,7 +71,7 @@ Windows Ops 每次选择并锁定一个受支持的 upstream baseline。`cloga/d
 
 ### 隔离 provisioning 验收
 
-在 Windows 上，下列命令构建当前 checkout，并在全新的 headless Edge context 中针对隔离的 workspace-linked Desktop Host 运行真实 Models UI。它们不启动已安装 Desktop，也不使用 live 凭据。Runner 把 provider-card、授权结果和恢复状态截图及 provenance 写入 `output/desktop-provisioning-fixes/`。合成授权 receipt 证明通用组合，不证明不可变 artifact integrity、实际 account/model discovery 或已安装 unified-0.1.6 release。打包 runtime smoke 使用 Playwright Chromium；fork release workflow 在 packaging 前准备该浏览器。
+在 Windows 上，下列命令构建当前 checkout，并在全新的 headless Edge context 中针对隔离的 workspace-linked Desktop Host 运行真实 Models UI。它们不启动已安装 Desktop，也不使用 live 凭据。Runner 把 provider-card、授权结果、恢复状态截图与运行证据写入 `output/desktop-provisioning-fixes/`。合成授权 receipt 证明通用组合，不证明不可变 artifact integrity、实际 account/model discovery 或已安装 unified-0.1.6 release。打包 runtime smoke 使用 Playwright Chromium；fork release workflow 在 packaging 前准备该浏览器。
 
 ```powershell
 $env:npm_execpath = (Resolve-Path apps\desktop\node_modules\pnpm\bin\pnpm.mjs).Path

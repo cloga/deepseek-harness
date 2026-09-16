@@ -71,7 +71,7 @@ Windows Ops selects and locks one supported upstream baseline at a time. `cloga/
 
 ### Isolated provisioning acceptance
 
-On Windows, the following commands build this checkout and run the real Models UI in a fresh headless Edge context against an isolated, workspace-linked Desktop Host. They do not launch installed Desktop or use live credentials. The runner writes provider-card, authorization-result, and restored-state screenshots with provenance under `output/desktop-provisioning-fixes/`. Its synthetic authorization receipt proves generic composition, not immutable artifact integrity, real account/model discovery, or the installed unified-0.1.6 release. Packaged-runtime smoke uses Playwright Chromium; the fork release workflow prepares that browser before packaging.
+On Windows, the following commands build this checkout and run the real Models UI in a fresh headless Edge context against an isolated, workspace-linked Desktop Host. They do not launch installed Desktop or use live credentials. The runner writes provider-card, authorization-result, and restored-state screenshots with run evidence under `output/desktop-provisioning-fixes/`. Its synthetic authorization receipt proves generic composition, not immutable artifact integrity, real account/model discovery, or the installed unified-0.1.6 release. Packaged-runtime smoke uses Playwright Chromium; the fork release workflow prepares that browser before packaging.
 
 ```powershell
 $env:npm_execpath = (Resolve-Path apps\desktop\node_modules\pnpm\bin\pnpm.mjs).Path
