@@ -300,37 +300,33 @@ async function main(): Promise<void> {
     startup ??= (async () => {
       pageError = undefined
       await navigateMain(startupUrl)
-      await backend.start(async () => {
-        if (development === undefined) {
-          await manager.applyRelease()
-          if (provisioning !== undefined) {
-            await manager.reconcileProvisioning(provisioning, {
-              beforeChange: async () => {},
-              healthCheck: async projectDir => hooks.healthCheck(projectDir),
-              afterChange: async () => {},
-            })
+      if (development === undefined) {
+        await manager.applyRelease(hooks, provisioning)
+      }
+      if (quitting) return
+      await backend.start(async () => {})
+      if (development === undefined) {
+        if (managedUpdate !== undefined && !managedCompletionChecked) {
+          if (resources.provisioning === undefined) {
+            throw new Error('desktop managed update: packaged plugin provisioning plan is missing')
           }
-          if (managedUpdate !== undefined && !managedCompletionChecked) {
-            if (resources.provisioning === undefined) {
-              throw new Error('desktop managed update: packaged plugin provisioning plan is missing')
-            }
-            const completion = await completeDesktopManagedUpdate(
-              managedUpdate.operationsRoot,
-              managedUpdate.completionPath,
-              managedUpdate.capability,
-              managedUpdate.installedSequence,
-              process.execPath,
-              join(resources.dsh, 'desktop-runtime.json'),
-              resources.provisioning,
-            )
-            if (completion.status === 'recovery-required') {
-              throw new Error(`${completion.message}\n\nRecovery: ${completion.command}`)
-            }
-            if (completion.status === 'complete') managedInstalledSequence = completion.sequence
-            managedCompletionChecked = true
+          const completion = await completeDesktopManagedUpdate(
+            managedUpdate.operationsRoot,
+            managedUpdate.completionPath,
+            managedUpdate.capability,
+            managedUpdate.installedSequence,
+            process.execPath,
+            join(resources.dsh, 'desktop-runtime.json'),
+            resources.provisioning,
+            manager.paths.profile,
+          )
+          if (completion.status === 'recovery-required') {
+            throw new Error(`${completion.message}\n\nRecovery: ${completion.command}`)
           }
+          if (completion.status === 'complete') managedInstalledSequence = completion.sequence
+          managedCompletionChecked = true
         }
-      })
+      }
       if (backend.host !== undefined) await navigateMain(applicationUrl)
     })().catch(async (error: unknown) => {
       await showStartupError(error)
@@ -667,7 +663,11 @@ async function main(): Promise<void> {
     if (shellInstallerOwnsQuit || quitting) return
     event.preventDefault()
     quitting = true
-    void backend.close().catch((error: unknown) => { console.error(error) }).finally(() => { app.quit() })
+    void Promise.allSettled([backend.close(), startup]).then((results) => {
+      for (const result of results) {
+        if (result.status === 'rejected') console.error(result.reason)
+      }
+    }).finally(() => { app.quit() })
   })
 
   mainWindow = createMainWindow()

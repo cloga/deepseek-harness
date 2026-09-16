@@ -44,6 +44,10 @@ pnpm dsh web
 
 `pnpm run build` 会准备仓库产物。`pnpm dsh web` 会直接使用这些已构建产物，不会重新构建。
 
+### Desktop
+
+应用打包、由 release 拥有的插件 provisioning 和 profile 恢复见 [Desktop 指南](apps/desktop/README.zh.md)。特定 provider 的 release 验收必须使用实际安装的 provider；neutral fixture 证据不能证明 GitHub Copilot release 合格。
+
 ## 社区与支持
 
 - 通过 [GitHub Discussions](https://github.com/deepseek-ai/deepseek-harness/discussions) 提交反馈或 bug 报告。

@@ -87,6 +87,7 @@ const harness = await vi.hoisted(async () => {
       version: '1.2.3',
     })),
     applyRelease: vi.fn(() => { preparing.resolve(); return prepared.promise }),
+    completeUpdate: vi.fn(async (..._args: unknown[]) => ({ status: 'none' as const })),
     assertProfileRuntime: vi.fn(),
     canRecoverProfile: vi.fn(() => true),
     get preparing() { return preparing }, get prepared() { return prepared },
@@ -132,6 +133,7 @@ vi.mock('node:fs', async (importOriginal) => {
 vi.mock('../src/paths.ts', () => ({ resolveDesktopPaths: () => ({ profile: 'desktop-test-profile' }) }))
 vi.mock('../src/project-manager.ts', () => ({
   DesktopProjectManager: class {
+    readonly paths = { profile: 'desktop-test-profile' }
     readonly applyRelease = harness.applyRelease
     readonly assertProfileRuntime = harness.assertProfileRuntime
     canRecoverProfile = harness.canRecoverProfile
@@ -154,6 +156,7 @@ vi.mock('../src/plugin-provisioning.ts', async (importOriginal) => {
   }
 })
 vi.mock('../src/host-process.ts', () => ({ DesktopHostProcess: harness.FakeHost }))
+vi.mock('../src/managed-update-completion.ts', () => ({ completeDesktopManagedUpdate: harness.completeUpdate }))
 vi.mock('../src/update-coordinator.ts', () => ({ DesktopUpdateCoordinator: vi.fn() }))
 vi.mock('../src/managed-update-state.ts', () => ({
   loadDesktopManagedUpdateConfiguration: () => harness.managedUpdates
@@ -221,6 +224,28 @@ afterEach(async () => {
 })
 
 describe('desktop main startup', () => {
+  it.each(['ready', 'failed'] as const)('records managed completion only after final Host readiness: %s', async (outcome) => {
+    harness.managedUpdates = true
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    expect(harness.completeUpdate).not.toHaveBeenCalled()
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    expect(harness.completeUpdate).not.toHaveBeenCalled()
+    const host = harness.hosts[0]!
+    if (outcome === 'failed') {
+      host.exited.resolve()
+      host.ready.reject(new Error('final-location Host failed'))
+      await harness.errorPublished.promise
+      expect(harness.completeUpdate).not.toHaveBeenCalled()
+    } else {
+      host.ready.resolve()
+      await harness.navigated.promise
+      expect(harness.completeUpdate).toHaveBeenCalledOnce()
+      expect(harness.completeUpdate.mock.calls[0]?.at(-1)).toBe('desktop-test-profile')
+    }
+  })
+
   it('requires a fresh managed-update confirmation when active work changes in the dialog', async () => {
     harness.managedUpdates = true
     harness.setHostImpacts([
