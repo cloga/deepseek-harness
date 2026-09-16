@@ -20,8 +20,8 @@ describe('Desktop fork release plan', () => {
     expect(plan).toMatchObject({
       schemaVersion: 2,
       channel: 'cloga-windows-x64',
-      version: '0.1.5-rc.3.cloga.4',
-      sequence: 5,
+      version: '0.1.5-rc.3.cloga.5',
+      sequence: 6,
       upstreamVersion: '0.1.5-rc.2',
       migration: {
         owner: 'cloga/dsh-windows-ops',
@@ -66,7 +66,7 @@ describe('Desktop fork release plan', () => {
       mode: 'github-release-managed',
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
-      currentSequence: 5,
+      currentSequence: 6,
       minimumSequence: 2,
       provisioning: {
         capability: { id: 'desktopNativePluginProvisioning' },

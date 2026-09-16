@@ -2,7 +2,18 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  closeSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright'
@@ -42,6 +53,25 @@ mkdirSync(scratch, { recursive: true })
 const home = mkdtempSync(join(scratch, 'packaged-copilot-'))
 const profile = join(home, 'profiles', 'desktop')
 mkdirSync(profile, { recursive: true })
+const legacySdk = mkdtempSync(join(scratch, 'legacy-mcp-sdk-'))
+const legacySdkLoaded = join(legacySdk, 'loaded')
+writeFileSync(join(legacySdk, 'package.json'), JSON.stringify({
+  name: '@modelcontextprotocol/sdk',
+  version: '1.0.0',
+  type: 'module',
+  exports: './index.js',
+}))
+writeFileSync(join(legacySdk, 'index.js'), [
+  'import { writeFileSync } from "node:fs"',
+  `writeFileSync(${JSON.stringify(legacySdkLoaded)}, '')`,
+  'export const legacy = true',
+  '',
+].join('\n'))
+const ancestorSdk = join(home, 'profiles', 'node_modules', '@modelcontextprotocol', 'sdk')
+mkdirSync(dirname(ancestorSdk), { recursive: true })
+symlinkSync(legacySdk, ancestorSdk, process.platform === 'win32' ? 'junction' : 'dir')
+assert(!realpathSync.native(ancestorSdk).startsWith(realpathSync.native(profile)),
+  'Legacy SDK fixture must resolve outside the Desktop profile')
 writeFileSync(join(home, '.env'), '')
 writeFileSync(join(profile, '.env'), '')
 writeFileSync(join(home, 'settings.yaml'), 'ui-onboarding:\n  welcomeNoticeVersion: "2026-08-13.1"\n')
@@ -157,6 +187,7 @@ try {
       && 'cwd' in graphResult && typeof graphResult.cwd === 'string'
       && resolve(graphResult.cwd).toLowerCase() === profile.toLowerCase(),
     'Packaged Node must verify the same graph without source-runner module paths')
+    assert(!existsSync(legacySdkLoaded), 'Packaged Host must not load the ancestor MCP SDK')
     record(`${phase}:packaged-graph`)
     const receipts = readFileSync(join(profile, 'desktop-plugin-receipts.json'))
     inventories.push(createHash('sha256').update(receipts).digest('hex'))
@@ -179,6 +210,8 @@ try {
     onboardingNoticeDismissed: true,
     restartReceiptSha256: inventories[0],
     actualGraphVerified: true,
+    ancestorSdkJunction: true,
+    ancestorSdkLoaded: false,
     accountEntryVisible: true,
     realOAuth: false,
     realModelRound: false,
@@ -215,12 +248,14 @@ try {
   console.error(JSON.stringify(diagnostic))
   throw error
 } finally {
-  try {
-    await app?.close()
-    removeOwnedDirectory(home)
-  } catch (cleanupError) {
+  const cleanupErrors: unknown[] = []
+  try { await app?.close() } catch (error) { cleanupErrors.push(error) }
+  for (const path of [home, legacySdk]) {
+    try { removeOwnedDirectory(path) } catch (error) { cleanupErrors.push(error) }
+  }
+  if (cleanupErrors.length > 0) {
     throw new AggregateError([
-      ...(failure === undefined ? [] : [failure]), cleanupError,
+      ...(failure === undefined ? [] : [failure]), ...cleanupErrors,
     ], 'Packaged Copilot acceptance cleanup failed')
   }
 }

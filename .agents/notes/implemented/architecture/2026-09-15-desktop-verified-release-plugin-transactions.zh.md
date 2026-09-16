@@ -12,7 +12,7 @@ Status: implemented
 
 Desktop 接受版本化的 `githubRelease` 来源，其中锁定仓库所有者、仓库、tag、artifact asset id 与名称、包名、包版本、字节大小、SHA-256、可选 SHA-512 integrity、目标 commit、可选依赖 registry 与可选 checksum-manifest 资产。由 Release 拥有的自动 provisioning 要求 checksum manifest。它的 lock 包含精确 asset id、规范 GitHub Release URL、名称、字节大小、SHA-256、`sha256sums` 格式与可选 SHA-512 integrity。Desktop 要求存在且只存在一个匹配的 `<sha256>  <artifact>` 行，并拒绝缺失、重复、格式错误、重命名或不匹配的条目。Desktop 根据 repository 与锁定 asset id 构造 GitHub API 请求。它拒绝可变 Release 选择器、未批准的重定向主机、Release 或 tag commit 不匹配、资产元数据不匹配、归档路径逃逸、逃逸链接、异常归档根目录、包身份不匹配与包生命周期脚本。
 
-根包是经过验证的本地 tgz。内置 pnpm 只通过显式、无凭据的 HTTPS registry 解析其传递依赖，忽略生命周期脚本，使用 Desktop 自有的 store 与配置路径，并且不接收继承的包管理器凭据或 secret 环境变量。普通 npm 来源保持其精确 registry 包行为。经过验证的制品仍必须满足目标共享包依赖图：应用拥有的包必须声明为 peer，而非普通或 optional dependency，即使相同名称也出现在 peer 中。制品完整性不能授权第二个 Host 包身份。
+根包是经过验证的本地 tgz。内置 pnpm 只通过显式、无凭据的 HTTPS registry 解析其传递依赖，忽略生命周期脚本，使用 Desktop 自有的 store 与配置路径，并且不接收继承的包管理器凭据或 secret 环境变量。普通 npm 来源保持其精确 registry 包行为。经过验证的制品仍必须满足目标共享包依赖图：应用拥有的包必须声明为 peer，而非普通或 optional dependency，即使相同名称也出现在 peer 中。制品完整性不能授权第二个 Host 包身份。在 profile 组合前，Desktop Host 为 profile `node_modules` 下的物理模块注册同步 package-resolution policy。其 bare package 请求经过 realpath 规范化后只能解析到 profile，或通过匹配的 profile link 进入打包 runtime package；祖先 optional peer 呈现 module-not-found 语义，而 required dependency 仍无效，内置模块与显式 file 请求保持 Node.js 行为。
 
 每次插件变更只把 profile 元数据和保留 artifact 复制到私有事务中，排除所有 `node_modules` 目录。内置 pnpm 在其中重建私有依赖；应用升级绝不在活动 profile 中安装或 rebuild。目标运行时链接和目标插件清单一起准备，然后验证 peer。每个来源 acquisition 使用独立的独占目录，GitHub 必须明确证明 `immutable: true`。
 

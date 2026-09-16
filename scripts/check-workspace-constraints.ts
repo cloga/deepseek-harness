@@ -64,6 +64,7 @@ const appPackageFiles: Readonly<Record<string, readonly string[]>> = {
   '@deepseek-ai/dsh': ['lib/*.js'],
   '@deepseek-ai/dsh-desktop-host': [
     'lib/index.js',
+    'register-module-resolution-policy.mjs',
     'config/desktop.cordis.patch.yml',
   ],
   // Sourcemaps stay out by payload policy; the worker-preview surface
