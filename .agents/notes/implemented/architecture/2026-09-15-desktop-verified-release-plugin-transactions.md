@@ -26,7 +26,7 @@ The active profile stores the canonical plan hash, per-plugin source and receipt
 
 ## Consumer transition
 
-Windows Ops selects plugin locks in the source-owned Desktop release plan. The protected workflow embeds the normalized plan, publishes it beside the installer, and records its file and canonical hashes in the build receipt. A release must contain the plan before deployment can rely on automatic provisioning. Transitive dependencies continue to use the plan's credential-free enterprise registry.
+Windows Ops selects plugin locks in the source-owned Desktop release plan. The protected workflow embeds the normalized plan, publishes it beside the installer, and records its file and canonical hashes in the build receipt. A release must contain the plan before deployment can rely on automatic provisioning. The 0.1.5 recovery plan resolves transitive dependencies through `https://packagefeedproxy.microsoft.io/npm/`; later plans select their own credential-free HTTPS registry explicitly.
 
 ## Alternatives considered
 
