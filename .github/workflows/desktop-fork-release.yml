@@ -7,6 +7,11 @@ on:
         description: Exact reviewed version from apps/desktop/release/cloga-windows-x64.json
         required: true
         type: string
+      rehearsal:
+        description: Build and retain reviewed branch artifacts without publishing a release
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -27,7 +32,7 @@ env:
 jobs:
   build:
     name: Build unsigned fork installer
-    if: github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/master' || inputs.rehearsal
     runs-on: windows-2025
     outputs:
       version: ${{ steps.plan.outputs.version }}
@@ -51,17 +56,29 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
 
-      - name: Require current master and reviewed version
+      - name: Require current reviewed ref and version
         id: plan
         shell: pwsh
         env:
           CONFIRM_VERSION: ${{ inputs.confirm_version }}
+          REHEARSAL: ${{ inputs.rehearsal }}
         run: |
           $ErrorActionPreference = 'Stop'
-          git fetch --no-tags origin master
-          $master = git rev-parse origin/master
           $head = git rev-parse HEAD
-          if ($head -ne $master) { throw "Release must run from current master: HEAD=$head origin/master=$master" }
+          if ($env:REHEARSAL -eq 'true') {
+            if ($env:GITHUB_REF_TYPE -ne 'branch') { throw 'Rehearsal must run from a branch' }
+            $selectedRef = 'refs/remotes/rehearsal/selected'
+            git fetch --no-tags origin "refs/heads/$($env:GITHUB_REF_NAME):$selectedRef"
+            $selected = git rev-parse $selectedRef
+            if ($head -ne $selected) {
+              throw "Rehearsal must run from the current selected branch: HEAD=$head origin/$($env:GITHUB_REF_NAME)=$selected"
+            }
+          } else {
+            if ($env:GITHUB_REF -ne 'refs/heads/master') { throw 'Release must run from master' }
+            git fetch --no-tags origin master
+            $master = git rev-parse origin/master
+            if ($head -ne $master) { throw "Release must run from current master: HEAD=$head origin/master=$master" }
+          }
           $plan = Get-Content -LiteralPath $env:RELEASE_PLAN -Raw | ConvertFrom-Json
           if ($env:CONFIRM_VERSION -ne $plan.version) {
             throw "Confirmation version does not match reviewed plan version $($plan.version)"
@@ -146,6 +163,7 @@ jobs:
   release:
     name: Publish immutable GitHub Release
     needs: build
+    if: ${{ !inputs.rehearsal && github.ref == 'refs/heads/master' }}
     runs-on: windows-2025
     environment: desktop-fork-release
     permissions:
@@ -222,6 +240,7 @@ jobs:
   remote-check:
     name: Verify remote managed Check
     needs: [build, release]
+    if: ${{ !inputs.rehearsal && github.ref == 'refs/heads/master' }}
     runs-on: windows-2025
     permissions:
       contents: read
