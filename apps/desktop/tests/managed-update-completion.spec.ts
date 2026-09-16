@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import { completeDesktopManagedUpdate } from '../src/managed-update-completion.ts'
+import { createPluginProfile } from '../src/project-manager.ts'
 import {
   MANAGED_COMMIT,
   managedCapability,
@@ -21,7 +22,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true })))
 })
 
-it('verifies installed evidence and the packaged provisioning plan before recording completion', async () => {
+it.each(['valid', 'missing-state'] as const)('requires active inventory before completion: %s', async (inventory) => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-managed-completion-'))
   roots.push(root)
   const operation = join(root, 'operations', 'a'.repeat(64), 'stage')
@@ -35,6 +36,15 @@ it('verifies installed evidence and the packaged provisioning plan before record
   await writeFile(executablePath, executable)
   await writeFile(runtimePath, runtime)
   await writeFile(provisioningPath, JSON.stringify(provisioning))
+  const profile = join(root, 'profile')
+  createPluginProfile(profile)
+  if (inventory === 'valid') {
+    await writeFile(join(profile, 'desktop-plugin-provisioning-state.json'), JSON.stringify({
+      schemaVersion: 1, capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+      planSha256: desktopPluginProvisioningPlanSha256(provisioning),
+      composition: 'active', plugins: [], removed: [], rolledBack: false, verified: true,
+    }))
+  }
   const manifest = managedManifest({
     source: {
       repository: 'cloga/deepseek-harness',
@@ -68,7 +78,7 @@ it('verifies installed evidence and the packaged provisioning plan before record
     installedEvidence: manifest.installedEvidence,
   }))
   const completionPath = join(root, 'completion.json')
-  await expect(completeDesktopManagedUpdate(
+  const result = await completeDesktopManagedUpdate(
     join(root, 'operations'),
     completionPath,
     managedCapability({
@@ -81,8 +91,15 @@ it('verifies installed evidence and the packaged provisioning plan before record
     executablePath,
     runtimePath,
     provisioningPath,
-  )).resolves.toEqual({ status: 'complete', sequence: 2, version: '1.2.3' })
-  expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({ status: 'complete', sequence: 2 })
+    profile,
+  )
+  if (inventory === 'valid') {
+    expect(result).toEqual({ status: 'complete', sequence: 2, version: '1.2.3' })
+    expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({ status: 'complete', sequence: 2 })
+  } else {
+    expect(result.status).toBe('recovery-required')
+    await expect(readFile(completionPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  }
 })
 
 it('requires recovery when the installed provisioning plan differs from the build capability', async () => {
@@ -132,6 +149,7 @@ it('requires recovery when the installed provisioning plan differs from the buil
     executablePath,
     runtimePath,
     provisioningPath,
+    join(root, 'profile'),
   )).resolves.toMatchObject({
     status: 'recovery-required',
     message: /provisioning plan does not match/u,
@@ -159,6 +177,7 @@ it('requires recovery when a helper acknowledgement has no terminal state', asyn
     join(root, 'unused.exe'),
     join(root, 'unused-runtime.json'),
     join(root, 'unused-provisioning.json'),
+    join(root, 'profile'),
   )).resolves.toMatchObject({
     status: 'recovery-required',
     message: /acknowledged the handoff/u,
@@ -206,6 +225,7 @@ it.each([
     join(root, 'unused.exe'),
     join(root, 'unused-runtime.json'),
     join(root, 'unused-provisioning.json'),
+    join(root, 'profile'),
   )).resolves.toMatchObject({ status: 'recovery-required', message })
 })
 
@@ -232,5 +252,6 @@ it('ignores an operation explicitly cancelled by its owning Desktop process', as
     join(root, 'unused.exe'),
     join(root, 'unused-runtime.json'),
     join(root, 'unused-provisioning.json'),
+    join(root, 'profile'),
   )).resolves.toEqual({ status: 'none' })
 })

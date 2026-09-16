@@ -1,92 +1,138 @@
 /** Boot the materialized target runtime without access to a user's Harness profile. */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { DesktopHostProcess } from '../src/host-process.ts'
 import { createPluginProfile } from '../src/project-manager.ts'
-import { linkDesktopHostPackages, validateDesktopPluginGraph } from '../src/profile-packages.ts'
-import type { DesktopRuntimeDescriptor } from '../src/runtime-tree.ts'
+import { linkDesktopHostPackages, unlinkDesktopHostPackages, validateDesktopPluginGraph } from '../src/profile-packages.ts'
+import { desktopRuntimeId, type DesktopRuntimeDescriptor } from '../src/runtime-tree.ts'
+import { NEUTRAL_PLUGIN, writeNeutralProviderFixture } from './neutral-provider-fixture.ts'
+import { smokeDesktopRuntimeBrowser } from './smoke-runtime-browser.ts'
+import { desktopSmokeEnvironment } from './smoke-environment.ts'
+import { removeOwnedDirectory } from '../src/owned-directory.ts'
 
 /**
- * Prove the final resource tree boots and serves its matching Web frontend.
+ * Prove the final resource tree boots, renders an external Models card, and commits offline authorization.
+ * This neutral fixture does not validate a real provider package or authentication service.
  * @param root - Materialized dsh resources.
  * @param node - Prepared target Node executable.
  * @param runtime - Verified resource descriptor.
+ * @param browserChannel - Explicit installed Chromium channel; omission requires Playwright's bundled Chromium.
+ * @param evidenceDirectory - Optional destination for successful neutral-fixture screenshots and provenance.
+ * @param runtimeKind - Workspace-linked fixtures enable the Host's existing development allowance with an OS-assigned inspector port.
  */
-export async function smokeDesktopRuntime(root: string, node: string, runtime: DesktopRuntimeDescriptor): Promise<void> {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-smoke-'))
+export async function smokeDesktopRuntime(
+  root: string,
+  node: string,
+  runtime: DesktopRuntimeDescriptor,
+  browserChannel?: string,
+  evidenceDirectory?: string,
+  runtimeKind: 'materialized' | 'workspace-linked' = 'materialized',
+): Promise<void> {
+  const scratch = resolve('.desktop-smoke')
+  mkdirSync(scratch, { recursive: true })
+  const home = mkdtempSync(join(scratch, 'runtime-'))
   const profile = join(home, 'profiles', 'desktop')
-  const host = new DesktopHostProcess(node, root, profile, undefined, { ...process.env, DSH_HOME: home })
+  const host = new DesktopHostProcess(
+    node, root, profile, runtimeKind === 'workspace-linked' ? 0 : undefined, desktopSmokeEnvironment(home),
+  )
+  let acceptanceError: unknown
   try {
     createPluginProfile(profile)
-    const pluginName = 'desktop-runtime-smoke-plugin'
-    const plugin = join(profile, 'node_modules', pluginName)
-    mkdirSync(plugin, { recursive: true })
-    const cordis = runtime.sharedPackages.find(entry => entry.name === '@deepseek-ai/cordis')
-    if (cordis === undefined) throw new Error('desktop runtime: missing shared Cordis package')
-    writeFileSync(join(plugin, 'package.json'), JSON.stringify({
-      name: pluginName,
-      version: '1.0.0',
-      type: 'module',
-      exports: { '.': './index.js', './client': './client.js' },
-      peerDependencies: { '@deepseek-ai/cordis': cordis.version },
-      dsh: {
-        bundle: { patch: './bundle.yml' },
-        client: { platform: 'web' },
-      },
-    }))
-    writeFileSync(join(plugin, 'index.js'), `
-import { Context } from '@deepseek-ai/cordis'
-export function apply(ctx) {
-  if (!(ctx instanceof Context)) throw new Error('desktop runtime: external plugin loaded another Cordis instance')
-}
-`)
-    writeFileSync(join(plugin, 'client.js'), `
-window.__ModuleLoader__.load({
-  id: ${JSON.stringify(pluginName)},
-  factory() {
-    return {
-      inject: ['slots'],
-      apply(ctx) {
-        ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register(
-          { name: 'settings.models.provider-card', key: 'neutral-auth-provider' },
-          () => 'device-code authentication',
-        ))
-      },
-    }
-  },
-})
-`)
-    writeFileSync(join(plugin, 'bundle.yml'), '- insert:\n    - id: desktop-runtime-smoke-plugin\n      name: desktop-runtime-smoke-plugin\n')
+    writeFileSync(join(home, '.env'), '')
+    writeFileSync(join(profile, '.env'), '')
+    const receipt = writeNeutralProviderFixture(profile, runtime)
+    writeFileSync(join(home, 'settings.yaml'), 'ui-onboarding:\n  welcomeNoticeVersion: "2026-08-13.1"\n')
+    writeFileSync(join(profile, 'cordis.patch.yml'), [
+      '- id: llm-deepseek',
+      '  disabled: true',
+      '- id: llm-pi-ai',
+      '  disabled: true',
+      '- id: session-telemetry-otel',
+      '  disabled: true',
+      '',
+    ].join('\n'))
     const manifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')) as {
       dependencies: Record<string, string>
       dsh: { profile: { bundles: string[] } }
     }
-    manifest.dependencies[pluginName] = '1.0.0'
-    manifest.dsh.profile.bundles.push(pluginName)
+    manifest.dependencies[NEUTRAL_PLUGIN] = '1.0.0'
+    manifest.dsh.profile.bundles.push(NEUTRAL_PLUGIN)
     writeFileSync(join(profile, 'package.json'), JSON.stringify(manifest))
     linkDesktopHostPackages(profile, root, runtime)
-    validateDesktopPluginGraph(profile, root, runtime, [pluginName])
-    const ready = await host.start()
+    validateDesktopPluginGraph(profile, root, runtime, [NEUTRAL_PLUGIN])
+    console.log('desktop smoke: starting isolated Host')
+    let readyTimeout: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<never>((_resolve, reject) => {
+      readyTimeout = setTimeout(() => { reject(new Error('desktop smoke: Host readiness exceeded 120 seconds')) }, 120_000)
+      readyTimeout.unref()
+    })
+    const ready = await Promise.race([host.start(), deadline]).finally(() => { clearTimeout(readyTimeout) })
+    console.log('desktop smoke: Host ready')
     if (ready.dshVersion !== runtime.release.version) throw new Error('desktop runtime: Host reported another dsh release')
     const response = await host.fetch(new Request('dsh-app://app/'))
     const index = await response.text()
-    if (response.status !== 200 || !index.includes('<html') || !index.includes(pluginName)) {
+    if (response.status !== 200 || !index.includes('<html') || !index.includes(NEUTRAL_PLUGIN)) {
       throw new Error('desktop runtime: packaged frontend smoke failed')
     }
     const pluginUrl = [...index.matchAll(/"(\/plugins\/\?\?[^"]+)"/gu)]
-      .map(match => match[1]?.replaceAll('\\u0026', '&'))
-      .find(url => url?.includes(`${pluginName}/client.js`))
+      .map(match => match[1]?.replaceAll('\\u0026', '&').replaceAll('&amp;', '&'))
+      .find(url => url?.includes(`${NEUTRAL_PLUGIN}/client.js`))
     if (pluginUrl === undefined) throw new Error('desktop runtime: external client plugin was not composed')
     const client = await host.fetch(new Request(`dsh-app://app${pluginUrl}`))
     const clientSource = await client.text()
+    console.log('desktop smoke: client assets received')
     if (client.status !== 200 || !clientSource.includes('settings.models.provider-card')
-      || !clientSource.includes('device-code authentication')) {
-      throw new Error('desktop runtime: external provider settings client bundle was not served')
+      || !clientSource.includes('Authorize neutral fixture')) {
+      throw new Error('desktop runtime: external provider settings client bundle was not served '
+        + `(HTTP ${String(client.status)}, ${pluginUrl}): ${clientSource.slice(0, 400)}`)
     }
+    const captures = evidenceDirectory === undefined ? undefined : join(home, 'evidence')
+    await smokeDesktopRuntimeBrowser(host, home, receipt, browserChannel, captures)
+    const evidence: unknown = JSON.parse(readFileSync(join(home, 'neutral-auth-result.json'), 'utf8'))
+    if (typeof evidence !== 'object' || evidence === null
+      || !('receipt' in evidence) || evidence.receipt !== receipt
+      || !('sharedCordis' in evidence) || evidence.sharedCordis !== true
+      || !('attempts' in evidence) || evidence.attempts !== 1
+      || !('status' in evidence) || evidence.status !== 'authorized') {
+      throw new Error('desktop smoke: browser action did not commit exactly one neutral Host authorization')
+    }
+    if (evidenceDirectory !== undefined && captures !== undefined) {
+      writeFileSync(join(captures, 'neutral-fixture-provenance.json'), JSON.stringify({
+        fixture: 'desktop-neutral-provider',
+        runtimeVersion: runtime.release.version,
+        runtimeId: desktopRuntimeId(runtime),
+        runtimeKind,
+        artifactIntegrityVerified: runtimeKind === 'materialized',
+        browserChannel: browserChannel ?? 'playwright-chromium',
+        transport: 'isolated loopback test carrier to Desktop Host byte pipes',
+        realAuthenticationService: false,
+        realModelRound: false,
+        installedReleaseAcceptance: false,
+        evidence,
+      }, undefined, 2) + '\n')
+      cpSync(captures, resolve(evidenceDirectory), { recursive: true, errorOnExist: true, force: false })
+    }
+  } catch (error) {
+    acceptanceError = error
+    throw error
   } finally {
-    await host.stop()
-    rmSync(home, { recursive: true, force: true })
+    const cleanupErrors: unknown[] = []
+    try {
+      await host.stop()
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+    try {
+      unlinkDesktopHostPackages(profile)
+      removeOwnedDirectory(home)
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError([
+        ...(acceptanceError === undefined ? [] : [acceptanceError]), ...cleanupErrors,
+      ], 'desktop smoke: isolated resource cleanup failed')
+    }
   }
 }

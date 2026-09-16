@@ -58,6 +58,30 @@ function receipt(value = source()) {
 }
 
 describe('Desktop plugin provisioning descriptors', () => {
+  it('records an optional failure without inventing a receipt and rejects incomplete results', () => {
+    const plugin = {
+      name: 'neutral-auth-provider', version: '1.0.0', required: false,
+      status: 'optional-failed', source: source(), phase: 'download', message: 'source unavailable',
+    }
+    const state = {
+      schemaVersion: 1, capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+      planSha256: 'a'.repeat(64), composition: 'active', plugins: [plugin],
+      removed: [], rolledBack: false, verified: true,
+    }
+    expect(parseDesktopPluginProvisioningState(state).plugins[0]).toEqual(plugin)
+    for (const invalid of [
+      { ...plugin, receipt: receipt() },
+      { ...plugin, required: true },
+      { ...plugin, phase: undefined },
+      { ...plugin, phase: 'unknown' },
+      { ...plugin, message: '' },
+      { ...plugin, status: 'active' },
+    ]) {
+      expect(() => parseDesktopPluginProvisioningState({ ...state, plugins: [invalid] })).toThrow()
+    }
+    expect(() => parseDesktopPluginProvisioningState({ ...state, plugins: [plugin, plugin] })).toThrow()
+  })
+
   it('parses an exact checksum-attested plan and stable active state', () => {
     const plan = parseDesktopPluginProvisioningPlan({
       schemaVersion: 1,

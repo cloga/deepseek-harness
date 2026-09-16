@@ -388,7 +388,9 @@ async function downloadArtifact(
   destination: string,
   lock: { readonly size: number; readonly sha256: string; readonly integrity?: string },
   fetcher: typeof fetch,
+  phase: (value: 'download' | 'validation') => void,
 ): Promise<void> {
+  phase('download')
   const response = await requestDesktopGithubRelease(
     url,
     'application/octet-stream',
@@ -409,6 +411,7 @@ async function downloadArtifact(
         if (chunk.done) break
         size += chunk.value.byteLength
         if (size > lock.size || size > MAX_RELEASE_ASSET_BYTES) {
+          phase('validation')
           throw new Error('desktop plugin source: release asset exceeds its locked size')
         }
         sha256.update(chunk.value)
@@ -421,6 +424,7 @@ async function downloadArtifact(
   } finally {
     closeSync(descriptor)
   }
+  phase('validation')
   if (size !== lock.size) throw new Error('desktop plugin source: release asset size does not match the lock')
   if (sha256.digest('hex') !== lock.sha256) {
     throw new Error('desktop plugin source: release asset SHA-256 does not match the lock')
@@ -471,35 +475,42 @@ function verifyChecksumManifest(path: string, source: DesktopGithubReleasePlugin
  * @param input - Structured source lock.
  * @param directory - Private transaction directory that owns the resulting artifact.
  * @param fetcher - Fetch implementation, injectable for deterministic tests.
+ * @param phase - Reports acquisition phases for durable optional-failure diagnostics.
  * @returns Verified artifact and GitHub object identities.
  */
 export async function acquireDesktopPluginArtifact(
   input: unknown,
   directory: string,
   fetcher: typeof fetch = fetch,
+  phase: (value: 'download' | 'validation') => void = () => {},
 ): Promise<DesktopVerifiedPluginArtifact> {
+  phase('validation')
   const parsed = parseDesktopPluginSource(input)
   if (parsed.type !== 'githubRelease') throw new Error('desktop plugin source: GitHub Release source required')
   mkdirSync(directory, { recursive: true, mode: 0o700 })
   const source = parsed
   const base = `https://${API_HOST}/repos/${encodeURIComponent(source.owner)}/${encodeURIComponent(source.repo)}`
+  phase('download')
   const release = await githubJson(new URL(`${base}/releases/tags/${encodeURIComponent(source.tag)}`), fetcher)
+  phase('validation')
   if (release.draft !== false) throw new Error('desktop plugin source: GitHub release is draft')
-  if (release.immutable === false) throw new Error('desktop plugin source: GitHub release is mutable')
+  if (release.immutable !== true) throw new Error('desktop plugin source: GitHub release is mutable or lacks immutable metadata')
   if (release.tag_name !== source.tag || release.target_commitish !== source.targetCommit) {
     throw new Error('desktop plugin source: GitHub release tag or target commit does not match the lock')
   }
   if (!Number.isSafeInteger(release.id) || (release.id as number) <= 0) {
     throw new Error('desktop plugin source: GitHub release has no valid id')
   }
+  phase('download')
   const tagCommit = await resolveTagCommit(source, fetcher)
+  phase('validation')
   if (tagCommit !== source.targetCommit) throw new Error('desktop plugin source: GitHub tag commit does not match the lock')
   const asset = releaseAsset(release, source.asset, source)
   const releaseId = release.id as number
   const assetId = asset.id as number
   const artifact = join(directory, source.asset)
   try {
-    await downloadArtifact(new URL(`${base}/releases/assets/${String(source.assetId)}`), artifact, source, fetcher)
+    await downloadArtifact(new URL(`${base}/releases/assets/${String(source.assetId)}`), artifact, source, fetcher, phase)
     if (source.checksumManifest !== undefined) {
       releaseAsset(release, source.checksumManifest.asset, source.checksumManifest)
       const checksumPath = join(directory, source.checksumManifest.asset)
@@ -508,6 +519,7 @@ export async function acquireDesktopPluginArtifact(
         checksumPath,
         source.checksumManifest,
         fetcher,
+        phase,
       )
       verifyChecksumManifest(checksumPath, source)
     }

@@ -49,6 +49,7 @@ export interface DesktopPluginProvisioningResult {
   readonly source: DesktopPluginProvisioningEntry['source']
   readonly receipt?: DesktopPluginProvisionReceipt
   readonly message?: string
+  readonly phase?: 'download' | 'validation' | 'install' | 'graph' | 'health'
 }
 
 /** Durable evidence for the active release-owned plugin inventory. */
@@ -107,9 +108,8 @@ export function parseDesktopPluginProvisioningState(value: unknown): DesktopPlug
   }
   const plugins = value.plugins.map((item: unknown): DesktopPluginProvisioningResult => {
     if (!record(item)
-      || !['name', 'version', 'required', 'status', 'source', 'receipt', 'message']
-        .every(key => key in item || key === 'message')
-      || Object.keys(item).some(key => !['name', 'version', 'required', 'status', 'source', 'receipt', 'message'].includes(key))
+      || !['name', 'version', 'required', 'status', 'source'].every(key => key in item)
+      || Object.keys(item).some(key => !['name', 'version', 'required', 'status', 'source', 'receipt', 'message', 'phase'].includes(key))
       || typeof item.name !== 'string' || typeof item.version !== 'string'
       || typeof item.required !== 'boolean' || (item.status !== 'active' && item.status !== 'optional-failed')
       || (item.message !== undefined && typeof item.message !== 'string')) {
@@ -120,10 +120,16 @@ export function parseDesktopPluginProvisioningState(value: unknown): DesktopPlug
       || source.packageName !== item.name || source.version !== item.version) {
       throw new Error('desktop plugin provisioning: invalid state source')
     }
-    const receipt = parseDesktopPluginProvisionReceipt(item.receipt)
-    if (JSON.stringify(receipt.source) !== JSON.stringify(source)
-      || (item.status === 'active' && item.message !== undefined)
-      || (item.status === 'optional-failed' && (item.required || item.message === undefined || item.message === ''))) {
+    const receipt = item.receipt === undefined ? undefined : parseDesktopPluginProvisionReceipt(item.receipt)
+    const phase = item.phase
+    if (phase !== undefined && phase !== 'download' && phase !== 'validation'
+      && phase !== 'install' && phase !== 'graph' && phase !== 'health') {
+      throw new Error('desktop plugin provisioning: invalid failure phase')
+    }
+    if ((receipt !== undefined && JSON.stringify(receipt.source) !== JSON.stringify(source))
+      || (item.status === 'active' && (receipt === undefined || item.message !== undefined || phase !== undefined))
+      || (item.status === 'optional-failed' && (item.required || receipt !== undefined
+        || item.message === undefined || item.message === '' || phase === undefined))) {
       throw new Error('desktop plugin provisioning: invalid state result')
     }
     return {
@@ -132,12 +138,14 @@ export function parseDesktopPluginProvisioningState(value: unknown): DesktopPlug
       required: item.required,
       status: item.status,
       source: source as DesktopPluginProvisioningEntry['source'],
-      receipt,
+      ...(receipt === undefined ? {} : { receipt }),
       ...(item.message === undefined ? {} : { message: item.message }),
+      ...(phase === undefined ? {} : { phase }),
     }
   })
   const removed = value.removed
-  if (removed.some(item => typeof item !== 'string' || !/^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/u.test(item))
+  if (new Set(plugins.map(plugin => plugin.name)).size !== plugins.length
+    || removed.some(item => typeof item !== 'string' || !/^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/u.test(item))
     || new Set(removed).size !== removed.length) {
     throw new Error('desktop plugin provisioning: invalid removed package')
   }

@@ -204,6 +204,9 @@ describe('desktop verified plugin source', () => {
   it.each([
     ['draft release', { release: { draft: true } }, /release is draft/u],
     ['mutable release', { release: { immutable: false } }, /release is mutable/u],
+    ['missing immutable assertion', { release: { immutable: undefined } }, /immutable/u],
+    ['null immutable assertion', { release: { immutable: null } }, /immutable/u],
+    ['text immutable assertion', { release: { immutable: 'true' } }, /immutable/u],
     ['wrong tag', { release: { tag_name: 'v0.4.0-alpha.19' } }, /tag or target commit/u],
     ['wrong target', { release: { target_commitish: '1111111111111111111111111111111111111111' } }, /tag or target commit/u],
     ['wrong tag commit', { tagObject: { type: 'commit', sha: '1111111111111111111111111111111111111111' } }, /tag commit/u],

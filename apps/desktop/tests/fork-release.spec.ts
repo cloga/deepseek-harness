@@ -76,7 +76,11 @@ describe('Desktop fork release plan', () => {
     )) as {
       permissions: Record<string, string>
       env: Record<string, string>
-      jobs: Record<string, { permissions?: Record<string, string>; environment?: string }>
+      jobs: Record<string, {
+        permissions?: Record<string, string>
+        environment?: string
+        steps?: Array<{ name?: string; run?: string; env?: Record<string, string> }>
+      }>
     }
     expect(workflow.permissions).toEqual({ contents: 'read' })
     expect(workflow.env).toMatchObject({
@@ -92,5 +96,17 @@ describe('Desktop fork release plan', () => {
       },
     })
     expect(workflow.jobs['remote-check']?.permissions).toEqual({ contents: 'read' })
+    const steps = workflow.jobs.build?.steps ?? []
+    const install = steps.findIndex(step => step.name === 'Install from frozen lockfile')
+    const browser = steps.findIndex(step => step.name === 'Prepare browser for isolated Desktop acceptance')
+    const packaging = steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')
+    expect(install).toBeGreaterThanOrEqual(0)
+    expect(browser).toBeGreaterThan(install)
+    expect(packaging).toBeGreaterThan(browser)
+    expect(steps[browser]).toMatchObject({
+      run: 'node apps/desktop/node_modules/playwright/cli.js install chromium',
+      env: { PLAYWRIGHT_BROWSERS_PATH: '${{ runner.temp }}/desktop-playwright' },
+    })
+    expect(steps[packaging]?.env?.PLAYWRIGHT_BROWSERS_PATH).toBe(steps[browser]?.env?.PLAYWRIGHT_BROWSERS_PATH)
   })
 })

@@ -97,6 +97,12 @@ function fileSha256(path: string): string {
   return sha256(readFileSync(path))
 }
 
+function assertFileSha256(path: string, expected: string, label: string): void {
+  if (fileSha256(path) !== expected) {
+    throw new Error(`desktop fork release: ${label} does not match the verified bytes: ${path}`)
+  }
+}
+
 function readJson(path: string): unknown {
   return JSON.parse(readFileSync(path, 'utf8'))
 }
@@ -217,8 +223,12 @@ export function createDesktopForkReleaseCapability(
   })
 }
 
+function jsonText(value: unknown): string {
+  return `${JSON.stringify(value, undefined, 2)}\n`
+}
+
 function writeJson(path: string, value: unknown): void {
-  writeFileSync(path, `${JSON.stringify(value, undefined, 2)}\n`)
+  writeFileSync(path, jsonText(value))
 }
 
 function assertReleaseBuildEnvironment(plan: DesktopForkReleasePlan): {
@@ -227,6 +237,11 @@ function assertReleaseBuildEnvironment(plan: DesktopForkReleasePlan): {
   planSha256: string
   lockfileSha256: string
 } {
+  const reviewedPlan = readFileSync(join(APP_ROOT, 'release', 'cloga-windows-x64.json'))
+  if (managedUpdateJsonSha256(parseDesktopForkReleasePlan(JSON.parse(reviewedPlan.toString('utf8'))))
+    !== managedUpdateJsonSha256(plan)) {
+    throw new Error('desktop fork release: supplied plan does not match the reviewed source plan')
+  }
   const rootVersion = record(readJson(join(REPOSITORY_ROOT, 'package.json')), 'root package').version
   const desktopVersion = record(readJson(join(APP_ROOT, 'package.json')), 'Desktop package').version
   if (rootVersion !== plan.upstreamVersion || desktopVersion !== plan.upstreamVersion) {
@@ -246,7 +261,7 @@ function assertReleaseBuildEnvironment(plan: DesktopForkReleasePlan): {
   return {
     commit,
     tree,
-    planSha256: fileSha256(join(APP_ROOT, 'release', 'cloga-windows-x64.json')),
+    planSha256: sha256(reviewedPlan),
     lockfileSha256: fileSha256(join(REPOSITORY_ROOT, 'pnpm-lock.yaml')),
   }
 }
@@ -274,8 +289,10 @@ function relativeImportPresent(source: string): boolean {
 
 /**
  * Finalize installer, receipt, manifest, and checksum assets after unsigned packaging.
+ * Reject inconsistent reviewed, input, packaged, or published identities before writing checksums.
  * @param plan - Reviewed release plan.
  * @param capabilityPath - Capability file copied into the packaged application.
+ * @param provisioningPath - Provisioning input matching the reviewed release inventory.
  * @param artifactsRoot - electron-builder unsigned output directory.
  * @param outputRoot - Release asset output directory.
  */
@@ -310,16 +327,26 @@ export function finalizeDesktopForkRelease(
   if (existsSync(appUpdatePath)) {
     throw new Error('desktop fork release: native app-update.yml must not accompany managed mode')
   }
-  if (relativeImportPresent(readFileSync(helperPath, 'utf8'))) {
+  const helperBytes = readFileSync(helperPath)
+  if (relativeImportPresent(helperBytes.toString('utf8'))) {
     throw new Error('desktop fork release: standalone helper contains a relative import')
   }
-  if (JSON.stringify(parseDesktopManagedUpdateCapability(readJson(capabilityPath)))
-    !== JSON.stringify(parseDesktopManagedUpdateCapability(readJson(packagedCapabilityPath)))) {
+  const inputCapability = parseDesktopManagedUpdateCapability(readJson(capabilityPath))
+  if (JSON.stringify(inputCapability) !== JSON.stringify(capability)) {
+    throw new Error('desktop fork release: input capability does not match the reviewed release plan')
+  }
+  const packagedCapabilityBytes = readFileSync(packagedCapabilityPath)
+  if (JSON.stringify(inputCapability)
+    !== JSON.stringify(parseDesktopManagedUpdateCapability(JSON.parse(packagedCapabilityBytes.toString('utf8'))))) {
     throw new Error('desktop fork release: packaged capability does not match the reviewed input')
   }
   const provisioning = parseDesktopPluginProvisioningPlan(readJson(provisioningPath))
+  if (JSON.stringify(provisioning) !== JSON.stringify(plan.desktopProvisioning)) {
+    throw new Error('desktop fork release: input provisioning plan does not match the reviewed release plan')
+  }
+  const packagedProvisioningBytes = readFileSync(packagedProvisioningPath)
   if (JSON.stringify(provisioning)
-    !== JSON.stringify(parseDesktopPluginProvisioningPlan(readJson(packagedProvisioningPath)))) {
+    !== JSON.stringify(parseDesktopPluginProvisioningPlan(JSON.parse(packagedProvisioningBytes.toString('utf8'))))) {
     throw new Error('desktop fork release: packaged provisioning plan does not match the reviewed input')
   }
   const provisioningSha256 = desktopPluginProvisioningPlanSha256(provisioning)
@@ -341,13 +368,17 @@ export function finalizeDesktopForkRelease(
   if (!existsSync(executablePath) || !existsSync(runtimePath)) {
     throw new Error('desktop fork release: installed executable or runtime descriptor is missing')
   }
+  const installerSha256 = fileSha256(installerPath)
+  const packagedProvisioningSha256 = sha256(packagedProvisioningBytes)
   rmSync(outputRoot, { recursive: true, force: true })
   mkdirSync(outputRoot, { recursive: true })
   const publishedInstaller = join(outputRoot, installerName)
   const provisioningName = 'desktop-provisioning.json'
   const publishedProvisioning = join(outputRoot, provisioningName)
   copyFileSync(installerPath, publishedInstaller)
-  copyFileSync(provisioningPath, publishedProvisioning)
+  copyFileSync(packagedProvisioningPath, publishedProvisioning)
+  assertFileSha256(publishedInstaller, installerSha256, 'published installer')
+  assertFileSha256(publishedProvisioning, packagedProvisioningSha256, 'published provisioning plan')
   const receiptPayload = {
     schemaVersion: 1,
     action: 'desktop-fork-release',
@@ -373,17 +404,17 @@ export function finalizeDesktopForkRelease(
       installer: {
         file: installerName,
         bytes: statSync(publishedInstaller).size,
-        sha256: fileSha256(publishedInstaller),
+        sha256: installerSha256,
         sha512: sha512(publishedInstaller),
         signature: 'NotSigned',
       },
       executableSha256: fileSha256(executablePath),
       runtimeSha256: fileSha256(runtimePath),
-      helperSha256: fileSha256(helperPath),
-      capabilitySha256: fileSha256(packagedCapabilityPath),
+      helperSha256: sha256(helperBytes),
+      capabilitySha256: sha256(packagedCapabilityBytes),
       provisioning: {
         file: provisioningName,
-        sha256: fileSha256(publishedProvisioning),
+        sha256: packagedProvisioningSha256,
         planSha256: provisioningSha256,
       },
     },
@@ -422,6 +453,7 @@ export function finalizeDesktopForkRelease(
   }
   const receipt = { ...receiptPayload, receiptSha256: managedUpdateJsonSha256(receiptPayload) }
   const receiptPath = join(outputRoot, 'build-receipt.json')
+  const receiptFileSha256 = sha256(jsonText(receipt))
   writeJson(receiptPath, receipt)
   const manifestPayload = {
     schemaVersion: DESKTOP_MANAGED_UPDATE_MANIFEST_SCHEMA_VERSION,
@@ -449,7 +481,7 @@ export function finalizeDesktopForkRelease(
     installer: receipt.artifacts.installer,
     buildReceipt: {
       file: basename(receiptPath),
-      sha256: fileSha256(receiptPath),
+      sha256: receiptFileSha256,
       receiptSha256: receipt.receiptSha256,
     },
     installedEvidence: {
@@ -467,6 +499,20 @@ export function finalizeDesktopForkRelease(
   parseDesktopManagedUpdateManifest(manifest, capability, 0, true)
   const manifestPath = join(outputRoot, DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET)
   writeJson(manifestPath, manifest)
+  for (const [path, expected, label] of [
+    [installerPath, installerSha256, 'packaged installer'],
+    [publishedInstaller, installerSha256, 'published installer'],
+    [packagedProvisioningPath, packagedProvisioningSha256, 'packaged provisioning plan'],
+    [publishedProvisioning, packagedProvisioningSha256, 'published provisioning plan'],
+    [packagedCapabilityPath, receipt.artifacts.capabilitySha256, 'packaged capability'],
+    [helperPath, receipt.artifacts.helperSha256, 'packaged helper'],
+    [executablePath, receipt.artifacts.executableSha256, 'packaged executable'],
+    [runtimePath, receipt.artifacts.runtimeSha256, 'packaged runtime descriptor'],
+    [receiptPath, receiptFileSha256, 'build receipt'],
+    [manifestPath, sha256(jsonText(manifest)), 'published manifest'],
+  ] as const) {
+    assertFileSha256(path, expected, label)
+  }
   const files = [installerName, provisioningName, basename(receiptPath), basename(manifestPath)]
   writeFileSync(join(outputRoot, 'SHA256SUMS'), `${files.map(name => `${fileSha256(join(outputRoot, name))}  ${name}`).join('\n')}\n`)
   writeFileSync(join(outputRoot, 'SHA512SUMS'), `${files.map(name => `${sha512(join(outputRoot, name))}  ${name}`).join('\n')}\n`)

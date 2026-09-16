@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto'
+import * as fs from 'node:fs'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { gzipSync } from 'node:zlib'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { resolveDesktopPaths } from '../src/paths.ts'
 import { DesktopProjectManager, packageNameFromSpec, type DesktopProjectHooks } from '../src/project-manager.ts'
 import type { DesktopGithubReleasePluginSource } from '../src/plugin-source.ts'
@@ -14,15 +15,21 @@ const roots: string[] = []
 const releaseWorkers: Array<() => Promise<void>> = []
 const targetCommit = '08bfccc3b5930b93ef2fe31d9cf9e509f34a8704'
 
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return { ...actual, renameSync: vi.fn(actual.renameSync) }
+})
+
 function octal(value: number, width: number): Buffer {
   return Buffer.from(value.toString(8).padStart(width - 1, '0') + '\0')
 }
 
-function verifiedPluginArchive(): Buffer {
+function verifiedPluginArchive(name = 'dsh-github-copilot', version = '0.4.0-alpha.18', peer = '^1.0.0'): Buffer {
   const entries = [
     ['package/package.json', JSON.stringify({
-      name: 'dsh-github-copilot',
-      version: '0.4.0-alpha.18',
+      name,
+      version,
+      peerDependencies: { '@deepseek-ai/cordis': peer },
       dsh: { bundle: { patch: './cordis.patch.yml' } },
     })],
     ['package/cordis.patch.yml', '[]\n'],
@@ -47,20 +54,20 @@ function verifiedPluginArchive(): Buffer {
   return gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]))
 }
 
-function verifiedSource(archive: Buffer): DesktopGithubReleasePluginSource {
+function verifiedSource(archive: Buffer, name = 'dsh-github-copilot', version = '0.4.0-alpha.18'): DesktopGithubReleasePluginSource {
   const artifactSha256 = createHash('sha256').update(archive).digest('hex')
-  const asset = 'dsh-github-copilot-0.4.0-alpha.18.tgz'
+  const asset = `${name}-${version}.tgz`
   const checksum = Buffer.from(`${artifactSha256}  ${asset}\n`)
   return {
     schemaVersion: 1,
     type: 'githubRelease',
     owner: 'cloga',
-    repo: 'dsh-github-copilot',
-    tag: 'v0.4.0-alpha.18',
+    repo: name,
+    tag: `v${version}`,
     asset,
     assetId: 563672719,
-    packageName: 'dsh-github-copilot',
-    version: '0.4.0-alpha.18',
+    packageName: name,
+    version,
     size: archive.byteLength,
     sha256: artifactSha256,
     targetCommit,
@@ -69,7 +76,7 @@ function verifiedSource(archive: Buffer): DesktopGithubReleasePluginSource {
       format: 'sha256sums',
       asset: 'SHA256SUMS',
       assetId: 563672720,
-      url: 'https://github.com/cloga/dsh-github-copilot/releases/download/v0.4.0-alpha.18/SHA256SUMS',
+      url: `https://github.com/cloga/${name}/releases/download/v${version}/SHA256SUMS`,
       size: checksum.byteLength,
       sha256: createHash('sha256').update(checksum).digest('hex'),
     },
@@ -126,7 +133,7 @@ function temporaryRoot(): string {
 function writeFakePnpm(root: string): string {
   const path = join(root, 'pnpm.mjs')
   writeFileSync(path, `
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { gunzipSync } from 'node:zlib'
 const args = process.argv.slice(2)
@@ -147,6 +154,7 @@ function archiveManifest(path) {
 }
 appendFileSync(${JSON.stringify(join(root, 'pnpm-log.jsonl'))}, JSON.stringify({
   args,
+  project,
   registry: process.env.NPM_CONFIG_REGISTRY,
   credentials: {
     npmToken: process.env.NPM_TOKEN,
@@ -156,12 +164,16 @@ appendFileSync(${JSON.stringify(join(root, 'pnpm-log.jsonl'))}, JSON.stringify({
   },
 }) + '\\n')
 if (command !== 'rebuild') {
+  let addedArtifact
   const manifestPath = join(project, 'package.json')
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   if (command === 'add') {
     const spec = args[args.indexOf(command) + 1]
     if (spec.startsWith('./.desktop-plugin-artifacts/')) {
       const installed = archiveManifest(join(project, spec))
+      addedArtifact = installed
+      const failure = ${JSON.stringify(join(root, 'fail-package'))}
+      if (existsSync(failure) && readFileSync(failure, 'utf8') === installed.name) throw new Error('fixture package install failed')
       manifest.dependencies[installed.name] = installed.version
     } else {
       const index = spec.lastIndexOf('@')
@@ -173,13 +185,13 @@ if (command !== 'rebuild') {
   writeFileSync(manifestPath, JSON.stringify(manifest))
   rmSync(join(project, 'node_modules'), { recursive: true, force: true })
   for (const [name, version] of Object.entries(manifest.dependencies)) {
-    const installedVersion = typeof version === 'string' && version.startsWith('file:.desktop-plugin-artifacts/')
-      ? archiveManifest(join(project, version.slice('file:'.length))).version
-      : version
+    const installed = addedArtifact?.name === name ? addedArtifact : typeof version === 'string' && version.startsWith('file:.desktop-plugin-artifacts/')
+      ? archiveManifest(join(project, version.slice('file:'.length)))
+      : { name, version }
     const packageRoot = join(project, 'node_modules', name)
     mkdirSync(packageRoot, { recursive: true })
-    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({name, version: installedVersion,
-      peerDependencies: {'@deepseek-ai/cordis': '^1.0.0'}, dsh: {bundle: {patch: './bundle.yml'}}}))
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ ...installed,
+      peerDependencies: installed.peerDependencies ?? {'@deepseek-ai/cordis': '^1.0.0'}, dsh: {bundle: {patch: './bundle.yml'}}}))
     writeFileSync(join(packageRoot, 'bundle.yml'), '[]\\n')
   }
   writeFileSync(join(project, 'pnpm-lock.yaml'), JSON.stringify(manifest.dependencies))
@@ -196,15 +208,18 @@ function setup(): { root: string; manager: DesktopProjectManager } {
   runtimeFixture(dsh)
   return { root, manager: new DesktopProjectManager(resolveDesktopPaths(join(root, '.dsh')), { node: process.execPath, pnpm: writeFakePnpm(root), dsh }) }
 }
-function calls(root: string): { args: string[]; registry: string; credentials: Record<string, string | undefined> }[] {
+function calls(root: string): { args: string[]; project: string; registry: string; credentials: Record<string, string | undefined> }[] {
   const path = join(root, 'pnpm-log.jsonl')
   return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line) as {
     args: string[]
+    project: string
     registry: string
     credentials: Record<string, string | undefined>
   }) : []
 }
 afterEach(async () => {
+  vi.restoreAllMocks()
+  vi.mocked(fs.renameSync).mockReset()
   const cleanups = releaseWorkers.splice(0)
   const directories = roots.splice(0)
   const results = await Promise.allSettled(cleanups.map(cleanup => cleanup()))
@@ -214,7 +229,256 @@ afterEach(async () => {
 })
 
 describe('desktop external plugin profile', () => {
-  it('reuses plugin files without scanning manifests and can disable or reset them', async () => {
+  it('isolates two required release acquisitions sharing SHA256SUMS', async () => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    const fixtures = ['first-plugin', 'second-plugin'].map((name) => {
+      const archive = verifiedPluginArchive(name)
+      return { archive, source: verifiedSource(archive, name) }
+    })
+    const original = globalThis.fetch
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input)
+      const fixture = fixtures.find(entry => url.pathname.includes(`/${entry.source.repo}/`))
+      if (fixture === undefined) throw new Error(`unexpected request ${url}`)
+      return verifiedFetch(fixture.source, fixture.archive)(input, init)
+    }
+    try {
+      await manager.reconcileProvisioning({
+        schemaVersion: 1, mode: 'exact',
+        plugins: fixtures.map(({ source }) => ({ required: true, source })),
+      }, hooks())
+      expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(['first-plugin', 'second-plugin'])
+    } finally { globalThis.fetch = original }
+  })
+
+  it.each(['registry', 'alternate-artifact', 'artifact-bytes', 'missing-package', 'missing-row', 'empty-extra'] as const)('repairs exact restart inventory after %s drift', async (drift) => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    const archive = verifiedPluginArchive()
+    const source = verifiedSource(archive)
+    const original = globalThis.fetch
+    globalThis.fetch = verifiedFetch(source, archive)
+    const plan = { schemaVersion: 1, mode: 'exact', plugins: drift === 'empty-extra' ? [] : [{ required: true, source }] }
+    try {
+      await manager.reconcileProvisioning(plan, hooks())
+      if (drift === 'registry') {
+        await manager.mutate({ type: 'plugin-update', name: source.packageName, version: source.version }, hooks())
+      } else if (drift === 'alternate-artifact') {
+        const alternateArchive = verifiedPluginArchive(source.packageName, source.version, '>=1.0.0')
+        const alternate = verifiedSource(alternateArchive)
+        globalThis.fetch = verifiedFetch(alternate, alternateArchive)
+        await manager.mutate({ type: 'plugin-install', source: alternate }, hooks())
+        globalThis.fetch = verifiedFetch(source, archive)
+      } else if (drift === 'artifact-bytes') {
+        writeFileSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${source.sha256}.tgz`), 'replaced archive')
+      } else if (drift === 'missing-package') {
+        rmSync(join(manager.paths.profile, 'node_modules', source.packageName), { recursive: true })
+      } else if (drift === 'empty-extra') {
+        await manager.mutate({ type: 'plugin-install', source }, hooks())
+      } else {
+        const path = join(manager.paths.profile, 'desktop-plugin-provisioning-state.json')
+        const state = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+        writeFileSync(path, JSON.stringify({ ...state, plugins: [] }))
+      }
+      const state = await manager.reconcileProvisioning(plan, hooks())
+      if (drift === 'empty-extra') expect(manager.listPlugins()).toEqual([])
+      else {
+        expect(state.plugins).toHaveLength(1)
+        expect(manager.listPlugins()[0]?.source).toEqual(source)
+      }
+    } finally { globalThis.fetch = original }
+  })
+
+  it.each((['download', 'validation', 'install', 'graph', 'health'] as const).flatMap(phase =>
+    [false, true].map(required => ({ phase, required })),
+  ))('handles $phase failure with required=$required without a successful receipt', async ({ phase, required }) => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-add', spec: 'manual-plugin@1.0.0' }, hooks())
+    const archive = verifiedPluginArchive()
+    const source = verifiedSource(archive)
+    const optionalArchive = verifiedPluginArchive('optional-plugin', '0.4.0-alpha.18', phase === 'graph' ? '^9.0.0' : '^1.0.0')
+    const optional = verifiedSource(optionalArchive, 'optional-plugin')
+    const validArchive = verifiedPluginArchive('valid-optional')
+    const validOptional = verifiedSource(validArchive, 'valid-optional')
+    if (phase === 'install') writeFileSync(join(root, 'fail-package'), optional.packageName)
+    const original = globalThis.fetch
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input)
+      if (url.pathname.includes('/optional-plugin/')) {
+        if (phase === 'download') throw new Error('optional download unavailable')
+        if (phase === 'validation' && url.pathname.includes('/releases/tags/')) {
+          return Response.json({ draft: false, immutable: false })
+        }
+        return verifiedFetch(optional, optionalArchive)(input, init)
+      }
+      if (url.pathname.includes('/valid-optional/')) return verifiedFetch(validOptional, validArchive)(input, init)
+      return verifiedFetch(source, archive)(input, init)
+    }
+    try {
+      const pending = manager.reconcileProvisioning({
+        schemaVersion: 1, mode: 'exact',
+        plugins: [{ required: true, source }, { required, source: optional }, { required: false, source: validOptional }],
+      }, hooks({ healthCheck: async (projectDir) => {
+        const manifest = JSON.parse(readFileSync(join(projectDir, 'package.json'), 'utf8')) as {
+          dsh: { profile: { bundles: string[] } }
+        }
+        expect(manifest.dsh.profile.bundles).toContain(source.packageName)
+        if (phase === 'health' && manifest.dsh.profile.bundles.includes(optional.packageName)) throw new Error('optional health failed')
+      } }))
+      if (required) {
+        await expect(pending).rejects.toThrow()
+        expect(manager.listPlugins()).toEqual([{ name: 'manual-plugin', version: '1.0.0', enabled: true }])
+        expect(existsSync(join(manager.paths.profile, 'desktop-plugin-provisioning-state.json'))).toBe(false)
+        return
+      }
+      const state = await pending
+      expect(state.plugins).toMatchObject([
+        { name: source.packageName, status: 'active' },
+        { name: optional.packageName, status: 'optional-failed', phase },
+        { name: validOptional.packageName, status: 'active' },
+      ])
+      expect(state.plugins[1]?.message).toBeTypeOf('string')
+      expect(state.plugins[1]?.receipt).toBeUndefined()
+      expect(manager.listPlugins().map(plugin => plugin.name)).toEqual([source.packageName, 'manual-plugin', validOptional.packageName])
+    } finally { globalThis.fetch = original }
+  })
+
+  it('stages a Node upgrade without running pnpm in the active profile', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-add', spec: 'manual-plugin@1.0.0' }, hooks())
+    const dsh = join(root, 'new-runtime')
+    runtimeFixture(dsh, '1.1.0', '24.18.0')
+    const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+    await next.applyRelease()
+    expect(calls(root).every(call => call.project !== manager.paths.profile)).toBe(true)
+  })
+
+  it('does not copy private node_modules into a toggle transaction', async () => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-add', spec: 'manual-plugin@1.0.0' }, hooks())
+    writeFileSync(join(manager.paths.profile, 'node_modules', 'private-sentinel'), 'must not be copied')
+    await manager.mutate({ type: 'plugin-toggle', name: 'manual-plugin', enabled: false }, hooks({
+      healthCheck: async (projectDir) => {
+        expect(existsSync(join(projectDir, 'node_modules', 'private-sentinel'))).toBe(false)
+      },
+    }))
+  })
+
+  it.each(['remove', 'replace'] as const)('reconciles an incompatible old plugin before validating a changed Host: %s', async (operation) => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const archive = verifiedPluginArchive()
+    const source = verifiedSource(archive)
+    const original = globalThis.fetch
+    globalThis.fetch = verifiedFetch(source, archive)
+    try {
+      await manager.reconcileProvisioning({ schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source }] }, hooks())
+      const dsh = join(root, 'next-major')
+      runtimeFixture(dsh, '2.0.0')
+      const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+      const replacementArchive = verifiedPluginArchive(source.packageName, '1.0.0', '^2.0.0')
+      const replacement = verifiedSource(replacementArchive, source.packageName, '1.0.0')
+      globalThis.fetch = verifiedFetch(replacement, replacementArchive)
+      await next.applyRelease(hooks(), {
+        schemaVersion: 1, mode: 'exact', plugins: operation === 'remove' ? [] : [{ required: true, source: replacement }],
+      })
+      if (operation === 'remove') expect(next.listPlugins()).toEqual([])
+      else expect(next.listPlugins()).toMatchObject([{ name: source.packageName, version: '1.0.0', enabled: true, source: replacement }])
+      expect(next.releaseVersion()).toBe('2.0.0')
+    } finally { globalThis.fetch = original }
+  })
+
+  it('restores the previous runtime when staging succeeds but final activation fails', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const dsh = join(root, 'new-runtime')
+    runtimeFixture(dsh, '1.1.0')
+    const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+    let starts = 0
+    await expect(next.applyRelease(hooks({
+      afterChange: async () => {
+        if (++starts === 1) throw new Error('final-location Host failed')
+      },
+    }), { schemaVersion: 1, mode: 'exact', plugins: [] })).rejects.toThrow('final-location Host failed')
+    expect(next.releaseVersion()).toBe('1.0.0')
+    expect(starts).toBe(2)
+  })
+
+  it('retains the recoverable old profile when rollback rename fails', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    writeFileSync(join(manager.paths.profile, 'old-profile-sentinel'), 'recover me')
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
+    vi.mocked(fs.renameSync).mockImplementation((from, to) => {
+      if (String(from).endsWith('rollback')) throw new Error('rollback rename denied')
+      actual.renameSync(from, to)
+    })
+    await expect(manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks({
+      afterChange: async () => { throw new Error('final Host failed') },
+    }))).rejects.toThrow('activation and rollback failed')
+    const parent = join(root, '.dsh', 'profiles')
+    const transaction = readdirSync(parent).find(name => name.startsWith('.desktop-transaction-'))
+    expect(transaction).toBeDefined()
+    expect(readFileSync(join(parent, transaction!, 'rollback', 'old-profile-sentinel'), 'utf8')).toBe('recover me')
+    vi.mocked(fs.renameSync).mockReset()
+    await manager.applyRelease()
+    expect(readFileSync(join(manager.paths.profile, 'old-profile-sentinel'), 'utf8')).toBe('recover me')
+    expect(manager.listPlugins()).toEqual([])
+  })
+
+  it.each(['old-moved', 'new-activated'] as const)('recovers an interrupted directory activation: %s', async (phase) => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    writeFileSync(join(manager.paths.profile, 'old-profile-sentinel'), 'recover me')
+    const transaction = mkdtempSync(join(root, '.dsh', 'profiles', '.desktop-transaction-'))
+    fs.renameSync(manager.paths.profile, join(transaction, 'rollback'))
+    if (phase === 'new-activated') {
+      mkdirSync(manager.paths.profile)
+      writeFileSync(join(manager.paths.profile, 'unverified-new-profile'), 'not ready')
+    }
+    writeFileSync(join(manager.paths.root, 'profile-activation.json'), JSON.stringify({
+      schemaVersion: 1, transaction: transaction.split(/[\\/]/u).at(-1), phase: 'activating',
+    }))
+    await manager.applyRelease()
+    expect(readFileSync(join(manager.paths.profile, 'old-profile-sentinel'), 'utf8')).toBe('recover me')
+    expect(existsSync(join(manager.paths.profile, 'unverified-new-profile'))).toBe(false)
+    expect(existsSync(transaction)).toBe(false)
+  })
+
+  it('rolls back when final Host readiness leaves required receipts missing', async () => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    const archive = verifiedPluginArchive()
+    const source = verifiedSource(archive)
+    const original = globalThis.fetch
+    globalThis.fetch = verifiedFetch(source, archive)
+    let starts = 0
+    try {
+      await expect(manager.reconcileProvisioning({
+        schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source }],
+      }, hooks({ afterChange: async () => {
+        if (++starts === 1) unlinkSync(join(manager.paths.profile, 'desktop-plugin-receipts.json'))
+      } }))).rejects.toThrow(/verified local artifacts/u)
+      expect(manager.listPlugins()).toEqual([])
+      expect(starts).toBe(2)
+    } finally { globalThis.fetch = original }
+  })
+
+  it.each(['../outside', '.desktop-transaction-invalid/path'])('rejects an unconfined recovery transaction: %s', async (transaction) => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    writeFileSync(join(manager.paths.root, 'profile-activation.json'), JSON.stringify({
+      schemaVersion: 1, transaction, phase: 'activating',
+    }))
+    await expect(manager.applyRelease()).rejects.toThrow('invalid profile activation recovery journal')
+    expect(manager.releaseVersion()).toBe('1.0.0')
+  })
+
+  it('reuses unchanged profiles and reconstructs damaged plugins when disabling or resetting them', async () => {
     const { manager } = setup()
     await manager.applyRelease()
     await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
@@ -223,7 +487,7 @@ describe('desktop external plugin profile', () => {
     await expect(manager.applyRelease()).resolves.toBe(false)
     await manager.mutate({ type: 'plugins-disable-all' }, hooks())
     await expect(manager.applyRelease()).resolves.toBe(false)
-    expect(readFileSync(manifest, 'utf8')).toBe('{broken')
+    expect(JSON.parse(readFileSync(manifest, 'utf8'))).toMatchObject({ name: 'plugin', version: '1.0.0' })
     await manager.resetConfiguration(hooks())
     expect(existsSync(manifest)).toBe(false)
     await expect(manager.applyRelease()).resolves.toBe(false)
@@ -244,7 +508,7 @@ describe('desktop external plugin profile', () => {
       dsh: { profile: { bundles: string[] } }
     }).dsh.profile.bundles).not.toContain('plugin')
     expect(existsSync(join(manager.paths.profile, 'node_modules/plugin/package.json'))).toBe(true)
-    expect(calls(root)).toHaveLength(2)
+    expect(calls(root)).toHaveLength(4)
     await expect(manager.applyRelease()).resolves.toBe(false)
   })
 
@@ -306,7 +570,7 @@ describe('desktop external plugin profile', () => {
     }
   })
 
-  it('retries installation after an interrupted runtime rebuild removed plugin files', async () => {
+  it('retains active plugin files after an interrupted staged runtime rebuild', async () => {
     const { root, manager } = setup()
     await manager.applyRelease()
     await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
@@ -316,7 +580,8 @@ describe('desktop external plugin profile', () => {
     writeFileSync(failing, 'process.exitCode = 1')
     const worker = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh, pnpm: failing })
     await expect(worker.applyRelease()).rejects.toThrow('pnpm exited with 1')
-    expect(existsSync(join(manager.paths.profile, 'node_modules/plugin'))).toBe(false)
+    expect(existsSync(join(manager.paths.profile, 'node_modules/plugin'))).toBe(true)
+    expect(manager.releaseVersion()).toBe('1.0.0')
     const retry = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
     await expect(retry.applyRelease()).resolves.toBe(true)
     expect(retry.listPlugins()).toEqual([{ name: 'plugin', version: '1.0.0', enabled: true }])
@@ -358,7 +623,7 @@ describe('desktop external plugin profile', () => {
       await expect(retry.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())).resolves.toBeUndefined()
       return
     }
-    expect(() => { worker.assertProfileRuntime(worker.paths.profile) }).toThrow('package preparation is incomplete')
+    expect(() => { worker.assertProfileRuntime(worker.paths.profile) }).toThrow('profile does not match this application runtime')
     const count = calls(root).length
     const retry = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
     await expect(retry.applyRelease()).resolves.toBe(true)
@@ -418,7 +683,7 @@ describe('desktop external plugin profile', () => {
     expect(JSON.parse(readFileSync(join(manager.paths.profile, 'package.json'), 'utf8'))).toMatchObject({ dependencies: { '@scope/plugin': '2.0.0' } })
     await expect(manager.mutate({ type: 'plugin-add', spec: '@deepseek-ai/cordis' }, hooks())).rejects.toThrow(/host-owned/u)
     await expect(manager.applyRelease()).resolves.toBe(false)
-    expect(calls(root)).toHaveLength(4)
+    expect(calls(root)).toHaveLength(3)
   })
 
   it('retains exact npm installation through the versioned source API', async () => {
@@ -537,7 +802,7 @@ describe('desktop external plugin profile', () => {
     }
   })
 
-  it('activates required plugins while disabling an optional plugin that fails composition health', async () => {
+  it('excludes an optional plugin that fails composition health without retaining a successful receipt', async () => {
     const { root, manager } = setup()
     await manager.applyRelease()
     const archive = verifiedPluginArchive()
@@ -554,27 +819,22 @@ describe('desktop external plugin profile', () => {
             const manifest = JSON.parse(readFileSync(join(projectDir, 'package.json'), 'utf8')) as {
               dsh: { profile: { bundles: string[] } }
             }
-            if (healthChecks === 1) {
-              expect(manifest.dsh.profile.bundles).toContain(source.packageName)
+            if (manifest.dsh.profile.bundles.includes(source.packageName)) {
               throw new Error('optional client composition failed')
             }
             expect(manifest.dsh.profile.bundles).not.toContain(source.packageName)
           },
         }),
       )
-      expect(healthChecks).toBe(2)
+      expect(healthChecks).toBe(3)
       expect(state.plugins).toMatchObject([{
         name: source.packageName,
         required: false,
         status: 'optional-failed',
         message: 'optional client composition failed',
       }])
-      expect(manager.listPlugins()).toEqual([{
-        name: source.packageName,
-        version: source.version,
-        enabled: false,
-        source,
-      }])
+      expect(manager.listPlugins()).toEqual([])
+      expect(state.plugins[0]?.receipt).toBeUndefined()
       const callCount = calls(root).length
       await expect(manager.reconcileProvisioning(
         { schemaVersion: 1, mode: 'exact', plugins: [{ required: false, source }] },
@@ -635,7 +895,7 @@ describe('desktop external plugin profile', () => {
     await manager.applyRelease()
     await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
     await manager.mutate({ type: 'plugins-disable-all' }, hooks())
-    expect(calls(root)).toHaveLength(2)
+    expect(calls(root)).toHaveLength(4)
     expect(manager.listPlugins()).toEqual([{ name: 'plugin', version: '1.0.0', enabled: false }])
     await manager.mutate({ type: 'plugin-update', name: 'plugin', version: '1.1.0' }, hooks())
     expect(manager.listPlugins()).toEqual([{ name: 'plugin', version: '1.1.0', enabled: false }])
@@ -657,7 +917,7 @@ describe('desktop external plugin profile', () => {
     expect(next.listPlugins()).toEqual(manager.listPlugins())
     expect(next.releaseVersion()).toBe('1.1.0')
     expect(readFileSync(join(manager.paths.profile, 'cordis.patch.yml'), 'utf8')).toBe('[]\n')
-    expect(calls(root)).toHaveLength(2)
+    expect(calls(root)).toHaveLength(4)
     expect(realpathSync(join(manager.paths.profile, 'node_modules/@deepseek-ai/cordis'))).toBe(realpathSync(join(nextRoot, 'node_modules/@deepseek-ai/cordis')))
     expect(readFileSync(join(manager.paths.profile, 'node_modules/plugin/bundle.yml'), 'utf8')).toBe('[]\n')
   })
@@ -684,7 +944,7 @@ describe('desktop external plugin profile', () => {
     runtimeFixture(dsh, '2.0.0')
     const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
     await expect(next.applyRelease()).rejects.toThrow(/requires @deepseek-ai\/cordis/u)
-    expect(next.releaseVersion()).toBe('2.0.0')
+    expect(next.releaseVersion()).toBe('1.0.0')
     await next.mutate({ type: 'plugins-disable-all' }, hooks())
     expect(next.releaseVersion()).toBe('2.0.0')
     expect(next.listPlugins()).toEqual([{ name: 'plugin', version: '1.0.0', enabled: false }])
