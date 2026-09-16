@@ -1,8 +1,8 @@
 {
   "schemaVersion": 2,
   "channel": "cloga-windows-x64",
-  "version": "0.1.5-rc.3.cloga.1",
-  "sequence": 2,
+  "version": "0.1.5-rc.3.cloga.2",
+  "sequence": 3,
   "upstreamVersion": "0.1.5-rc.2",
   "identity": {
     "appId": "io.github.cloga.deepseek-harness.desktop",
@@ -13,7 +13,36 @@
   "desktopProvisioning": {
     "schemaVersion": 1,
     "mode": "exact",
-    "plugins": []
+    "plugins": [
+      {
+        "required": true,
+        "source": {
+          "schemaVersion": 1,
+          "type": "githubRelease",
+          "owner": "cloga",
+          "repo": "dsh-github-copilot",
+          "tag": "v0.4.0-alpha.21",
+          "asset": "dsh-github-copilot-0.4.0-alpha.21.tgz",
+          "assetId": 567393184,
+          "packageName": "dsh-github-copilot",
+          "version": "0.4.0-alpha.21",
+          "size": 650457,
+          "sha256": "10ffa19b0dc672a450654338ad007dc36ef24abd4388d312d9540cbf27890506",
+          "integrity": "sha512-lR7bI19zL3aldE62U2jd7thdWpXNaCuP5PaNcejW2E/N3BEFlkw3Rz4VblExyOQL/BPERZDNtghxl9WCn42HPg==",
+          "targetCommit": "6ed42a8e6da4abd29df42537e908f76fbe48430f",
+          "dependencyRegistry": "https://registry.npmjs.org/",
+          "checksumManifest": {
+            "format": "sha256sums",
+            "asset": "SHA256SUMS",
+            "assetId": 567393197,
+            "url": "https://github.com/cloga/dsh-github-copilot/releases/download/v0.4.0-alpha.21/SHA256SUMS",
+            "size": 104,
+            "sha256": "e96f1c0eb20fa87e3fe358d1969a4d842f9a150ce4ad3603ed4e2dc9ea9a205f",
+            "integrity": "sha512-XqLIl+jOXgxnpc9+GyX9040AhqgzoTJFJbijLP7ubjtBf3s78KKVx2yOGCKMTHjBY6J425shG9RBRRF8wAeUFA=="
+          }
+        }
+      }
+    ]
   },
   "migration": {
     "owner": "cloga/dsh-windows-ops",

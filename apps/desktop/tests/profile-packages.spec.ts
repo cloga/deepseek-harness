@@ -41,9 +41,12 @@ it.each(['nested', 'alias'])('rejects a %s second copy of a host package', (plac
   else writePackage(join(profile, 'node_modules'), 'alias', { name: '@deepseek-ai/cordis' })
   expect(() =>{  validateDesktopPluginGraph(profile, dsh, runtime, ['plugin']) }).toThrow(/duplicate or aliased/u)
 })
-it('rejects a host package declared as an ordinary dependency', () => {
+it.each(['dependencies', 'optionalDependencies'] as const)('rejects a shared peer also declared in %s', (section) => {
   const { dsh, runtime, profile } = fixture()
-  writePackage(join(profile, 'node_modules'), 'plugin', { dependencies: { '@deepseek-ai/cordis': '^1.0.0' } })
+  writePackage(join(profile, 'node_modules'), 'plugin', {
+    [section]: { '@deepseek-ai/cordis': '^1.0.0' },
+    peerDependencies: { '@deepseek-ai/cordis': '^1.0.0' },
+  })
   expect(() =>{  validateDesktopPluginGraph(profile, dsh, runtime, ['plugin']) }).toThrow(/peer dependency/u)
 })
 it('rejects incompatible peers only when the plugin is enabled', () => {

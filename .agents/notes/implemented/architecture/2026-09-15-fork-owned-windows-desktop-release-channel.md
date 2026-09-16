@@ -38,9 +38,9 @@ The immutable `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest re
 
 ## Publication
 
-The manual Windows workflow runs only from current `master` and requires the operator to repeat the reviewed plan version. The credential-free build job uses a clean checkout, pinned Node and pnpm, a frozen lockfile, focused Desktop tests, and unsigned packaging. It verifies the standalone helper has no relative imports, the packaged capability and provisioning plan match the reviewed plan, `app-update.yml` is absent, and the installer and installed evidence match the generated records.
+The manual Windows workflow requires the operator to repeat the reviewed plan version. A rehearsal requires the checkout to equal the current selected remote branch, uses the credential-free build job with a clean checkout, pinned Node and pnpm, a frozen lockfile, focused Desktop tests, and unsigned packaging, then finalizes and uploads the checksummed asset set with seven-day retention. It never runs the release or remote-check job.
 
-The protected release job is the only job with `contents: write`. It downloads the build artifact, cross-checks the complete asset set, creates the exact source commit tag as a draft, uploads every asset, and publishes only after the asset set is complete. It then requires GitHub to report the release immutable, the tag and release target to resolve to the build commit, and every remote asset digest to match the local bytes. A final credential-free job runs the shipped discovery against GitHub and requires it to select the reviewed version, sequence, commit, and tree.
+A publication run requires current `master`. The protected release job is the only job with `contents: write`. It downloads the build artifact, cross-checks the complete asset set, creates the exact source commit tag as a draft, uploads every asset, and publishes only after the asset set is complete. It then requires GitHub to report the release immutable, the tag and release target to resolve to the build commit, and every remote asset digest to match the local bytes. A final credential-free job runs the shipped discovery against GitHub and requires it to select the reviewed version, sequence, commit, and tree.
 
 ## Alternatives considered
 

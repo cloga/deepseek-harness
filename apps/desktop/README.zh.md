@@ -39,7 +39,9 @@ Electron 根据应用 locale 选择类型化的英文或中文桌面壳文案，
 
 ### 由 Release 拥有的插件 provisioning
 
-托管 fork release 可以携带 `resources/desktop-provisioning/plan.json`。该精确状态计划列出外部插件，但不会把它们加入 `desktop-runtime.json.sharedPackages`；Desktop 继续拥有 `@deepseek-ai/cordis` 和 `@deepseek-ai/dsh-*` 包，从经过验证的 Release tgz 安装每个外部根包，并在保留 profile 中启用其 bundle。常规 Host 组合随后加载插件的服务端 patch，而 `dsh.client` 与 `./client` 让其 Client contribution 可供 Settings 使用。该计划是通用机制。Capability smoke 使用 neutral provider fixture 证明 Client module 与 provider-card 组合；后续 0.1.6 release plan 必须 provision `dsh-github-copilot` `0.4.0-alpha.19`，并验证其 Settings > Models provider card 与 device-code authentication UI。
+托管 fork release 可以携带 `resources/desktop-provisioning/plan.json`。该精确状态计划列出外部插件，但不会把它们加入 `desktop-runtime.json.sharedPackages`；Desktop 继续拥有 `@deepseek-ai/cordis` 和 `@deepseek-ai/dsh-*` 包，从经过验证的 Release tgz 安装每个外部根包，并在保留 profile 中启用其 bundle。常规 Host 组合随后加载插件的服务端 patch，而 `dsh.client` 与 `./client` 让其 Client contribution 可供 Settings 使用。该计划是通用机制。Capability smoke 使用 neutral provider fixture 证明 Client module 与 provider-card 组合；验收选定 provider 需要其实际不可变制品以及 Settings > Models 中的账户与认证 UI。
+
+外部包必须将目标运行时 `sharedPackages` 中的每个所需包声明为 peer，而非普通或 optional dependency。同一个名称同时出现在 dependency 与 peer 区域中仍会失败。这包括共享的 authorization 和 Schemastery 包；校验和有效的制品与兼容的 peer 范围都不能免除冲突依赖声明的检查。
 
 每个条目分为 `required` 或 optional，并包含带 checksum-manifest lock 的 `githubRelease` source。GitHub 必须明确报告 `immutable: true`。Artifact lock 指定精确的 Release asset id、文件名、字节大小与 SHA-256。Checksum lock 指定精确的 asset id、规范 GitHub Release URL、文件名、字节大小、SHA-256 与 `sha256sums` 格式。每次 acquisition 使用独占私有目录，因此多个来源可以使用 `SHA256SUMS`。Desktop 验证恰好一个 `<sha256>  <artifact>` 条目；缺失、重复、格式错误、重命名或不匹配都会拒绝该来源。可选 SHA-512 SRI 字段一旦提供就必须验证。同一个 plan 的所有条目使用相同的无凭据 HTTPS dependency registry。
 
@@ -56,6 +58,8 @@ Windows Ops 验证 `resources/managed-update/capability.json` 中的 `desktopNat
 包事务持有 `$DSH_HOME/desktop/profile.lock`，直到 pnpm 进程退出并完成激活。两次目录重命名记录在 `$DSH_HOME/desktop/profile-activation.json` 中；启动在同一个锁下恢复中断且未提交的 profile。恢复失败时，保留 journal 和其中指定的 `.desktop-transaction-*` 目录及其 `rollback`，不要删除，也不要在保留 profile 中运行 pnpm。共享链接使用 symlink 或 Windows junction，清理绝不跟随链接。原生构建仍受 profile 中经过审查的 `allowBuilds` 列表约束。
 
 ### Fork 拥有的 Windows 托管更新
+
+Desktop 在启动十秒后自动检查更新。你也可以使用应用菜单中的 **Check for updates**。发现更新后，Desktop 会先要求确认，再下载、验证并打开安装程序；选择 **Later** 不会安装。你无需手动下载安装程序。这是交互式更新，而非无人值守安装：Windows 警告、安装选项与 UAC 仍需你批准。
 
 包含 `resources/app-update.yml` 的已签名包使用 `electron-updater`，并保留其发布者与平台签名检查。未签名 cloga 包仅在同时携带 `resources/managed-update/capability.json` 与已打包的 `resources/managed-update/helper.mjs` 时选择托管模式；启动会拒绝同时启用两种模式的包。Capability schema 3 固定 `cloga/deepseek-harness`、`dsh-desktop-v` tag 前缀、`release.json` 资产名、包内 sequence、最小 sequence 与规范插件 provisioning plan hash，不接受 URL。一个精确的 `cloga/dsh-windows-ops` manifest 只作为 sequence 为零时的迁移入口。
 
@@ -183,7 +187,7 @@ pnpm run package:desktop:win:x64:unsigned
 
 ### Fork 拥有的 Windows 发布
 
-`release/cloga-windows-x64.json` 中经过评审的 plan 同时推进语义版本与整数 sequence。手动 `Desktop fork release (Windows x64)` workflow 只能从当前 `master` 运行，要求操作员确认经过评审的版本，固定 Node 24.13.0 与 pnpm 11.7.0，从冻结 lockfile 安装，测试 Desktop，打包固定 cloga 身份，并验证独立 helper、capability、未签名 installer、已安装 executable、runtime descriptor 与原生/托管互斥。受保护的 release job 获得唯一的 `contents: write` 权限，交叉检查下载的 workflow artifact，以精确 commit tag 创建 draft，上传全部资产并发布；除非 GitHub 报告 release 不可变且每个远程 asset digest 匹配，否则流程失败。最后一个不带凭据的 job 针对 GitHub 运行已发布的 release discovery。
+`release/cloga-windows-x64.json` 中经过评审的 plan 同时推进语义版本与整数 sequence。手动 `Desktop fork release (Windows x64)` workflow 要求操作员确认经过评审的版本，固定 Node 24.13.0 与 pnpm 11.7.0，从冻结 lockfile 安装，测试 Desktop，打包固定 cloga 身份，并验证独立 helper、capability、未签名 installer、已安装 executable、runtime descriptor 与原生/托管互斥。Rehearsal run 要求 checkout 等于所选远端分支的当前 head，执行相同的构建、finalization、checksum 验证与 artifact upload，并跳过 publication 与远端 release discovery。Publication run 必须使用当前 `master`；其受保护的 release job 获得唯一的 `contents: write` 权限，交叉检查下载的 workflow artifact，以精确 commit tag 创建 draft，上传全部资产并发布；除非 GitHub 报告 release 不可变且每个远程 asset digest 匹配，否则流程失败。最后一个不带凭据的 job 仅在 publication 后针对 GitHub 运行已发布的 release discovery。
 
 每个 release 包含交互式 NSIS installer、`release.json`、`build-receipt.json`、`SHA256SUMS` 与 `SHA512SUMS`。Manifest 与 receipt 锁定源码 commit 与 tree、lockfile 与 plan hash、构建工具与依赖 registry、fork package identity、installer size 与 hash、插件 capability 与结构化 source/receipt 版本、允许的 origin 与 redirect，以及重启后 completion 语义。Workflow 不会启动 installer。
 

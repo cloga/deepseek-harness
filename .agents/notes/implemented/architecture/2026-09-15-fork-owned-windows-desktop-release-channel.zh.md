@@ -38,9 +38,9 @@ Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须�
 
 ## 发布
 
-手动 Windows workflow 只能从当前 `master` 运行，并要求操作员重复经过评审的 plan version。不带凭据的 build job 使用干净 checkout、固定 Node 与 pnpm、冻结 lockfile、focused Desktop tests 与未签名 packaging。它验证独立 helper 没有 relative import、包内 capability 与 provisioning plan 匹配经过评审的 plan、`app-update.yml` 不存在，并且 installer 与 installed evidence 匹配生成记录。
+手动 Windows workflow 要求操作员重复经过评审的 plan version。Rehearsal 要求 checkout 等于所选远端分支的当前 head，使用不带凭据的 build job 与干净 checkout、固定 Node 和 pnpm、冻结 lockfile、focused Desktop tests 及未签名 packaging，然后完成 finalization，并上传保留七天且经过 checksum 验证的 asset set。它绝不运行 release 或 remote-check job。
 
-受保护 release job 是唯一具有 `contents: write` 的 job。它下载 build artifact，交叉检查完整 asset set，以精确 source commit tag 创建 draft，上传每个 asset，并只在 asset set 完整后发布。随后它要求 GitHub 报告 release immutable，tag 与 release target 解析到 build commit，并且每个 remote asset digest 匹配本地 bytes。最后一个不带凭据的 job 针对 GitHub 运行已发布 discovery，并要求它选择经过评审的 version、sequence、commit 与 tree。
+Publication run 必须使用当前 `master`。受保护 release job 是唯一具有 `contents: write` 的 job。它下载 build artifact，交叉检查完整 asset set，以精确 source commit tag 创建 draft，上传每个 asset，并只在 asset set 完整后发布。随后它要求 GitHub 报告 release immutable，tag 与 release target 解析到 build commit，并且每个 remote asset digest 匹配本地 bytes。最后一个不带凭据的 job 针对 GitHub 运行已发布 discovery，并要求它选择经过评审的 version、sequence、commit 与 tree。
 
 ## 考虑过的替代方案
 

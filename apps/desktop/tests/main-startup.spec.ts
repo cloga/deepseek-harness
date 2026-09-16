@@ -81,6 +81,11 @@ const harness = await vi.hoisted(async () => {
   return {
     windows, hosts, handlers, app, FakeWindow, FakeHost,
     dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn() },
+    managedCheck: vi.fn(async () => ({
+      phase: 'available' as const,
+      mode: 'github-release-managed' as const,
+      version: '1.2.3',
+    })),
     managedInstall: vi.fn(async () => ({
       phase: 'installing' as const,
       mode: 'github-release-managed' as const,
@@ -179,13 +184,7 @@ vi.mock('../src/managed-update-state.ts', () => ({
 }))
 vi.mock('../src/managed-update-coordinator.ts', () => ({
   DesktopManagedUpdateCoordinator: class {
-    async check() {
-      return {
-        phase: 'available' as const,
-        mode: 'github-release-managed' as const,
-        version: '1.2.3',
-      }
-    }
+    readonly check = harness.managedCheck
     readonly install = harness.managedInstall
   },
 }))
@@ -224,6 +223,30 @@ afterEach(async () => {
 })
 
 describe('desktop main startup', () => {
+  it.each([0, 1])('automatically discovers updates and requires installation consent: response %s', async (response) => {
+    harness.managedUpdates = true
+    harness.dialog.showMessageBox.mockResolvedValue({ response })
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    expect(harness.managedCheck).not.toHaveBeenCalled()
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    await vi.advanceTimersByTimeAsync(0)
+
+    await vi.advanceTimersByTimeAsync(9_999)
+    expect(harness.managedCheck).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(harness.managedCheck).toHaveBeenCalled()
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
+    const prompt = harness.dialog.showMessageBox.mock.calls[0]?.[0] as { detail: string; cancelId: number } | undefined
+    expect(prompt?.detail).toContain('Running Sessions: 0')
+    expect(prompt?.cancelId).toBe(1)
+    expect(harness.managedInstall).toHaveBeenCalledTimes(response === 0 ? 1 : 0)
+  })
+
   it.each(['ready', 'failed'] as const)('records managed completion only after final Host readiness: %s', async (outcome) => {
     harness.managedUpdates = true
     await import('../src/main.ts')
