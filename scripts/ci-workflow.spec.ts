@@ -37,6 +37,88 @@ describe('CI workflow', () => {
     }
   })
 
+  it('rehearses reviewed Desktop branch artifacts without making publication reachable', () => {
+    const workflow = loadWorkflow('.github/workflows/desktop-fork-release.yml')
+    const dispatch = workflowEvent(workflow, 'workflow_dispatch')
+    const build = workflowJob(workflow, 'build')
+    const release = workflowJob(workflow, 'release')
+    const remoteCheck = workflowJob(workflow, 'remote-check')
+    if (!isRecord(dispatch.inputs) || !Array.isArray(build.steps)
+      || typeof release.if !== 'string' || typeof remoteCheck.if !== 'string') {
+      throw new TypeError('Desktop fork release workflow must define rehearsal input, build steps, and publication conditions')
+    }
+
+    expect(dispatch.inputs.rehearsal).toEqual({
+      description: 'Build and retain reviewed branch artifacts without publishing a release',
+      required: false,
+      default: false,
+      type: 'boolean',
+    })
+    expect(workflow.permissions).toEqual({ contents: 'read' })
+    expect(build.permissions).toBeUndefined()
+    expect(build.if).toBe("github.ref == 'refs/heads/master' || inputs.rehearsal")
+    const steps = build.steps.filter(isRecord)
+    const authorize = steps.find(step => step.id === 'plan')
+    expect(authorize).toMatchObject({
+      name: 'Require current reviewed ref and version',
+      env: {
+        CONFIRM_VERSION: '${{ inputs.confirm_version }}',
+        REHEARSAL: '${{ inputs.rehearsal }}',
+      },
+    })
+    if (typeof authorize?.run !== 'string') throw new TypeError('Desktop fork release workflow must authorize its source ref')
+    expect(authorize.run).toContain("if ($env:REHEARSAL -eq 'true')")
+    expect(authorize.run).toContain("$env:GITHUB_REF_TYPE -ne 'branch'")
+    expect(authorize.run).toContain("$selectedRef = 'refs/remotes/rehearsal/selected'")
+    expect(authorize.run).toContain('git fetch --no-tags origin "refs/heads/$($env:GITHUB_REF_NAME):$selectedRef"')
+    expect(authorize.run).toContain('$selected = git rev-parse $selectedRef')
+    expect(authorize.run).toContain('$head -ne $selected')
+    expect(authorize.run).toContain("$env:GITHUB_REF -ne 'refs/heads/master'")
+    expect(authorize.run).toContain('$head -ne $master')
+    for (const message of [
+      'Could not resolve the checked-out source commit',
+      'Could not fetch the current rehearsal branch',
+      'Could not resolve the current rehearsal branch',
+      'Could not fetch current master',
+      'Could not resolve current master',
+    ]) {
+      expect(authorize.run).toContain(`if ($LASTEXITCODE -ne 0) { throw '${message}' }`)
+    }
+    expect(steps.map(step => step.name).filter(name => typeof name === 'string')).toEqual(expect.arrayContaining([
+      'Verify Desktop release code',
+      'Prepare reviewed managed capability',
+      'Build unsigned interactive NSIS installer',
+      'Verify packaged Copilot account and restart',
+      'Finalize release manifest and receipts',
+      'Verify release asset checksums',
+    ]))
+    const upload = steps.find(step => step.uses === 'actions/upload-artifact@v4'
+      && isRecord(step.with) && step.with.name === 'desktop-fork-release-${{ steps.plan.outputs.version }}')
+    if (!isRecord(upload?.with)) throw new TypeError('Desktop fork release workflow must upload its build artifact')
+    expect(upload.with).toMatchObject({ 'retention-days': 7, 'if-no-files-found': 'error' })
+    const diagnostics = steps.find(step => isRecord(step.with)
+      && step.with.name === 'desktop-copilot-acceptance-${{ steps.plan.outputs.version }}')
+    expect(diagnostics?.if).toBe(
+      "${{ !cancelled() && (steps.copilot_acceptance.outcome == 'success' || steps.copilot_acceptance.outcome == 'failure') }}",
+    )
+    expect(steps.find(step => step.id === 'copilot_acceptance')?.['continue-on-error']).toBeUndefined()
+    expect(steps.find(step => step.name === 'Finalize release manifest and receipts')?.if).toBeUndefined()
+
+    const publishCondition = "${{ !inputs.rehearsal && github.ref == 'refs/heads/master' }}"
+    expect(release.if).toBe(publishCondition)
+    expect(remoteCheck.if).toBe(publishCondition)
+    for (const rehearsal of [false, true]) {
+      for (const ref of ['refs/heads/master', 'refs/heads/cloga-desktop-0-1-5-recovery']) {
+        expect(runInNewContext(release.if.trim().slice(3, -2), {
+          inputs: { rehearsal },
+          github: { ref },
+        }, { timeout: 1000 })).toBe(!rehearsal && ref === 'refs/heads/master')
+      }
+    }
+    expect(release.permissions).toEqual({ actions: 'read', contents: 'write' })
+    expect(remoteCheck.permissions).toEqual({ contents: 'read' })
+  })
+
   it('skips coverage-history uploads on cancellation but retains Wine cleanup', () => {
     const coverage = workflowJob(loadWorkflow('.github/workflows/ci.yml'), 'windows-coverage')
     const wine = workflowJob(loadWorkflow('.github/workflows/ci-master.yml'), 'windows')

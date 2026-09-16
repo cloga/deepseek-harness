@@ -20,22 +20,53 @@ describe('Desktop fork release plan', () => {
     expect(plan).toMatchObject({
       schemaVersion: 2,
       channel: 'cloga-windows-x64',
-      version: '0.1.5-rc.3.cloga.1',
-      sequence: 2,
+      version: '0.1.5-rc.3.cloga.2',
+      sequence: 3,
       upstreamVersion: '0.1.5-rc.2',
       migration: {
         owner: 'cloga/dsh-windows-ops',
         maximumSequence: 1,
         channelVersion: '0.1.5-rc.2.local.1',
       },
-      desktopProvisioning: { schemaVersion: 1, mode: 'exact', plugins: [] },
+    })
+    expect(plan.desktopProvisioning).toEqual({
+      schemaVersion: 1,
+      mode: 'exact',
+      plugins: [{
+        required: true,
+        source: {
+          schemaVersion: 1,
+          type: 'githubRelease',
+          owner: 'cloga',
+          repo: 'dsh-github-copilot',
+          tag: 'v0.4.0-alpha.22',
+          asset: 'dsh-github-copilot-0.4.0-alpha.22.tgz',
+          assetId: 567596250,
+          packageName: 'dsh-github-copilot',
+          version: '0.4.0-alpha.22',
+          size: 651444,
+          sha256: 'e749d982ac55752eeca4cf4819b9751144cda1c2dc06033e4b42240151e40e0e',
+          integrity: 'sha512-HkGACgfUrTREbtbUgZJ6Sb02hqKseCtldW16ZBounQZahTpeKWW5bqj5TNb1MD6X7y4e5MI0Q5edYLCF71ybnQ==',
+          targetCommit: '479340f965c5be7b4408e4f1e6c9dda6c421d37b',
+          dependencyRegistry: 'https://registry.npmjs.org/',
+          checksumManifest: {
+            format: 'sha256sums',
+            asset: 'SHA256SUMS',
+            assetId: 567596283,
+            url: 'https://github.com/cloga/dsh-github-copilot/releases/download/v0.4.0-alpha.22/SHA256SUMS',
+            size: 104,
+            sha256: 'cdc2a7e8df955c9136c6c79c25adaaf929bee815308ff3ceb6c9cfb948c03546',
+            integrity: 'sha512-Q6hlYjOSZU397FlT180MK8NgkEdDct20KPEpk7q1PB19Y1HkpiTweqFenptizstFrCm6u0fTl6gDEK3mEGMD/Q==',
+          },
+        },
+      }],
     })
     expect(createDesktopForkReleaseCapability(plan)).toMatchObject({
       schemaVersion: 3,
       mode: 'github-release-managed',
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
-      currentSequence: 2,
+      currentSequence: 3,
       minimumSequence: 2,
       provisioning: {
         capability: { id: 'desktopNativePluginProvisioning' },

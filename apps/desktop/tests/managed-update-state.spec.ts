@@ -1,8 +1,9 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { loadDesktopManagedUpdateConfiguration } from '../src/managed-update-state.ts'
+import { completeDesktopManagedUpdate } from '../src/managed-update-completion.ts'
 import { managedCapability } from './managed-update-fixture.ts'
 
 const roots: string[] = []
@@ -23,12 +24,21 @@ async function fixture(): Promise<{ resources: string; userData: string }> {
 }
 
 describe('managed update configuration', () => {
-  it('selects the packaged Windows capability', async () => {
+  it('selects the packaged Windows capability without claiming a fresh installation was completed', async () => {
     const { resources, userData } = await fixture()
-    await expect(loadDesktopManagedUpdateConfiguration(resources, userData, 'win32')).resolves.toMatchObject({
+    const configuration = await loadDesktopManagedUpdateConfiguration(resources, userData, 'win32')
+    expect(configuration).toMatchObject({
       installedSequence: 2,
+      completedSequence: 0,
       capability: { mode: 'github-release-managed' },
     })
+    if (configuration === undefined) throw new Error('Fixture must select managed updates')
+    await expect(completeDesktopManagedUpdate(
+      configuration.operationsRoot, configuration.completionPath, configuration.capability, configuration.completedSequence,
+      join(resources, 'unused.exe'), join(resources, 'unused-runtime.json'),
+      join(resources, 'unused-plan.json'), join(userData, 'unused-profile'),
+    )).resolves.toEqual({ status: 'none' })
+    await expect(readFile(configuration.completionPath)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('advances beyond the packaged sequence only after durable completion', async () => {
@@ -42,6 +52,7 @@ describe('managed update configuration', () => {
     }))
     await expect(loadDesktopManagedUpdateConfiguration(resources, userData, 'win32')).resolves.toMatchObject({
       installedSequence: 3,
+      completedSequence: 3,
     })
   })
 
