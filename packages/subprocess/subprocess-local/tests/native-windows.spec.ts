@@ -197,10 +197,20 @@ describe.skipIf(!windowsNative)('Windows Job native containment', () => {
   it('preserves missing-target and invalid-executable rejection errors', async () => {
     const relativeExecutable = `relative-node-${String(Date.now())}.exe`
     copyFileSync(process.execPath, join(scratch, relativeExecutable))
-    const relative = spec([relativeExecutable, '-e', 'process.exit(17)'])
-    const relativeHandle = bindManagedProcess(relative, launchWindowsJob(relative, targetEnvironment(relative)))
-    await expect(relativeHandle.done).resolves.toEqual({ exitCode: 17, signal: null })
-    await expect(relativeHandle.waitForExit()).resolves.toBe(true)
+    const noDefaultCurrentDirectory = process.env.NODEFAULTCURRENTDIRECTORYINEXEPATH
+    Reflect.deleteProperty(process.env, 'NODEFAULTCURRENTDIRECTORYINEXEPATH')
+    try {
+      const relative = spec([relativeExecutable, '-e', 'process.exit(17)'])
+      const relativeHandle = bindManagedProcess(relative, launchWindowsJob(relative, targetEnvironment(relative)))
+      await expect(relativeHandle.done).resolves.toEqual({ exitCode: 17, signal: null })
+      await expect(relativeHandle.waitForExit()).resolves.toBe(true)
+    } finally {
+      if (noDefaultCurrentDirectory === undefined) {
+        Reflect.deleteProperty(process.env, 'NODEFAULTCURRENTDIRECTORYINEXEPATH')
+      } else {
+        process.env.NODEFAULTCURRENTDIRECTORYINEXEPATH = noDefaultCurrentDirectory
+      }
+    }
 
     const missing = spec([`missing-native-target-${Date.now()}.exe`])
     const expectedMissing = await directSpawnFailure(missing.argv)

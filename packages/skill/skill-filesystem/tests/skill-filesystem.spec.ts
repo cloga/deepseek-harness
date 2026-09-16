@@ -646,6 +646,8 @@ describe('FileSystemSkillProvider', () => {
       dshHome: join(home, '.dsh'),
       agentsHome: join(home, '.agents'),
       watch: true,
+      // Windows native events can coalesce the rapid root transitions this integration case drives.
+      watchUsePolling: process.platform === 'win32',
       watchStabilityThresholdMs: 20,
       watchPollIntervalMs: 10,
     })
@@ -755,6 +757,7 @@ describe('FileSystemSkillProvider', () => {
       agentsHome: join(home, '.agents'),
       customSkillDirs: [join(first, '.agents/skills')],
       watch: true,
+      watchUsePolling: process.platform === 'win32',
       watchMaxProjects: 1,
       watchStabilityThresholdMs: 20,
       watchPollIntervalMs: 10,
@@ -796,6 +799,7 @@ describe('FileSystemSkillProvider', () => {
         agentsHome: join(home, '.agents'),
         customSkillDirs: [nonDirectoryRoot],
         watch: true,
+        watchUsePolling: process.platform === 'win32',
         watchStabilityThresholdMs: 20,
         watchPollIntervalMs: 10,
       })
@@ -828,6 +832,7 @@ describe('FileSystemSkillProvider', () => {
       dshHome: join(home, '.dsh'),
       agentsHome: join(home, '.agents'),
       watch: true,
+      watchUsePolling: process.platform === 'win32',
       watchFollowSymlinks: true,
       watchStabilityThresholdMs: 20,
       watchPollIntervalMs: 10,
