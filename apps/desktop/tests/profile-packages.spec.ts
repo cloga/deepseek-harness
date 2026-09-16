@@ -55,6 +55,23 @@ it('rejects incompatible peers only when the plugin is enabled', () => {
   expect(() =>{  validateDesktopPluginGraph(profile, dsh, runtime, ['plugin']) }).toThrow(/found 1.0.0/u)
   expect(() =>{  validateDesktopPluginGraph(profile, dsh, runtime, []) }).not.toThrow()
 })
+it('does not satisfy a required Node peer through a Client external declaration', () => {
+  const { dsh, runtime, profile } = fixture()
+  writePackage(join(profile, 'node_modules'), 'plugin', {
+    peerDependencies: { react: '^18.2.0' },
+    dsh: { client: { external: ['react'] } },
+  })
+  expect(() => { validateDesktopPluginGraph(profile, dsh, runtime, ['plugin']) })
+    .toThrow('plugin requires missing react@^18.2.0')
+})
+it('keeps Client-only externals outside the Node dependency graph', () => {
+  const { dsh, runtime, profile } = fixture()
+  writePackage(join(profile, 'node_modules'), 'plugin', {
+    peerDependencies: { '@deepseek-ai/cordis': '^1.0.0' },
+    dsh: { client: { external: ['react'] } },
+  })
+  expect(() => { validateDesktopPluginGraph(profile, dsh, runtime, ['plugin']) }).not.toThrow()
+})
 it('refuses to satisfy a plugin dependency from an ancestor CLI project', () => {
   const { root, dsh, runtime, profile } = fixture()
   writePackage(join(root, 'node_modules'), 'ambient')
