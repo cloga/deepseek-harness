@@ -26,7 +26,7 @@ Desktop release 也可以携带通用的 `desktopNativePluginProvisioning` schem
 
 ## Consumer transition
 
-Windows Ops 在由源码拥有的 Desktop release plan 中选择插件 lock。受保护的 workflow 嵌入规范化 plan，将它与 installer 一起发布，并在 build receipt 中记录文件 hash 与规范 hash。部署只有在 release 包含该 plan 后才能依赖自动 provisioning。传递依赖继续使用 plan 中无凭据的企业 registry。
+Windows Ops 在由源码拥有的 Desktop release plan 中选择插件 lock。受保护的 workflow 嵌入规范化 plan，将它与 installer 一起发布，并在 build receipt 中记录文件 hash 与规范 hash。部署只有在 release 包含该 plan 后才能依赖自动 provisioning。0.1.5 恢复 plan 通过 `https://packagefeedproxy.microsoft.io/npm/` 解析传递依赖；后续 plan 各自显式选择无凭据的 HTTPS registry。
 
 ## Alternatives considered
 

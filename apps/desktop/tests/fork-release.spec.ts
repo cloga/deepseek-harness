@@ -20,8 +20,8 @@ describe('Desktop fork release plan', () => {
     expect(plan).toMatchObject({
       schemaVersion: 2,
       channel: 'cloga-windows-x64',
-      version: '0.1.5-rc.3.cloga.3',
-      sequence: 4,
+      version: '0.1.5-rc.3.cloga.4',
+      sequence: 5,
       upstreamVersion: '0.1.5-rc.2',
       migration: {
         owner: 'cloga/dsh-windows-ops',
@@ -48,7 +48,7 @@ describe('Desktop fork release plan', () => {
           sha256: 'e749d982ac55752eeca4cf4819b9751144cda1c2dc06033e4b42240151e40e0e',
           integrity: 'sha512-HkGACgfUrTREbtbUgZJ6Sb02hqKseCtldW16ZBounQZahTpeKWW5bqj5TNb1MD6X7y4e5MI0Q5edYLCF71ybnQ==',
           targetCommit: '479340f965c5be7b4408e4f1e6c9dda6c421d37b',
-          dependencyRegistry: 'https://registry.npmjs.org/',
+          dependencyRegistry: 'https://packagefeedproxy.microsoft.io/npm/',
           checksumManifest: {
             format: 'sha256sums',
             asset: 'SHA256SUMS',
@@ -66,7 +66,7 @@ describe('Desktop fork release plan', () => {
       mode: 'github-release-managed',
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
-      currentSequence: 4,
+      currentSequence: 5,
       minimumSequence: 2,
       provisioning: {
         capability: { id: 'desktopNativePluginProvisioning' },
