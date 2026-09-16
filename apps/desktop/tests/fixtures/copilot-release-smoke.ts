@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright'
@@ -13,6 +13,7 @@ import { validateDesktopPluginGraph } from '../../src/profile-packages.ts'
 import { readDesktopPluginProvisioningPlan } from '../../src/plugin-provisioning.ts'
 import { verifyDesktopRuntime } from '../../src/runtime-tree.ts'
 import { removeOwnedDirectory } from '../../src/owned-directory.ts'
+import { inspectPackagedGraphResolution } from './packaged-graph-check.ts'
 
 const { values } = parseArgs({
   options: { application: { type: 'string' }, output: { type: 'string' } },
@@ -31,6 +32,7 @@ assert.deepEqual(plan, reviewed.desktopProvisioning)
 const copilot = plan.plugins.find(entry => entry.source.packageName === 'dsh-github-copilot')
 assert(copilot?.required, 'This acceptance requires a release-owned Copilot package')
 const runtime = await verifyDesktopRuntime(runtimeRoot, reviewed.upstreamVersion)
+const runtimeSha256 = createHash('sha256').update(readFileSync(join(runtimeRoot, 'desktop-runtime.json'))).digest('hex')
 mkdirSync(output, { recursive: true })
 copyFileSync(join(runtimeRoot, 'desktop-runtime.json'), join(output, 'desktop-runtime.json'))
 copyFileSync(join(resources, 'desktop-provisioning', 'plan.json'), join(output, 'provisioning-plan.json'))
@@ -119,7 +121,43 @@ try {
       .waitFor({ state: 'visible' })
     await page.screenshot({ path: join(output, `${phase}-account.png`) })
     assertDesktopProvisioningInventory(profile, plan)
-    validateDesktopPluginGraph(profile, runtimeRoot, runtime, plan.plugins.map(entry => entry.source.packageName))
+    const plugins = plan.plugins.map(entry => entry.source.packageName)
+    let runnerError: string | undefined
+    try {
+      validateDesktopPluginGraph(profile, runtimeRoot, runtime, plugins)
+    } catch (error) {
+      runnerError = safeDiagnostic(String(error))
+    }
+    writeFileSync(join(output, `${phase}-runner-resolution.json`), JSON.stringify({
+      authoritative: false, ...inspectPackagedGraphResolution(profile), runnerError,
+    }, undefined, 2) + '\n')
+    const graphOutput = join(output, `${phase}-packaged-graph.json`)
+    const graphError = join(output, `${phase}-packaged-graph.stderr.txt`)
+    const stdout = openSync(graphOutput, 'w')
+    const bundledNode = join(resources, 'runtime', 'node', 'node.exe')
+    let stderrFile: number | undefined
+    try {
+      stderrFile = openSync(graphError, 'w')
+      execFileSync(bundledNode, [
+        resolve('apps/desktop/tests/fixtures/packaged-graph-check.ts'), profile, runtimeRoot, ...plugins,
+      ], { cwd: profile, env: environment, stdio: ['ignore', stdout, stderrFile], timeout: 120_000 })
+    } finally {
+      closeSync(stdout)
+      if (stderrFile !== undefined) closeSync(stderrFile)
+    }
+    const graphResult: unknown = JSON.parse(readFileSync(graphOutput, 'utf8'))
+    assert(typeof graphResult === 'object' && graphResult !== null
+      && 'valid' in graphResult && graphResult.valid === true
+      && 'runtimeSha256' in graphResult && graphResult.runtimeSha256 === runtimeSha256
+      && 'nodePath' in graphResult && graphResult.nodePath === null
+      && 'nodeOptionsPresent' in graphResult && graphResult.nodeOptionsPresent === false
+      && 'nodeVersion' in graphResult && graphResult.nodeVersion === runtime.release.nodeVersion
+      && 'executable' in graphResult && typeof graphResult.executable === 'string'
+      && resolve(graphResult.executable).toLowerCase() === bundledNode.toLowerCase()
+      && 'cwd' in graphResult && typeof graphResult.cwd === 'string'
+      && resolve(graphResult.cwd).toLowerCase() === profile.toLowerCase(),
+    'Packaged Node must verify the same graph without source-runner module paths')
+    record(`${phase}:packaged-graph`)
     const receipts = readFileSync(join(profile, 'desktop-plugin-receipts.json'))
     inventories.push(createHash('sha256').update(receipts).digest('hex'))
     for (const file of ['desktop-plugin-receipts.json', 'desktop-plugin-provisioning-state.json', 'package.json']) {

@@ -195,6 +195,8 @@ Each release contains the interactive NSIS installer, `release.json`, `build-rec
 
 Before finalization, [packaged Copilot acceptance](tests/fixtures/copilot-release-smoke.ts) launches the unpacked Electron application with fresh Harness and Electron data directories. It requires the real Settings > Models account, sign-in entry, and Manage panel, validates the installed plugin graph and provisioning inventory, and repeats those observations after quitting and restarting. Its separate seven-day workflow artifact records screenshots, receipts, packaged runtime/capability/plan records, executable metadata, and exact source identity. Failed runs retain redacted startup diagnostics and receipt/state existence, not credentials or a profile copy. It neither clicks sign-in nor calls a model. These checks do not establish OAuth success, model availability, or an old-to-new installer upgrade, and rehearsal artifacts are not immutable Releases.
 
+The independent graph check runs the unchanged validator in the bundled Node with the active profile as its working directory and no inherited `NODE_PATH`, `NODE_OPTIONS`, or tsx loader. It binds the result to the same runtime descriptor hash. Source-runner lookup paths and errors are retained only for comparison: a pnpm/tsx virtual-store path is not a package supplied to the application. Missing optional peers remain permitted; an optional peer resolved outside the profile remains an error.
+
 ### Windows EV signing
 
 Windows packaging fixes the 7-Zip filter to `BCJ` for compatibility with the bundled NSIS decoder. This preserves ARM64 binaries carried by dependencies in x64 installers; automatic ARM64 filtering produces entries that this decoder cannot extract.

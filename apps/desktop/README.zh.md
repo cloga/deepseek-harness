@@ -195,6 +195,8 @@ pnpm run package:desktop:win:x64:unsigned
 
 在 finalization 前，[打包 Copilot 验收](tests/fixtures/copilot-release-smoke.ts) 使用全新的 Harness 与 Electron 数据目录启动 unpacked Electron 应用。它要求真实 Settings > Models 账户、登录入口与 Manage 面板可见，验证已安装插件依赖图和 provisioning 清单，并在退出后重新启动时重复这些观察。独立的七天 workflow artifact 记录截图、receipt、打包 runtime/capability/plan 记录、可执行文件元数据与精确源码身份。失败运行保留脱敏启动诊断和 receipt/state 是否存在，不保留凭据或 profile 副本。它既不点击登录，也不调用模型。这些检查不证明 OAuth 成功、模型可用或旧版本到新版本的 installer 升级；rehearsal artifact 不是不可变 Release。
 
+独立依赖图检查在内置 Node 中运行未修改的 validator，以活动 profile 为工作目录，不继承 `NODE_PATH`、`NODE_OPTIONS` 或 tsx loader。结果绑定同一个运行时 descriptor hash。源码 runner 的查找路径与错误仅用于对比：pnpm/tsx virtual-store 路径不代表应用实际拥有的包。缺失的 optional peer 仍被允许；解析到 profile 之外的 optional peer 仍会报错。
+
 ### Windows EV 签名
 
 Windows 打包将 7-Zip 过滤器固定为 `BCJ`，以兼容内置的 NSIS 解码器。这样可以保留 x64 安装包中由依赖携带的 ARM64 二进制文件；自动 ARM64 过滤会生成该解码器无法解压的条目。
