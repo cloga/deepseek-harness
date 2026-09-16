@@ -32,6 +32,9 @@ const copilot = plan.plugins.find(entry => entry.source.packageName === 'dsh-git
 assert(copilot?.required, 'This acceptance requires a release-owned Copilot package')
 const runtime = await verifyDesktopRuntime(runtimeRoot, reviewed.upstreamVersion)
 mkdirSync(output, { recursive: true })
+copyFileSync(join(runtimeRoot, 'desktop-runtime.json'), join(output, 'desktop-runtime.json'))
+copyFileSync(join(resources, 'desktop-provisioning', 'plan.json'), join(output, 'provisioning-plan.json'))
+copyFileSync(join(resources, 'managed-update', 'capability.json'), join(output, 'capability.json'))
 const scratch = resolve('.desktop-smoke')
 mkdirSync(scratch, { recursive: true })
 const home = mkdtempSync(join(scratch, 'packaged-copilot-'))
@@ -55,6 +58,26 @@ let page: Page | undefined
 let app: ElectronApplication | undefined
 let failure: unknown
 try {
+  const metadata = execFileSync(
+    join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoProfile', '-NonInteractive', '-Command', [
+      '$ErrorActionPreference = "Stop"',
+      'Import-Module (Join-Path $env:SystemRoot "System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1")',
+      '$file = Get-Item -LiteralPath $env:DSH_DESKTOP_SMOKE_EXECUTABLE',
+      '[ordered]@{',
+      '  file = $file.Name',
+      '  sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()',
+      '  productVersion = $file.VersionInfo.ProductVersion',
+      '  companyName = $file.VersionInfo.CompanyName',
+      '  productName = $file.VersionInfo.ProductName',
+      '  fileDescription = $file.VersionInfo.FileDescription',
+      '  signature = (Get-AuthenticodeSignature -LiteralPath $file.FullName).Status.ToString()',
+      '} | ConvertTo-Json',
+    ].join('\n')],
+    { encoding: 'utf8', windowsHide: true, env: { ...environment, DSH_DESKTOP_SMOKE_EXECUTABLE: application } },
+  )
+  writeFileSync(join(output, 'executable.json'), metadata.trim() + '\n')
+  record('package-identity')
   for (const phase of ['initial', 'restart'] as const) {
     record(`${phase}:launch`)
     app = await electron.launch({
