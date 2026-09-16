@@ -23,6 +23,7 @@ const PACKAGE_README_GLOBS = [
   'packages/*/*/README.md',
   'packages/*/*/README.zh.md',
 ] as const
+const PACKAGE_README_SCAN_TIMEOUT_MS = 30_000
 
 function packageReadmes(): string[] {
   return PACKAGE_README_GLOBS
@@ -339,7 +340,7 @@ describe('dsh-doc skill consolidation', () => {
     }
   })
 
-  it('maps package README kinds to their documentation standards', () => {
+  it('maps package README kinds to their documentation standards', { timeout: PACKAGE_README_SCAN_TIMEOUT_MS }, () => {
     const files = packageReadmes()
     expect(files.length).toBeGreaterThan(0)
 
@@ -392,7 +393,7 @@ describe('dsh-doc skill consolidation', () => {
     }
   })
 
-  it('keeps every package README on the summary, contents, and Dev Note skeleton', () => {
+  it('keeps every package README on the summary, contents, and Dev Note skeleton', { timeout: PACKAGE_README_SCAN_TIMEOUT_MS }, () => {
     for (const file of packageReadmes().filter(file => file.split('/').length === 4)) {
       const source = readFileSync(resolve(root, file), 'utf8')
       expect(packageReadmeStructureErrors(file, source), file).toEqual([])

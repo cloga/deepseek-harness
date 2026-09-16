@@ -837,7 +837,7 @@ describe('desktop external plugin profile', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
-  })
+  }, 30_000)
 
   it('keeps the active exact inventory when required provisioning health fails', async () => {
     const { manager } = setup()

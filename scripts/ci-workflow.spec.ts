@@ -104,6 +104,7 @@ describe('CI workflow', () => {
       'Verify Desktop release code',
       'Prepare reviewed managed capability',
       'Build unsigned interactive NSIS installer',
+      'Verify copied helper bootstrap and acknowledgement',
       'Verify packaged Copilot account and restart',
       'Finalize release manifest and receipts',
       'Verify release asset checksums',
@@ -118,6 +119,13 @@ describe('CI workflow', () => {
       "${{ !cancelled() && (steps.copilot_acceptance.outcome == 'success' || steps.copilot_acceptance.outcome == 'failure') }}",
     )
     expect(steps.find(step => step.id === 'copilot_acceptance')?.['continue-on-error']).toBeUndefined()
+    const helperSmoke = steps.findIndex(step => step.name === 'Verify copied helper bootstrap and acknowledgement')
+    const finalize = steps.findIndex(step => step.name === 'Finalize release manifest and receipts')
+    expect(helperSmoke).toBeGreaterThan(steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer'))
+    expect(finalize).toBeGreaterThan(helperSmoke)
+    expect(steps[helperSmoke]?.['continue-on-error']).toBeUndefined()
+    expect(steps[helperSmoke]?.if).toBeUndefined()
+    expect(steps[helperSmoke]?.run).toContain('resources/managed-update/helper.mjs')
     expect(steps.find(step => step.name === 'Finalize release manifest and receipts')?.if).toBeUndefined()
 
     const publishCondition = "${{ !inputs.rehearsal && github.ref == 'refs/heads/master' }}"

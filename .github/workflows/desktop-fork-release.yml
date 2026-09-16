@@ -120,6 +120,14 @@ jobs:
           DSH_DESKTOP_PLUGIN_PROVISIONING_PLAN: ${{ github.workspace }}\${{ env.PROVISIONING_PATH }}
         run: pnpm run package:desktop:win:x64:unsigned
 
+      - name: Verify copied helper bootstrap and acknowledgement
+        run: >-
+          pnpm exec tsx apps/desktop/scripts/smoke-helper.ts
+          --node apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/resources/runtime/node/node.exe
+          --helper apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/resources/managed-update/helper.mjs
+          --capability apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/resources/managed-update/capability.json
+          --output dist/desktop-copilot-acceptance
+
       - name: Verify packaged Copilot account and restart
         id: copilot_acceptance
         run: >-
