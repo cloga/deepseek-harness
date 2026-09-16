@@ -65,7 +65,7 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[], labe
  * @param operationsRoot - Desktop-owned operation directory.
  * @param completionPath - Durable sequence receipt path.
  * @param capability - Build-carried immutable channel selection.
- * @param installedSequence - Last previously completed sequence.
+ * @param completedSequence - Last sequence verified in the durable completion receipt, excluding the packaged discovery floor.
  * @param executable - Running installed Desktop executable.
  * @param runtimeDescriptor - Installed Desktop runtime descriptor.
  * @param provisioningPlan - Installed release-owned Desktop plugin plan.
@@ -75,7 +75,7 @@ export async function completeDesktopManagedUpdate(
   operationsRoot: string,
   completionPath: string,
   capability: DesktopManagedUpdateCapability,
-  installedSequence: number,
+  completedSequence: number,
   executable: string,
   runtimeDescriptor: string,
   provisioningPlan: string,
@@ -104,7 +104,7 @@ export async function completeDesktopManagedUpdate(
       }
       const blocked = await readJsonIfExists(join(operationRoot, 'helper-result.json'))
       if (blocked?.status === 'blocked'
-        && Number.isSafeInteger(blocked.sequence) && Number(blocked.sequence) > installedSequence) {
+        && Number.isSafeInteger(blocked.sequence) && Number(blocked.sequence) > completedSequence) {
         return {
           status: 'recovery-required',
           message: typeof blocked.reason === 'string' ? blocked.reason : 'The managed update helper could not continue.',
@@ -134,21 +134,21 @@ export async function completeDesktopManagedUpdate(
       }
       const resultSequence = Number.isSafeInteger(result?.sequence) ? Number(result?.sequence) : undefined
       const pendingSequence = Number.isSafeInteger(pending?.sequence) ? Number(pending?.sequence) : undefined
-      if (result?.status === 'blocked' && resultSequence !== undefined && resultSequence > installedSequence) {
+      if (result?.status === 'blocked' && resultSequence !== undefined && resultSequence > completedSequence) {
         return {
           status: 'recovery-required',
           message: typeof result.reason === 'string' ? result.reason : 'The managed update installer did not complete.',
           command: RECOVERY_COMMAND,
         }
       }
-      if (pendingSequence !== undefined && pendingSequence > installedSequence && result === undefined) {
+      if (pendingSequence !== undefined && pendingSequence > completedSequence && result === undefined) {
         return {
           status: 'recovery-required',
           message: 'The managed update was interrupted before the installer result was recorded.',
           command: RECOVERY_COMMAND,
         }
       }
-      if (result?.status === 'installer-exited' && resultSequence !== undefined && resultSequence > installedSequence) {
+      if (result?.status === 'installer-exited' && resultSequence !== undefined && resultSequence > completedSequence) {
         if (pending === undefined) {
           return {
             status: 'recovery-required',
@@ -157,7 +157,7 @@ export async function completeDesktopManagedUpdate(
           }
         }
         candidates.push({ root, result })
-      } else if (pendingSequence !== undefined && pendingSequence > installedSequence) {
+      } else if (pendingSequence !== undefined && pendingSequence > completedSequence) {
         return {
           status: 'recovery-required',
           message: 'The managed update operation has an invalid terminal result.',
@@ -194,7 +194,7 @@ export async function completeDesktopManagedUpdate(
       throw new Error('desktop managed update: helper result is not completable')
     }
     const manifestValue = await readJson(join(candidate.root, 'release.json'))
-    const manifest = parseDesktopManagedUpdateManifest(manifestValue, capability, installedSequence)
+    const manifest = parseDesktopManagedUpdateManifest(manifestValue, capability, completedSequence)
     if (manifest.owner !== 'cloga/deepseek-harness') {
       throw new Error('desktop managed update: legacy release requires Windows Ops Complete')
     }

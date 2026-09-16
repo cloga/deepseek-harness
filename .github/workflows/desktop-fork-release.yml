@@ -65,18 +65,23 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the checked-out source commit' }
           if ($env:REHEARSAL -eq 'true') {
             if ($env:GITHUB_REF_TYPE -ne 'branch') { throw 'Rehearsal must run from a branch' }
             $selectedRef = 'refs/remotes/rehearsal/selected'
             git fetch --no-tags origin "refs/heads/$($env:GITHUB_REF_NAME):$selectedRef"
+            if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the current rehearsal branch' }
             $selected = git rev-parse $selectedRef
+            if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the current rehearsal branch' }
             if ($head -ne $selected) {
               throw "Rehearsal must run from the current selected branch: HEAD=$head origin/$($env:GITHUB_REF_NAME)=$selected"
             }
           } else {
             if ($env:GITHUB_REF -ne 'refs/heads/master') { throw 'Release must run from master' }
             git fetch --no-tags origin master
+            if ($LASTEXITCODE -ne 0) { throw 'Could not fetch current master' }
             $master = git rev-parse origin/master
+            if ($LASTEXITCODE -ne 0) { throw 'Could not resolve current master' }
             if ($head -ne $master) { throw "Release must run from current master: HEAD=$head origin/master=$master" }
           }
           $plan = Get-Content -LiteralPath $env:RELEASE_PLAN -Raw | ConvertFrom-Json
@@ -114,6 +119,21 @@ jobs:
           DSH_DESKTOP_MANAGED_UPDATE_CAPABILITY: ${{ github.workspace }}\${{ env.CAPABILITY_PATH }}
           DSH_DESKTOP_PLUGIN_PROVISIONING_PLAN: ${{ github.workspace }}\${{ env.PROVISIONING_PATH }}
         run: pnpm run package:desktop:win:x64:unsigned
+
+      - name: Verify packaged Copilot account and restart
+        id: copilot_acceptance
+        run: >-
+          pnpm exec tsx apps/desktop/tests/fixtures/copilot-release-smoke.ts
+          --application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe
+          --output dist/desktop-copilot-acceptance
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && (steps.copilot_acceptance.outcome == 'success' || steps.copilot_acceptance.outcome == 'failure') }}
+        with:
+          name: desktop-copilot-acceptance-${{ steps.plan.outputs.version }}
+          path: dist/desktop-copilot-acceptance/*
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Finalize release manifest and receipts
         run: >-

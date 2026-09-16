@@ -39,7 +39,11 @@ Electron 根据应用 locale 选择类型化的英文或中文桌面壳文案，
 
 ### 由 Release 拥有的插件 provisioning
 
-托管 fork release 可以携带 `resources/desktop-provisioning/plan.json`。该精确状态计划列出外部插件，但不会把它们加入 `desktop-runtime.json.sharedPackages`；Desktop 继续拥有 `@deepseek-ai/cordis` 和 `@deepseek-ai/dsh-*` 包，从经过验证的 Release tgz 安装每个外部根包，并在保留 profile 中启用其 bundle。常规 Host 组合随后加载插件的服务端 patch，而 `dsh.client` 与 `./client` 让其 Client contribution 可供 Settings 使用。该计划是通用机制。Capability smoke 使用 neutral provider fixture 证明 Client module 与 provider-card 组合；用于部署的 provider release 必须保留由 Desktop 拥有的 shared packages，并通过 fail-closed package graph validation，然后才能接受其 Settings 与 authentication UI。
+托管 fork release 可以携带 `resources/desktop-provisioning/plan.json`。该精确状态计划列出外部插件，但不会把它们加入 `desktop-runtime.json.sharedPackages`；Desktop 继续拥有 `@deepseek-ai/cordis` 和 `@deepseek-ai/dsh-*` 包，从经过验证的 Release tgz 安装每个外部根包，并在保留 profile 中启用其 bundle。常规 Host 组合随后加载插件的服务端 patch，而 `dsh.client` 与 `./client` 让其 Client contribution 可供 Settings 使用。该计划是通用机制。Capability smoke 使用 neutral provider fixture 证明 Client module 与 provider-card 组合；验收选定 provider 需要其实际不可变制品以及 Settings > Models 中的账户与认证 UI。
+
+外部包必须将目标运行时 `sharedPackages` 中的每个所需包声明为 peer，而非普通或 optional dependency。同一个名称同时出现在 dependency 与 peer 区域中仍会失败。这包括共享的 authorization 和 Schemastery 包；校验和有效的制品与兼容的 peer 范围都不能免除冲突依赖声明的检查。
+
+`dsh.client.external` 声明由 Client 提供的模块，例如 React；它不能满足必需的 Node peer。仅在 Client bundle 中使用 React 的包应声明该 external，而非 Node 运行时依赖。
 
 每个条目分为 `required` 或 optional，并包含带 checksum-manifest lock 的 `githubRelease` source。GitHub 必须明确报告 `immutable: true`。Artifact lock 指定精确的 Release asset id、文件名、字节大小与 SHA-256。Checksum lock 指定精确的 asset id、规范 GitHub Release URL、文件名、字节大小、SHA-256 与 `sha256sums` 格式。每次 acquisition 使用独占私有目录，因此多个来源可以使用 `SHA256SUMS`。Desktop 验证恰好一个 `<sha256>  <artifact>` 条目；缺失、重复、格式错误、重命名或不匹配都会拒绝该来源。可选 SHA-512 SRI 字段一旦提供就必须验证。同一个 plan 的所有条目使用相同的无凭据 HTTPS dependency registry。
 
@@ -57,13 +61,15 @@ Windows Ops 验证 `resources/managed-update/capability.json` 中的 `desktopNat
 
 ### Fork 拥有的 Windows 托管更新
 
+Desktop 在启动十秒后自动检查更新。你也可以使用应用菜单中的 **Check for updates**。发现更新后，Desktop 会先要求确认，再下载、验证并打开安装程序；选择 **Later** 不会安装。你无需手动下载安装程序。这是交互式更新，而非无人值守安装：Windows 警告、安装选项与 UAC 仍需你批准。
+
 包含 `resources/app-update.yml` 的已签名包使用 `electron-updater`，并保留其发布者与平台签名检查。未签名 cloga 包仅在同时携带 `resources/managed-update/capability.json` 与已打包的 `resources/managed-update/helper.mjs` 时选择托管模式；启动会拒绝同时启用两种模式的包。Capability schema 3 固定 `cloga/deepseek-harness`、`dsh-desktop-v` tag 前缀、`release.json` 资产名、包内 sequence、最小 sequence 与规范插件 provisioning plan hash，不接受 URL。一个精确的 `cloga/dsh-windows-ops` manifest 只作为 sequence 为零时的迁移入口。
 
 **Check for updates** 通过固定 GitHub API 仓库列出 release，要求 release 不可变且 tag 锁定 commit，验证 release asset digest，然后检查 manifest schema 3、规范 self-hash、单调 sequence、源码 commit 与 tree、构建输入、fork 身份、installer hash、installed evidence、网络策略、交互式 completion 策略，以及通用 `desktopNativeVerifiedRelease` capability、source-schema 与 receipt-schema 兼容性。Schema 3 保留 `automaticProvisioning: false`，使现有 0.1.5 Desktop 客户端仍能解析并安装该 release；已安装 capability 与 build receipt 负责该 release 的启动 provisioning 证据。包内 sequence 防止企业部署后的 release 选择自身，已完成 sequence 防止回滚。Renderer 消息不能提供 repository、URL、executable、process id、path 或 installer argument。
 
 **Install** 在确认前报告正在运行的 Sessions、排队消息、活动 jobs、当前 composer draft、attachments 与 submission 状态；如果 dialog 打开期间这些影响发生变化，应用会重新要求确认。Electron 在自己的 user-data 目录中写入一次性交接文件，并启动复制的 Node.js 与独立 helper。除非 helper 验证所选 manifest 并确认同一 manifest hash，Electron 会保持应用与 Host 运行。Acknowledgement 失败会把 operation 标记为 cancelled，仅结束该 owned helper 并等待它退出；Host 停止失败会回滚 updater-owned quit，并执行相同取消流程。Acknowledgement 与 Host 停止完成后，Electron 正常退出。Helper 只等待记录的 Electron 与 Host process id，为每个网络请求设置固定超时，把流式下载字节限制为 manifest size，下载并重新验证 build receipt 与 installer，并在 operation 目录下暂存它们。它会在重新计算 hash、检查声明的未签名 Authenticode 状态及启动无参数交互式 NSIS 期间持有不可写 installer handle；子进程不会继承凭据型环境变量。Windows warning 与 UAC 仍由用户交互决定。
 
-下一个 Desktop process 将打包的插件 plan 与运行时一起暂存，启动最终位置的 Host，并且仅在 helper 结果、已安装文件、capability、plan、实际插件清单、receipt 与 sequence 一致时接受 completion。缺失、中断、阻塞、冲突或不匹配的 completion 证据会打开 recovery，不记录成功。从经过验证的 `dsh-windows-ops` checkout 执行旧 migration recovery 时，使用 `pwsh -NoProfile -File .\Install-DshOfficialDesktop.ps1 -Action Complete`。
+下一个 Desktop process 将打包的插件 plan 与运行时一起暂存，启动最终位置的 Host，并且仅在 helper 结果、已安装文件、capability、plan、实际插件清单、receipt 与 sequence 一致时接受 completion。Completion 使用持久完成 receipt 中的 sequence，而非 discovery 为防止选择自身所用的打包 sequence。新打包版本不证明其待处理安装已经完成。缺失、中断、阻塞、冲突或不匹配的 completion 证据会打开 recovery，不记录成功。从经过验证的 `dsh-windows-ops` checkout 执行旧 migration recovery 时，使用 `pwsh -NoProfile -File .\Install-DshOfficialDesktop.ps1 -Action Complete`。
 
 Windows Ops 每次选择并锁定一个受支持的 upstream baseline。`cloga/deepseek-harness` 在经过评审的 release plan 中记录该选择，并拥有 installer、manifest、receipt、checksums、不可变 tag 与 capability 注入。随后 Windows Ops 锁定、验证并部署这些由源码拥有的资产，不维护另一份 release 定义。旧 `dsh-local-0.1.5-rc.2.local.1` manifest 只能通过显式 migration 条目接受，不能成为第二个持续通道。当 fork 改用带发布者验证的已签名原生产物时，省略 capability 即可删除托管模式，而无需改变原生更新器。
 
@@ -186,6 +192,10 @@ pnpm run package:desktop:win:x64:unsigned
 `release/cloga-windows-x64.json` 中经过评审的 plan 同时推进语义版本与整数 sequence。手动 `Desktop fork release (Windows x64)` workflow 要求操作员确认经过评审的版本，固定 Node 24.13.0 与 pnpm 11.7.0，从冻结 lockfile 安装，测试 Desktop，打包固定 cloga 身份，并验证独立 helper、capability、未签名 installer、已安装 executable、runtime descriptor 与原生/托管互斥。Rehearsal run 要求 checkout 等于所选远端分支的当前 head，执行相同的构建、finalization、checksum 验证与 artifact upload，并跳过 publication 与远端 release discovery。Publication run 必须使用当前 `master`；其受保护的 release job 获得唯一的 `contents: write` 权限，交叉检查下载的 workflow artifact，以精确 commit tag 创建 draft，上传全部资产并发布；除非 GitHub 报告 release 不可变且每个远程 asset digest 匹配，否则流程失败。最后一个不带凭据的 job 仅在 publication 后针对 GitHub 运行已发布的 release discovery。
 
 每个 release 包含交互式 NSIS installer、`release.json`、`build-receipt.json`、`SHA256SUMS` 与 `SHA512SUMS`。Manifest 与 receipt 锁定源码 commit 与 tree、lockfile 与 plan hash、构建工具与依赖 registry、fork package identity、installer size 与 hash、插件 capability 与结构化 source/receipt 版本、允许的 origin 与 redirect，以及重启后 completion 语义。Workflow 不会启动 installer。
+
+在 finalization 前，[打包 Copilot 验收](tests/fixtures/copilot-release-smoke.ts) 使用全新的 Harness 与 Electron 数据目录启动 unpacked Electron 应用。它要求真实 Settings > Models 账户、登录入口与 Manage 面板可见，验证已安装插件依赖图和 provisioning 清单，并在退出后重新启动时重复这些观察。独立的七天 workflow artifact 记录截图、receipt、打包 runtime/capability/plan 记录、可执行文件元数据与精确源码身份。失败运行保留脱敏启动诊断和 receipt/state 是否存在，不保留凭据或 profile 副本。它既不点击登录，也不调用模型。这些检查不证明 OAuth 成功、模型可用或旧版本到新版本的 installer 升级；rehearsal artifact 不是不可变 Release。
+
+独立依赖图检查在内置 Node 中运行未修改的 validator，以活动 profile 为工作目录，不继承 `NODE_PATH`、`NODE_OPTIONS` 或 tsx loader。结果绑定同一个运行时 descriptor hash。源码 runner 的查找路径与错误仅用于对比：pnpm/tsx virtual-store 路径不代表应用实际拥有的包。缺失的 optional peer 仍被允许；解析到 profile 之外的 optional peer 仍会报错。
 
 ### Windows EV 签名
 

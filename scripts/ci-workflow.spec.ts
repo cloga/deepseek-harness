@@ -71,6 +71,7 @@ describe('CI workflow', () => {
       type: 'boolean',
     })
     expect(workflow.permissions).toEqual({ contents: 'read' })
+    expect(build.permissions).toBeUndefined()
     expect(build.if).toBe("github.ref == 'refs/heads/master' || inputs.rehearsal")
     const steps = build.steps.filter(isRecord)
     const authorize = steps.find(step => step.id === 'plan')
@@ -90,32 +91,46 @@ describe('CI workflow', () => {
     expect(authorize.run).toContain('$head -ne $selected')
     expect(authorize.run).toContain("$env:GITHUB_REF -ne 'refs/heads/master'")
     expect(authorize.run).toContain('$head -ne $master')
+    for (const message of [
+      'Could not resolve the checked-out source commit',
+      'Could not fetch the current rehearsal branch',
+      'Could not resolve the current rehearsal branch',
+      'Could not fetch current master',
+      'Could not resolve current master',
+    ]) {
+      expect(authorize.run).toContain(`if ($LASTEXITCODE -ne 0) { throw '${message}' }`)
+    }
     expect(steps.map(step => step.name).filter(name => typeof name === 'string')).toEqual(expect.arrayContaining([
       'Verify Desktop release code',
       'Prepare reviewed managed capability',
       'Build unsigned interactive NSIS installer',
+      'Verify packaged Copilot account and restart',
       'Finalize release manifest and receipts',
       'Verify release asset checksums',
     ]))
-    const upload = steps.find(step => step.uses === 'actions/upload-artifact@v4')
+    const upload = steps.find(step => step.uses === 'actions/upload-artifact@v4'
+      && isRecord(step.with) && step.with.name === 'desktop-fork-release-${{ steps.plan.outputs.version }}')
     if (!isRecord(upload?.with)) throw new TypeError('Desktop fork release workflow must upload its build artifact')
     expect(upload.with).toMatchObject({ 'retention-days': 7, 'if-no-files-found': 'error' })
+    const diagnostics = steps.find(step => isRecord(step.with)
+      && step.with.name === 'desktop-copilot-acceptance-${{ steps.plan.outputs.version }}')
+    expect(diagnostics?.if).toBe(
+      "${{ !cancelled() && (steps.copilot_acceptance.outcome == 'success' || steps.copilot_acceptance.outcome == 'failure') }}",
+    )
+    expect(steps.find(step => step.id === 'copilot_acceptance')?.['continue-on-error']).toBeUndefined()
+    expect(steps.find(step => step.name === 'Finalize release manifest and receipts')?.if).toBeUndefined()
 
     const publishCondition = "${{ !inputs.rehearsal && github.ref == 'refs/heads/master' }}"
     expect(release.if).toBe(publishCondition)
     expect(remoteCheck.if).toBe(publishCondition)
-    expect(evaluateRunsOn(release.if, {
-      inputs: { rehearsal: true },
-      github: { ref: 'refs/heads/master' },
-    })).toBe(false)
-    expect(evaluateRunsOn(release.if, {
-      inputs: { rehearsal: true },
-      github: { ref: 'refs/heads/cloga-dsh-0-1-6-adaptation' },
-    })).toBe(false)
-    expect(evaluateRunsOn(release.if, {
-      inputs: { rehearsal: false },
-      github: { ref: 'refs/heads/master' },
-    })).toBe(true)
+    for (const rehearsal of [false, true]) {
+      for (const ref of ['refs/heads/master', 'refs/heads/cloga-desktop-0-1-5-recovery']) {
+        expect(runInNewContext(release.if.trim().slice(3, -2), {
+          inputs: { rehearsal },
+          github: { ref },
+        }, { timeout: 1000 })).toBe(!rehearsal && ref === 'refs/heads/master')
+      }
+    }
     expect(release.permissions).toEqual({ actions: 'read', contents: 'write' })
     expect(remoteCheck.permissions).toEqual({ contents: 'read' })
   })

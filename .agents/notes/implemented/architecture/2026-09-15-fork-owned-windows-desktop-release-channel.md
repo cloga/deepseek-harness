@@ -34,6 +34,8 @@ Check lists the fixed repository's GitHub Releases. Every matching release must 
 
 The selected handoff locks both the manifest's canonical self-hash and its raw release-asset SHA-256. The detached helper revalidates both before it downloads the receipt and installer. On the next launch, Desktop reconciles the packaged plugin plan before Host startup. Completion verifies the running executable, runtime descriptor, expected GitHub release and asset identifiers, and the packaged plan against capability schema 3 before it records the new sequence.
 
+The loaded configuration distinguishes the packaged discovery floor from the persisted completed sequence. Discovery and handoff use the greater of packaged and completed sequences; completion uses only the durable receipt's sequence, or zero when absent. Using the packaged floor for completion would skip the newly installed release's own pending result and its inventory checks. Repeated completion is idempotent, failed inventory validation preserves the previous receipt, and a higher completed sequence never decreases.
+
 The immutable `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest remains an exact sequence-zero migration only when the source repository has no matching release. The migration record fixes the manifest and installer hashes plus the build receipt's `dsh-v0.1.5-rc.2` source tag; the manifest-fixed receipt retains the source commit and tree. Any malformed, mutable, conflicting, or unreachable source release fails closed instead of falling back. Once a source release exists, Windows Ops cannot act as a second channel.
 
 ## Publication

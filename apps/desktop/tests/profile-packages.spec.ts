@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { lstatSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -57,9 +58,12 @@ it.each(['nested', 'alias'])('rejects a %s second copy of a host package', (plac
   else writePackage(join(profile, 'node_modules'), 'alias', { name: '@deepseek-ai/cordis' })
   expect(() =>{  validateDesktopPluginGraph(profile, dsh, runtime, ['plugin']) }).toThrow(/duplicate or aliased/u)
 })
-it('rejects a host package declared as an ordinary dependency', () => {
+it.each(['dependencies', 'optionalDependencies'] as const)('rejects a shared peer also declared in %s', (section) => {
   const { dsh, runtime, profile } = fixture()
-  writePackage(join(profile, 'node_modules'), 'plugin', { dependencies: { '@deepseek-ai/cordis': '^1.0.0' } })
+  writePackage(join(profile, 'node_modules'), 'plugin', {
+    [section]: { '@deepseek-ai/cordis': '^1.0.0' },
+    peerDependencies: { '@deepseek-ai/cordis': '^1.0.0' },
+  })
   expect(() =>{  validateDesktopPluginGraph(profile, dsh, runtime, ['plugin']) }).toThrow(/peer dependency/u)
 })
 it('rejects incompatible peers only when the plugin is enabled', () => {
@@ -67,6 +71,34 @@ it('rejects incompatible peers only when the plugin is enabled', () => {
   writePackage(join(profile, 'node_modules'), 'plugin', { peerDependencies: { '@deepseek-ai/cordis': '^2.0.0' } })
   expect(() =>{  validateDesktopPluginGraph(profile, dsh, runtime, ['plugin']) }).toThrow(/found 1.0.0/u)
   expect(() =>{  validateDesktopPluginGraph(profile, dsh, runtime, []) }).not.toThrow()
+})
+it('does not satisfy a required Node peer through a Client external declaration', () => {
+  const { dsh, runtime, profile } = fixture()
+  const external = `desktop-client-external-${randomUUID()}`
+  writePackage(join(profile, 'node_modules'), 'plugin', {
+    peerDependencies: { [external]: '1.0.0' },
+    dsh: { client: { external: [external] } },
+  })
+  expect(() => { validateDesktopPluginGraph(profile, dsh, runtime, ['plugin']) })
+    .toThrow(`plugin requires missing ${external}@1.0.0`)
+})
+it('rejects an ancestor React peer even when React is a Client external', () => {
+  const { root, dsh, runtime, profile } = fixture()
+  writePackage(join(root, 'node_modules'), 'react', { version: '18.3.1' })
+  writePackage(join(profile, 'node_modules'), 'plugin', {
+    peerDependencies: { react: '^18.2.0' },
+    dsh: { client: { external: ['react'] } },
+  })
+  expect(() => { validateDesktopPluginGraph(profile, dsh, runtime, ['plugin']) })
+    .toThrow('plugin resolves react outside its owned packages')
+})
+it('keeps Client-only externals outside the Node dependency graph', () => {
+  const { dsh, runtime, profile } = fixture()
+  writePackage(join(profile, 'node_modules'), 'plugin', {
+    peerDependencies: { '@deepseek-ai/cordis': '^1.0.0' },
+    dsh: { client: { external: ['react'] } },
+  })
+  expect(() => { validateDesktopPluginGraph(profile, dsh, runtime, ['plugin']) }).not.toThrow()
 })
 it('refuses to satisfy a plugin dependency from an ancestor CLI project', () => {
   const { root, dsh, runtime, profile } = fixture()

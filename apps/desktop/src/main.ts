@@ -324,7 +324,7 @@ async function main(): Promise<void> {
             managedUpdate.operationsRoot,
             managedUpdate.completionPath,
             managedUpdate.capability,
-            managedUpdate.installedSequence,
+            managedUpdate.completedSequence,
             process.execPath,
             join(resources.dsh, 'desktop-runtime.json'),
             resources.provisioning,
