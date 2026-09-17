@@ -37,7 +37,7 @@ import {
   parseDesktopPluginProvisioningPlan,
   type DesktopPluginProvisioningPlan,
 } from '../src/plugin-provisioning.ts'
-import { discoverDesktopManagedSourceRelease } from '../src/managed-update-coordinator.ts'
+import { discoverDesktopReleaseForBuild } from './desktop-release-github-fetch.ts'
 import { resolveDesktopPackageRegistry } from './desktop-release-environment.mjs'
 import { assertStandaloneDesktopHelper } from './helper-standalone.ts'
 import { packagedDesktopRuntimeRoot, readPackagedDesktopRuntimeDescriptor } from './packaged-runtime.mjs'
@@ -535,7 +535,7 @@ async function main(): Promise<void> {
   if (command === 'prepare') {
     assertReleaseBuildEnvironment(plan)
     if (values.remote) {
-      const latest = await discoverDesktopManagedSourceRelease(capability, 0)
+      const latest = await discoverDesktopReleaseForBuild(capability, process.env.DSH_DESKTOP_RELEASE_GITHUB_TOKEN)
       if (latest !== undefined && latest.manifest.sequence >= plan.sequence) {
         throw new Error('desktop fork release: reviewed sequence does not advance the published channel')
       }
@@ -558,7 +558,7 @@ async function main(): Promise<void> {
   }
   if (command === 'verify-remote') {
     const source = assertReleaseBuildEnvironment(plan)
-    const selected = await discoverDesktopManagedSourceRelease(capability, 0)
+    const selected = await discoverDesktopReleaseForBuild(capability, process.env.DSH_DESKTOP_RELEASE_GITHUB_TOKEN)
     if (selected === undefined || selected.kind !== 'source'
       || selected.manifest.owner !== DESKTOP_MANAGED_UPDATE_SOURCE_REPOSITORY
       || selected.manifest.version !== plan.version

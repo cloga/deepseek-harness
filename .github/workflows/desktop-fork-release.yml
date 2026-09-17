@@ -104,6 +104,8 @@ jobs:
         run: pnpm exec vitest run apps/desktop apps/desktop-host --maxWorkers=1
 
       - name: Prepare reviewed managed capability
+        env:
+          DSH_DESKTOP_RELEASE_GITHUB_TOKEN: ${{ github.token }}
         run: >-
           pnpm exec tsx apps/desktop/scripts/fork-release.ts prepare
           --plan ${{ env.RELEASE_PLAN }}
@@ -312,6 +314,8 @@ jobs:
       - run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Run the shipped source discovery against GitHub
+        env:
+          DSH_DESKTOP_RELEASE_GITHUB_TOKEN: ${{ github.token }}
         run: >-
           pnpm exec tsx apps/desktop/scripts/fork-release.ts verify-remote
           --plan ${{ env.RELEASE_PLAN }}
