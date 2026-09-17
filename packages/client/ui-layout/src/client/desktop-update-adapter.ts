@@ -61,7 +61,10 @@ export class DesktopUpdateAdapter implements HostObservable<DesktopUpdateSnapsho
     return () => { this.listeners.delete(listener) }
   }
 
-  /** @returns Fiber cleanup; late IPC responses and queued events cannot publish after disposal. */
+  /**
+   * Subscribe once for the owning Fiber's lifetime.
+   * @returns Cleanup that prevents late IPC responses and queued events from publishing.
+   */
   connect(): () => void {
     const bridge = this.bridge
     if (bridge === undefined) return () => { this.listeners.clear() }
@@ -97,11 +100,12 @@ export class DesktopUpdateAdapter implements HostObservable<DesktopUpdateSnapsho
     } catch {
       reviewFailed = true
     } finally {
-      if (this.active) this.publish({ ...this.snapshot, reviewing: false, reviewFailed })
+      this.publish({ ...this.snapshot, reviewing: false, reviewFailed })
     }
   }
 
   private publish(next: DesktopUpdateSnapshot): void {
+    if (!this.active) return
     const previous = this.snapshot
     if (previous.state?.phase === next.state?.phase && previous.state?.version === next.state?.version
       && previous.reviewing === next.reviewing && previous.reviewFailed === next.reviewFailed) return

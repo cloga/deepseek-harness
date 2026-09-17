@@ -254,7 +254,9 @@ export default defineConfig({
         'packages/client/ui-primitives/src/DisclosureRow.tsx',
         'packages/client/ui-tool/src/*',
         'packages/client/ui-slots/src/*',
-        'packages/client/ui-layout/src/*',
+        // The Desktop update bridge adapter is covered independently of the remaining layout GUI debt.
+        'packages/client/ui-layout/src/index.ts',
+        'packages/client/ui-layout/src/client/!(desktop-update-adapter).{ts,tsx}',
         'packages/client/web/src/*',
         'packages/host/webserver/src/*',
         // The browser-worker runtime and its image packer: the executing
