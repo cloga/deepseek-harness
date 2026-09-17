@@ -7,12 +7,15 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { dump, JSON_SCHEMA, load } from 'js-yaml'
+import { valid } from 'semver'
 
 /** Caller-validated manifest entry backed by a source lock or verified Release receipt. */
 export interface DesktopArtifactSpecifier {
   readonly name: string
   readonly specifier: string
   readonly sha256: string
+  /** Verified Release package version; requires the locked root resolution to match the receipt and bytes. */
+  readonly verifiedVersion?: string
 }
 
 const MAX_LOCK_BYTES = 16 * 1024 * 1024
@@ -64,7 +67,8 @@ function validateArtifacts(artifacts: readonly DesktopArtifactSpecifier[]): void
   for (const artifact of artifacts) {
     if (artifact.name.length > 214 || !PACKAGE_NAME.test(artifact.name)
       || !/^[a-f0-9]{64}$/u.test(artifact.sha256)
-      || ARTIFACT_SPECIFIER.exec(artifact.specifier)?.[1] !== artifact.sha256) {
+      || ARTIFACT_SPECIFIER.exec(artifact.specifier)?.[1] !== artifact.sha256
+      || (artifact.verifiedVersion !== undefined && valid(artifact.verifiedVersion) !== artifact.verifiedVersion)) {
       fail('artifact metadata requires a package name and canonical file:.desktop-plugin-artifacts/<sha256>.tgz matching its SHA-256')
     }
     if (names.has(artifact.name)) fail(`duplicate artifact metadata for ${artifact.name}`)
@@ -72,14 +76,50 @@ function validateArtifacts(artifacts: readonly DesktopArtifactSpecifier[]): void
   }
 }
 
-function verifyArtifacts(profile: string, artifacts: readonly DesktopArtifactSpecifier[]): void {
-  if (artifacts.length === 0) return
+function verifyArtifacts(profile: string, artifacts: readonly DesktopArtifactSpecifier[]): ReadonlyMap<string, string> {
+  const integrities = new Map<string, string>()
+  if (artifacts.length === 0) return integrities
   requireDirectory(join(profile, '.desktop-plugin-artifacts'))
   for (const artifact of artifacts) {
     const hash = createHash('sha256')
+    const integrity = createHash('sha512')
     consumeRegularFile(join(profile, '.desktop-plugin-artifacts', `${artifact.sha256}.tgz`), MAX_ARTIFACT_BYTES,
-      (chunk) => { hash.update(chunk) })
+      (chunk) => { hash.update(chunk); integrity.update(chunk) })
     if (hash.digest('hex') !== artifact.sha256) fail(`snapshot SHA-256 mismatch for ${artifact.name}`)
+    integrities.set(artifact.name, `sha512-${integrity.digest('base64')}`)
+  }
+  return integrities
+}
+
+function matchesArtifactReference(value: unknown, specifier: string, peers: boolean): boolean {
+  if (typeof value !== 'string') return false
+  const normalized = value.replaceAll('\\', '/')
+  return normalized === specifier || (peers && normalized.startsWith(`${specifier}(`) && normalized.endsWith(')'))
+}
+
+function verifyReleaseResolution(
+  lock: Record<string, unknown>,
+  entry: Record<string, unknown>,
+  artifact: DesktopArtifactSpecifier,
+  integrity: string | undefined,
+): void {
+  if (artifact.verifiedVersion === undefined) return
+  const prefix = `${artifact.name}@`
+  const candidates = record(lock.packages) ? Object.entries(lock.packages).filter(([key]) => (
+    key.startsWith(prefix) && matchesArtifactReference(key.slice(prefix.length), artifact.specifier, true)
+  )) : []
+  if (!matchesArtifactReference(entry.version, artifact.specifier, true)) {
+    fail('inconsistent verified-artifact lock identity: locked reference')
+  }
+  const locked = candidates.length === 1 ? candidates[0]?.[1] : undefined
+  if (!record(locked)) fail('inconsistent verified-artifact lock identity: package key')
+  if (locked.version !== artifact.verifiedVersion) fail('inconsistent verified-artifact lock identity: package version')
+  const resolution = locked.resolution
+  if (!record(resolution) || !matchesArtifactReference(resolution.tarball, artifact.specifier, false)) {
+    fail('inconsistent verified-artifact lock identity: tarball reference')
+  }
+  if (integrity === undefined || resolution.integrity !== integrity) {
+    fail(`verified-artifact lock integrity mismatch for ${artifact.name}`)
   }
 }
 
@@ -90,6 +130,7 @@ function verifyArtifacts(profile: string, artifacts: readonly DesktopArtifactSpe
  * @returns Whether the lockfile changed. Absent locks, unknown schemas, and multiple importers remain byte-identical.
  * Throws on invalid candidate metadata, unsafe files, missing or corrupt artifact bytes, or malformed YAML.
  * All artifacts are verified before writing; resolutions, integrity, versions, and package.json are never changed.
+ * Verified Release candidates additionally require the receipt's package version, canonical tarball and byte-derived SHA-512.
  */
 export function normalizeDesktopArtifactSpecifiers(profile: string, artifacts: readonly DesktopArtifactSpecifier[]): boolean {
   validateArtifacts(artifacts)
@@ -118,7 +159,7 @@ export function normalizeDesktopArtifactSpecifiers(profile: string, artifacts: r
   if (sole === undefined) return false
   const [key, importer] = sole
   if (!record(importer) || !record(importer.dependencies)) return false
-  verifyArtifacts(profile, artifacts)
+  const integrities = verifyArtifacts(profile, artifacts)
   const dependencies = { ...importer.dependencies }
   let changed = false
   for (const artifact of artifacts) {
@@ -126,6 +167,7 @@ export function normalizeDesktopArtifactSpecifiers(profile: string, artifacts: r
     const entry = dependencies[artifact.name]
     if (!record(entry) || typeof entry.specifier !== 'string' || entry.specifier === artifact.specifier
       || entry.specifier.replaceAll('\\', '/') !== artifact.specifier) continue
+    verifyReleaseResolution(parsed, entry, artifact, integrities.get(artifact.name))
     // Copy the entry instead of mutating a YAML alias also referenced by a resolution or another dependency.
     dependencies[artifact.name] = { ...entry, specifier: artifact.specifier }
     changed = true

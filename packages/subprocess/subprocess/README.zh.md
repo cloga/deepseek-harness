@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`ctx.subprocess` 可解析可执行文件、启动显式指定的子进程或真实终端会话、流式读取或有界收集输出，并终止完整的受管进程范围。每个组合配置一个 subprocess 实现，并根据命令运行位置选择本地或远程执行。每次请求都指定 argv、工作目录、stdio、环境覆盖、终止宽限期与取消信号，不会添加 shell 解释或隐藏的执行默认值。子进程环境会先移除环境中的凭据与 `DSH_*` 值，再应用显式覆盖；时限、拆卸策略与面向模型的渲染由调用方负责，收集的输出在进程退出后仍可读取。
+`ctx.subprocess` 可解析可执行文件、启动显式指定的子进程或真实终端会话、流式读取或有界收集输出，并终止完整的受管进程范围。每个组合配置一个 subprocess 实现，并根据命令运行位置选择本地或远程执行。每次请求都指定 argv、工作目录、stdio、环境覆盖、终止宽限期与取消信号，不会添加 shell 解释或隐藏的执行默认值。共享环境 helper 会先移除环境中的凭据、Git 临时配置组与 `DSH_*` 值，再应用显式覆盖；时限、拆卸策略与面向模型的渲染由调用方负责，收集的输出在进程退出后仍可读取。
 
 ## 目录
 
@@ -70,7 +70,7 @@ const output = handle.collected.stdout?.readFrom(0)
 
 ### 每个子进程起步时的环境
 
-子进程永远不会隐式继承 harness 的环境秘密：形似凭据的名称与环境中的 `DSH_*` 事实都会被清除，调用方显式的 `env` 在该清除之后合并。有意转发的凭据或当前的 `DSH_*` 部署事实仍会到达子进程；显式的 `undefined` 墓碑值则移除一个普通的环境项。
+共享的 `scrubbedParentEnv` helper 在合并调用方显式 `env` 前移除形似凭据的名称、环境中的 `DSH_*` 事实与 Git 临时配置组。它按名称移除 `GIT_CONFIG_COUNT`、数字索引的 `GIT_CONFIG_KEY_n`／`GIT_CONFIG_VALUE_n` 及 `GIT_CONFIG_PARAMETERS`，不会读取被拒绝的值；独立的 `GIT_CONFIG_GLOBAL`、`GIT_CONFIG_SYSTEM` 与 `GIT_CONFIG_NOSYSTEM` 设置保留。有意转发的凭据、完整 Git 配置组或当前 `DSH_*` 部署事实仍可通过显式覆盖到达子进程；显式的 `undefined` 墓碑值则移除一个普通环境项。[分组环境决策](../../../.agents/notes/implemented/bug-fix/2026-09-17-ambient-git-configuration-groups.zh.md)解释这一删除单位。
 
 ### 可能出错的地方
 

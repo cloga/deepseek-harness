@@ -67,6 +67,109 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
+function verifiedFixture(name = 'verified-fixture') {
+  const root = fixture()
+  const owned = { ...artifact(root, name), verifiedVersion: '1.0.0' }
+  const bytes = readFileSync(join(root, '.desktop-plugin-artifacts', `${owned.sha256}.tgz`))
+  const entry = { specifier: windows(owned.specifier), version: `${owned.specifier}(peer@1.0.0)` }
+  const resolved = {
+    version: owned.verifiedVersion,
+    resolution: { tarball: owned.specifier, integrity: `sha512-${createHash('sha512').update(bytes).digest('base64')}` },
+  }
+  const data = {
+    lockfileVersion: '9.0',
+    importers: { '../../profiles/desktop': { dependencies: { [name]: entry } } },
+    packages: { [`${name}@${owned.specifier}`]: resolved },
+    snapshots: { [`${name}@${entry.version}`]: { dependencies: { peer: '1.0.0' } } },
+  }
+  return { root, owned, data, entry, resolved }
+}
+
+describe('verified Release lock identity', () => {
+  it.each(['verified-fixture', '@scope/verified-fixture'])('retains locked root identity when repairing %s', (name) => {
+    const f = verifiedFixture(name)
+    writeLock(f.root, f.data)
+    expect(normalizeDesktopArtifactSpecifiers(f.root, [f.owned])).toBe(true)
+    expect(readLock(f.root)).toEqual({
+      ...f.data,
+      importers: { '../../profiles/desktop': { dependencies: { [name]: { ...f.entry, specifier: f.owned.specifier } } } },
+    })
+    expect(readFileSync(join(f.root, 'package.json'), 'utf8')).toBe(packageJson)
+    const repaired = readFileSync(join(f.root, 'pnpm-lock.yaml'), 'utf8')
+    expect(normalizeDesktopArtifactSpecifiers(f.root, [f.owned])).toBe(false)
+    expect(readFileSync(join(f.root, 'pnpm-lock.yaml'), 'utf8')).toBe(repaired)
+  })
+
+  it.each(['version', 'package-key', 'tarball', 'all', 'peer-key'] as const)(
+    'accepts same-hash Windows %s representation without rewriting resolution fields', (representation) => {
+      const f = verifiedFixture('@scope/verified-fixture')
+      if (representation === 'version' || representation === 'all') f.entry.version = windows(f.entry.version)
+      if (representation === 'tarball' || representation === 'all') f.resolved.resolution.tarball = windows(f.owned.specifier)
+      if (representation === 'package-key' || representation === 'all' || representation === 'peer-key') {
+        delete f.data.packages[`${f.owned.name}@${f.owned.specifier}`]
+        const suffix = representation === 'peer-key' ? '(peer@1.0.0)' : ''
+        f.data.packages[`${f.owned.name}@${windows(f.owned.specifier)}${suffix}`] = f.resolved
+      }
+      writeLock(f.root, f.data)
+      expect(normalizeDesktopArtifactSpecifiers(f.root, [f.owned])).toBe(true)
+      expect(readLock(f.root)).toEqual({
+        ...f.data,
+        importers: { '../../profiles/desktop': { dependencies: {
+          [f.owned.name]: { ...f.entry, specifier: f.owned.specifier },
+        } } },
+      })
+    },
+  )
+
+  it.each(['artifact', 'integrity', 'version', 'tarball', 'package-version', 'missing-package', 'ambiguous-package'] as const)(
+    'refuses verified %s drift without a partial lock rewrite', (damage) => {
+      const f = verifiedFixture()
+      if (damage === 'artifact') writeFileSync(join(f.root, '.desktop-plugin-artifacts', `${f.owned.sha256}.tgz`), 'changed')
+      if (damage === 'integrity') f.resolved.resolution.integrity = 'sha512-unrelated'
+      if (damage === 'version') f.entry.version = 'file:.desktop-plugin-artifacts/unrelated.tgz'
+      if (damage === 'tarball') f.resolved.resolution.tarball = 'file:../outside.tgz'
+      if (damage === 'package-version') f.resolved.version = '2.0.0'
+      if (damage === 'missing-package') delete f.data.packages[`${f.owned.name}@${f.owned.specifier}`]
+      if (damage === 'ambiguous-package') f.data.packages[`${f.owned.name}@${windows(f.owned.specifier)}`] = { ...f.resolved }
+      const original = writeLock(f.root, f.data)
+      expect(() => normalizeDesktopArtifactSpecifiers(f.root, [f.owned])).toThrow()
+      expect(readFileSync(join(f.root, 'pnpm-lock.yaml'), 'utf8')).toBe(original)
+      expect(readdirSync(f.root).some(name => name.startsWith('.desktop-lock-normalization-'))).toBe(false)
+    },
+  )
+
+  it('does not rewrite a valid earlier candidate when a later verified resolution fails', () => {
+    const f = verifiedFixture()
+    const first = artifact(f.root, 'first-source')
+    const original = writeLock(f.root, {
+      ...f.data,
+      importers: { '.': { dependencies: {
+        [first.name]: { specifier: windows(first.specifier), version: first.specifier },
+        [f.owned.name]: f.entry,
+      } } },
+      packages: {},
+    })
+    expect(() => normalizeDesktopArtifactSpecifiers(f.root, [first, f.owned])).toThrow('verified-artifact lock identity')
+    expect(readFileSync(join(f.root, 'pnpm-lock.yaml'), 'utf8')).toBe(original)
+  })
+
+  it('copies an aliased verified importer without changing the unrelated reference', () => {
+    const f = verifiedFixture()
+    const original = {
+      ...f.data,
+      importers: { '.': { dependencies: { [f.owned.name]: f.entry, unrelated: f.entry } } },
+    }
+    writeLock(f.root, original)
+    expect(normalizeDesktopArtifactSpecifiers(f.root, [f.owned])).toBe(true)
+    expect(readLock(f.root)).toEqual({
+      ...original,
+      importers: { '.': { dependencies: {
+        [f.owned.name]: { ...f.entry, specifier: f.owned.specifier }, unrelated: f.entry,
+      } } },
+    })
+  })
+})
+
 describe('normalizeDesktopArtifactSpecifiers', () => {
   it.each(['.', 'C:\\private\\staging', '../../relocated-profile'])('repairs only the owned importer specifier under %s', (importer) => {
     const root = fixture()
@@ -199,25 +302,33 @@ describe('normalizeDesktopArtifactSpecifiers', () => {
     expect(readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8')).toBe(original)
   })
 
-  it('rejects a linked artifact file without following it', () => {
+  it('rejects a link-shaped artifact path without following it', () => {
     const root = fixture()
     const owned = artifact(root)
     const original = writeLock(root, lock(owned))
     const path = join(root, '.desktop-plugin-artifacts', `${owned.sha256}.tgz`)
-    const target = join(root, 'external.tgz')
+    const directory = join(root, 'external-artifact')
+    mkdirSync(directory)
+    const target = join(directory, 'external.tgz')
     renameSync(path, target)
-    symlinkSync(target, path, 'file')
+    const bytes = readFileSync(target)
+    // Windows file symlinks require privileges; junctions exercise the same unlinked-regular-file guard.
+    symlinkSync(process.platform === 'win32' ? directory : target, path, process.platform === 'win32' ? 'junction' : 'file')
     expect(() => normalizeDesktopArtifactSpecifiers(root, [owned])).toThrow('unlinked regular file')
     expect(readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8')).toBe(original)
+    expect(readFileSync(target)).toEqual(bytes)
   })
 
   it('rejects linked lockfiles without replacing their target', () => {
     const root = fixture()
     const owned = artifact(root)
     const original = writeLock(root, lock(owned))
-    const target = join(root, 'external-lock.yaml')
+    const directory = join(root, 'external-lock')
+    mkdirSync(directory)
+    const target = join(directory, 'external-lock.yaml')
     renameSync(join(root, 'pnpm-lock.yaml'), target)
-    symlinkSync(target, join(root, 'pnpm-lock.yaml'), 'file')
+    symlinkSync(process.platform === 'win32' ? directory : target, join(root, 'pnpm-lock.yaml'),
+      process.platform === 'win32' ? 'junction' : 'file')
     expect(() => normalizeDesktopArtifactSpecifiers(root, [owned])).toThrow('unlinked regular file')
     expect(readFileSync(target, 'utf8')).toBe(original)
   })
@@ -242,7 +353,7 @@ describe('normalizeDesktopArtifactSpecifiers', () => {
     { name: '../escape' }, { name: '' }, { sha256: 'a'.repeat(64) }, { sha256: 'A'.repeat(64) },
     { specifier: 'file:../escape.tgz' }, { specifier: 'file:./.desktop-plugin-artifacts/{hash}.tgz' },
     { specifier: 'file:.desktop-plugin-artifacts\\{hash}.tgz' }, { specifier: 'link:.desktop-plugin-artifacts/{hash}.tgz' },
-    { specifier: 'file:.desktop-plugin-artifacts/{hash}.tgz?x=1' },
+    { specifier: 'file:.desktop-plugin-artifacts/{hash}.tgz?x=1' }, { verifiedVersion: 'latest' },
   ])('rejects invalid canonical metadata %j before touching lock bytes', (patch) => {
     const root = fixture()
     const owned = artifact(root)

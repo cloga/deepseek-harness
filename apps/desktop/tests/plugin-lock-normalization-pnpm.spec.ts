@@ -10,6 +10,7 @@ import { DesktopProjectManager, type DesktopProjectMutation } from '../src/proje
 import type { DesktopGithubReleasePluginSource } from '../src/plugin-source.ts'
 import { resolveDesktopPaths } from '../src/paths.ts'
 import { runtimeFixture, writePackage } from './runtime-fixture.ts'
+import { observeFixturePnpm } from './pnpm-fixture-observer.ts'
 
 interface FixtureLock {
   importers: Record<string, { dependencies?: Record<string, { specifier: string; version: unknown }> }>
@@ -26,6 +27,7 @@ const hooks = { beforeChange: async () => {}, healthCheck: async () => {}, after
 // Each offline case includes a real verified install and a separate ordinary mutation of the legacy profile.
 it.each(['add', 'toggle', 'remove'] as const)('repairs an existing receipt-bound separator mismatch before ordinary %s frozen install', async (action) => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'desktop-legacy-lock-pnpm-')))
+  const observer = observeFixturePnpm(root, join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs'), 'legacy-verified-plugin')
   const originalFetch = globalThis.fetch
   try {
     const name = 'legacy-verified-plugin'
@@ -54,7 +56,7 @@ it.each(['add', 'toggle', 'remove'] as const)('repairs an existing receipt-bound
     const capture = join(root, 'before-first-frozen.yaml')
     const captureManifest = join(root, 'before-first-frozen-package.json')
     const pnpm = join(root, 'offline-pnpm.mjs')
-    const realPnpm = pathToFileURL(join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs')).href
+    const realPnpm = pathToFileURL(observer.entry).href
     writeFileSync(pnpm, `import {existsSync,readFileSync,writeFileSync} from 'node:fs'
 import {join} from 'node:path'
 if (process.argv.includes('--frozen-lockfile') && !existsSync(${JSON.stringify(capture)})) {
@@ -105,6 +107,9 @@ await import(${JSON.stringify(realPnpm)})
       expect(retained?.enabled).toBe(action !== 'toggle')
       expect(retained?.source).toEqual(source)
     }
+  } catch (error) {
+    observer.reportFailure()
+    throw error
   } finally {
     globalThis.fetch = originalFetch
     rmSync(root, { recursive: true, force: true })

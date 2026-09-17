@@ -44,13 +44,18 @@ export type {
  */
 export const SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i
 
+// Git's temporary config can carry credentials. Drop the entire ambient group,
+// not only KEY_n: retaining COUNT or VALUE_n leaves broken or orphaned entries.
+const AMBIENT_GIT_CONFIG_PATTERN = /^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_\d+)$/i
+
 /**
- * The ambient parent environment minus credential-shaped names and minus all
- * `DSH_*` names — the canonical base every harness child starts from. `PATH`,
- * `HOME`, locale, and proxy variables survive, so child CLIs run normally;
+ * The ambient parent environment minus credential-shaped names, `DSH_*` names,
+ * and Git's temporary `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`/`PARAMETERS` configuration
+ * — the canonical base every harness child starts from. Independent Git
+ * `GLOBAL`/`SYSTEM`/`NOSYSTEM` settings, `PATH`, `HOME`, locale, and proxy variables survive;
  * harness identity never leaks implicitly (a deliberately forwarded
  * credential or current `DSH_*` fact goes through the spec's explicit `env`,
- * which merges after this scrub). Both scrubs match case-insensitively:
+ * which merges after this scrub). All name filters match case-insensitively:
  * Windows environment names are case-insensitive, so a parent `dsh_*` entry
  * would otherwise survive and read back as `$env:DSH_*` in the child;
  * deliberate lowercase `dsh_*` names on POSIX are implausible. Exported as a plain function so spawners
@@ -63,8 +68,10 @@ export const SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i
  */
 export function scrubbedParentEnv(): Record<string, string> {
   const env: Record<string, string> = {}
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && !SENSITIVE_ENV_PATTERN.test(key) && !key.toUpperCase().startsWith(DSH_ENV_PREFIX)) env[key] = value
+  for (const key of Object.keys(process.env)) {
+    if (SENSITIVE_ENV_PATTERN.test(key) || key.toUpperCase().startsWith(DSH_ENV_PREFIX) || AMBIENT_GIT_CONFIG_PATTERN.test(key)) continue
+    const value = process.env[key]
+    if (value !== undefined) env[key] = value
   }
   // A child Node ignores the inherited proxy variables unless the flag this adds is set, so an MCP
   // stdio server or subagent CLI would connect directly while its parent proxies. The same overlay
