@@ -31,6 +31,7 @@ import {
 import type { DesktopPaths } from './paths.ts'
 import { parseDesktopPluginInstallSpec, type DesktopPluginInstallSpec } from './plugin-install-spec.ts'
 import { acquireDesktopSourcePackage } from './plugin-package-artifact.ts'
+import { normalizeDesktopArtifactSpecifiers } from './plugin-lock-normalization.ts'
 import {
   desktopPackageArtifactSpecifier, readDesktopPackageLocks, verifyDesktopPackageArtifact,
   writeDesktopPackageLocks, type DesktopPackageInstallLock,
@@ -564,7 +565,7 @@ export class DesktopProjectManager {
 
   /**
    * Stage, validate, health-check, and atomically activate one profile mutation.
-   * @param mutation - Registry or verified-release package change.
+   * @param mutation - Registry, source snapshot, or verified-release package change.
    * @param hooks - Active Host lifecycle and staged composition health check.
    * @returns Verified-release attestation, or undefined for ordinary mutations.
    */
@@ -594,6 +595,7 @@ export class DesktopProjectManager {
         const previous = readDesktopProfileState(staging)
         const registry = this.registryForMutation(staging, mutation)
         if (mutation.type !== 'plugins-reconcile' && (removingSnapshot || Object.keys(projectManifest(staging).dependencies).length > 0)) {
+          if (!removingSnapshot) this.normalizeRetainedArtifactSpecifiers(staging)
           await this.runPnpm(staging, ['install', removingSnapshot ? '--no-frozen-lockfile' : '--frozen-lockfile', '--ignore-scripts'], registry)
         }
         let provision: StagedDesktopPluginProvision | StagedDesktopProvisioning | undefined
@@ -723,6 +725,23 @@ export class DesktopProjectManager {
       throw new Error('desktop plugin provisioning: reconciliation returned no state')
     }
     return result
+  }
+
+  private normalizeRetainedArtifactSpecifiers(projectDir: string): void {
+    const manifest = projectManifest(projectDir)
+    const receipts = readPluginReceipts(projectDir).receipts
+    const snapshots = readDesktopPackageLocks(projectDir)
+    const artifacts = Object.entries(manifest.dependencies).flatMap(([name, specifier]) => {
+      const snapshot = snapshots[name]
+      if (snapshot !== undefined && desktopPackageArtifactSpecifier(snapshot) === specifier) {
+        return [{ name, specifier, sha256: snapshot.sha256 }]
+      }
+      const receipt = receipts[name]
+      return receipt !== undefined && artifactSpecifier(receipt) === specifier
+        ? [{ name, specifier, sha256: receipt.artifactSha256 }]
+        : []
+    })
+    normalizeDesktopArtifactSpecifiers(projectDir, artifacts)
   }
 
   private clearPluginReceipt(projectDir: string, name: string): void {

@@ -26,6 +26,8 @@ Desktop 在仅支持 registry 的 `npmRegistry` 与带证明的 `githubRelease` 
 
 [来源 lock 存储](../../../../apps/desktop/src/plugin-package-lock.ts)在 `desktop-plugin-package-locks.json` 中记录原始请求 spec、解析后的 URL、可选 GitHub commit、真实包名与版本、SHA-256 及 SHA-512 integrity。每个 profile 拥有的归档使用依赖 spec `file:.desktop-plugin-artifacts/<sha256>.tgz`。[项目管理器](../../../../apps/desktop/src/project-manager.ts)在冻结迁移前规范 manifest（元数据清单）与 lockfile，使两者一致。Hash 标识的是快照，而非经过验证的 Release receipt。再次从来源安装可以改变 commit 或字节，而无需改变包版本。
 
+首次冻结安装前，仅在 staging 中运行的[产物 lock 规范化器](../../../../apps/desktop/src/plugin-lock-normalization.ts)处理 importer specifier 仅存在 Windows 分隔符差异的保留 lock。候选项必须与规范 manifest 项精确匹配，并由已验证的 source lock 或验证 receipt 支持，随后还必须核对归档 SHA-256。辅助函数只改变该 importer specifier 的分隔符表示；包解析结果、版本、integrity 与冻结安装标志都保持不变。无效 UTF-8、不安全文件与损坏产物会在不重写 lock 的情况下失败。未知 schema、多个 importer 与无关差异保持原样，交由冻结安装验证；这不是通用 lock 迁移。
+
 重启与冻结重建使用保留的快照，不重新获取原始来源。Registry、快照与经过验证的 Release 之间的替换会移除过时的来源归属。精确 plan 替换在可选验证候选失败时也会移除被替换的 source lock，避免未安装的来源留下保留产物前提。来源重装仍是显式输入操作；验证更新路径不会静默改用保证更弱的来源。
 
 快照缺失或损坏时仍可显示并删除。删除会先排除目标，再验证和重建保留的依赖。其他损坏的保留归档会在 Host 中断前停止事务。这样可以先删除再安装以恢复，而不把禁用全部插件或直接重装当作修复路径。激活与回滚继续遵循共享事务；成功应用会重启 Host，并在运行时执行选定插件。
@@ -40,6 +42,8 @@ Desktop 在仅支持 registry 的 `npmRegistry` 与带证明的 `githubRelease` 
 
 **禁用所有原生依赖构建。** 这会破坏经过评审的 registry 原生依赖路径。因此拒绝来源根包钩子、隐式根包构建、捆绑依赖和直接非 registry 依赖；现有 registry 构建策略保留自身适用范围。
 
+**丢弃或重新解析存在差异的 lockfile。** 为了纠正拼写差异，这种方式可能刷新无关依赖或削弱冻结安装保证。以 receipt 为依据的分隔符规范化保留已选包依赖图，并拒绝无关修复。
+
 ## 影响
 
 安装时编译、依赖私有或通用 Git 传输，或者包含不可移植直接依赖的来源包，需要重新打包为具备预构建输出与 registry 依赖的包。快照存储与私有事务副本占用磁盘空间。保存的快照不受原始 checkout 丢失影响，但 profile 归档丢失后需要显式恢复。内容 hash 与获取成功不证明运行时兼容性、认证可用性或插件行为安全。
@@ -47,5 +51,7 @@ Desktop 在仅支持 registry 的 `npmRegistry` 与带证明的 `githubRelease` 
 ## 必需验证
 
 [解析器测试](../../../../apps/desktop/tests/plugin-install-spec.spec.ts)与[获取测试](../../../../apps/desktop/tests/plugin-package-artifact.spec.ts)固定支持的语法、输出选择、生命周期拒绝、依赖限制、归档路径约束与有界下载。[真实 pnpm 测试](../../../../apps/desktop/tests/plugin-source-pnpm.spec.ts)针对恶意脚本、配置钩子与包管理器选择器验证实际发布的包管理器调用方式；归档场景必须携带可执行哨兵载荷，而不只是 manifest 中对它的引用。
+
+[Lock 规范化测试](../../../../apps/desktop/tests/plugin-lock-normalization.spec.ts)保留无关解析数据与无需变更时的原始字节，拒绝不安全或损坏的输入，并要求写入前验证全部候选项。[真实 pnpm 规范化回归](../../../../apps/desktop/tests/plugin-lock-normalization-pnpm.spec.ts)在普通添加、切换启用状态与删除操作前植入现有 receipt 支持的分隔符差异；捕获到的首次冻结 pnpm 调用输入必须仅包含获准的 specifier 修正，manifest 与已选解析结果保持不变。
 
 [事务测试](../../../../apps/desktop/tests/project-manager.spec.ts)要求验证冻结迁移、保留来源重建、同版本字节替换、另一类来源依据清理、可选替换失败、损坏快照删除，以及保留快照损坏时在停止 Host 前失败。[插件窗口测试](../../../../apps/desktop/tests/plugin-manager.spec.ts)覆盖来源重装与验证通道保留。目标平台 Desktop 验收还要求验证实际插件窗口、最终位置 Host 启动与回滚行为；源码测试不构成特定外部插件运行时或认证后模型使用的验收。
