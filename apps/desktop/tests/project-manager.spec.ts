@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { resolveDesktopPaths } from '../src/paths.ts'
-import { DesktopProjectManager, packageNameFromSpec, type DesktopProjectHooks } from '../src/project-manager.ts'
+import { assertDesktopProvisioningInventory, DesktopProjectManager, packageNameFromSpec, type DesktopProjectHooks } from '../src/project-manager.ts'
 import type { DesktopGithubReleasePluginSource } from '../src/plugin-source.ts'
 import { readDesktopProfileState } from '../src/profile-packages.ts'
 import { readDesktopPackageLocks } from '../src/plugin-package-lock.ts'
@@ -247,6 +247,73 @@ describe('desktop external plugin profile', () => {
     await expect(runtimeManager.applyRelease()).resolves.toBe(true)
     expect(readDesktopProfileState(manager.paths.profile)?.links).toEqual(links)
     await expect(runtimeManager.applyRelease()).resolves.toBe(false)
+  })
+
+  it.each(['legacy', 'explicit'] as const)('retains off-plan user verified plugins during a runtime-mode exact-plan upgrade: %s ownership', async (ownership) => {
+    const { root, manager } = setup()
+    const fixtures = ['release-provider', 'manual-verified'].map((name) => {
+      const archive = verifiedPluginArchive(name)
+      return { archive, source: verifiedSource(archive, name) }
+    })
+    const release = fixtures[0]!
+    const manual = fixtures[1]!
+    const plan = { schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source: release.source }] } as const
+    const original = globalThis.fetch
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input)
+      const fixture = fixtures.find(entry => url.pathname.includes(`/${entry.source.repo}/`))
+      if (fixture === undefined) throw new Error(`unexpected request ${url}`)
+      return verifiedFetch(fixture.source, fixture.archive)(input, init)
+    }
+    try {
+      await manager.applyRelease(hooks(), plan)
+      await manager.mutate({ type: 'plugin-install', source: manual.source }, hooks())
+      await manager.mutate({ type: 'plugin-toggle', name: manual.source.packageName, enabled: false }, hooks())
+      await manager.mutate({ type: 'plugin-add', spec: 'manual-registry@1.0.0' }, hooks())
+      const receiptPath = join(manager.paths.profile, 'desktop-plugin-receipts.json')
+      const store = JSON.parse(readFileSync(receiptPath, 'utf8')) as {
+        schemaVersion: number
+        receipts: Record<string, unknown>
+        owners?: Record<string, 'user' | 'release'>
+      }
+      // Old clients lack owner metadata; an ownership-aware predecessor records the same user intent explicitly.
+      const { owners: _owners, ...legacy } = store
+      writeFileSync(receiptPath, JSON.stringify(ownership === 'legacy' ? legacy : {
+        ...legacy, owners: { 'release-provider': 'release', 'manual-verified': 'user' },
+      }))
+      const artifact = join('.desktop-plugin-artifacts', `${manual.source.sha256}.tgz`)
+      const retainedFiles = ['package.json', 'desktop-plugin-receipts.json', 'desktop-plugin-provisioning-state.json', artifact]
+        .map(path => ({ path, bytes: readFileSync(join(manager.paths.profile, path)) }))
+      const previous = readDesktopProfileState(manager.paths.profile)
+      expect(previous).toBeDefined()
+      const dsh = join(root, 'next-runtime', 'dsh')
+      runtimeFixture(dsh, '1.1.0')
+      const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh, profileResolution: 'runtime' })
+      let starts = 0
+      await expect(next.applyRelease(hooks({ afterChange: async () => {
+        if (++starts === 1) throw new Error('retention upgrade final activation rejected')
+      } }), plan)).rejects.toThrow('retention upgrade final activation rejected')
+      expect(readDesktopProfileState(manager.paths.profile)).toEqual(previous)
+      for (const entry of retainedFiles) expect(readFileSync(join(manager.paths.profile, entry.path))).toEqual(entry.bytes)
+
+      const beforeUpgrade = calls(root).length
+      await expect(next.applyRelease(hooks(), plan)).resolves.toBe(true)
+      expect(readDesktopProfileState(manager.paths.profile)?.runtimeId).not.toBe(previous?.runtimeId)
+      expect(calls(root).length).toBeGreaterThan(beforeUpgrade)
+      expect(next.listPlugins()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'manual-verified', enabled: false, source: manual.source }),
+        expect.objectContaining({ name: 'manual-registry', enabled: true }),
+        expect.objectContaining({ name: 'release-provider', enabled: true, source: release.source }),
+      ]))
+      const updated = JSON.parse(readFileSync(receiptPath, 'utf8')) as { receipts: Record<string, unknown> }
+      expect(updated.receipts[manual.source.packageName]).toEqual(store.receipts[manual.source.packageName])
+      expect(readFileSync(join(manager.paths.profile, artifact))).toEqual(manual.archive)
+      assertDesktopProvisioningInventory(manager.paths.profile, plan)
+      const beforeReuse = calls(root).length
+      await expect(next.applyRelease(hooks(), plan)).resolves.toBe(false)
+      expect(calls(root)).toHaveLength(beforeReuse)
+      expect(calls(root).every(call => call.project !== manager.paths.profile)).toBe(true)
+    } finally { globalThis.fetch = original }
   })
 
   it('isolates two required release acquisitions sharing SHA256SUMS', async () => {
