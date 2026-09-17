@@ -79,6 +79,18 @@ describe('ui-layout client apply', () => {
     expect(inject).toEqual(['slots', 'theme', 'locale'])
   })
 
+  it('owns and removes the Desktop notification dictionary with the layout fiber', async () => {
+    const { ctx } = await bench()
+    const locale = ctx.get('locale') as LocaleRuntime
+    const t = locale.bind('layout')
+    expect(t('desktopUpdate.review')).toBe('desktopUpdate.review')
+    const fiber = ctx.plugin({ inject: [...inject], apply })
+    await fiber.await()
+    expect(t('desktopUpdate.review')).not.toBe('desktopUpdate.review')
+    await fiber.dispose()
+    expect(t('desktopUpdate.review')).toBe('desktopUpdate.review')
+  })
+
   it('provides ctx.layout and declares the four root-scoped frame slots', async () => {
     const { ctx, slots } = await bench()
     const fiber = ctx.plugin({ inject: [...inject], apply })
