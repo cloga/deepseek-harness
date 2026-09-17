@@ -42,6 +42,8 @@ Windows Ops 在由源码拥有的 Desktop release plan 中选择插件 lock。�
 
 ## Consequences
 
+发布工作流单独运行项目事务夹具，采用 Windows 覆盖率通道的 90 秒测试及 hook 预算；其他 Desktop 测试保留默认值。派生发布配置向每个内联 Vitest project 添加排除项，实际执行的收集检查要求两组发现结果互不重叠，并且合集等于原始清单。这些事务等待多个真实 Node 子进程，并非性能基准。夹具持有操作及完整测试函数的 Promise，并保留有界阶段耗时。清理先阻止新夹具工作，仅终止仍由夹具持有的 fake-pnpm 子进程，等待其 close 事件和后续操作结束后，才恢复 mock 或删除目录。25 秒清理期限到达时保持关闭，保留尚未静止的状态并阻止后续用例使用它；生产进程期限、重试与事务断言均不变。
+
 插件变更需要临时磁盘空间并重建包，即使只是兼容运行时升级或 bundle toggle。Required 与 optional 健康检查增加启动工作，但阻止失败 candidate 修改活动依赖图。精确状态删除只作用于 release-owned 插件；无关手动插件仍由用户拥有。测试覆盖多来源 checksum acquisition、来源与清单漂移、Host peer 替换/删除、按阶段隔离 optional 失败、最终激活失败、rollback 恢复失败、中断重命名以及拒绝提前 completion。每个选定 provider release 都需要其实际不可变制品、目标共享包依赖图及 Models、account、discovery、device-code 行为的独立证据；neutral fixture 不能证明其符合要求。
 
 经过评审的 release plan 选择不可变的 `dsh-github-copilot@0.4.0-alpha.23`，其打包的 authorization 与 Schemastery 依赖均为必需的 Host peer。React 是 Client external，而非必需的 Node peer 或第二份私有运行时副本。已发布制品和历史共享清单检查不证明新 Desktop 的物化或已安装 UI 行为。Models、account、discovery、device-code 与更新持久性仍属于 rehearsal 和 release 的验收义务。

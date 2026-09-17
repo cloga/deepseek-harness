@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { load } from 'js-yaml'
+import { assertReleaseTestCollection } from '../scripts/verify-release-test-collection.mjs'
 import {
   createDesktopForkReleaseCapability,
   parseDesktopForkReleasePlan,
@@ -55,7 +56,51 @@ function assertMetadataAuthScope(workflow: ReleaseWorkflow): void {
   expect(authenticatedSteps).toEqual(['build', 'remote-check'])
 }
 
+function assertProjectFixtureSelection(workflow: ReleaseWorkflow): void {
+  const ci = load(readFileSync(resolve(repositoryRoot, '.github', 'workflows', 'ci.yml'), 'utf8')) as ReleaseWorkflow
+  const budget = ci.jobs['windows-coverage']!.env!.DSH_COVERAGE_TEST_TIMEOUT_MS!
+  expect(budget).toBe('90000')
+  const file = 'apps/desktop/tests/project-manager.spec.ts'
+  const steps = workflow.jobs.build!.steps
+  const collection = steps.findIndex(step => step.name === 'Verify Desktop test collection')
+  const ordinary = steps.findIndex(step => step.name === 'Verify Desktop release code')
+  expect(collection).toBeGreaterThanOrEqual(0)
+  expect(steps[collection]?.run).toBe('node apps/desktop/scripts/verify-release-test-collection.mjs')
+  expect(ordinary).toBeGreaterThan(collection)
+  const transactions = steps.findIndex(step => step.name === 'Verify Desktop project transactions')
+  const prepare = steps.findIndex(step => step.name === 'Prepare reviewed managed capability')
+  expect(steps[ordinary]?.run?.trim()).toBe('pnpm exec vitest run apps/desktop apps/desktop-host --config=vitest.desktop-release.config.ts --maxWorkers=1')
+  expect(steps[transactions]?.run?.trim()).toBe(
+    `pnpm exec vitest run ${file} --maxWorkers=1 --testTimeout=${budget} --hookTimeout=${budget}`,
+  )
+  expect(transactions).toBeGreaterThan(ordinary)
+  expect(prepare).toBeGreaterThan(transactions)
+}
+
 describe('Desktop fork release plan', () => {
+  it('rejects omitted or duplicated actual collection entries', () => {
+    const transaction = 'thread-safe:apps/desktop/tests/project-manager.spec.ts'
+    const ordinary = 'thread-safe:apps/desktop/tests/fork-release.spec.ts'
+    expect(() => { assertReleaseTestCollection([ordinary, transaction], [ordinary], [transaction]) }).not.toThrow()
+    expect(() => { assertReleaseTestCollection([ordinary, transaction], [ordinary, transaction], [transaction]) }).toThrow()
+    expect(() => { assertReleaseTestCollection([ordinary, transaction], [], [transaction]) }).toThrow()
+    expect(() => { assertReleaseTestCollection([ordinary, transaction], [ordinary, ordinary], [transaction]) }).toThrow()
+    expect(() => { assertReleaseTestCollection([ordinary, transaction, 'thread-safe:missing'], [ordinary], [transaction]) }).toThrow()
+  })
+  it('runs every Desktop suite once while assigning only project transactions the Windows process budget', () => {
+    assertProjectFixtureSelection(readReleaseWorkflow())
+  })
+
+  it.each(['duplicate', 'omitted', 'test-budget', 'hook-budget'])('rejects a %s transaction test selection', (damage) => {
+    const workflow = readReleaseWorkflow()
+    const ordinary = workflow.jobs.build!.steps.find(step => step.name === 'Verify Desktop release code')!
+    const transactions = workflow.jobs.build!.steps.find(step => step.name === 'Verify Desktop project transactions')!
+    if (damage === 'duplicate') ordinary.run = ordinary.run!.replace(' --config=vitest.desktop-release.config.ts', '')
+    else if (damage === 'omitted') transactions.run = 'pnpm exec vitest run apps/desktop/tests/locale.spec.ts'
+    else if (damage === 'test-budget') transactions.run = transactions.run!.replace('--testTimeout=90000', '--testTimeout=5000')
+    else transactions.run = transactions.run!.replace(' --hookTimeout=90000', '')
+    expect(() => { assertProjectFixtureSelection(workflow) }).toThrow()
+  })
   it('defines a monotonic source-owned release after the Windows Ops bridge', () => {
     const plan = parseDesktopForkReleasePlan(planValue())
     expect(plan).toMatchObject({
