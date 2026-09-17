@@ -64,11 +64,17 @@ process.on('message', message => {
 })
 `
 
+const sourceLoader = pathToFileURL(createRequire(import.meta.url).resolve('tsx/esm')).href
+
 function copyResolutionPolicy(project: string): string {
   const policy = join(project, 'register-module-resolution-policy.mjs')
-  copyFileSync(resolve(import.meta.dirname, '../../desktop-host/register-module-resolution-policy.mjs'), policy)
-  const helper = writePackage(join(project, 'node_modules'), '@deepseek-ai/dsh-home-paths')
-  copyFileSync(resolve(import.meta.dirname, '../../../packages/util/home-paths/lib/types/index.js'), join(helper, 'index.js'))
+  const implementation = join(project, 'module-resolution-policy.mjs')
+  copyFileSync(resolve(import.meta.dirname, '../../desktop-host/register-module-resolution-policy.mjs'), implementation)
+  const helperSource = pathToFileURL(resolve(import.meta.dirname, '../../../packages/util/home-paths/src/index.ts')).href
+  writePackage(join(project, 'node_modules'), '@deepseek-ai/dsh-home-paths', {},
+    `export { resolveDshHome } from ${JSON.stringify(helperSource)}\n`)
+  // DesktopHostProcess owns argv; its test-owned --import entry installs the ESM source launcher first.
+  writeFileSync(policy, `await import(${JSON.stringify(sourceLoader)})\nawait import(${JSON.stringify(pathToFileURL(implementation).href)})\n`)
   return policy
 }
 
@@ -239,7 +245,7 @@ export const load = url => import(url)
       writeFileSync(join(plugin, `${name}.mjs`), `export { marker } from ${JSON.stringify(specifier)}\n`)
       writeFileSync(join(plugin, `${name}.cjs`), `module.exports = require(${JSON.stringify(specifier)})\n`)
     }
-    const resolver = resolve(import.meta.dirname, '../../../packages/boot/app-boot/lib/types/profile-resolution/resolver.js')
+    const resolver = resolve(import.meta.dirname, '../../../packages/boot/app-boot/src/profile-resolution/resolver.ts')
     const addon = createRequire(resolver).resolve('node-addon-require-builtin')
     const entry = join(root, 'probe.mjs')
     const generation = {
@@ -305,7 +311,7 @@ try {
     const env: NodeJS.ProcessEnv = { ...process.env, DSH_HOME: home }
     delete env.NODE_OPTIONS
     delete env.NODE_PATH
-    const unprotected = spawnSync(process.execPath, ['--expose-internals', entry, runtime, profile],
+    const unprotected = spawnSync(process.execPath, ['--import', sourceLoader, '--expose-internals', entry, runtime, profile],
       { cwd: profile, env, encoding: 'utf8', timeout: 30_000 })
     expect(unprotected.error).toBeUndefined()
     expect(unprotected.signal).toBeNull()
