@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileS
 import { tmpdir } from 'node:os'
 import { basename, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { load } from 'js-yaml'
+import { dump, load } from 'js-yaml'
 import { c } from 'tar'
 import { expect, it } from 'vitest'
 import { DesktopProjectManager, type DesktopProjectHooks } from '../src/project-manager.ts'
@@ -90,8 +90,11 @@ it.each(['activate', 'health-failure', 'activation-failure'] as const)(
         expect(entries).toHaveLength(1)
         const entry = entries[0]
         if (entry === undefined) throw new Error('fixture lock has no installed dependency')
-        expect(entry.specifier.startsWith('file:')).toBe(true)
-        // Windows pnpm can serialize backslashes and a relocated, non-dot importer key.
+        const declared = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')) as {
+          dependencies: Record<string, string>
+        }
+        expect(entry.specifier).toBe(declared.dependencies[name])
+        // Relocation can retain a non-dot importer key; both platform path forms identify the same artifact.
         for (const specifier of new Set([entry.specifier, entry.specifier.replaceAll('/', '\\')])) {
           const resolved = resolve(profile, specifier.slice('file:'.length).replaceAll('\\', '/'))
           expect(realpathSync(resolved)).toBe(realpathSync(artifactPath))
@@ -119,6 +122,68 @@ it.each(['activate', 'health-failure', 'activation-failure'] as const)(
           dependencies: Record<string, string>
         }
         expect(manifest.dependencies[name]).toBe(`file:.desktop-plugin-artifacts/${sha256}.tgz`)
+        verifyPrivateArtifact()
+        const lockPath = join(manager.paths.profile, 'pnpm-lock.yaml')
+        const legacyLock = load(readFileSync(lockPath, 'utf8')) as {
+          importers: Record<string, { dependencies?: Record<string, { specifier: string }> }>
+        }
+        const legacyEntry = Object.values(legacyLock.importers).flatMap(importer => (
+          importer.dependencies?.[name] === undefined ? [] : [importer.dependencies[name]]
+        ))[0]
+        if (legacyEntry === undefined) throw new Error('fixture legacy dependency missing')
+        legacyEntry.specifier = manifest.dependencies[name]?.replaceAll('/', '\\') ?? ''
+        writeFileSync(lockPath, dump(legacyLock, { lineWidth: -1 }))
+        const legacyBytes = readFileSync(lockPath, 'utf8')
+        // Plain pnpm on this synthetic profile proves the old input fails without Desktop's staged repair.
+        const control = await new Promise<{
+          code: string | number | null | undefined
+          killed: boolean
+          signal: NodeJS.Signals | null
+          output: string
+        }>((settle) => {
+          execFile(process.execPath, [
+            join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs'),
+            `--config.store-dir=${manager.paths.pnpm.store}`,
+            `--config.userconfig=${join(manager.paths.pnpm.config, 'npmrc')}`,
+            '--config.enable-global-virtual-store=false',
+            'install', '--frozen-lockfile', '--lockfile-only', '--ignore-scripts', '--offline',
+          ], {
+            cwd: manager.paths.profile, timeout: 30_000, encoding: 'utf8',
+            env: {
+              ...Object.fromEntries(Object.entries(process.env).filter(([key]) => (
+                /^(?:PATH|SYSTEMROOT|COMSPEC|TEMP|TMP|WINDIR|PATHEXT|PROCESSOR_ARCHITECTURE)$/iu.test(key)
+              ))),
+              HOME: manager.paths.pnpm.home, USERPROFILE: manager.paths.pnpm.home,
+              APPDATA: manager.paths.pnpm.config, LOCALAPPDATA: manager.paths.pnpm.state,
+              XDG_CONFIG_HOME: manager.paths.pnpm.config, XDG_CACHE_HOME: manager.paths.pnpm.cache,
+              NPM_CONFIG_GLOBALCONFIG: join(manager.paths.pnpm.config, 'npmrc'),
+            },
+          }, (error, stdout, stderr) => {
+            settle({
+              code: error?.code, killed: error?.killed ?? false, signal: error?.signal ?? null,
+              output: `${stdout}\n${stderr}`,
+            })
+          })
+        })
+        expect(control.killed).toBe(false)
+        expect(control.signal).toBeNull()
+        expect(control.code).toBe(1)
+        expect(control.output).toContain('ERR_PNPM_OUTDATED_LOCKFILE')
+        expect(readFileSync(lockPath, 'utf8')).toBe(legacyBytes)
+        await expect(manager.mutate({ type: 'plugin-toggle', name, enabled: false }, {
+          beforeChange: async () => {},
+          healthCheck: async () => { throw new Error('legacy repair health rejected') },
+          afterChange: async () => {},
+        })).rejects.toThrow('legacy repair health rejected')
+        expect(readFileSync(lockPath, 'utf8')).toBe(legacyBytes)
+        const hooks: DesktopProjectHooks = {
+          beforeChange: async () => {}, healthCheck: async () => {}, afterChange: async () => {},
+        }
+        await manager.mutate({ type: 'plugin-toggle', name, enabled: false }, hooks)
+        expect(manager.listPlugins()).toMatchObject([{ name, enabled: false }])
+        verifyPrivateArtifact()
+        await manager.mutate({ type: 'plugin-toggle', name, enabled: true }, hooks)
+        expect(manager.listPlugins()).toMatchObject([{ name, enabled: true }])
         verifyPrivateArtifact()
         const previousSha256 = sha256
         writeFileSync(join(packageDir, 'index.js'), 'export const replacement = true\n')
@@ -152,7 +217,7 @@ it.each(['activate', 'health-failure', 'activation-failure'] as const)(
       rmSync(root, { recursive: true, force: true })
     }
   },
-  30_000,
+  60_000,
 )
 
 it('installs a real pnpm graph, then executes approved scripts with the shared host instance', async () => {
