@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-17-ambient-git-configuration-groups.md
+2026-09-17-ambient-git-configuration-groups.md: a15d63095b1be0787a380115abffa5eba4b1449b
+2026-09-17-ambient-git-configuration-groups.zh.md: 74a2b9d9c06eeb623c780ac6df7e2e60f8b91071

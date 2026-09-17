@@ -10,6 +10,7 @@ import { resolveDesktopPaths } from '../src/paths.ts'
 import { assertDesktopProvisioningInventory, DesktopProjectManager, packageNameFromSpec, type DesktopProjectHooks } from '../src/project-manager.ts'
 import type { DesktopGithubReleasePluginSource, DesktopPluginProvisionReceipt } from '../src/plugin-source.ts'
 import { parseDesktopPluginProvisioningPlan } from '../src/plugin-provisioning.ts'
+import { readDesktopPackageLocks } from '../src/plugin-package-lock.ts'
 import { runtimeFixture } from './runtime-fixture.ts'
 
 const roots: string[] = []
@@ -345,6 +346,33 @@ describe('desktop external plugin profile', () => {
     await next.reconcileProvisioning(empty, hooks())
     expect(calls(root)).toHaveLength(finalCount)
     expect(calls(root).every(call => call.project !== manager.paths.profile)).toBe(true)
+  }, 30_000)
+
+  it('preserves user source snapshots beside verified plugins when the release inventory is removed', async () => {
+    const { root, manager } = setup()
+    const manual = pluginFixture('manual-verified')
+    const baseline = pluginFixture('release-provider')
+    mockVerifiedPlugins([manual, baseline])
+    await manager.applyRelease()
+    const archive = join(root, 'source-snapshot.tgz')
+    writeFileSync(archive, verifiedPluginArchive('manual-source'))
+    await manager.mutate({ type: 'plugin-add', spec: archive }, hooks())
+    await manager.mutate({ type: 'plugin-install', source: manual.source }, hooks())
+    const snapshot = readDesktopPackageLocks(manager.paths.profile)['manual-source']
+    expect(snapshot).toBeDefined()
+    await manager.reconcileProvisioning({
+      schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source: baseline.source }],
+    }, hooks())
+    const empty = { schemaVersion: 1, mode: 'exact', plugins: [] }
+    const state = await manager.reconcileProvisioning(empty, hooks())
+    expect(state.removed).toEqual([baseline.source.packageName])
+    expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(['manual-source', 'manual-verified'])
+    expect(readDesktopPackageLocks(manager.paths.profile)['manual-source']).toEqual(snapshot)
+    expect(receiptStore(manager).owners).toEqual({ 'manual-verified': 'user' })
+    expect(() => assertDesktopProvisioningInventory(manager.paths.profile, parseDesktopPluginProvisioningPlan(empty))).not.toThrow()
+    const count = calls(root).length
+    await manager.reconcileProvisioning(empty, hooks())
+    expect(calls(root)).toHaveLength(count)
   }, 30_000)
 
   it('reuses an empty plan after a user installs a verified plugin', async () => {
@@ -767,7 +795,7 @@ describe('desktop external plugin profile', () => {
         schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source }],
       }, hooks({ afterChange: async () => {
         if (++starts === 1) unlinkSync(join(manager.paths.profile, 'desktop-plugin-receipts.json'))
-      } }))).rejects.toThrow(/verified local artifacts/u)
+      } }))).rejects.toThrow(/locked local artifacts/u)
       expect(manager.listPlugins()).toEqual([])
       expect(starts).toBe(2)
     } finally { globalThis.fetch = original }
@@ -867,12 +895,14 @@ describe('desktop external plugin profile', () => {
     expect(manager.canRecoverProfile()).toBe(false)
   })
 
-  it('accepts registry names and tags but rejects alternate sources and flags', () => {
+  it('keeps the registry-only helper separate from general source installation', () => {
     expect(packageNameFromSpec('@scope/plugin@1.2.3')).toBe('@scope/plugin')
     expect(packageNameFromSpec('plugin@next')).toBe('plugin')
-    for (const spec of ['file:../plugin', '--registry=evil', 'https://example.test/plugin.tgz']) {
-      expect(() => packageNameFromSpec(spec)).toThrow(/unsupported npm package spec/u)
+    expect(packageNameFromSpec('plugin@^1.2.0')).toBe('plugin')
+    for (const spec of ['file:../plugin', 'github:example/plugin', 'https://example.test/plugin.tgz']) {
+      expect(() => packageNameFromSpec(spec)).toThrow('expected an npm registry package spec')
     }
+    expect(() => packageNameFromSpec('--registry=evil')).toThrow('unsupported source protocol or option')
   })
 
   it('retains active plugin files after an interrupted staged runtime rebuild', async () => {
@@ -1335,6 +1365,116 @@ describe('desktop external plugin profile', () => {
       .toBe(realpathSync(join(manager.runtime.dsh, 'node_modules/@deepseek-ai/cordis')))
     await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
     expect(manager.listPlugins()).toEqual([{ name: 'plugin', version: '1.0.0', enabled: true }])
+  })
+
+  it('replaces registry, source, and verified origins without retaining opposite provenance', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const bytes = verifiedPluginArchive('plugin', '1.0.0')
+    const path = join(root, 'repository-name-is-not-package-name.tgz')
+    writeFileSync(path, bytes)
+    await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
+    await manager.mutate({ type: 'plugin-add', spec: path }, hooks())
+    expect(manager.listPlugins()[0]?.source?.type).toBe('packageSpec')
+    expect(readDesktopPackageLocks(manager.paths.profile).plugin?.packageName).toBe('plugin')
+    const source = verifiedSource(bytes, 'plugin', '1.0.0')
+    const original = globalThis.fetch
+    globalThis.fetch = verifiedFetch(source, bytes)
+    try {
+      await manager.mutate({ type: 'plugin-install', source }, hooks())
+      expect(manager.listPlugins()[0]?.source?.type).toBe('githubRelease')
+      expect(readDesktopPackageLocks(manager.paths.profile)).toEqual({})
+      await manager.mutate({ type: 'plugin-add', spec: path }, hooks())
+      expect(manager.listPlugins()[0]?.source?.type).toBe('packageSpec')
+      expect(JSON.parse(readFileSync(join(manager.paths.profile, 'desktop-plugin-receipts.json'), 'utf8'))).toEqual({ schemaVersion: 1, receipts: {}, owners: {} })
+      await manager.mutate({ type: 'plugin-add', spec: 'plugin@2.0.0' }, hooks())
+      expect(manager.listPlugins()).toEqual([{ name: 'plugin', version: '2.0.0', enabled: true }])
+      expect(readDesktopPackageLocks(manager.paths.profile)).toEqual({})
+      expect((JSON.parse(readFileSync(join(manager.paths.profile, 'package.json'), 'utf8')) as { dsh: { profile: { bundles: string[] } } }).dsh.profile.bundles.filter(name => name === 'plugin')).toHaveLength(1)
+    } finally { globalThis.fetch = original }
+  })
+
+  it('discards source ownership when optional verified replacement fails', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const bytes = verifiedPluginArchive('plugin', '1.0.0')
+    const path = join(root, 'input.tgz')
+    writeFileSync(path, bytes)
+    await manager.mutate({ type: 'plugin-add', spec: path }, hooks())
+    const lock = readDesktopPackageLocks(manager.paths.profile).plugin!
+    const original = globalThis.fetch
+    globalThis.fetch = async () => { throw new Error('fixture download unavailable') }
+    try {
+      const result = await manager.reconcileProvisioning({
+        schemaVersion: 1, mode: 'exact', plugins: [{ required: false, source: verifiedSource(bytes, 'plugin', '1.0.0') }],
+      }, hooks())
+      expect(result.plugins[0]?.status).toBe('optional-failed')
+      expect(manager.listPlugins()).toEqual([])
+      expect(readDesktopPackageLocks(manager.paths.profile)).toEqual({})
+      expect(existsSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${lock.sha256}.tgz`))).toBe(false)
+      await manager.mutate({ type: 'plugin-add', spec: 'unrelated@1.0.0' }, hooks())
+      expect(manager.listPlugins()[0]?.name).toBe('unrelated')
+    } finally { globalThis.fetch = original }
+  })
+
+  it.each(['missing', 'corrupt'] as const)('lists and removes a source package with a %s snapshot without rehydrating it', async (damage) => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const path = join(root, 'source.tgz')
+    writeFileSync(path, verifiedPluginArchive('plugin', '1.0.0'))
+    await manager.mutate({ type: 'plugin-add', spec: path }, hooks())
+    await manager.mutate({ type: 'plugin-add', spec: 'unrelated@1.0.0' }, hooks())
+    const lock = readDesktopPackageLocks(manager.paths.profile).plugin!
+    const artifact = join(manager.paths.profile, '.desktop-plugin-artifacts', `${lock.sha256}.tgz`)
+    if (damage === 'missing') unlinkSync(artifact)
+    else writeFileSync(artifact, 'corrupted package bytes')
+    expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(['plugin', 'unrelated'])
+    const beforeChange = vi.fn(async () => {})
+    await expect(manager.mutate({ type: 'plugin-toggle', name: 'unrelated', enabled: false }, hooks({ beforeChange }))).rejects.toThrow(/snapshot/u)
+    expect(beforeChange).not.toHaveBeenCalled()
+    await manager.mutate({ type: 'plugin-remove', name: 'plugin' }, hooks())
+    expect(manager.listPlugins()).toEqual([{ name: 'unrelated', version: '1.0.0', enabled: true }])
+    expect(readDesktopPackageLocks(manager.paths.profile)).toEqual({})
+    expect(existsSync(artifact)).toBe(false)
+  })
+
+  it.each(['success', 'health-failure', 'activation-failure'] as const)('handles same-version source replacement through %s', async (outcome) => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const path = join(root, 'source.tgz')
+    writeFileSync(path, verifiedPluginArchive('plugin', '1.0.0'))
+    await manager.mutate({ type: 'plugin-add', spec: path }, hooks())
+    const old = readDesktopPackageLocks(manager.paths.profile).plugin!
+    writeFileSync(path, verifiedPluginArchive('plugin', '1.0.0', '>=1.0.0'))
+    let starts = 0
+    const result = manager.mutate({ type: 'plugin-add', spec: path }, hooks({
+      healthCheck: async () => { if (outcome === 'health-failure') throw new Error('source fixture health failed') },
+      afterChange: async () => { if (++starts === 1 && outcome === 'activation-failure') throw new Error('source fixture activation failed') },
+    }))
+    if (outcome === 'success') {
+      await result
+      const next = readDesktopPackageLocks(manager.paths.profile).plugin!
+      expect(next.version).toBe(old.version)
+      expect(next.sha256).not.toBe(old.sha256)
+      expect(existsSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${old.sha256}.tgz`))).toBe(false)
+    } else {
+      await expect(result).rejects.toThrow(/source fixture/u)
+      expect(readDesktopPackageLocks(manager.paths.profile).plugin).toEqual(old)
+      expect(existsSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${old.sha256}.tgz`))).toBe(true)
+    }
+    expect(manager.listPlugins()).toHaveLength(1)
+    await manager.mutate({ type: 'plugin-toggle', name: 'plugin', enabled: false }, hooks())
+    expect(manager.listPlugins()[0]?.enabled).toBe(false)
+  })
+
+  it('protects actual host package names concealed behind a source archive filename', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const path = join(root, 'innocent-plugin.tgz')
+    writeFileSync(path, verifiedPluginArchive('@deepseek-ai/cordis', '1.0.0'))
+    await expect(manager.mutate({ type: 'plugin-add', spec: path }, hooks())).rejects.toThrow('cannot install host-owned package')
+    expect(manager.listPlugins()).toEqual([])
+    expect(calls(root)).toEqual([])
   })
 
   it('holds the transaction lock until the pnpm worker exits', async ({ task, signal }) => {

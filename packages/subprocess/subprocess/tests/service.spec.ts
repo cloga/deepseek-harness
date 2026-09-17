@@ -74,6 +74,58 @@ describe('SubprocessRuntime seam', () => {
     await expect(ctx.plugin(SecondService)).rejects.toThrow(/service "subprocess" has been registered/)
   })
 
+  it.each<{ label: string; entries: Record<string, string> }>([
+    { label: 'zero count', entries: { GIT_CONFIG_COUNT: '0' } },
+    { label: 'one pair', entries: { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.quotepath', GIT_CONFIG_VALUE_0: 'false' } },
+    {
+      label: 'multiple pairs',
+      entries: {
+        GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'core.quotepath', GIT_CONFIG_VALUE_0: 'false',
+        GIT_CONFIG_KEY_1: 'core.bare', GIT_CONFIG_VALUE_1: 'false',
+      },
+    },
+    { label: 'sparse indices', entries: { GIT_CONFIG_COUNT: '5', GIT_CONFIG_KEY_4: 'core.quotepath', GIT_CONFIG_VALUE_4: 'false' } },
+    { label: 'missing key', entries: { GIT_CONFIG_COUNT: '1', GIT_CONFIG_VALUE_0: 'false' } },
+    { label: 'missing value', entries: { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.quotepath' } },
+    { label: 'orphan pair', entries: { GIT_CONFIG_KEY_7: 'core.quotepath', GIT_CONFIG_VALUE_7: 'false' } },
+    { label: 'orphan value', entries: { GIT_CONFIG_VALUE_9: 'false' } },
+    {
+      label: 'mixed case',
+      entries: { git_config_count: '1', Git_Config_Key_0: 'core.quotepath', Git_Config_Value_0: 'false', git_config_parameters: "'core.quotepath=false'" },
+    },
+    { label: 'legacy parameters', entries: { GIT_CONFIG_PARAMETERS: "'core.quotepath=false'" } },
+  ])('scrubbedParentEnv removes ambient Git temporary configuration: $label', ({ entries }) => {
+    const originalEnv = process.env
+    const retained = {
+      PATH: '/synthetic/bin', HOME: '/synthetic/home',
+      GIT_CONFIG_GLOBAL: '/synthetic/global', GIT_CONFIG_SYSTEM: '/synthetic/system', GIT_CONFIG_NOSYSTEM: '1',
+    }
+    // Replace rather than copy ambient values: the fixture never reads real Git configuration.
+    process.env = { ...retained, ...entries }
+    try {
+      expect(scrubbedParentEnv()).toEqual(retained)
+    } finally {
+      process.env = originalEnv
+    }
+  })
+
+  it('scrubbedParentEnv rejects temporary Git configuration by name without reading its values', () => {
+    const originalEnv = process.env
+    const fixture: NodeJS.ProcessEnv = { PATH: '/synthetic/bin', UNSET: undefined }
+    for (const key of ['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_PARAMETERS']) {
+      Object.defineProperty(fixture, key, {
+        enumerable: true,
+        get: () => { throw new Error('filtered value must not be read') },
+      })
+    }
+    process.env = fixture
+    try {
+      expect(scrubbedParentEnv()).toEqual({ PATH: '/synthetic/bin' })
+    } finally {
+      process.env = originalEnv
+    }
+  })
+
   it('scrubbedParentEnv drops credential-shaped and DSH_ names (case-insensitively) but keeps PATH', () => {
     process.env.DSH_SCRUB_PROBE = 'stale'
     process.env.dsh_scrub_probe_lower = 'stale'

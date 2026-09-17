@@ -21,9 +21,9 @@
 
 ## 安装归属
 
-Electron 拥有 `$DSH_HOME/profiles/desktop`。其 `dependencies` 只包含精确版本的 registry 插件或由 receipt 证明的本地 tgz 文件；`dsh.profile.bundles` 包含内置 bundle，后接已启用插件。签名应用从 `resources/dsh` 提供 dsh、私有 Desktop Host 及其生产依赖。共享包链接解析到这些实际目录。宿主与插件在同一个内置上游 Node 进程中执行，使用正常的 realpath 解析；Desktop 不启用 `--preserve-symlinks`。在 profile 组合前，Host 把 profile `node_modules` 下物理模块发起的 bare package 请求限制到该 profile，或打包 runtime 中与 profile link 匹配的 package real path。祖先 package 与未链接的 runtime package 对这些请求不可用，而内置模块及显式 relative、absolute 或 URL file load 保持 Node.js 行为。CLI 不能启动或修改此 profile。
+Electron 拥有 `$DSH_HOME/profiles/desktop`。其 `dependencies` 包含精确版本的 registry 插件、profile 拥有的来源快照，或由 receipt 证明的 Release tgz 文件；`dsh.profile.bundles` 包含内置 bundle，后接已启用插件。签名应用从 `resources/dsh` 提供 dsh、私有 Desktop Host 及其生产依赖。共享包链接解析到这些实际目录。宿主与插件在同一个内置上游 Node 进程中执行，使用正常的 realpath 解析；Desktop 不启用 `--preserve-symlinks`。在 profile 组合前，Host 把 profile `node_modules` 下物理模块发起的 bare package 请求限制到该 profile，或打包 runtime 中与 profile link 匹配的 package real path。祖先 package 与未链接的 runtime package 对这些请求不可用，而内置模块及显式 relative、absolute 或 URL file load 保持 Node.js 行为。CLI 不能启动或修改此 profile。
 
-本地启动页提供启动状态和可用恢复操作；加载后的 dsh 渲染进程仅接收桌面协议标记。独立插件窗口接收结构化的列表、锁定来源安装、删除、更新、capability 和更新检查操作；两个渲染进程都无法访问文件系统、原始 Electron IPC、shell、任意下载 URL 或任意 pnpm 参数。
+本地启动页提供启动状态和可用恢复操作；加载后的 dsh 渲染进程仅接收桌面协议标记。独立插件窗口接收结构化的列表、来源安装、删除、更新、capability 和更新检查操作。来源输入经过 Electron 的受限解析器与获取检查；两个渲染进程都不获得直接文件系统访问、原始 Electron IPC、shell、通用下载 API 或任意 pnpm 参数。
 
 Electron 根据应用 locale 选择类型化的英文或中文桌面壳文案，并以英文作为 fallback。菜单、原生对话框、启动页与插件管理渲染进程使用同一 locale 数据；仓库的 Client UI i18n gate 会检查这些桌面源文件。
 
@@ -37,7 +37,29 @@ Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.
 2. 应用升级先把目标运行时链接和目标插件清单一起暂存，再检查 peer。过时的 release-owned 插件不会阻止计划中的替换或删除。Profile 配置和手动插件版本会保留。
 3. 每次 profile 变更只复制元数据与保留的 artifact，绝不复制 `node_modules`。内置 pnpm 在 staging 中禁用脚本重建私有依赖，验证并链接宿主包，再运行获准的待执行构建并再次验证。运行时升级绝不在活动的保留 profile 中执行包操作。
 4. 插件添加、更新和删除使用内置 pnpm 及 Desktop 独有的包管理器状态。`githubRelease` 来源绑定精确 Release、资产、commit、大小、hash、integrity、包身份与依赖 registry 元数据；Desktop 只通过批准的 GitHub 主机下载，并在禁用生命周期脚本的情况下从经过验证的本地 tgz 安装根包。保留的宿主包必须声明为 peer；共享包的嵌套副本和别名会被验证拒绝。
-5. 插件变更在私有目录中准备并健康检查目标依赖图，再停止活动后端，把 staged profile 重命名到最终位置。旧 profile 一直保留到最终位置的 Host 启动且 required 清单验证完成。激活失败恢复旧 profile；恢复失败保留事务与恢复 journal，而不删除剩余旧数据。
+5. 插件变更先在私有目录中准备目标依赖图，再停止活动 Host 以执行 staged 健康检查，随后把 staged profile 重命名到最终位置并激活。Staged 健康检查失败时会重新启动先前的 Host。旧 profile 一直保留到最终位置的 Host 启动且 required 清单验证完成。激活失败恢复旧 profile；恢复失败保留事务与恢复 journal，而不删除剩余旧数据。
+
+### 插件来源与快照
+
+插件窗口接受以下来源输入。安装要求包具有真实名称、精确版本、`dsh.bundle.patch`，以及声明的预构建 Host 与 Client 文件。仓库名称不决定安装后的包名称。
+
+| 来源 | 接受的输入 | 保存的安装结果 |
+|---|---|---|
+| npm registry | `plugin`、`@scope/plugin@next`、`plugin@^1.2.0` 或其他有效 semver 范围 | 精确解析的 registry 版本 |
+| 公开 GitHub 仓库 | `github:owner/repo[#ref]`、`owner/repo[#ref]`、`https://github.com/owner/repo[.git][#ref]`，或同一 GitHub URL 的 `git+https` 形式 | 完整解析的 commit 与 profile 拥有的包快照 |
+| 本地目录 | Windows 或 POSIX 绝对路径、显式 `./` 或 `../` 路径、`file:<path>` 或 `link:<path>` | 打包快照；`link:` 不创建实时链接 |
+| 本地归档 | 以 `.tgz` 或 `.tar.gz` 结尾的显式路径或 `file:<path>` | 复制的包快照 |
+| HTTPS 归档 | 以 `.tgz` 或 `.tar.gz` 结尾、不含凭据、query、fragment 或自定义端口的 HTTPS URL | 下载的包快照 |
+
+GitHub ref 接受分支名、tag 与 commit，包括含斜杠的分支名；不支持 revision 表达式与 `semver:` 选择器。获取过程使用公开 GitHub API 请求与经过验证的归档下载，不使用 Git 可执行文件、SSH、私有仓库认证或通用 Git 主机。存在歧义的裸名称按 registry 包处理；本地文件必须使用显式路径。带版本的安装 API 保持 `npmRegistry` 仅接受 registry 输入，以 `packageSpec` 接受通用来源输入，并保留 `githubRelease` 处理经过验证的 Release lock。
+
+来源包必须已经构建。Desktop 拒绝根包的 `preinstall`、`install` 与 `postinstall` 钩子、根目录 `binding.gyp`、捆绑依赖，以及非 registry 的直接运行时依赖，包括 file、link、Git、URL、workspace 与 npm 别名选择器。普通依赖与可选依赖使用 registry 版本、tag 或 semver 范围；peer 使用 semver 范围，并继续接受共享包规则检查。来源获取期间不执行保留在包中的 `prepare`、`prepack`、`postpack` 与 `build` 脚本。缺少声明的输出会报错，不构成下载编译器或执行构建的许可。经过评审的原生 registry 依赖构建继续遵循 profile 的 `allowBuilds` 策略；获取限制不承诺所有传递依赖都完全不执行脚本。
+
+每个非 registry 来源都转换为 Desktop profile 下的 `.desktop-plugin-artifacts/<sha256>.tgz`。独立的 `desktop-plugin-package-locks.json` 记录请求 spec、解析后的来源 URL、适用时的 GitHub commit、包名与版本、SHA-256 及 SHA-512 integrity。这些 hash 标识保存的字节，不证明发布者身份，也不赋予 `githubRelease` 验证 receipt 的保证。打包不会修改来源目录的元数据。重启与冻结重装复用保存的快照，不要求原始来源目录仍然存在，也不重新解析其可能移动的 GitHub ref。
+
+使用 **Reinstall from source** 在页内对话框中检查或编辑来源；再次选择本地文件时使用绝对路径。即使包版本不变，显式重装也可以选择不同的字节或 commit。Registry 更新继续选择版本。经过验证的 Release 更新使用验证通道，不会静默退回 registry 或通用来源。替换包来源会清除另一类 source lock 或 receipt 归属，不会把两者同时显示为当前来源依据。
+
+快照缺失或损坏时，插件仍可列出并删除。先删除该包，再从原始来源安装以恢复；禁用插件或直接重装损坏快照不保证修复。删除操作先排除目标包，再重建保留的依赖。如果损坏快照属于保留的包，事务会在活动 Host 停止前被拒绝。成功应用插件事务仍会重启 Host；获取快照不等于验证运行时兼容性或插件代码可信度。[来源快照决策](../../.agents/notes/implemented/feature/2026-09-17-desktop-plugin-source-snapshots.zh.md)负责打包隔离、取舍与必需验证。
 
 ### 由 Release 拥有的插件 provisioning
 
@@ -51,11 +73,11 @@ Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.
 
 Windows Ops 修改 [`release/cloga-windows-x64.json`](release/cloga-windows-x64.json) 中的 `desktopProvisioning`，然后运行受保护的 `desktop-fork-release.yml` workflow。直接使用现有不可变的版本化 tgz 与 `SHA256SUMS` 资产，不要重新发布。Prepare 为 packaging 设置 `DSH_DESKTOP_PLUGIN_PROVISIONING_PLAN` 并嵌入 plan 与 capability schema 3。Finalization 拒绝经过评审的输入、打包 capability 与 plan、发布字节和 receipt hash 之间的不一致。它将打包 plan 发布为 `desktop-provisioning.json`，在 `build-receipt.json` 中记录文件 hash 与规范 plan hash，并通过 `SHA256SUMS` 和 `SHA512SUMS` 覆盖 release 文件。部署需要包含实际非空 provider plan 的 release。
 
-Desktop 在启动时把 release-owned 插件协调到打包 plan，同时保留计划包名之外的手动 registry 与 verified-release 插件及其启用状态。计划中的包名遵循其精确来源，即使用户曾在该名称下安装不同包。Required 条目构成经过验证的基线。每个 optional 条目加入独立 candidate；download、validation、install、graph 或 health 失败只排除该条目，并记录阶段与原因，不保留成功 receipt。Required 失败保留活动 profile。复用要求 desired/result 成员完全一致，来源、receipt、版本、artifact 字节与启用状态匹配，且没有额外 release-owned 根包。空 plan 只删除 release-owned 根包。
+Desktop 在启动时把 release-owned 插件协调到打包 plan，同时保留计划包名之外的手动 registry、来源快照与 verified-release 插件及其启用状态。计划中的包名遵循其精确来源，即使用户曾在该名称下安装不同包。Required 条目构成经过验证的基线。每个 optional 条目加入独立 candidate；download、validation、install、graph 或 health 失败只排除该条目，并记录阶段与原因，不保留成功 receipt。Required 失败保留活动 profile。复用要求 desired/result 成员完全一致，来源、receipt、版本、artifact 字节与启用状态匹配，且没有额外 release-owned 根包。空 plan 只删除 release-owned 根包。
 
 私有 receipt store 将用户或发行版归属与来源验证分别记录。显式手动验证安装记录用户归属，包括对同一来源的重装；重建该精确来源时保留用户归属。旧数据仅在先前一致的 provisioning state 中存在 active、相同 receipt 且 manifest 引用匹配时推断发行版归属，其他验证插件保留用户归属。旧记录无法区分留下完全相同 receipt 的手动重装。归属迁移与变更随暂存 profile 一起提交或回滚。[插件保留决策](../../.agents/notes/implemented/bug-fix/2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md)负责这些删除与迁移规则。
 
-冻结重建前，Desktop 只修复 receipt、manifest、锁定包身份、tarball 路径及制品 SHA-256/SHA-512 全部一致的 Windows 分隔符差异。修复仅在 staging 中更改锁文件 specifier，并拒绝符号链接锁文件；无关依赖漂移仍由冻结校验拒绝。
+冻结重建前，验证 Release 根包的修复要求 receipt、manifest、锁定包身份、tarball 路径及制品 SHA-256/SHA-512 全部一致，且只有 Windows 分隔符差异。修复仅在 staging 中更改锁文件 specifier，并拒绝符号链接锁文件；无关依赖漂移仍由冻结校验拒绝。
 
 Windows Ops 验证 `resources/managed-update/capability.json` 中的 `desktopNativePluginProvisioning`、打包和发布的 plan hash、`desktop-plugin-receipts.json` 中的 Release 与 artifact identity，以及 `$DSH_HOME/profiles/desktop/desktop-plugin-provisioning-state.json` 中每个插件的 `active` 或 `optional-failed` 结果和已删除包证据。托管更新 completion 仅在最终位置的 Host ready 后运行，并在记录 sequence 前独立核对实际安装清单、receipt 和打包 plan。仅 staging 健康检查通过不构成 completion 证据。
 

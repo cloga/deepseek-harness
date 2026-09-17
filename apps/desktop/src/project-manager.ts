@@ -29,7 +29,13 @@ import {
   verifyDesktopCorePackageSet,
 } from './core-package-set.ts'
 import type { DesktopPaths } from './paths.ts'
-import { repairVerifiedArtifactLockfile } from './plugin-lockfile.ts'
+import { parseDesktopPluginInstallSpec, type DesktopPluginInstallSpec } from './plugin-install-spec.ts'
+import { acquireDesktopSourcePackage } from './plugin-package-artifact.ts'
+import { normalizeDesktopArtifactSpecifiers, type DesktopArtifactSpecifier } from './plugin-lock-normalization.ts'
+import {
+  desktopPackageArtifactSpecifier, readDesktopPackageLocks, verifyDesktopPackageArtifact,
+  writeDesktopPackageLocks, type DesktopPackageInstallLock,
+} from './plugin-package-lock.ts'
 import { removeOwnedDirectory } from './owned-directory.ts'
 import type { DesktopRelease } from './release.ts'
 import { desktopRuntimeId, readDesktopRuntime, type DesktopRuntimeDescriptor } from './runtime-tree.ts'
@@ -63,6 +69,7 @@ export interface DesktopPluginRecord {
   readonly version: string
   readonly enabled: boolean
   readonly source?: DesktopPluginSource
+  readonly resolution?: Pick<DesktopPackageInstallLock, 'resolved' | 'commit' | 'sha256' | 'integrity'>
 }
 
 /** Installed desktop project manifest slice. */
@@ -268,6 +275,7 @@ function matchesProvisioning(
       || JSON.stringify(entry.source) !== JSON.stringify(result.source)) return false
     if (result.status === 'optional-failed') {
       return !entry.required && receipts[result.name] === undefined
+        && readDesktopPackageLocks(projectDir)[result.name] === undefined
         && !Object.hasOwn(manifest.dependencies, result.name)
         && !profilePluginNames(projectDir).includes(result.name)
     }
@@ -334,23 +342,17 @@ function assertVersion(version: string): void {
  * @returns Requested package name.
  */
 export function packageNameFromSpec(spec: string): string {
-  if (spec === '' || spec.startsWith('-') || /[\s\\]/u.test(spec) || spec.includes('://') || spec.startsWith('file:')) {
-    throw new Error(`desktop project: unsupported npm package spec ${JSON.stringify(spec)}`)
+  const parsed = parseDesktopPluginInstallSpec(spec, process.cwd())
+  if (parsed.kind !== 'registry') throw new Error('desktop project: expected an npm registry package spec')
+  return parsed.name
+}
+
+function installedDependencySpecifier(projectDir: string, name: string): string {
+  const value = readJson(join(projectDir, 'package.json'))
+  if (!isRecord(value) || !isRecord(value.dependencies) || typeof value.dependencies[name] !== 'string') {
+    throw new Error(`desktop project: package manager did not record ${name}`)
   }
-  if (spec.startsWith('@')) {
-    const slash = spec.indexOf('/')
-    if (slash === -1) throw new Error(`desktop project: invalid scoped package spec ${JSON.stringify(spec)}`)
-    const versionAt = spec.indexOf('@', slash)
-    const name = versionAt === -1 ? spec : spec.slice(0, versionAt)
-    assertPackageName(name)
-    if (versionAt !== -1) assertVersion(spec.slice(versionAt + 1))
-    return name
-  }
-  const versionAt = spec.indexOf('@')
-  const name = versionAt === -1 ? spec : spec.slice(0, versionAt)
-  assertPackageName(name)
-  if (versionAt !== -1) assertVersion(spec.slice(versionAt + 1))
-  return name
+  return value.dependencies[name]
 }
 
 function projectManifest(projectDir: string): DesktopProjectManifest {
@@ -365,13 +367,17 @@ function projectManifest(projectDir: string): DesktopProjectManifest {
   }
   const manifest = { ...value, dependencies: value.dependencies ?? {} } as unknown as DesktopProjectManifest
   const receipts = readPluginReceipts(projectDir).receipts
+  const snapshots = readDesktopPackageLocks(projectDir)
   if (Object.entries(manifest.dependencies).some(([name, version]) => {
     const receipt = receipts[name]
+    const snapshot = snapshots[name]
+    const verifiedArtifact = receipt !== undefined && artifactSpecifier(receipt) === version
+      && existsSync(join(projectDir, PLUGIN_ARTIFACTS, `${receipt.artifactSha256}.tgz`))
+    const sourceArtifact = snapshot !== undefined && desktopPackageArtifactSpecifier(snapshot) === version
     return !PACKAGE_NAME_PATTERN.test(name) || typeof version !== 'string'
-      || (valid(version) !== version && (receipt === undefined || artifactSpecifier(receipt) !== version
-        || !existsSync(join(projectDir, PLUGIN_ARTIFACTS, `${receipt.artifactSha256}.tgz`))))
+      || (valid(version) !== version && !verifiedArtifact && !sourceArtifact)
   })) {
-    throw new Error('desktop project: plugin dependencies must use exact registry versions or verified local artifacts')
+    throw new Error('desktop project: plugin dependencies must use exact registry versions or locked local artifacts')
   }
   return manifest
 }
@@ -391,8 +397,20 @@ function profilePluginNames(projectDir: string): readonly string[] {
 
 function pluginRecords(projectDir: string): readonly DesktopPluginRecord[] {
   const receipts = readPluginReceipts(projectDir).receipts
+  const snapshots = readDesktopPackageLocks(projectDir)
   return Object.keys(projectManifest(projectDir).dependencies).sort().map((name) => {
     const record = inspectPlugin(projectDir, name)
+    const snapshot = snapshots[name]
+    if (snapshot !== undefined) {
+      return {
+        ...record,
+        source: { schemaVersion: 1, type: 'packageSpec', spec: snapshot.spec },
+        resolution: {
+          resolved: snapshot.resolved, sha256: snapshot.sha256, integrity: snapshot.integrity,
+          ...(snapshot.commit === undefined ? {} : { commit: snapshot.commit }),
+        },
+      }
+    }
     return receipts[name] === undefined ? record : { ...record, source: receipts[name].source }
   })
 }
@@ -606,7 +624,7 @@ export class DesktopProjectManager {
 
   /**
    * Stage, validate, health-check, and atomically activate one profile mutation.
-   * @param mutation - Registry or verified-release package change.
+   * @param mutation - Registry, source snapshot, or verified-release package change.
    * @param hooks - Active Host lifecycle and staged composition health check.
    * @returns Verified-release attestation, or undefined for ordinary mutations.
    */
@@ -627,14 +645,24 @@ export class DesktopProjectManager {
         copyProfileMetadata(this.paths.profile, staging)
         // Commit legacy ownership only with the staged profile, never during an active-profile read.
         if (existsSync(join(staging, PLUGIN_RECEIPTS))) writePluginReceipts(staging, readPluginReceipts(staging))
+        const removingSnapshot = mutation.type === 'plugin-remove' && readDesktopPackageLocks(staging)[mutation.name] !== undefined
+        if (removingSnapshot) this.pruneSourcePackage(staging, mutation.name)
+        if (mutation.type === 'plugins-reconcile') {
+          for (const entry of mutation.plan.plugins) this.pruneSourcePackage(staging, entry.source.packageName)
+        }
+        for (const snapshot of Object.values(readDesktopPackageLocks(staging))) {
+          verifyDesktopPackageArtifact(staging, snapshot)
+        }
         const previous = readDesktopProfileState(staging)
         const registry = this.registryForMutation(staging, mutation)
-        if (mutation.type !== 'plugins-reconcile' && Object.keys(projectManifest(staging).dependencies).length > 0) {
-          await this.runPnpm(staging, ['install', '--frozen-lockfile', '--ignore-scripts'], registry)
+        if (mutation.type !== 'plugins-reconcile' && (removingSnapshot || Object.keys(projectManifest(staging).dependencies).length > 0)) {
+          await this.runPnpm(staging, ['install', removingSnapshot ? '--no-frozen-lockfile' : '--frozen-lockfile', '--ignore-scripts'], registry)
         }
         let provision: StagedDesktopPluginProvision | StagedDesktopProvisioning | undefined
         if (mutation.type === 'plugins-reconcile') {
           provision = await this.stageProvisioning(staging, mutation.plan, transaction, hooks)
+        } else if (removingSnapshot) {
+          await this.reconcileProfile(staging, previous, true, registry)
         } else if (mutation.type === 'plugins-disable-all') {
           const manifest = projectManifest(staging)
           writeJson(join(staging, 'package.json'), {
@@ -759,6 +787,23 @@ export class DesktopProjectManager {
     return result
   }
 
+  private normalizeRetainedArtifactSpecifiers(projectDir: string): void {
+    const manifest = projectManifest(projectDir)
+    const receipts = readPluginReceipts(projectDir).receipts
+    const snapshots = readDesktopPackageLocks(projectDir)
+    const artifacts = Object.entries(manifest.dependencies).flatMap(([name, specifier]): DesktopArtifactSpecifier[] => {
+      const receipt = receipts[name]
+      if (receipt !== undefined && artifactSpecifier(receipt) === specifier) {
+        return [{ name, specifier, sha256: receipt.artifactSha256, verifiedVersion: receipt.version }]
+      }
+      const snapshot = snapshots[name]
+      return snapshot !== undefined && desktopPackageArtifactSpecifier(snapshot) === specifier
+        ? [{ name, specifier, sha256: snapshot.sha256 }]
+        : []
+    })
+    normalizeDesktopArtifactSpecifiers(projectDir, artifacts)
+  }
+
   private clearPluginReceipt(projectDir: string, name: string): void {
     const store = readPluginReceipts(projectDir)
     const receipt = store.receipts[name]
@@ -766,8 +811,85 @@ export class DesktopProjectManager {
     const receipts = Object.fromEntries(Object.entries(store.receipts).filter(([entry]) => entry !== name))
     const owners = Object.fromEntries(Object.entries(store.owners).filter(([entry]) => entry !== name))
     writePluginReceipts(projectDir, { schemaVersion: 1, receipts, owners })
-    const artifact = join(projectDir, PLUGIN_ARTIFACTS, `${receipt.artifactSha256}.tgz`)
+    this.removePackageArtifact(projectDir, receipt.artifactSha256)
+  }
+
+  private clearPackageLock(projectDir: string, name: string): void {
+    const locks = readDesktopPackageLocks(projectDir)
+    const lock = locks[name]
+    if (lock === undefined) return
+    writeDesktopPackageLocks(projectDir, Object.fromEntries(Object.entries(locks).filter(([entry]) => entry !== name)))
+    this.removePackageArtifact(projectDir, lock.sha256)
+  }
+
+  private removePackageArtifact(projectDir: string, sha256: string): void {
+    const directory = join(projectDir, PLUGIN_ARTIFACTS)
+    if (existsSync(directory) && lstatSync(directory).isSymbolicLink()) {
+      throw new Error('desktop plugin package: artifact directory must not be a link')
+    }
+    const artifact = join(directory, `${sha256}.tgz`)
     if (existsSync(artifact)) unlinkSync(artifact)
+  }
+
+  private pruneSourcePackage(projectDir: string, name: string): void {
+    if (readDesktopPackageLocks(projectDir)[name] === undefined) return
+    const manifest = projectManifest(projectDir)
+    this.clearPackageLock(projectDir, name)
+    writeJson(join(projectDir, 'package.json'), {
+      ...manifest,
+      dependencies: Object.fromEntries(Object.entries(manifest.dependencies).filter(([entry]) => entry !== name)),
+      dsh: {
+        ...manifest.dsh,
+        profile: { ...manifest.dsh.profile, bundles: manifest.dsh.profile.bundles.filter(entry => entry !== name) },
+      },
+    } satisfies DesktopProjectManifest)
+  }
+
+  private async installSourcePackage(
+    projectDir: string,
+    input: Exclude<DesktopPluginInstallSpec, { kind: 'registry' }>,
+    transaction: string,
+  ): Promise<void> {
+    const snapshot = await acquireDesktopSourcePackage(
+      input,
+      mkdtempSync(join(transaction, 'package-')),
+      (directory, archive) => this.runPnpm(directory, [
+        'pack', '--out', archive,
+        '--config.ignore-scripts=true', '--config.ignore-pnpmfile=true',
+        '--pm-on-fail=ignore', '--ignore-workspace',
+      ], DESKTOP_REGISTRY, 0, false),
+    )
+    if (this.currentRuntime().sharedPackages.some(entry => entry.name === snapshot.packageName)) {
+      throw new Error(`desktop project: cannot install host-owned package ${snapshot.packageName}`)
+    }
+    const manifest = projectManifest(projectDir)
+    this.clearPluginReceipt(projectDir, snapshot.packageName)
+    this.clearPackageLock(projectDir, snapshot.packageName)
+    const artifacts = join(projectDir, PLUGIN_ARTIFACTS)
+    mkdirSync(artifacts, { recursive: true, mode: 0o700 })
+    copyFileSync(snapshot.path, join(artifacts, `${snapshot.sha256}.tgz`))
+    const lock: DesktopPackageInstallLock = {
+      packageName: snapshot.packageName, version: snapshot.version, spec: input.spec,
+      resolved: snapshot.resolved, sha256: snapshot.sha256, integrity: snapshot.integrity,
+      ...(snapshot.commit === undefined ? {} : { commit: snapshot.commit }),
+    }
+    const specifier = desktopPackageArtifactSpecifier(lock)
+    await this.runPnpm(projectDir, ['add', `./${specifier.slice('file:'.length)}`, '--save-exact', '--ignore-scripts'])
+    const normalizeLock = installedDependencySpecifier(projectDir, snapshot.packageName) !== specifier
+    const installed = inspectInstalledPlugin(projectDir, snapshot.packageName)
+    if (installed.version !== snapshot.version) throw new Error('desktop plugin package: installed version differs from the snapshot')
+    writeDesktopPackageLocks(projectDir, { ...readDesktopPackageLocks(projectDir), [installed.name]: lock })
+    writeJson(join(projectDir, 'package.json'), {
+      ...manifest,
+      dependencies: { ...manifest.dependencies, [installed.name]: specifier },
+    } satisfies DesktopProjectManifest)
+    // pnpm add can record Windows separators; resolve the canonical manifest spec before frozen relocation.
+    if (normalizeLock) this.normalizeRetainedArtifactSpecifiers(projectDir)
+    const remaining = pluginRecords(projectDir).filter(plugin => plugin.name !== installed.name)
+    writeProfilePlugins(
+      projectDir,
+      [...remaining, { ...installed, enabled: true }].sort((left, right) => left.name.localeCompare(right.name)),
+    )
   }
 
   private registryForMutation(projectDir: string, mutation: DesktopProjectMutation): string {
@@ -795,12 +917,13 @@ export class DesktopProjectManager {
       throw new Error(`desktop project: cannot install host-owned package ${source.packageName}`)
     }
     const verified = await acquireDesktopPluginArtifact(source, mkdtempSync(join(transaction, 'download-')), fetch, phase)
+    const manifest = projectManifest(projectDir)
+    this.clearPackageLock(projectDir, source.packageName)
     const artifacts = join(projectDir, PLUGIN_ARTIFACTS)
     mkdirSync(artifacts, { recursive: true, mode: 0o700 })
     const artifactName = `${source.sha256}.tgz`
     copyFileSync(verified.path, join(artifacts, artifactName))
     const relativeArtifact = `./${PLUGIN_ARTIFACTS}/${artifactName}`
-    const manifest = projectManifest(projectDir)
     phase('install')
     await this.runPnpm(
       projectDir,
@@ -808,6 +931,7 @@ export class DesktopProjectManager {
       source.dependencyRegistry ?? DESKTOP_REGISTRY,
       1,
     )
+    const normalizeLock = installedDependencySpecifier(projectDir, source.packageName) !== `file:${PLUGIN_ARTIFACTS}/${artifactName}`
     const installed = inspectInstalledPlugin(projectDir, source.packageName)
     if (installed.version !== source.version) {
       throw new Error('desktop project: installed verified package version does not match the source lock')
@@ -838,7 +962,7 @@ export class DesktopProjectManager {
         },
       },
     })
-    repairVerifiedArtifactLockfile(projectDir, readPluginReceipts(projectDir).receipts)
+    if (normalizeLock) this.normalizeRetainedArtifactSpecifiers(projectDir)
     const current = pluginRecords(projectDir).filter(plugin => plugin.name !== installed.name)
     writeProfilePlugins(
       projectDir,
@@ -977,12 +1101,18 @@ export class DesktopProjectManager {
   ): Promise<StagedDesktopPluginProvision | StagedDesktopProvisioning | undefined> {
     switch (mutation.type) {
       case 'plugin-add': {
-        const requestedName = packageNameFromSpec(mutation.spec)
+        const parsed = parseDesktopPluginInstallSpec(mutation.spec, process.cwd())
+        if (parsed.kind !== 'registry') {
+          await this.installSourcePackage(projectDir, parsed, transaction)
+          return
+        }
+        const requestedName = parsed.name
         if (this.currentRuntime().sharedPackages.some(entry => entry.name === requestedName)) {
           throw new Error(`desktop project: cannot install host-owned package ${requestedName}`)
         }
-        await this.runPnpm(projectDir, ['add', mutation.spec, '--save-exact', '--ignore-scripts'])
+        await this.runPnpm(projectDir, ['add', parsed.spec, '--save-exact', '--ignore-scripts'])
         this.clearPluginReceipt(projectDir, requestedName)
+        this.clearPackageLock(projectDir, requestedName)
         const installed = { ...inspectPlugin(projectDir, requestedName), enabled: true }
         const current = pluginRecords(projectDir).filter(plugin => plugin.name !== installed.name)
         writeProfilePlugins(
@@ -993,7 +1123,8 @@ export class DesktopProjectManager {
       }
       case 'plugin-install': {
         const source = parseDesktopPluginSource(mutation.source)
-        if (source.type === 'npmRegistry') {
+        if (source.type !== 'githubRelease') {
+          if (source.type === 'npmRegistry') packageNameFromSpec(source.spec)
           return this.applyMutation(projectDir, { type: 'plugin-add', spec: source.spec }, transaction)
         }
         return this.installGithubRelease(projectDir, source, transaction, 'user')
@@ -1006,12 +1137,16 @@ export class DesktopProjectManager {
         const remaining = pluginRecords(projectDir).filter(plugin => plugin.name !== mutation.name)
         await this.runPnpm(projectDir, ['remove', mutation.name, '--config.ignore-scripts=true'])
         this.clearPluginReceipt(projectDir, mutation.name)
+        this.clearPackageLock(projectDir, mutation.name)
         writeProfilePlugins(projectDir, remaining)
         return
       }
       case 'plugin-update':
         assertPackageName(mutation.name)
         assertVersion(mutation.version)
+        if (readDesktopPackageLocks(projectDir)[mutation.name] !== undefined) {
+          throw new Error('desktop plugin package: update a source-installed plugin by installing its source again, not a registry version')
+        }
         if (!Object.hasOwn(projectManifest(projectDir).dependencies, mutation.name)) {
           throw new Error(`desktop project: plugin ${JSON.stringify(mutation.name)} is not installed`)
         }
@@ -1044,11 +1179,12 @@ export class DesktopProjectManager {
     args: readonly string[],
     registry = DESKTOP_REGISTRY,
     retries = 0,
+    markPending = true,
   ): Promise<void> {
     let failure: unknown
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        await this.runPnpmAttempt(projectDir, args, registry)
+        await this.runPnpmAttempt(projectDir, args, registry, markPending)
         return
       } catch (error) {
         failure = error
@@ -1057,11 +1193,11 @@ export class DesktopProjectManager {
     throw errorOf(failure, 'desktop project: pnpm failed')
   }
 
-  private async runPnpmAttempt(projectDir: string, args: readonly string[], registry: string): Promise<void> {
+  private async runPnpmAttempt(projectDir: string, args: readonly string[], registry: string, markPending: boolean): Promise<void> {
     if (resolve(projectDir) === resolve(this.paths.profile)) {
       throw new Error('desktop project: package operations require a private staging profile')
     }
-    if (args.includes('--frozen-lockfile')) repairVerifiedArtifactLockfile(projectDir, readPluginReceipts(projectDir).receipts)
+    if (args.includes('--frozen-lockfile')) this.normalizeRetainedArtifactSpecifiers(projectDir)
     const registryUrl = new URL(registry)
     if (registryUrl.protocol !== 'https:' || registryUrl.username !== '' || registryUrl.password !== ''
       || registryUrl.search !== '' || registryUrl.hash !== '') {
@@ -1079,10 +1215,11 @@ export class DesktopProjectManager {
       name !== 'NODE_OPTIONS' && name !== 'NODE_PATH' && !/^DSH_DESKTOP_/u.test(name)
       && !/^(?:npm|pnpm|corepack)_/iu.test(name) && !/(?:AUTH|KEY|SECRET|TOKEN|PASSWORD)/iu.test(name)
     )))
-    writeFileSync(this.pendingPackages(projectDir), '')
+    if (markPending) writeFileSync(this.pendingPackages(projectDir), '')
     await new Promise<void>((settle, reject) => {
       const child = spawn(this.runtime.node, [
         this.runtime.pnpm,
+        ...(markPending ? [] : ['pm']),
         `--config.registry=${registry}`,
         `--config.store-dir=${this.paths.pnpm.store}`,
         '--config.enable-global-virtual-store=false',
