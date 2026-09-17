@@ -157,6 +157,81 @@ describe('direct Messages HTTP', () => {
     await expect(chunks(adapter().stream(options()))).rejects.toMatchObject({ code: 'TRANSPORT' })
   })
 
+  it.each(['comments', 'silence', 'post-comment stall'] as const)('enforces the Messages 100ms idle window with %s', async (scenario) => {
+    vi.useFakeTimers()
+    const caller = new AbortController()
+    const encoder = new TextEncoder()
+    let bodyController!: ReadableStreamDefaultController<Uint8Array>
+    let requestSignal!: AbortSignal
+    let closed = false
+    let stopped = false
+    let detach = () => {}
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => {
+      requestSignal = init!.signal!
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          bodyController = controller
+          const abort = () => {
+            if (closed) return
+            stopped = true
+            controller.error(requestSignal.reason)
+          }
+          requestSignal.addEventListener('abort', abort, { once: true })
+          detach = () => { requestSignal.removeEventListener('abort', abort) }
+        },
+      })
+      return Promise.resolve(new Response(body, { status: 200 }))
+    })
+    const drain = chunks(adapter({ baseURL: 'https://example.invalid/anthropic', streamIdleTimeoutMs: 100 })
+      .stream(options({ signal: caller.signal })))
+    const settlement = scenario === 'comments'
+      ? expect(drain).resolves.toEqual(expect.arrayContaining([
+        { type: 'text-delta', index: 0, text: 'Hello 世界' },
+        expect.objectContaining({ type: 'finish', reason: { kind: 'stop' } }),
+      ]))
+      : expect(drain).rejects.toMatchObject({ code: 'TIMEOUT', message: 'DeepSeek Messages stream idle timeout' })
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetchSpy).toHaveBeenCalledOnce()
+      expect(fetchSpy.mock.calls[0]?.[0]).toBe('https://example.invalid/anthropic/v1/messages')
+      if (scenario !== 'silence') {
+        await vi.advanceTimersByTimeAsync(75)
+        bodyController.enqueue(encoder.encode(': keep-alive\n\n'))
+        await vi.advanceTimersByTimeAsync(0)
+      }
+      if (scenario === 'comments') {
+        await vi.advanceTimersByTimeAsync(75)
+        expect(requestSignal.aborted).toBe(false)
+        bodyController.enqueue(encoder.encode(': keep-alive\n\n'))
+        await vi.advanceTimersByTimeAsync(0)
+        // Only comments bridge both original 100ms windows before content arrives at 225ms.
+        await vi.advanceTimersByTimeAsync(75)
+        expect(requestSignal.aborted).toBe(false)
+        bodyController.enqueue(encoder.encode(sse(textEvents)))
+        closed = true
+        bodyController.close()
+        await settlement
+        expect(stopped).toBe(false)
+      } else {
+        await vi.advanceTimersByTimeAsync(99)
+        expect(stopped).toBe(false)
+        expect(requestSignal.aborted).toBe(false)
+        await vi.advanceTimersByTimeAsync(1)
+        await settlement
+        expect(stopped).toBe(true)
+        expect(requestSignal.reason).toMatchObject({ code: 'MESSAGES_IDLE', timeoutMs: 100 })
+      }
+      expect(fetchSpy).toHaveBeenCalledOnce()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      caller.abort()
+      await Promise.allSettled([drain, settlement])
+      detach()
+      fetchSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
   it('rejects a successful response with no readable body', async () => {
     vi.stubGlobal('fetch', async () => new Response(null, { status: 200 }))
     await expect(chunks(adapter().stream(options()))).rejects.toMatchObject({ code: 'EMPTY_RESPONSE' })

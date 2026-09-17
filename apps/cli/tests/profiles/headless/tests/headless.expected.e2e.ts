@@ -86,24 +86,21 @@ async function expectHeadlessStream(normalized: string, expectedPath: string): P
 async function deepseekDefaultsServer(options: { waitForTitleRequest?: boolean; protocol?: 'messages' } = {}): Promise<DeepSeekDefaultsServer> {
   const requests: JsonObject[] = []
   const paths: string[] = []
+  let titleReceived = false
+  const waitingForTitle = new Set<() => void>()
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
     let body = ''
     request.setEncoding('utf8')
     request.on('data', (chunk: string) => { body += chunk })
     request.on('end', () => {
-      requests.push(JSON.parse(body) as JsonObject)
+      const parsed = JSON.parse(body) as JsonObject
+      requests.push(parsed)
       paths.push(request.url ?? '')
       response.writeHead(200, { 'content-type': 'text/event-stream' })
-      let keepAlives = 3
-      const write = (): void => {
-        // One-shot teardown may cancel background title work after the main response.
-        if (keepAlives-- > 0
-          || (options.waitForTitleRequest === true && !requests.some(request => request.max_tokens === 64))) {
-          response.write(': keep-alive\n\n')
-          timer = setTimeout(write, 60)
-          return
-        }
-        if (options.protocol === 'messages') {
+      if (options.protocol === 'messages') {
+        response.write(': keep-alive\n\n')
+        const finish = (): void => {
+          if (response.destroyed || response.writableEnded) return
           response.end([
             { type: 'message_start', message: { id: 'defaults-response', model: 'deepseek-v4-flash', usage: { input_tokens: 3, output_tokens: 0 } } },
             { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
@@ -112,6 +109,26 @@ async function deepseekDefaultsServer(options: { waitForTitleRequest?: boolean; 
             { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } },
             { type: 'message_stop' },
           ].map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''))
+        }
+        response.once('close', () => { waitingForTitle.delete(finish) })
+        if (parsed.max_tokens === 64) {
+          titleReceived = true
+          finish()
+          for (const release of waitingForTitle) release()
+          waitingForTitle.clear()
+        } else if (options.waitForTitleRequest === true && !titleReceived) {
+          // The assembled-profile test synchronizes on the title request, not subsecond scheduler timing.
+          waitingForTitle.add(finish)
+        } else finish()
+        return
+      }
+      let keepAlives = 3
+      const write = (): void => {
+        // One-shot teardown may cancel background title work after the main response.
+        if (keepAlives-- > 0
+          || (options.waitForTitleRequest === true && !requests.some(request => request.max_tokens === 64))) {
+          response.write(': keep-alive\n\n')
+          timer = setTimeout(write, 60)
           return
         }
         response.end([
@@ -132,7 +149,11 @@ async function deepseekDefaultsServer(options: { waitForTitleRequest?: boolean; 
     url: `http://127.0.0.1:${address.port}`,
     requests,
     paths,
-    close: () => new Promise(resolve => server.close(() => { resolve() })),
+    close: () => new Promise((resolve) => {
+      waitingForTitle.clear()
+      server.close(() => { resolve() })
+      server.closeAllConnections()
+    }),
   }
 }
 
@@ -579,8 +600,8 @@ describe('headless stream-json snapshots', () => {
     `)
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
-  it('keeps provider comments alive and sends DeepSeek defaults through the one-shot app', async () => {
-    const server = await deepseekDefaultsServer({ protocol: 'messages' })
+  it('sends DeepSeek defaults through the one-shot app with provider comments', async () => {
+    const server = await deepseekDefaultsServer({ protocol: 'messages', waitForTitleRequest: true })
     try {
       const result = await runLoaderSmoke({
         label: 'DeepSeek adapter defaults headless stream-json snapshot',
@@ -600,11 +621,28 @@ describe('headless stream-json snapshots', () => {
           DSH_SNAPSHOT_BASE_URL: server.url,
           NODE_OPTIONS: [process.env.NODE_OPTIONS, '--disable-warning=ExperimentalWarning'].filter(Boolean).join(' '),
         },
+      }).catch((error: unknown) => {
+        throw new Error(`DeepSeek defaults fixture failed; ${JSON.stringify({
+          requestCount: server.requests.length,
+          maxTokens: server.requests.slice(0, 8).map(request => typeof request.max_tokens === 'number' ? request.max_tokens : null),
+          paths: server.paths.slice(0, 8),
+        })}`, { cause: error })
       })
 
       expect(result.stderr).toBe('')
-      expect(server.requests).toHaveLength(2)
+      const retries = parseJsonl(result.stdout).flatMap((record) => {
+        const event = record.event as JsonObject | undefined
+        if (event?.type !== 'llm/retry') return []
+        const failure = (event.data as JsonObject).failure as JsonObject
+        return [{ code: failure.code, message: typeof failure.message === 'string' ? failure.message.slice(0, 160) : undefined }]
+      })
+      const diagnostic = JSON.stringify({
+        requests: server.requests.map(request => ({ maxTokens: request.max_tokens, model: request.model })),
+        paths: server.paths, retries,
+      })
+      expect(server.requests, diagnostic).toHaveLength(2)
       expect(server.paths).toEqual(['/v1/messages', '/v1/messages'])
+      expect(parseJsonl(result.stdout).at(-1)).toMatchObject({ type: 'result', output: 'DEFAULTS_OK' })
       const agentRequest = server.requests.find(request => request.max_tokens === 256_000)
       const titleRequest = server.requests.find(request => request.max_tokens === 64)
       expect(agentRequest?.output_config).toEqual({ effort: 'low' })
@@ -634,6 +672,36 @@ describe('headless stream-json snapshots', () => {
       await server.close()
     }
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
+  it('holds Messages agent output on title arrival after an immediate provider comment', async () => {
+    const server = await deepseekDefaultsServer({ protocol: 'messages', waitForTitleRequest: true })
+    try {
+      const response = await fetch(`${server.url}/v1/messages`, {
+        method: 'POST', body: JSON.stringify({ max_tokens: 256_000 }),
+      })
+      const reader = response.body!.getReader()
+      try {
+        const decoder = new TextDecoder()
+        const first = await reader.read()
+        expect(first.done).toBe(false)
+        expect(decoder.decode(first.value)).toBe(': keep-alive\n\n')
+        const title = await fetch(`${server.url}/v1/messages`, {
+          method: 'POST', body: JSON.stringify({ max_tokens: 64 }),
+        })
+        expect(await title.text()).toContain('message_stop')
+        let rest = ''
+        for (;;) {
+          const chunk = await reader.read()
+          if (chunk.done) break
+          rest += decoder.decode(chunk.value)
+        }
+        expect(rest).toContain('DEFAULTS_OK')
+        expect(rest).toContain('message_stop')
+        expect(server.paths).toEqual(['/v1/messages', '/v1/messages'])
+        expect(server.requests).toHaveLength(2)
+      } finally { await reader.cancel() }
+    } finally { await server.close() }
+  })
 
   it('keeps the compatibility stream open until the title request arrives', async () => {
     const server = await deepseekDefaultsServer({ waitForTitleRequest: true })
