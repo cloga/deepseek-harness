@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render } from '@testing-library/react'
 import { AppFrame } from '../src/client/AppFrame.tsx'
 import type { AppFrameProps } from '../src/client/AppFrame.tsx'
+import type { DesktopUpdateSnapshot } from '../src/client/desktop-update-adapter.ts'
 import type { MainPanelId, RightbarOwnerProps, SidebarOwnerProps } from '../src/client/index.ts'
 import { createLayoutStore } from '../src/client/stores.ts'
 import type { WorkspaceSnapshot } from '@deepseek-ai/dsh-api-workspace-controller/client'
@@ -60,7 +61,12 @@ function resize(width: number): void {
   })
 }
 
-function mountFrame(windowWidth = frameWidth) {
+function mountFrame(
+  windowWidth = frameWidth,
+  desktopUpdate: DesktopUpdateSnapshot = { state: null, reviewing: false, reviewFailed: false },
+) {
+  const reviewDesktopUpdate = vi.fn(async () => {})
+  const useDesktopUpdate = bindSnapshotSelector({ getSnapshot: () => desktopUpdate, subscribe: () => () => {} })
   vi.stubGlobal('innerWidth', windowWidth)
   const instance = createLayoutStore().create()
   const slotCalls: { key: string; props: object; options: RenderOpts | undefined }[] = []
@@ -98,6 +104,8 @@ function mountFrame(windowWidth = frameWidth) {
       renderSlot={renderSlot}
       useSessions={useSessions}
       usePanelInfo={usePanelInfo}
+      useDesktopUpdate={useDesktopUpdate}
+      reviewDesktopUpdate={reviewDesktopUpdate}
       useSessionPendingInteraction={useSessionPendingInteraction}
       useResource={useResource}
       useWorkspaces={sel => sel(workspaceState)}
@@ -107,7 +115,7 @@ function mountFrame(windowWidth = frameWidth) {
   const utils = render(element())
   const frame = utils.container.firstElementChild as HTMLElement
   return {
-    ...utils, instance, frame, slotCalls,
+    ...utils, instance, frame, slotCalls, reviewDesktopUpdate,
     rerenderFrame: () => { utils.rerender(element()) },
     rightOwner: () => slotCalls.findLast(c => c.key === 'rightbar')!.props as RightbarOwnerProps,
     sidebarOwner: () => slotCalls.findLast(c => c.key === 'sidebar')!.props as SidebarOwnerProps,
@@ -179,6 +187,20 @@ afterEach(() => {
 })
 
 describe('AppFrame', () => {
+  it('keeps the Desktop notice above the main panel across Session and panel changes', () => {
+    const { container, getByTestId, rerenderFrame, instance, reviewDesktopUpdate } = mountFrame(frameWidth, {
+      state: { phase: 'available', version: '2.0.0' }, reviewing: false, reviewFailed: false,
+    })
+    const notice = container.querySelector('[data-desktop-update-notice]')!
+    expect(notice.textContent).toContain('2.0.0')
+    expect(notice.nextElementSibling?.contains(getByTestId('main-content'))).toBe(true)
+    selectedSession = undefined
+    rerenderFrame()
+    act(() => { instance.actions.selectPanel('panel-a' as MainPanelId) })
+    expect(container.querySelector('[data-desktop-update-notice]')).toBe(notice)
+    expect(reviewDesktopUpdate).not.toHaveBeenCalled()
+  })
+
   it('localizes the product title without a configured build title', () => {
     mountFrame()
     expect(document.title).toBe('DSH Local Build')

@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { gt, valid } from 'semver'
 import {
   app,
   BrowserWindow,
@@ -200,7 +201,18 @@ async function main(): Promise<void> {
   let mainWindow: BrowserWindow | undefined
   let pluginWindow: BrowserWindow | undefined
   let shellInstallerOwnsQuit = false
+  const hasQuitStarted = (): boolean => quitting || shellInstallerOwnsQuit
   let updateState: DesktopUpdateState = { phase: 'idle' }
+  let notificationState: DesktopUpdateState = updateState
+  let updateCheck: Promise<DesktopUpdateState> | undefined
+  let startupUpdateTimer: ReturnType<typeof setTimeout> | undefined
+  let periodicUpdateTimer: ReturnType<typeof setInterval> | undefined
+  const clearUpdateTimers = (): void => {
+    clearTimeout(startupUpdateTimer)
+    clearInterval(periodicUpdateTimer)
+    startupUpdateTimer = undefined
+    periodicUpdateTimer = undefined
+  }
   let rendererUpdateImpact = { hasDraft: false, attachmentCount: 0, submitting: false }
   let updateConfirmation: Promise<DesktopUpdateState | undefined> | undefined
   let managedCompletionChecked = false
@@ -262,9 +274,26 @@ async function main(): Promise<void> {
   })
 
   const publishUpdate = (state: DesktopUpdateState): DesktopUpdateState => {
+    if (quitting) return state
     updateState = state
+    // A failed refresh must not erase a release the application already advertised.
+    const failedInstallation = notificationState.phase === 'installing' || notificationState.phase === 'error'
+    if (failedInstallation && notificationState.version !== undefined && state.phase === 'error') {
+      notificationState = { ...state, version: state.version ?? notificationState.version }
+    } else if (notificationState.phase === 'error' && notificationState.version !== undefined && state.phase === 'checking') {
+      // Keep the failed release actionable while a later check is pending.
+    } else if (notificationState.phase !== 'available'
+      || !['checking', 'error', 'available'].includes(state.phase)) {
+      notificationState = state
+    } else if (state.phase === 'available'
+      && state.version !== undefined && notificationState.version !== undefined
+      && valid(state.version) !== null && valid(notificationState.version) !== null
+      && gt(state.version, notificationState.version)) {
+      notificationState = state
+    }
     for (const window of BrowserWindow.getAllWindows()) {
-      window.webContents.send(DESKTOP_IPC.updatesState, state)
+      const applicationDocument = window.webContents.getURL().startsWith(`${SCHEME}://app/`)
+      window.webContents.send(DESKTOP_IPC.updatesState, applicationDocument ? notificationState : state)
     }
     return state
   }
@@ -390,6 +419,23 @@ async function main(): Promise<void> {
       },
     )
 
+  const checkUpdates = (): Promise<DesktopUpdateState> => {
+    if (hasQuitStarted() || updateState.phase === 'installing' || updateState.phase === 'ready') {
+      return Promise.resolve(updateState)
+    }
+    updateCheck ??= Promise.resolve().then(() => (
+      hasQuitStarted() ? updateState : updates.check()
+    )).catch((error: unknown) => publishUpdate({
+      phase: 'error',
+      message: error instanceof Error ? error.message : String(error),
+    })).finally(() => { updateCheck = undefined })
+    return updateCheck
+  }
+  const automaticallyCheckUpdates = (): void => {
+    if (updateConfirmation !== undefined) return
+    void checkUpdates().catch((error: unknown) => { console.error('desktop automatic update check failed', error) })
+  }
+
   protocol.handle(SCHEME, (request) => {
     const url = new URL(request.url)
     if (url.hostname === 'shell') return serveShellAsset(request).then((response) => {
@@ -491,13 +537,18 @@ async function main(): Promise<void> {
       await showStartupError(error)
     }
   })
+  ipcMain.handle(DESKTOP_IPC.updatesStatus, (event) => {
+    assertDesktopSender(event, ['app', 'shell'])
+    return notificationState
+  })
   ipcMain.handle(DESKTOP_IPC.updatesCheck, async (event) => {
     assertDesktopSender(event, ['shell'])
-    return updates.check()
+    return updateConfirmation === undefined ? checkUpdates() : updateState
   })
   ipcMain.handle(DESKTOP_IPC.updatesInstall, async (event) => {
-    assertDesktopSender(event, ['shell'])
-    await confirmAndInstallUpdate()
+    assertDesktopSender(event, ['app', 'shell'])
+    const result = await confirmAndInstallUpdate()
+    if (result?.phase === 'error') throw new Error(result.message ?? messages.unknownError)
   })
   ipcMain.on(DESKTOP_IPC.updatesImpactReport, (event, value: unknown) => {
     try {
@@ -511,8 +562,10 @@ async function main(): Promise<void> {
   const confirmAndInstallUpdate = (): Promise<DesktopUpdateState | undefined> => {
     if (updateConfirmation !== undefined) return updateConfirmation
     updateConfirmation = (async () => {
-      const state = updateState.phase === 'available' ? updateState : await updates.check()
-      if (state.phase !== 'available') return state
+      await updateCheck
+      if (hasQuitStarted()) return undefined
+      const state = updateState.phase === 'available' ? updateState : await checkUpdates()
+      if (hasQuitStarted() || state.phase !== 'available') return state
       if (state.mode !== 'github-release-managed') {
         const result = await dialog.showMessageBox({
           type: 'info',
@@ -523,7 +576,7 @@ async function main(): Promise<void> {
           defaultId: 0,
           cancelId: 1,
         })
-        if (result.response !== 0) return undefined
+        if (result.response !== 0 || hasQuitStarted()) return undefined
         return updates.install()
       }
       const readImpact = async (): Promise<{
@@ -548,6 +601,7 @@ async function main(): Promise<void> {
         && left.renderer.submitting === right.renderer.submitting
       let impact = await readImpact()
       for (;;) {
+        if (hasQuitStarted()) return undefined
         const detail = formatDesktopMessage(messages.managedUpdateDetail, {
           version: state.version ?? '',
           runningSessions: String(impact.host.runningSessions),
@@ -566,8 +620,9 @@ async function main(): Promise<void> {
           defaultId: 0,
           cancelId: 1,
         })
-        if (result.response !== 0) return undefined
+        if (result.response !== 0 || hasQuitStarted()) return undefined
         const currentImpact = await readImpact()
+        if (hasQuitStarted()) return undefined
         if (sameImpact(impact, currentImpact)) return updates.install()
         impact = currentImpact
       }
@@ -575,30 +630,29 @@ async function main(): Promise<void> {
     return updateConfirmation
   }
 
-  const checkAndPrompt = async (manual: boolean): Promise<void> => {
-    const state = await updates.check()
+  const checkAndPrompt = async (): Promise<void> => {
+    if (hasQuitStarted() || updateConfirmation !== undefined
+      || updateState.phase === 'installing' || updateState.phase === 'ready') return
+    const state = await checkUpdates()
+    if (hasQuitStarted()) return
     if (state.phase === 'error') {
-      if (manual) {
-        await dialog.showMessageBox({
-          type: 'error',
-          title: messages.updateCheckFailedTitle,
-          message: state.message ?? messages.unknownError,
-        })
-      }
+      await dialog.showMessageBox({
+        type: 'error',
+        title: messages.updateCheckFailedTitle,
+        message: state.message ?? messages.unknownError,
+      })
       return
     }
     if (state.phase !== 'available') {
-      if (manual) {
-        await dialog.showMessageBox({
-          type: 'info',
-          title: messages.updateCheckTitle,
-          message: state.message ?? messages.updateCurrent,
-        })
-      }
+      await dialog.showMessageBox({
+        type: 'info',
+        title: messages.updateCheckTitle,
+        message: state.message ?? messages.updateCurrent,
+      })
       return
     }
     const installed = await confirmAndInstallUpdate()
-    if (installed === undefined) return
+    if (installed === undefined || hasQuitStarted()) return
     if (installed.phase === 'error') {
       await dialog.showMessageBox({
         type: 'error',
@@ -630,7 +684,10 @@ async function main(): Promise<void> {
         enabled: development === undefined,
         click: openPluginWindow,
       },
-      { label: messages.checkUpdatesMenu, click: () => { void checkAndPrompt(true) } },
+      {
+        label: messages.checkUpdatesMenu,
+        click: () => { void checkAndPrompt().catch((error: unknown) => { console.error('desktop update review failed', error) }) },
+      },
       { type: 'separator' },
       { role: 'quit' },
     ],
@@ -672,7 +729,12 @@ async function main(): Promise<void> {
     if (process.platform !== 'darwin') app.quit()
   })
   app.on('before-quit', (event) => {
-    if (shellInstallerOwnsQuit || quitting) return
+    clearUpdateTimers()
+    if (shellInstallerOwnsQuit) {
+      quitting = true
+      return
+    }
+    if (quitting) return
     event.preventDefault()
     quitting = true
     void Promise.allSettled([backend.close(), startup]).then((results) => {
@@ -693,7 +755,11 @@ async function main(): Promise<void> {
     window.webContents.openDevTools({ mode: 'detach' })
   }
   publishUpdate(updateState)
-  setTimeout(() => { void checkAndPrompt(false) }, 10_000)
+  startupUpdateTimer = setTimeout(() => {
+    startupUpdateTimer = undefined
+    periodicUpdateTimer = setInterval(automaticallyCheckUpdates, 6 * 60 * 60 * 1000)
+    automaticallyCheckUpdates()
+  }, 10_000)
 }
 
 const ownsDesktopInstance = claimDesktopSingleInstance(app, () => { focusPrimaryWindow() })

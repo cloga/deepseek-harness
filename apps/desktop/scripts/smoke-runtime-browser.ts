@@ -11,6 +11,7 @@ import { promisify } from 'node:util'
 import type { Locator, Page } from 'playwright'
 import type { DesktopHostProcess } from '../src/host-process.ts'
 import { desktopSmokeEnvironment } from './smoke-environment.ts'
+import { assertDesktopUpdateNoticeInBrowser } from './smoke-update-notice.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -215,14 +216,47 @@ export async function smokeDesktopRuntimeBrowser(
           aria: await page.locator('body').ariaSnapshot(),
         })}`, { cause: error })
       }
+      // Release the first document's streaming connections before opening the updater document.
+      await page.close()
+      const updatePage = await browser.newPage()
+      updatePage.on('pageerror', (error) => { failures.push(error.message) })
+      try {
+        await assertDesktopUpdateNoticeInBrowser(updatePage, bridge.origin, 30_000, evidenceDirectory)
+      } catch (error) {
+        throw new Error(`desktop smoke: update notice acceptance failed (simulated updater, real compiled Web); ${JSON.stringify({
+          pageErrors: failures,
+          aria: await updatePage.locator('body').ariaSnapshot({ timeout: 1_000 })
+            .catch((snapshotError: unknown) => `snapshot unavailable: ${String(snapshotError)}`),
+        })}`, { cause: error })
+      } finally {
+        await updatePage.close()
+      }
       if (failures.length > 0) throw new Error(`desktop smoke: browser errors: ${failures.join('; ')}`)
       if (bridge.errors.length > 0) throw new AggregateError(bridge.errors, 'desktop smoke: browser carrier failed')
       if (evidenceDirectory !== undefined) {
         writeFileSync(join(evidenceDirectory, 'browser-evidence.json'), JSON.stringify({
           origin: bridge.origin,
           viewport: { width: 1680, height: 1000 },
-          capture: 'three screenshots from one isolated browser and Host run',
-          states: ['provider visible and unauthorized', 'neutral authorization succeeded', 'authorized receipt restored after reload'],
+          capture: 'five screenshots from two acceptance pages in one isolated browser and Host run',
+          states: [
+            'provider visible and unauthorized', 'neutral authorization succeeded', 'authorized receipt restored after reload',
+            'real compiled Web update notice with simulated available version 0.1.5-rc.3.cloga.7 after Later review',
+            'available snapshot restored after reload; real theme responds to emulated dark color-scheme media',
+          ],
+          desktopUpdateNotice: {
+            screenshot: '03-desktop-update-notice.png',
+            darkScreenshot: '04-desktop-update-notice-dark.png',
+            darkTheme: 'real theme media-query response; no injected CSS or token overrides',
+            composition: 'real compiled full Web composition served by the isolated Desktop Host byte-pipe carrier',
+            fixture: 'Electron window.dshDesktop protocol-v2 bridge only; simulated updater state and Later review',
+            verified: ['idle absent', 'available status/version', 'composer focus retained', 'above main panel without overlap',
+              'exactly one review and notice retained', 'available snapshot restored on reload',
+              'dark theme notice without overlap', 'idle releases layout space'],
+            realUpdateCheck: false,
+            realUpdateDownload: false,
+            realUpdateInstalled: false,
+            realRestart: false,
+          },
           continuousVideo: false,
           realModelRound: false,
           realAuthenticationService: false,
