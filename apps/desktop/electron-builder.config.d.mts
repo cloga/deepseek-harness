@@ -1,7 +1,6 @@
 /** Electron-builder fields asserted by the Desktop release tests. */
 export interface DesktopElectronBuilderConfig {
   readonly appId: string
-  readonly files: readonly string[]
   readonly win: {
     readonly icon: string
   }
@@ -12,6 +11,7 @@ export interface DesktopElectronBuilderConfig {
     string,
     string,
     string,
+    'assets/whale.png',
     string,
     { readonly from: string, readonly to: 'dsh', readonly filter: readonly ['**/*'] },
     { readonly from: string, readonly to: 'dsh/node_modules', readonly filter: readonly ['**/*'] },
