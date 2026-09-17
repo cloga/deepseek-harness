@@ -8,7 +8,7 @@
   padding: 9px 20px;
   color: var(--dsw-alias-label-primary);
   background: color-mix(in srgb, var(--dsw-alias-button-info-fill) 13%, var(--dsw-alias-bg-base));
-  border-bottom: 1px solid color-mix(in srgb, var(--dsw-alias-button-info-fill) 32%, var(--dsw-alias-border-l3));
+  border-bottom: 0.5px solid color-mix(in srgb, var(--dsw-alias-button-info-fill) 32%, var(--dsw-alias-border-l3));
 }
 
 .icon {
