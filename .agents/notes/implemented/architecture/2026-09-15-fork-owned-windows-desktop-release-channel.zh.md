@@ -22,9 +22,13 @@ fork 身份为 `io.github.cloga.deepseek-harness.desktop`，产品为 `DeepSeek 
 
 Manifest schema 3 对规范 JSON 进行 self-hash，并记录源码 repository、commit、tree、tag、upstream version、sequence、workflow path、lockfile hash、plan hash、固定 Node 与 pnpm 版本、依赖物化 registry、fork identities、installer filename、byte size、SHA-256、SHA-512、未签名 Authenticode 状态、build-receipt hashes、已安装 executable 与 runtime hashes、网络策略和交互式重启后 completion 语义。
 
+安装后的运行时描述文件为 `resources/app.asar/dsh/desktop-runtime.json`；receipt 对打包 Electron 在 Node 模式下读取的归档原始字节计算哈希，而非重新序列化的 JSON。构建时的[打包运行时检查](../../../../apps/desktop/scripts/packaged-runtime.mjs)使用构建器的 ASAR 读取器拒绝不安全路径与链接，核对物理解包文件集合完全一致，并把实际字节物化到私有临时验证目录。归档内文件的可执行标志取自 ASAR，解包文件的模式取自物理文件，因为 Electron 的虚拟 stat 会合成权限且遗漏未登记的 sidecar 文件。未修改的清单验证器通过有界、环境已清理的 Electron Node 模式检查该副本，并在子进程退出后清理。该副本不是安装后的运行时，也不是第二个权威来源，且不启动 Host 或 profile。发布 workflow 在 finalization 前使用打包 Electron 运行清单 canary 检查。
+
 插件兼容性保留 manifest schema 3 对完整通用 `desktopNativeVerifiedRelease` capability 的记录，包括 capability schema 1 与结构化 source 和 receipt schema version 1，并设置 `automaticProvisioning: false`。保持该记录不变，使已安装的 0.1.5 client 能够解析并安装包含 provisioning 实现的 release。
 
 经过评审的 release plan schema 2 携带通用精确状态 Desktop 插件 plan；schema 1 会规范化为空 plan，使现有且版本中立的 release 定义仍然可读。Build receipt 独立 self-hash，并记录相同的 source、build inputs、identity、artifact evidence、helper 与 capability hashes、已发布 provisioning plan 的文件 hash 与规范 hash、native-updater exclusion、network policy、installation policy 与通用插件 schema 兼容性。`SHA256SUMS` 与 `SHA512SUMS` 覆盖 installer、provisioning plan、manifest 与 receipt。
+
+仅构建使用的元数据发现可以通过 [release fetch adapter](../../../../apps/desktop/scripts/desktop-release-github-fetch.ts) 显式接收 `DSH_DESKTOP_RELEASE_GITHUB_TOKEN`。CI 只向 preparation 与 remote verification 提供其只读 Actions token，不传给 packaging 或应用。仅固定 GitHub API repository 的规范 release-list 与 tag-resolution GET 请求携带认证。带认证的重定向会失败关闭；下载及其他 origin 保持匿名，并移除调用方的 authorization/cookie。传输和响应错误不输出任意远端文本，只保留安全的取消分类或数字 HTTP 状态。未提供 token 时仍匿名发现；不会读取凭据存储或环境中的 `GH_TOKEN`，receipt 也绝不包含 token。已发布应用的行为保持不变。
 
 ## 发现与安装
 
@@ -38,7 +42,7 @@ Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须�
 
 加载后的配置区分打包的 discovery 下限与持久完成的 sequence。Discovery 与 handoff 使用打包和已完成 sequence 中的较大值；completion 只使用持久 receipt 的 sequence，缺失时为零。若 completion 使用打包下限，就会跳过新安装 release 自身的待完成结果及清单检查。重复 completion 是幂等的，清单验证失败会保留先前 receipt，较高的已完成 sequence 绝不降低。
 
-不可变 `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest 仅在源码 repository 没有匹配 release 时作为精确 sequence-zero migration 保留。任何格式错误、可变、冲突或不可达的 source release 都会 fail closed，不会 fallback。一旦 source release 存在，Windows Ops 不能充当第二通道。
+不可变 `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest 仅在源码 repository 没有匹配 release 时作为精确 sequence-zero migration 保留。Migration record 固定 manifest 与 installer hash，并固定 build receipt 的 `dsh-v0.1.5-rc.2` source tag；由 manifest 固定的 receipt 仍保留 source commit 与 tree。任何格式错误、可变、冲突或不可达的 source release 都会 fail closed，不会 fallback。一旦 source release 存在，Windows Ops 不能充当第二通道。
 
 ## 发布
 

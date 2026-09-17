@@ -20,7 +20,7 @@ Desktop 在仅支持 registry 的 `npmRegistry` 与带证明的 `githubRelease` 
 
 打包通过内置的上游 Node 调用内置 pnpm 的 `pm pack` 命令，并使用隔离环境与 Desktop 拥有的包管理器状态。`--pm-on-fail=ignore` 阻止下载由来源选择的包管理器；`--ignore-workspace` 阻止工作区发现；`--config.ignore-pnpmfile=true` 与 `--config.ignore-scripts=true` 禁用包管理器钩子和来源生命周期准备。来源中名为 `pack` 的脚本不能替换内置命令。打包不会向来源目录写入 Desktop 元数据。打包前，`publishConfig.directory` 必须在词法路径检查与 realpath 检查下都保持在选定来源目录内；已打包 tarball 中的发布元数据不生效，也不会被重新求值。
 
-不支持根包的 `preinstall`、`install` 与 `postinstall` 声明、根目录 `binding.gyp`，以及非空捆绑依赖声明。直接运行时依赖与可选依赖必须使用真实名称的 registry 版本、tag 或 semver 范围；peer 使用 semver 范围。只有已具备预构建输出时，才允许保留不执行的构建与打包脚本。这些限制防止来源根包仅凭声明获准包名就继承原生构建许可。它们不替代现有经过评审的 registry 原生依赖构建策略，也不证明每个传递包的来源。
+不支持根包的 `preinstall`、`install` 与 `postinstall` 声明、根目录 `binding.gyp`，以及非空捆绑依赖声明。直接运行时依赖与可选依赖必须使用真实名称的 registry 版本、tag 或 semver 范围；peer 使用 semver 范围。只有已具备预构建输出时，才允许保留不执行的构建与打包脚本。这些限制防止来源根包仅凭声明获准包名就继承原生构建许可。它们不替代现有经过评审的 registry 原生依赖构建策略，也不验证每个传递包的来源身份。
 
 ### 持久身份与替换
 
@@ -28,7 +28,7 @@ Desktop 在仅支持 registry 的 `npmRegistry` 与带证明的 `githubRelease` 
 
 首次冻结安装前，仅在 staging 中运行的[产物 lock 规范化器](../../../../apps/desktop/src/plugin-lock-normalization.ts)处理 importer specifier 仅存在 Windows 分隔符差异的保留 lock。候选项必须与规范 manifest 项精确匹配，并由已验证的 source lock 或验证 receipt 支持，随后还必须核对归档 SHA-256。辅助函数只改变该 importer specifier 的分隔符表示；包解析结果、版本、integrity 与冻结安装标志都保持不变。无效 UTF-8、不安全文件与损坏产物会在不重写 lock 的情况下失败。未知 schema、多个 importer 与无关差异保持原样，交由冻结安装验证；这不是通用 lock 迁移。
 
-重启与冻结重建使用保留的快照，不重新获取原始来源。Registry、快照与经过验证的 Release 之间的替换会移除过时的来源归属。精确 plan 替换在可选验证候选失败时也会移除被替换的 source lock，避免未安装的来源留下保留产物前提。来源重装仍是显式输入操作；验证更新路径不会静默改用保证更弱的来源。
+重启与冻结重建使用保留的快照，不重新获取原始来源。Registry、快照与经过验证的 Release 之间的替换会移除过时的 source lock 或 receipt 归属。精确 plan 替换在可选验证候选失败时也会移除被替换的 source lock，避免未安装的来源留下保留产物前提。来源重装仍是显式输入操作；验证更新路径不会静默改用保证更弱的来源。
 
 快照缺失或损坏时仍可显示并删除。删除会先排除目标，再验证和重建保留的依赖。其他损坏的保留归档会在 Host 中断前停止事务。这样可以先删除再安装以恢复，而不把禁用全部插件或直接重装当作修复路径。激活与回滚继续遵循共享事务；成功应用会重启 Host，并在运行时执行选定插件。
 
@@ -54,4 +54,4 @@ Desktop 在仅支持 registry 的 `npmRegistry` 与带证明的 `githubRelease` 
 
 [Lock 规范化测试](../../../../apps/desktop/tests/plugin-lock-normalization.spec.ts)保留无关解析数据与无需变更时的原始字节，拒绝不安全或损坏的输入，并要求写入前验证全部候选项。[真实 pnpm 规范化回归](../../../../apps/desktop/tests/plugin-lock-normalization-pnpm.spec.ts)在普通添加、切换启用状态与删除操作前植入现有 receipt 支持的分隔符差异；捕获到的首次冻结 pnpm 调用输入必须仅包含获准的 specifier 修正，manifest 与已选解析结果保持不变。
 
-[事务测试](../../../../apps/desktop/tests/project-manager.spec.ts)要求验证冻结迁移、保留来源重建、同版本字节替换、另一类来源依据清理、可选替换失败、损坏快照删除，以及保留快照损坏时在停止 Host 前失败。[插件窗口测试](../../../../apps/desktop/tests/plugin-manager.spec.ts)覆盖来源重装与验证通道保留。目标平台 Desktop 验收还要求验证实际插件窗口、最终位置 Host 启动与回滚行为；源码测试不构成特定外部插件运行时或认证后模型使用的验收。
+[事务测试](../../../../apps/desktop/tests/project-manager.spec.ts)要求验证冻结迁移、保留来源重建、同版本字节替换、被替换的 source lock 与 receipt 清理、可选替换失败、损坏快照删除，以及保留快照损坏时在停止 Host 前失败。[插件窗口测试](../../../../apps/desktop/tests/plugin-manager.spec.ts)覆盖来源重装与验证通道保留。目标平台 Desktop 验收还要求验证实际插件窗口、最终位置 Host 启动与回滚行为；源码测试不构成特定外部插件运行时或认证后模型使用的验收。

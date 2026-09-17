@@ -33,6 +33,8 @@ Global panels occupy the root-scoped `main` keyed slot; `conversation` is the re
 
 When the Desktop preload provides update status, subscription and review methods, the frame displays a compact notice above the main panel. It remains mounted across Session/panel changes, reserves no space when idle, and never steals focus. **Review update** opens Desktop's existing confirmation; no update check, download or installation is initiated by rendering. The `layout` locale namespace owns this copy. Plain Web and older Desktop bridges remain unchanged. See the [Desktop update notice decision](../../../.agents/notes/implemented/feature/2026-09-17-persistent-desktop-update-notice.md).
 
+The layout fiber owns the preload subscription and a stable observable bound through the root registration's inject `hooks`. AppFrame reads the framework hook and passes plain notice props; React remounts retain the current status and pending review. Fiber disposal unsubscribes and ignores late IPC completion.
+
 ### Theme presentation
 
 The presenter consumes resolved theme snapshots and projects them onto the document: `html { color-scheme }` for native UA chrome, `body[data-ds-dark-theme]` from the active color scheme, the theme's alias tokens and `--dsh-content-font-size` as inline variables on body, and one owned `<meta name="theme-color">` whose content follows the computed body background. Disposing the presenter removes its metadata node with its other global writes.

@@ -14,7 +14,7 @@ Electron owns release discovery and its process-local notification snapshot. It 
 
 The application preload exposes only update status, removable subscriptions, an explicit review request, and the existing unsaved-input impact report. Review enters the existing native confirmation and repeated active-work check. Renderers cannot choose update URLs, paths, versions, or installer arguments. Plugin management remains shell-only.
 
-The layout plugin renders a non-modal strip above the main panel, not an overlay. It survives Session and panel navigation and occupies no space when no update is available. It subscribes before obtaining the initial snapshot; an event received in the meantime wins over the delayed snapshot. Unmount removes the listener and suppresses late completion state. Plain Web and older report-only Desktop bridges render no strip.
+The layout plugin renders a non-modal strip above the main panel, not an overlay. It survives Session and panel navigation and occupies no space when no update is available. An apply-owned adapter subscribes before obtaining the initial snapshot; an event received in the meantime wins over the delayed snapshot. Its stable observable enters the root registration's inject `hooks` compartment, and the framework-bound hook supplies plain notice props alongside an explicit review callback. The layout fiber owns subscription cleanup and suppresses late snapshot, event, and review completion after disposal; component remounts neither resubscribe nor reset an outstanding review. Plain Web and older report-only Desktop bridges render no strip.
 
 ## Alternatives considered
 

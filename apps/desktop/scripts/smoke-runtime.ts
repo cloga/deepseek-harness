@@ -18,7 +18,7 @@ import { removeOwnedDirectory } from '../src/owned-directory.ts'
  * @param node - Prepared target Node executable.
  * @param runtime - Verified resource descriptor.
  * @param browserChannel - Explicit installed Chromium channel; omission requires Playwright's bundled Chromium.
- * @param evidenceDirectory - Optional destination for successful neutral-fixture screenshots and provenance.
+ * @param evidenceDirectory - Optional destination for successful neutral-fixture screenshots and run evidence.
  * @param runtimeKind - Workspace-linked fixtures enable the Host's existing development allowance with an OS-assigned inspector port.
  */
 export async function smokeDesktopRuntime(
@@ -98,7 +98,7 @@ export async function smokeDesktopRuntime(
       throw new Error('desktop smoke: browser action did not commit exactly one neutral Host authorization')
     }
     if (evidenceDirectory !== undefined && captures !== undefined) {
-      writeFileSync(join(captures, 'neutral-fixture-provenance.json'), JSON.stringify({
+      writeFileSync(join(captures, 'neutral-fixture-evidence.json'), JSON.stringify({
         fixture: 'desktop-neutral-provider',
         runtimeVersion: runtime.release.version,
         runtimeId: desktopRuntimeId(runtime),

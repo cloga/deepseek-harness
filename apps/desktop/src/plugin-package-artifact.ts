@@ -12,7 +12,7 @@ import { valid, validRange } from 'semver'
 import { t, x, type ReadEntry } from 'tar'
 import type { DesktopPluginInstallSpec } from './plugin-install-spec.ts'
 
-/** Snapshot identity, not release provenance or publisher attestation. */
+/** Snapshot identity, not verified Release evidence or publisher attestation. */
 export interface DesktopSourcePackageArtifact {
   readonly path: string
   readonly packageName: string

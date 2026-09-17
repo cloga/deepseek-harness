@@ -33,6 +33,8 @@ kind: "package-reference"
 
 当 Desktop preload 提供更新状态、订阅和查看接口时，框架在主面板上方显示窄提示栏。切换会话或面板时保持挂载，空闲时不占空间，也不抢焦点。“查看更新”打开 Desktop 现有的确认流程；渲染本身不触发检查、下载或安装。文案归 `layout` locale namespace 所有。普通 Web 和旧 Desktop 桥接保持不变。详见 [Desktop 更新提示决策](../../../.agents/notes/implemented/feature/2026-09-17-persistent-desktop-update-notice.zh.md)。
 
+布局 fiber 持有 preload 订阅，以及通过 root 注册的 inject `hooks` 绑定的引用稳定的可观察源。AppFrame 读取框架 hook 并传递普通提示属性；React 重新挂载时保留当前状态及尚未完成的查看请求。fiber 释放时取消订阅并忽略迟到的 IPC 完成结果。
+
 ### 主题呈现
 
 呈现器消费解析后的主题快照，并投影到 document：`html { color-scheme }` 驱动原生 UA 控件，依据当前配色方案设置 `body[data-ds-dark-theme]`，把主题的别名 token 与 `--dsh-content-font-size` 设为 body 上的内联变量，并持有一个 `<meta name="theme-color">`，其内容随计算后的 body 背景色更新。对呈现器执行 dispose（资源释放）时，它会连同其他全局写入一起移除自己的元数据节点。

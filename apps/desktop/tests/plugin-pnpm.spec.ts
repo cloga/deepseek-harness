@@ -24,7 +24,7 @@ interface FixturePnpmLock {
 }
 
 it.each(['activate', 'health-failure', 'activation-failure'] as const)(
-  'preserves real pnpm verified file provenance through %s',
+  'preserves real pnpm verified file identity through %s',
   async (outcome) => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'desktop-verified-pnpm-')))
     const originalFetch = globalThis.fetch

@@ -211,20 +211,63 @@ for (const backend of backends) {
       await first.dispose()
 
       const second = await stack(backend, storageRoot, [textResponse('cold resumed answer')])
-      const activeHandle = await second.ctx.agents.resume({
-        resumeSessionId: activeRootId,
-        agentOptions: { provider: 'mock', model: 'mock' },
+      const internal = second.ctx.agentTeams as unknown as { recoverFor(agent: Agent): Promise<void> }
+      const recoverFor = internal.recoverFor.bind(internal)
+      const recoveries = new Map<SessionId, Promise<void>>()
+      const recoverySpy = vi.spyOn(internal, 'recoverFor').mockImplementation((agent) => {
+        const recovery = recoverFor(agent)
+        if (agent.id === activeRootId || agent.id === failedRootId) recoveries.set(agent.id, recovery)
+        return recovery
       })
-      const failedHandle = await second.ctx.agents.resume({
-        resumeSessionId: failedRootId,
-        agentOptions: { provider: 'mock', model: 'mock' },
+      const flush = second.ctx.sessions.flush.bind(second.ctx.sessions)
+      const checkpointEntered = Promise.withResolvers<undefined>()
+      const releaseCheckpoint = Promise.withResolvers<undefined>()
+      const delayedCheckpoint = vi.spyOn(second.ctx.sessions, 'flush').mockImplementation(async (session) => {
+        if (session.id === activeRootId && session.snapshotEvents().some(event =>
+          event.type === 'team/member' && event.data.member.id === childId && event.data.member.phase === 'active')) {
+          checkpointEntered.resolve(undefined)
+          await releaseCheckpoint.promise
+        }
+        return await flush(session)
       })
-      await vi.waitFor(() => {
-        expect(durable(activeHandle.agent).members[0]?.phase).toBe('active')
-        const failedMember = durable(failedHandle.agent).members[0]
-        expect(failedMember?.phase).toBe('failed')
-        expect(failedMember?.error).toContain('child Session recovery failed')
-      }, { timeout: 5_000 })
+      let activeHandle: AgentHandle
+      let failedHandle: AgentHandle
+      try {
+        activeHandle = await second.ctx.agents.resume({
+          resumeSessionId: activeRootId,
+          agentOptions: { provider: 'mock', model: 'mock' },
+        })
+        failedHandle = await second.ctx.agents.resume({
+          resumeSessionId: failedRootId,
+          agentOptions: { provider: 'mock', model: 'mock' },
+        })
+        await checkpointEntered.promise
+        await vi.waitFor(() => {
+          expect(durable(activeHandle.agent).members[0]?.phase).toBe('active')
+          const failedMember = durable(failedHandle.agent).members[0]
+          expect(failedMember?.phase).toBe('failed')
+          expect(failedMember?.error).toContain('child Session recovery failed')
+        }, { timeout: 5_000 })
+        expect([...recoveries.keys()]).toEqual([activeRootId, failedRootId])
+        // The active projection precedes its flush and the root's mailbox retry.
+        // Await the actual startup passes, not another recovery invocation.
+        let recovered = false
+        const settlement = Promise.all(recoveries.values()).then(() => { recovered = true })
+        await Promise.resolve()
+        expect(recovered).toBe(false)
+        expect(durable(activeHandle.agent).pendingMessages).toEqual([])
+        releaseCheckpoint.resolve(undefined)
+        await settlement
+        expect(recovered).toBe(true)
+      } finally {
+        releaseCheckpoint.resolve(undefined)
+        try {
+          await Promise.all(recoveries.values())
+        } finally {
+          delayedCheckpoint.mockRestore()
+          recoverySpy.mockRestore()
+        }
+      }
 
       const receipt = await second.ctx.agentTeams.sendMessage(activeHandle.agent, {
         target: 'recoverable',

@@ -15,6 +15,8 @@ import {
 } from './scripts/windows-sign.mjs'
 import { resolveDesktopAutoUpdateConfig } from './scripts/desktop-auto-update-environment.mjs'
 import { desktopTargetBuildPaths, resolveDesktopBuildTarget } from './scripts/desktop-build-paths.mjs'
+import { packagedDesktopRuntimeRoot, verifyPackagedDesktopRuntime } from './scripts/packaged-runtime.mjs'
+import { DESKTOP_PACKAGE_METADATA_OPTIONS } from './scripts/runtime-package-metadata.mjs'
 
 /**
  * Create electron-builder configuration from one release environment.
@@ -68,6 +70,7 @@ export function createElectronBuilderConfig(
     throw new Error('desktop package: whale icon must be a 256x256 PNG')
   }
   return {
+    ...DESKTOP_PACKAGE_METADATA_OPTIONS,
     appId,
     productName: forkRelease?.productName ?? 'DeepSeek Harness',
     executableName: forkRelease?.executableName,
@@ -85,10 +88,18 @@ export function createElectronBuilderConfig(
       'renderer/**/*',
       'assets/whale.png',
       'package.json',
+      { from: buildPaths.dsh, to: 'dsh', filter: ['**/*'] },
+      // electron-builder excludes a source directory's root node_modules.
+      { from: join(buildPaths.dsh, 'node_modules'), to: 'dsh/node_modules', filter: ['**/*'] },
+    ],
+    asarUnpack: [
+      '**/*.{node,dylib,dll,so,exe}',
+      '**/*.so.*',
+      '**/spawn-helper',
+      '**/@vscode/ripgrep/bin/rg',
     ],
     extraResources: [
       { from: buildPaths.runtime, to: 'runtime' },
-      { from: buildPaths.dsh, to: 'dsh' },
       { from: 'lib/managed-update-helper.js', to: 'managed-update/helper.mjs' },
       ...(forkRelease === undefined
         ? []
@@ -96,16 +107,14 @@ export function createElectronBuilderConfig(
             { from: forkRelease.capabilityPath, to: 'managed-update/capability.json' },
             { from: forkRelease.provisioningPath, to: 'desktop-provisioning/plan.json' },
           ]),
-      // electron-builder excludes a source directory's root node_modules.
-      { from: join(buildPaths.dsh, 'node_modules'), to: 'dsh/node_modules' },
     ],
     mac: {
       category: 'public.app-category.developer-tools',
       identity: macOSSigning?.signingIdentity,
       forceCodeSigning: true,
       hardenedRuntime: true,
-      // Native runtime files are pre-signed; PAK resources are sealed by their enclosing bundle.
-      signIgnore: ['/Contents/Resources/dsh(?:/|$)', '\\.pak$'],
+      // ASAR-unpacked native runtime files are pre-signed; PAK resources are sealed by their enclosing bundle.
+      signIgnore: ['/Contents/Resources/app\\.asar\\.unpacked/dsh(?:/|$)', '\\.pak$'],
       notarize: true,
       target: ['dmg', 'zip'],
     },
@@ -114,14 +123,20 @@ export function createElectronBuilderConfig(
       writeUpdateInfo: false,
     },
     afterPack: async context => {
-      const { verifyDesktopRuntime } = await import('./lib/types/runtime-tree.js')
-      await verifyDesktopRuntime(join(context.packager.getResourcesDir(context.appOutDir), 'dsh'),
+      const name = context.packager.appInfo.productFilename
+      const executable = resolvedPlatform === 'darwin'
+        ? join(context.appOutDir, `${name}.app`, 'Contents', 'MacOS', name)
+        : join(context.appOutDir, `${name}${resolvedPlatform === 'win32' ? '.exe' : ''}`)
+      await verifyPackagedDesktopRuntime(executable,
+        packagedDesktopRuntimeRoot(context.packager.getResourcesDir(context.appOutDir)),
         runtimeVersion, { platform: resolvedPlatform, arch: resolvedArch })
     },
     afterSign: async context => {
       if (context.electronPlatformName !== 'darwin') return
-      const { verifyDesktopRuntime } = await import('./lib/types/runtime-tree.js')
-      await verifyDesktopRuntime(join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, 'Contents', 'Resources', 'dsh'),
+      const name = context.packager.appInfo.productFilename
+      const contents = join(context.appOutDir, `${name}.app`, 'Contents')
+      await verifyPackagedDesktopRuntime(join(contents, 'MacOS', name),
+        packagedDesktopRuntimeRoot(join(contents, 'Resources')),
         runtimeVersion, { platform: 'darwin', arch: resolvedArch })
       verifyMacOSSignatureAfterSign(context, macOSSigning ?? resolveMacOSSigningEnvironment(env))
     },

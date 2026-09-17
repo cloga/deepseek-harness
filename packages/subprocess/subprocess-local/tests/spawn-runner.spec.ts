@@ -126,6 +126,17 @@ async function runWindows(
 }
 
 describe('closed runner protocol', () => {
+  it('preserves the explicit control request and rejects other transport values', () => {
+    const files = track(createLinuxLaunchFiles({ cwd: '/target', env: {}, control: 'pipe' }))
+    expect(consumeLinuxLaunchRequest(files.requestPath)).toEqual({ cwd: '/target', env: {}, control: 'pipe' })
+    expect(parseWindowsStartRequest({ type: 'start', cwd: 'C:\\target', env: {}, control: 'pipe' }))
+      .toEqual({ type: 'start', cwd: 'C:\\target', env: {}, control: 'pipe' })
+    const invalid = track(createLinuxLaunchFiles({ cwd: '/target', env: {} }))
+    writeFileSync(invalid.requestPath, JSON.stringify({ cwd: '/target', env: {}, control: 'ipc' }))
+    expect(() => consumeLinuxLaunchRequest(invalid.requestPath)).toThrow('invalid Linux launch request')
+    expect(() => parseWindowsStartRequest({ type: 'start', cwd: 'C:\\target', env: {}, control: 'ipc' })).toThrow()
+  })
+
   it('creates, consumes, reports through, and cleans one private Linux exchange', () => {
     const files = track(createLinuxLaunchFiles({ cwd: '/target', env: { A: '1' } }))
     if (process.platform !== 'win32') {
@@ -263,6 +274,9 @@ describe('runner launch inputs', () => {
     expect(parseRunnerTargetArgv(['--', 'node', 'a'])).toEqual(['node', 'a'])
     expect(() => parseRunnerTargetArgv(['node'])).toThrow('private -- delimiter')
     expect(runnerStdio(spec, false)).toEqual(['pipe', 'pipe', 'inherit'])
+    const withControl = { ...spec, stdio: { ...spec.stdio, control: 'pipe' as const } }
+    expect(runnerStdio(withControl, false)).toEqual(['pipe', 'pipe', 'inherit', 'ignore', 'ignore', 'ignore', 'ignore', 'overlapped'])
+    expect(runnerStdio(withControl, true)).toEqual(['ignore', 'ignore', 'ignore', 'ipc', 'pipe', 'pipe', 2, 'overlapped'])
     expect(runnerStdio(spec, true)).toEqual([
       'ignore', 'ignore', 'ignore', 'ipc', 'pipe', 'pipe', 2,
     ])
@@ -374,6 +388,7 @@ describe('runner launch inputs', () => {
   })
 
   it('resolves Windows executables with target-cwd and PATH search semantics', () => {
+    const currentEnv = {}
     const probed: string[] = []
     const exists = (candidate: string): boolean => {
       probed.push(candidate)
@@ -381,7 +396,7 @@ describe('runner launch inputs', () => {
     }
     expect(resolveWindowsExecutable('bash', 'C:\\target', {
       Path: 'relative;"C:\\semi;colon";"C:\\tools\\git\\bin";C:\\later',
-    }, exists)).toBe('C:\\tools\\git\\bin\\bash.exe')
+    }, exists, currentEnv)).toBe('C:\\tools\\git\\bin\\bash.exe')
     expect(probed).toEqual([
       'C:\\target\\bash.com',
       'C:\\target\\bash.exe',
@@ -394,7 +409,7 @@ describe('runner launch inputs', () => {
     ])
 
     expect(resolveWindowsExecutable('local.exe', 'C:\\target', {}, candidate =>
-      candidate === 'C:\\target\\local.exe')).toBe('C:\\target\\local.exe')
+      candidate === 'C:\\target\\local.exe', currentEnv)).toBe('C:\\target\\local.exe')
     expect(resolveWindowsExecutable('tool', 'C:\\target', {
       PATH: 'C:\\bin',
     }, candidate => candidate === 'C:\\bin\\tool.com', {
@@ -402,28 +417,28 @@ describe('runner launch inputs', () => {
     })).toBe('C:\\bin\\tool.com')
     expect(resolveWindowsExecutable('tool', 'C:\\target', {
       PATH: 'D:relative',
-    }, candidate => candidate === 'D:relative\\tool.exe')).toBe('D:relative\\tool.exe')
+    }, candidate => candidate === 'D:relative\\tool.exe', currentEnv)).toBe('D:relative\\tool.exe')
     expect(resolveWindowsExecutable('tool.', 'C:\\target', {}, candidate =>
-      candidate === 'C:\\target\\tool.exe')).toBe('C:\\target\\tool.exe')
-    expect(resolveWindowsExecutable('.\\missing', 'C:\\target', {}, () => false))
+      candidate === 'C:\\target\\tool.exe', currentEnv)).toBe('C:\\target\\tool.exe')
+    expect(resolveWindowsExecutable('.\\missing', 'C:\\target', {}, () => false, currentEnv))
       .toBeUndefined()
 
     expect(resolveWindowsExecutable('tool', 'C:\\target', {
       PATH: ';;C:\\bin',
-    }, candidate => candidate === 'C:\\bin\\tool.exe')).toBe('C:\\bin\\tool.exe')
+    }, candidate => candidate === 'C:\\bin\\tool.exe', currentEnv)).toBe('C:\\bin\\tool.exe')
     expect(resolveWindowsExecutable('tool', 'C:\\target', {
       PATH: '"";C:\\bin',
-    }, candidate => candidate === 'C:\\bin\\tool.exe')).toBe('C:\\bin\\tool.exe')
+    }, candidate => candidate === 'C:\\bin\\tool.exe', currentEnv)).toBe('C:\\bin\\tool.exe')
     expect(resolveWindowsExecutable('tool', 'C:\\target', {
       PATH: '"unterminated',
-    }, candidate => candidate === 'C:\\target\\unterminated\\tool.exe'))
+    }, candidate => candidate === 'C:\\target\\unterminated\\tool.exe', currentEnv))
       .toBe('C:\\target\\unterminated\\tool.exe')
     expect(resolveWindowsExecutable('\\\\server\\share\\tool', 'C:\\target', {}, candidate =>
-      candidate === '\\\\server\\share\\tool.exe')).toBe('\\\\server\\share\\tool.exe')
+      candidate === '\\\\server\\share\\tool.exe', currentEnv)).toBe('\\\\server\\share\\tool.exe')
     expect(resolveWindowsExecutable('\\tools\\tool', 'C:\\target', {}, candidate =>
-      candidate === 'C:\\tools\\tool.exe')).toBe('C:\\tools\\tool.exe')
+      candidate === 'C:\\tools\\tool.exe', currentEnv)).toBe('C:\\tools\\tool.exe')
     expect(resolveWindowsExecutable('C:tools\\tool', 'C:\\target', {}, candidate =>
-      candidate === 'C:\\target\\tools\\tool.exe')).toBe('C:\\target\\tools\\tool.exe')
+      candidate === 'C:\\target\\tools\\tool.exe', currentEnv)).toBe('C:\\target\\tools\\tool.exe')
 
     const noSearchEnvironment = { NoDefaultCurrentDirectoryInExePath: '1' }
     expect(resolveWindowsExecutable('missing', 'C:\\target', {}, () => false, noSearchEnvironment))
@@ -529,8 +544,8 @@ describe('Linux one-shot exec bootstrap', () => {
     })
   })
 
-  it('retries ENOEXEC through /bin/sh with the resolved file and original arguments', async () => {
-    const files = track(createLinuxLaunchFiles({ cwd: '/work', env: { PATH: 'bin' } }))
+  it.each([undefined, 'pipe'] as const)('retries ENOEXEC through /bin/sh with control %s', async (control) => {
+    const files = track(createLinuxLaunchFiles({ cwd: '/work', env: { PATH: 'bin' }, ...control === undefined ? {} : { control } }))
     const execve = vi.fn()
       .mockImplementationOnce(() => { throw Object.assign(new Error('exec format'), { code: 'ENOEXEC' }) })
       .mockImplementationOnce(() => { throw Object.assign(new Error('shell failed'), { code: 'EIO' }) })
@@ -541,8 +556,8 @@ describe('Linux one-shot exec bootstrap', () => {
       internals({ execve: execve as never }),
     )
     expect(execve.mock.calls).toEqual([
-      ['/work/bin/tool', ['tool', 'literal arg'], { PATH: 'bin' }],
-      ['/bin/sh', ['/bin/sh', '/work/bin/tool', 'literal arg'], { PATH: 'bin' }],
+      ['/work/bin/tool', ['tool', 'literal arg'], { PATH: 'bin' }, ...control === undefined ? [] : [control]],
+      ['/bin/sh', ['/bin/sh', '/work/bin/tool', 'literal arg'], { PATH: 'bin' }, ...control === undefined ? [] : [control]],
     ])
     expect(readLinuxStartupError(files.startupErrorPath)).toMatchObject({
       type: 'error', error: { code: 'EIO', path: 'tool' },
@@ -714,7 +729,7 @@ describe('Windows Job runner protocol owner', () => {
     expect(host.env).toEqual({ SAFE: 'bootstrap' })
   })
 
-  it('closes every target carrier before the first Windows poll', async () => {
+  it.each([undefined, 'pipe'] as const)('closes every target carrier with control %s before the first Windows poll', async (control) => {
     const events: string[] = []
     const interval = vi.spyOn(globalThis, 'setInterval').mockImplementation((callback: () => void) => {
       events.push('interval')
@@ -730,8 +745,8 @@ describe('Windows Job runner protocol owner', () => {
           return 0
         }),
       })
-      await runWindows(host, native)
-      expect(events).toEqual(['close:4', 'close:5', 'close:6', 'interval', 'poll'])
+      await runWindows(host, native, { type: 'start', cwd: 'C:\\target', env: {}, ...control === undefined ? {} : { control } })
+      expect(events).toEqual(['close:4', 'close:5', 'close:6', ...control === 'pipe' ? ['close:7'] : [], 'interval', 'poll'])
       expect(host.sent).toEqual([{ type: 'target-exit', exitCode: 0 }])
       expect(host.exitCode).toBe(0)
     } finally {

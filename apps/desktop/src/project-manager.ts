@@ -59,7 +59,7 @@ import {
   type DesktopPluginProvisioningState,
 } from './plugin-provisioning.ts'
 import {
-  desktopPluginLockHash, linkDesktopHostPackages, readDesktopProfileState,
+  desktopPluginLockHash, linkDesktopHostPackages, readDesktopProfileState, recordDesktopRuntimeProfile,
   unlinkDesktopHostPackages, validateDesktopPluginGraph, type DesktopProfileState,
 } from './profile-packages.ts'
 
@@ -90,6 +90,8 @@ export interface DesktopRuntimeExecutables {
   readonly node: string
   readonly pnpm: string
   readonly dsh: string
+  /** How the Host obtains release-owned packages outside the writable profile. */
+  readonly profileResolution?: 'link' | 'runtime'
 }
 
 /** Hooks that verify staged composition and control the active backend around profile activation. */
@@ -132,9 +134,12 @@ const PLUGIN_RECEIPTS = 'desktop-plugin-receipts.json'
 const PLUGIN_ARTIFACTS = '.desktop-plugin-artifacts'
 const PNPM_TIMEOUT_MS = 5 * 60 * 1000
 
+type DesktopPluginOwner = 'user' | 'release'
+
 interface DesktopPluginReceiptStore {
   readonly schemaVersion: 1
   readonly receipts: Record<string, DesktopPluginProvisionReceipt>
+  readonly owners: Record<string, DesktopPluginOwner>
 }
 
 type StagedDesktopPluginProvision = Omit<DesktopPluginProvisionReceipt, 'states'>
@@ -169,14 +174,57 @@ function readJson(path: string): unknown {
   return JSON.parse(readFileSync(path, 'utf8'))
 }
 
+function legacyReceiptOwners(
+  projectDir: string,
+  receipts: Readonly<Record<string, DesktopPluginProvisionReceipt>>,
+): Record<string, DesktopPluginOwner> {
+  const owners = Object.create(null) as Record<string, DesktopPluginOwner>
+  for (const name of Object.keys(receipts)) owners[name] = 'user'
+  const statePath = join(projectDir, DESKTOP_PLUGIN_PROVISIONING_STATE_FILE)
+  if (!existsSync(statePath)) return owners
+  const metadata = lstatSync(statePath)
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error('desktop project: legacy provisioning state must be a regular file')
+  }
+  const state = parseDesktopPluginProvisioningState(readJson(statePath))
+  const previousPlan = parseDesktopPluginProvisioningPlan({
+    schemaVersion: 1,
+    mode: 'exact',
+    plugins: state.plugins.map(({ required, source }) => ({ required, source })),
+  })
+  // Incomplete evidence cannot authorize deleting an otherwise unowned plugin.
+  if (desktopPluginProvisioningPlanSha256(previousPlan) !== state.planSha256) return owners
+  const manifest = readJson(join(projectDir, 'package.json'))
+  if (!isRecord(manifest) || !isRecord(manifest.dependencies) || Array.isArray(manifest.dependencies)) {
+    throw new Error('desktop project: invalid manifest for legacy plugin ownership')
+  }
+  for (const result of state.plugins) {
+    const receipt = receipts[result.name]
+    if (result.status === 'active' && receipt !== undefined
+      && JSON.stringify(receipt) === JSON.stringify(result.receipt)
+      && manifest.dependencies[result.name] === artifactSpecifier(receipt)) {
+      owners[result.name] = 'release'
+    }
+  }
+  return owners
+}
+
 function readPluginReceipts(projectDir: string): DesktopPluginReceiptStore {
   const path = join(projectDir, PLUGIN_RECEIPTS)
-  if (!existsSync(path)) return { schemaVersion: 1, receipts: Object.create(null) as Record<string, DesktopPluginProvisionReceipt> }
+  const receipts = Object.create(null) as Record<string, DesktopPluginProvisionReceipt>
+  if (!existsSync(path)) return {
+    schemaVersion: 1, receipts, owners: Object.create(null) as Record<string, DesktopPluginOwner>,
+  }
+  const metadata = lstatSync(path)
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error('desktop project: plugin receipt store must be a regular file')
+  }
   const value = readJson(path)
-  if (!isRecord(value) || value.schemaVersion !== 1 || !isRecord(value.receipts)) {
+  if (!isRecord(value) || Array.isArray(value) || value.schemaVersion !== 1
+    || !isRecord(value.receipts) || Array.isArray(value.receipts)
+    || Object.keys(value).some(key => !['schemaVersion', 'receipts', 'owners'].includes(key))) {
     throw new Error('desktop project: invalid plugin receipt store')
   }
-  const receipts = Object.create(null) as Record<string, DesktopPluginProvisionReceipt>
   for (const [name, receipt] of Object.entries(value.receipts)) {
     assertPackageName(name)
     const parsed = parseDesktopPluginProvisionReceipt(receipt)
@@ -185,7 +233,19 @@ function readPluginReceipts(projectDir: string): DesktopPluginReceiptStore {
     }
     receipts[name] = parsed
   }
-  return { schemaVersion: 1, receipts }
+  if (!Object.hasOwn(value, 'owners')) return { schemaVersion: 1, receipts, owners: legacyReceiptOwners(projectDir, receipts) }
+  if (!isRecord(value.owners) || Array.isArray(value.owners)
+    || Object.keys(value.owners).length !== Object.keys(receipts).length) {
+    throw new Error('desktop project: invalid plugin receipt owners')
+  }
+  const owners = Object.create(null) as Record<string, DesktopPluginOwner>
+  for (const [name, owner] of Object.entries(value.owners)) {
+    if (!Object.hasOwn(receipts, name) || (owner !== 'user' && owner !== 'release')) {
+      throw new Error('desktop project: invalid plugin receipt owners')
+    }
+    owners[name] = owner
+  }
+  return { schemaVersion: 1, receipts, owners }
 }
 
 function writePluginReceipts(projectDir: string, store: DesktopPluginReceiptStore): void {
@@ -208,9 +268,9 @@ function matchesProvisioning(
   if (state.planSha256 !== desktopPluginProvisioningPlanSha256(plan)
     || state.plugins.length !== plan.plugins.length) return false
   const manifest = projectManifest(projectDir)
-  const receipts = readPluginReceipts(projectDir).receipts
+  const { receipts, owners } = readPluginReceipts(projectDir)
   const desired = new Map(plan.plugins.map(entry => [entry.source.packageName, entry]))
-  if (Object.keys(receipts).some(name => !desired.has(name))) return false
+  if (Object.keys(receipts).some(name => owners[name] === 'release' && !desired.has(name))) return false
   return state.plugins.every((result) => {
     const entry = desired.get(result.name)
     if (entry === undefined || entry.required !== result.required
@@ -233,7 +293,7 @@ function matchesProvisioning(
 }
 
 /**
- * Validate durable results against the actual receipt-owned installed inventory.
+ * Validate the release inventory while allowing independently user-owned plugins.
  * @param projectDir - Active profile whose Host has reached readiness.
  * @param plan - Installed release's reviewed exact inventory.
  * @returns Matching active provisioning evidence; throws on missing or drifted inventory.
@@ -515,17 +575,20 @@ export class DesktopProjectManager {
 
   private prepareProfile(projectDir: string): void {
     const runtime = this.currentRuntime()
-    linkDesktopHostPackages(projectDir, this.runtime.dsh, runtime)
-    validateDesktopPluginGraph(projectDir, this.runtime.dsh, runtime, profilePluginNames(projectDir))
+    const resolutionMode = this.runtime.profileResolution ?? 'link'
+    if (resolutionMode === 'runtime') recordDesktopRuntimeProfile(projectDir, runtime)
+    else linkDesktopHostPackages(projectDir, this.runtime.dsh, runtime)
+    validateDesktopPluginGraph(projectDir, this.runtime.dsh, runtime, profilePluginNames(projectDir), resolutionMode)
   }
 
   private profileMatchesRuntime(projectDir: string): boolean {
     const target = this.currentRuntime()
     const previous = readDesktopProfileState(projectDir)
-    return !existsSync(this.pendingPackages(projectDir))
+    const current = !existsSync(this.pendingPackages(projectDir))
       && previous?.runtimeId === desktopRuntimeId(target)
       && previous.lockHash === desktopPluginLockHash(projectDir)
-      && previous.links.length === target.sharedPackages.length
+    if (!current || this.runtime.profileResolution === 'runtime') return current
+    return previous.links.length === target.sharedPackages.length
       && previous.links.every((link) => {
         const actual = join(projectDir, 'node_modules', link.name)
         const expected = join(this.runtime.dsh, 'node_modules', link.name)
@@ -582,8 +645,11 @@ export class DesktopProjectManager {
       const staging = join(transaction, 'staging')
       const rollback = join(transaction, 'rollback')
       const failed = join(transaction, 'failed')
+      const packagesChanged = mutation.type !== 'plugin-toggle'
       try {
         copyProfileMetadata(this.paths.profile, staging)
+        // Commit legacy ownership only with the staged profile, before source replacement changes its evidence.
+        if (existsSync(join(staging, PLUGIN_RECEIPTS))) writePluginReceipts(staging, readPluginReceipts(staging))
         const removingSnapshot = mutation.type === 'plugin-remove' && readDesktopPackageLocks(staging)[mutation.name] !== undefined
         if (removingSnapshot) this.pruneSourcePackage(staging, mutation.name)
         if (mutation.type === 'plugins-reconcile') {
@@ -595,7 +661,6 @@ export class DesktopProjectManager {
         const previous = readDesktopProfileState(staging)
         const registry = this.registryForMutation(staging, mutation)
         if (mutation.type !== 'plugins-reconcile' && (removingSnapshot || Object.keys(projectManifest(staging).dependencies).length > 0)) {
-          if (!removingSnapshot) this.normalizeRetainedArtifactSpecifiers(staging)
           await this.runPnpm(staging, ['install', removingSnapshot ? '--no-frozen-lockfile' : '--frozen-lockfile', '--ignore-scripts'], registry)
         }
         let provision: StagedDesktopPluginProvision | StagedDesktopProvisioning | undefined
@@ -613,14 +678,20 @@ export class DesktopProjectManager {
         } else if (mutation.type === 'runtime-reconcile') {
           await this.reconcileProfile(staging, previous, existsSync(this.pendingPackages(staging)), registry)
         } else {
-          const packagesChanged = mutation.type !== 'plugin-toggle' || existsSync(this.pendingPackages(staging))
-          if (packagesChanged) unlinkDesktopHostPackages(staging)
+          const materializedPackagesChanged = packagesChanged || existsSync(this.pendingPackages(staging))
+          if (materializedPackagesChanged && this.runtime.profileResolution !== 'runtime') {
+            unlinkDesktopHostPackages(staging)
+          }
           try {
             provision = await this.applyMutation(staging, mutation, transaction)
           } finally {
-            if (packagesChanged) linkDesktopHostPackages(staging, this.runtime.dsh, this.currentRuntime())
+            if (materializedPackagesChanged) {
+              const runtime = this.currentRuntime()
+              if (this.runtime.profileResolution === 'runtime') recordDesktopRuntimeProfile(staging, runtime)
+              else linkDesktopHostPackages(staging, this.runtime.dsh, runtime)
+            }
           }
-          await this.reconcileProfile(staging, previous, packagesChanged, registry)
+          await this.reconcileProfile(staging, previous, materializedPackagesChanged, registry)
         }
         await hooks.beforeChange()
         try {
@@ -641,7 +712,7 @@ export class DesktopProjectManager {
           }
           const store = readPluginReceipts(staging)
           writePluginReceipts(staging, {
-            schemaVersion: 1,
+            ...store,
             receipts: { ...store.receipts, [receipt.packageName]: receipt },
           })
           result = receipt
@@ -749,7 +820,8 @@ export class DesktopProjectManager {
     const receipt = store.receipts[name]
     if (receipt === undefined) return
     const receipts = Object.fromEntries(Object.entries(store.receipts).filter(([entry]) => entry !== name))
-    writePluginReceipts(projectDir, { schemaVersion: 1, receipts })
+    const owners = Object.fromEntries(Object.entries(store.owners).filter(([entry]) => entry !== name))
+    writePluginReceipts(projectDir, { schemaVersion: 1, receipts, owners })
     this.removePackageArtifact(projectDir, receipt.artifactSha256)
   }
 
@@ -849,6 +921,7 @@ export class DesktopProjectManager {
     projectDir: string,
     source: DesktopGithubReleasePluginSource,
     transaction: string,
+    owner: DesktopPluginOwner,
     phase: (value: NonNullable<DesktopPluginProvisioningResult['phase']>) => void = () => {},
   ): Promise<StagedDesktopPluginProvision> {
     if (this.currentRuntime().sharedPackages.some(entry => entry.name === source.packageName)) {
@@ -891,6 +964,7 @@ export class DesktopProjectManager {
     const store = readPluginReceipts(projectDir)
     writePluginReceipts(projectDir, {
       schemaVersion: 1,
+      owners: { ...store.owners, [source.packageName]: owner },
       receipts: {
         ...store.receipts,
         [source.packageName]: {
@@ -915,11 +989,20 @@ export class DesktopProjectManager {
     hooks: DesktopProjectHooks,
   ): Promise<StagedDesktopProvisioning> {
     const manifest = projectManifest(projectDir)
-    const owned = Object.keys(readPluginReceipts(projectDir).receipts)
+    const store = readPluginReceipts(projectDir)
+    // Reconstructing the same requested artifact does not transfer a user's installation to the release.
+    const rebuiltOwner = (source: DesktopGithubReleasePluginSource): DesktopPluginOwner => {
+      const receipt = store.receipts[source.packageName]
+      return store.owners[source.packageName] === 'user' && receipt !== undefined
+        && JSON.stringify(receipt.source) === JSON.stringify(source)
+        && manifest.dependencies[source.packageName] === artifactSpecifier(receipt)
+        ? 'user' : 'release'
+    }
+    const owned = Object.keys(store.receipts).filter(name => store.owners[name] === 'release')
     const desired = new Set(plan.plugins.map(entry => entry.source.packageName))
     const replace = new Set([...owned, ...desired])
     const removed = owned.filter(name => !desired.has(name))
-    for (const name of owned) this.clearPluginReceipt(projectDir, name)
+    for (const name of replace) this.clearPluginReceipt(projectDir, name)
     writeJson(join(projectDir, 'package.json'), {
       ...manifest,
       dependencies: Object.fromEntries(Object.entries(manifest.dependencies).filter(([name]) => !replace.has(name))),
@@ -942,7 +1025,8 @@ export class DesktopProjectManager {
       receipt: { ...receipt, states: { staged: true, health: 'passed', activated: true, rolledBack: false, verified: true } },
     })
     for (const entry of plan.plugins.filter(entry => entry.required)) {
-      results.set(entry.source.packageName, activeResult(entry, await this.installGithubRelease(projectDir, entry.source, transaction)))
+      const receipt = await this.installGithubRelease(projectDir, entry.source, transaction, rebuiltOwner(entry.source))
+      results.set(entry.source.packageName, activeResult(entry, receipt))
     }
     await this.reconcileProfile(projectDir, undefined, existsSync(this.pendingPackages(projectDir)), registry)
     await hooks.healthCheck(projectDir)
@@ -956,7 +1040,9 @@ export class DesktopProjectManager {
           if (Object.keys(projectManifest(candidate).dependencies).length > 0) {
             await this.runPnpm(candidate, ['install', '--frozen-lockfile', '--ignore-scripts'], registry)
           }
-          provision = await this.installGithubRelease(candidate, entry.source, transaction, (value) => { phase = value })
+          provision = await this.installGithubRelease(
+            candidate, entry.source, transaction, rebuiltOwner(entry.source), (value) => { phase = value },
+          )
           phase = 'graph'
           this.prepareProfile(candidate)
           phase = 'install'
@@ -1004,7 +1090,7 @@ export class DesktopProjectManager {
       && (previous.nodeVersion !== target.release.nodeVersion || previous.platform !== target.platform || previous.arch !== target.arch)))
     if (rebuild) {
       writeFileSync(this.pendingPackages(projectDir), '')
-      unlinkDesktopHostPackages(projectDir)
+      if (this.runtime.profileResolution !== 'runtime') unlinkDesktopHostPackages(projectDir)
       removeOwnedDirectory(join(projectDir, 'node_modules'))
       await this.runPnpm(projectDir, ['install', '--frozen-lockfile', '--ignore-scripts'], registry)
     }
@@ -1052,7 +1138,7 @@ export class DesktopProjectManager {
           if (source.type === 'npmRegistry') packageNameFromSpec(source.spec)
           return this.applyMutation(projectDir, { type: 'plugin-add', spec: source.spec }, transaction)
         }
-        return this.installGithubRelease(projectDir, source, transaction)
+        return this.installGithubRelease(projectDir, source, transaction, 'user')
       }
       case 'plugin-remove': {
         assertPackageName(mutation.name)
@@ -1122,6 +1208,7 @@ export class DesktopProjectManager {
     if (resolve(projectDir) === resolve(this.paths.profile)) {
       throw new Error('desktop project: package operations require a private staging profile')
     }
+    if (args.includes('--frozen-lockfile')) this.normalizeRetainedArtifactSpecifiers(projectDir)
     const registryUrl = new URL(registry)
     if (registryUrl.protocol !== 'https:' || registryUrl.username !== '' || registryUrl.password !== ''
       || registryUrl.search !== '' || registryUrl.hash !== '') {

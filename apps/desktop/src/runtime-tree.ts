@@ -178,8 +178,51 @@ export function readDesktopRuntime(root: string): DesktopRuntimeDescriptor {
     arch: value.arch, sharedPackages, files }
 }
 
+function runtimeInventoryDiagnostic(expected: readonly unknown[], actual: readonly DesktopRuntimeFile[]): string {
+  const desired = new Map<string, Record<string, unknown>>()
+  let invalidExpected = 0
+  for (const entry of expected) {
+    if (!record(entry) || typeof entry.path !== 'string' || desired.has(entry.path)) {
+      invalidExpected++
+      continue
+    }
+    desired.set(entry.path, entry)
+  }
+  const present = new Map(actual.map(entry => [entry.path, entry]))
+  const samples: unknown[] = []
+  let missing = 0
+  let unexpected = 0
+  let changed = 0
+  const metadata = (entry: Record<string, unknown>): object => ({
+    bytes: typeof entry.bytes === 'number' && Number.isSafeInteger(entry.bytes) && entry.bytes >= 0 ? entry.bytes : null,
+    sha256: typeof entry.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(entry.sha256) ? entry.sha256 : null,
+    ...(process.platform === 'win32' ? {} : { executable: typeof entry.executable === 'boolean' ? entry.executable : null }),
+  })
+  for (const [path, entry] of desired) {
+    const found = present.get(path)
+    if (found === undefined) {
+      missing++
+      if (samples.length < 5) samples.push({ kind: 'missing', path: path.slice(0, 160) })
+    } else if (entry.bytes !== found.bytes || entry.sha256 !== found.sha256
+      || (process.platform !== 'win32' && entry.executable !== found.executable)) {
+      changed++
+      if (samples.length < 5) samples.push({
+        kind: 'changed', path: path.slice(0, 160), expected: metadata(entry), actual: metadata({ ...found }),
+      })
+    }
+  }
+  for (const entry of actual) {
+    if (desired.has(entry.path)) continue
+    unexpected++
+    if (samples.length < 5) samples.push({ kind: 'unexpected', path: entry.path.slice(0, 160) })
+  }
+  return JSON.stringify({ expectedFiles: expected.length, actualFiles: actual.length, missing, unexpected, changed,
+    invalidExpected, recordOrderOrShape: invalidExpected === 0 && missing === 0 && unexpected === 0 && changed === 0, samples })
+}
+
 /**
  * Verify every packaged runtime file against its recorded bytes and permissions at build time.
+ * Failures include bounded relative-path and metadata samples, never file contents.
  * @param root - Materialized runtime resources.
  * @param electronVersion - Expected shell version.
  * @param target - Required execution target; defaults to the current process.
@@ -207,7 +250,7 @@ export async function verifyDesktopRuntime(
   const comparable = (items: readonly DesktopRuntimeFile[]): unknown => process.platform === 'win32'
     ? items.map(({ executable: _executable, ...item }) => item) : items
   if (JSON.stringify(comparable(descriptor.files)) !== JSON.stringify(comparable(actual))) {
-    throw new Error('desktop runtime: integrity verification failed')
+    throw new Error(`desktop runtime: integrity verification failed: ${runtimeInventoryDiagnostic(descriptor.files, actual)}`)
   }
   return descriptor
 }

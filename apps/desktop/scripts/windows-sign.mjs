@@ -5,10 +5,10 @@ import { open } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import wineVmModule from 'app-builder-lib/out/vm/WineVm.js'
+import { createRequire } from 'node:module'
 
 const execFileAsync = promisify(execFile)
-const { WineVmManager } = wineVmModule
+const require = createRequire(import.meta.url)
 const CODE_SIGNING_EKU = '1.3.6.1.5.5.7.3.3'
 const NSIS_RUN_AS_INVOKER = 'RunAsInvoker'
 const NSIS_BOOTSTRAP_PATCH = Symbol.for('@deepseek-ai/dsh-desktop/nsis-bootstrap-signing')
@@ -239,12 +239,13 @@ function findDanglingAuthenticodeDirectory(header, fileSize) {
 /**
  * Sign electron-builder's temporary NSIS executable before enterprise code integrity evaluates it.
  *
- * @param {{ sign: (configuration: { path: string, hash: string, isNest: boolean }) => Promise<void>, wineVmManager?: typeof WineVmManager, platform?: NodeJS.Platform, environment?: NodeJS.ProcessEnv }} options Signing hook and injectable host values.
+ * @param {{ sign: (configuration: { path: string, hash: string, isNest: boolean }) => Promise<void>, wineVmManager?: typeof import('app-builder-lib/out/vm/WineVm.js').WineVmManager, platform?: NodeJS.Platform, environment?: NodeJS.ProcessEnv }} options Signing hook and injectable host values.
  * @returns {void}
  */
 export function installWindowsNsisBootstrapSigner(options) {
   if ((options.platform ?? process.platform) !== 'win32') return
-  const prototype = (options.wineVmManager ?? WineVmManager).prototype
+  const manager = options.wineVmManager ?? require('app-builder-lib/out/vm/WineVm.js').WineVmManager
+  const prototype = manager.prototype
   if (prototype[NSIS_BOOTSTRAP_PATCH] === true) return
   const originalExec = prototype.exec
   prototype.exec = async function (file, args, execOptions, isLogOutIfDebug) {

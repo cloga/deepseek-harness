@@ -7,8 +7,10 @@ import { pathToFileURL } from 'node:url'
 import { gzipSync } from 'node:zlib'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resolveDesktopPaths } from '../src/paths.ts'
-import { DesktopProjectManager, packageNameFromSpec, type DesktopProjectHooks } from '../src/project-manager.ts'
-import type { DesktopGithubReleasePluginSource } from '../src/plugin-source.ts'
+import { assertDesktopProvisioningInventory, DesktopProjectManager, packageNameFromSpec, type DesktopProjectHooks } from '../src/project-manager.ts'
+import type { DesktopGithubReleasePluginSource, DesktopPluginProvisionReceipt } from '../src/plugin-source.ts'
+import { parseDesktopPluginProvisioningPlan } from '../src/plugin-provisioning.ts'
+import { readDesktopProfileState } from '../src/profile-packages.ts'
 import { readDesktopPackageLocks } from '../src/plugin-package-lock.ts'
 import { runtimeFixture } from './runtime-fixture.ts'
 
@@ -126,6 +128,28 @@ function verifiedFetch(source: DesktopGithubReleasePluginSource, archive: Buffer
   }
 }
 
+function pluginFixture(name: string) {
+  const archive = verifiedPluginArchive(name)
+  return { archive, source: verifiedSource(archive, name) }
+}
+
+function mockVerifiedPlugins(fixtures: ReturnType<typeof pluginFixture>[]): void {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : input)
+    const fixture = fixtures.find(entry => url.pathname.includes(`/${entry.source.repo}/`))
+    if (fixture === undefined) throw new Error(`unexpected fixture request ${url.href}`)
+    return verifiedFetch(fixture.source, fixture.archive)(input, init)
+  })
+}
+
+function receiptStore(manager: DesktopProjectManager): {
+  schemaVersion: 1
+  receipts: Record<string, DesktopPluginProvisionReceipt>
+  owners?: Record<string, 'user' | 'release'>
+} {
+  return JSON.parse(readFileSync(join(manager.paths.profile, 'desktop-plugin-receipts.json'), 'utf8')) as ReturnType<typeof receiptStore>
+}
+
 function temporaryRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'dsh-desktop-test-'))
   roots.push(root)
@@ -230,6 +254,93 @@ afterEach(async () => {
 })
 
 describe('desktop external plugin profile', () => {
+  it('changes runtime generations without deleting legacy host links', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const links = readDesktopProfileState(manager.paths.profile)?.links
+    expect(links?.length).toBeGreaterThan(0)
+
+    const dsh = join(root, 'next-runtime', 'dsh')
+    runtimeFixture(dsh, '1.1.0')
+    const runtimeManager = new DesktopProjectManager(manager.paths, {
+      ...manager.runtime,
+      dsh,
+      profileResolution: 'runtime',
+    })
+    await expect(runtimeManager.applyRelease()).resolves.toBe(true)
+    expect(readDesktopProfileState(manager.paths.profile)?.links).toEqual(links)
+    await expect(runtimeManager.applyRelease()).resolves.toBe(false)
+  })
+
+  it.each(['legacy', 'explicit'] as const)('retains off-plan user verified plugins during a runtime-mode exact-plan upgrade: %s ownership', async (ownership) => {
+    const { root, manager } = setup()
+    const fixtures = ['release-provider', 'manual-verified'].map((name) => {
+      const archive = verifiedPluginArchive(name)
+      return { archive, source: verifiedSource(archive, name) }
+    })
+    const release = fixtures[0]!
+    const manual = fixtures[1]!
+    const plan = parseDesktopPluginProvisioningPlan({
+      schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source: release.source }],
+    })
+    const original = globalThis.fetch
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input)
+      const fixture = fixtures.find(entry => url.pathname.includes(`/${entry.source.repo}/`))
+      if (fixture === undefined) throw new Error(`unexpected request ${url}`)
+      return verifiedFetch(fixture.source, fixture.archive)(input, init)
+    }
+    try {
+      await manager.applyRelease(hooks(), plan)
+      await manager.mutate({ type: 'plugin-install', source: manual.source }, hooks())
+      await manager.mutate({ type: 'plugin-toggle', name: manual.source.packageName, enabled: false }, hooks())
+      await manager.mutate({ type: 'plugin-add', spec: 'manual-registry@1.0.0' }, hooks())
+      const receiptPath = join(manager.paths.profile, 'desktop-plugin-receipts.json')
+      const store = JSON.parse(readFileSync(receiptPath, 'utf8')) as {
+        schemaVersion: number
+        receipts: Record<string, unknown>
+        owners?: Record<string, 'user' | 'release'>
+      }
+      // Old clients lack owner metadata; an ownership-aware predecessor records the same user intent explicitly.
+      const { owners: _owners, ...legacy } = store
+      writeFileSync(receiptPath, JSON.stringify(ownership === 'legacy' ? legacy : {
+        ...legacy, owners: { 'release-provider': 'release', 'manual-verified': 'user' },
+      }))
+      const artifact = join('.desktop-plugin-artifacts', `${manual.source.sha256}.tgz`)
+      const retainedFiles = ['package.json', 'desktop-plugin-receipts.json', 'desktop-plugin-provisioning-state.json', artifact]
+        .map(path => ({ path, bytes: readFileSync(join(manager.paths.profile, path)) }))
+      const previous = readDesktopProfileState(manager.paths.profile)
+      expect(previous).toBeDefined()
+      const dsh = join(root, 'next-runtime', 'dsh')
+      runtimeFixture(dsh, '1.1.0')
+      const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh, profileResolution: 'runtime' })
+      let starts = 0
+      await expect(next.applyRelease(hooks({ afterChange: async () => {
+        if (++starts === 1) throw new Error('retention upgrade final activation rejected')
+      } }), plan)).rejects.toThrow('retention upgrade final activation rejected')
+      expect(readDesktopProfileState(manager.paths.profile)).toEqual(previous)
+      for (const entry of retainedFiles) expect(readFileSync(join(manager.paths.profile, entry.path))).toEqual(entry.bytes)
+
+      const beforeUpgrade = calls(root).length
+      await expect(next.applyRelease(hooks(), plan)).resolves.toBe(true)
+      expect(readDesktopProfileState(manager.paths.profile)?.runtimeId).not.toBe(previous?.runtimeId)
+      expect(calls(root).length).toBeGreaterThan(beforeUpgrade)
+      expect(next.listPlugins()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'manual-verified', enabled: false, source: manual.source }),
+        expect.objectContaining({ name: 'manual-registry', enabled: true }),
+        expect.objectContaining({ name: 'release-provider', enabled: true, source: release.source }),
+      ]))
+      const updated = JSON.parse(readFileSync(receiptPath, 'utf8')) as { receipts: Record<string, unknown> }
+      expect(updated.receipts[manual.source.packageName]).toEqual(store.receipts[manual.source.packageName])
+      expect(readFileSync(join(manager.paths.profile, artifact))).toEqual(manual.archive)
+      assertDesktopProvisioningInventory(manager.paths.profile, plan)
+      const beforeReuse = calls(root).length
+      await expect(next.applyRelease(hooks(), plan)).resolves.toBe(false)
+      expect(calls(root)).toHaveLength(beforeReuse)
+      expect(calls(root).every(call => call.project !== manager.paths.profile)).toBe(true)
+    } finally { globalThis.fetch = original }
+  })
+
   it('isolates two required release acquisitions sharing SHA256SUMS', async () => {
     const { manager } = setup()
     await manager.applyRelease()
@@ -302,12 +413,302 @@ describe('desktop external plugin profile', () => {
         writeFileSync(path, JSON.stringify({ ...state, plugins: [] }))
       }
       const state = await manager.reconcileProvisioning(plan, hooks())
-      if (drift === 'empty-extra') expect(manager.listPlugins()).toEqual([])
-      else {
+      if (drift === 'empty-extra') {
+        expect(state.plugins).toEqual([])
+        expect(state.removed).toEqual([])
+        expect(manager.listPlugins()).toMatchObject([{ name: source.packageName, enabled: true, source }])
+        expect(receiptStore(manager).owners?.[source.packageName]).toBe('user')
+      } else {
         expect(state.plugins).toHaveLength(1)
         expect(manager.listPlugins()[0]?.source).toEqual(source)
+        expect(receiptStore(manager).owners?.[source.packageName]).toBe('release')
       }
     }))
+  })
+
+  it('retains user verified plugins across exact reconciliation, runtime changes, empty plans and reuse', async () => {
+    const { root, manager } = setup()
+    const manual = pluginFixture('manual-verified')
+    const baseline = pluginFixture('release-provider')
+    mockVerifiedPlugins([manual, baseline])
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-add', spec: 'manual-registry@1.0.0' }, hooks())
+    await manager.mutate({ type: 'plugin-install', source: manual.source }, hooks())
+    await manager.mutate({ type: 'plugin-toggle', name: manual.source.packageName, enabled: false }, hooks())
+    const manualReceipt = receiptStore(manager).receipts[manual.source.packageName]
+    const plan = { schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source: baseline.source }] }
+    await manager.reconcileProvisioning(plan, hooks())
+    expect(receiptStore(manager).owners).toEqual({ 'manual-verified': 'user', 'release-provider': 'release' })
+    expect(() => assertDesktopProvisioningInventory(manager.paths.profile, parseDesktopPluginProvisioningPlan(plan))).not.toThrow()
+    const count = calls(root).length
+    await manager.reconcileProvisioning(plan, hooks())
+    expect(calls(root)).toHaveLength(count)
+    const dsh = join(root, 'updated-runtime')
+    runtimeFixture(dsh, '1.1.0', '24.18.0')
+    const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+    await next.applyRelease(hooks(), plan)
+    const empty = { schemaVersion: 1, mode: 'exact', plugins: [] }
+    const state = await next.reconcileProvisioning(empty, hooks())
+    expect(state.removed).toEqual(['release-provider'])
+    expect(next.listPlugins()).toMatchObject([
+      { name: 'manual-registry', version: '1.0.0', enabled: true },
+      { name: 'manual-verified', version: manual.source.version, enabled: false, source: manual.source },
+    ])
+    expect(receiptStore(next)).toMatchObject({ receipts: { 'manual-verified': manualReceipt }, owners: { 'manual-verified': 'user' } })
+    expect(readFileSync(join(next.paths.profile, '.desktop-plugin-artifacts', `${manual.source.sha256}.tgz`))).toEqual(manual.archive)
+    expect(() => assertDesktopProvisioningInventory(next.paths.profile, parseDesktopPluginProvisioningPlan(empty))).not.toThrow()
+    const finalCount = calls(root).length
+    await next.reconcileProvisioning(empty, hooks())
+    expect(calls(root)).toHaveLength(finalCount)
+    expect(calls(root).every(call => call.project !== manager.paths.profile)).toBe(true)
+  }, 30_000)
+
+  it('reuses an empty plan after a user installs a verified plugin', async () => {
+    const { root, manager } = setup()
+    const fixture = pluginFixture('manual-verified')
+    mockVerifiedPlugins([fixture])
+    const plan = { schemaVersion: 1, mode: 'exact', plugins: [] }
+    await manager.applyRelease(hooks(), plan)
+    await manager.mutate({ type: 'plugin-install', source: fixture.source }, hooks())
+    const count = calls(root).length
+    await manager.reconcileProvisioning(plan, hooks())
+    expect(calls(root)).toHaveLength(count)
+    expect(manager.listPlugins()[0]?.source).toEqual(fixture.source)
+    expect(() => assertDesktopProvisioningInventory(manager.paths.profile, parseDesktopPluginProvisioningPlan(plan))).not.toThrow()
+  })
+
+  it.each(['matching', 'absent-state', 'incomplete-state', 'optional-failed', 'different-receipt'] as const)(
+    'migrates legacy receipt ownership from %s evidence only in staging', async (evidence) => {
+      const { manager } = setup()
+      const baseline = pluginFixture('legacy-provider')
+      const manual = pluginFixture('manual-verified')
+      mockVerifiedPlugins([baseline, manual])
+      const plan = { schemaVersion: 1, mode: 'exact', plugins: [{ required: false, source: baseline.source }] }
+      await manager.applyRelease(hooks(), plan)
+      await manager.mutate({ type: 'plugin-install', source: manual.source }, hooks())
+      const statePath = join(manager.paths.profile, 'desktop-plugin-provisioning-state.json')
+      const state = JSON.parse(readFileSync(statePath, 'utf8')) as Record<string, unknown>
+      if (evidence === 'absent-state') unlinkSync(statePath)
+      if (evidence === 'incomplete-state') writeFileSync(statePath, JSON.stringify({ ...state, plugins: [] }))
+      if (evidence === 'optional-failed') writeFileSync(statePath, JSON.stringify({
+        ...state,
+        plugins: [{ name: baseline.source.packageName, version: baseline.source.version, required: false,
+          source: baseline.source, status: 'optional-failed', phase: 'download', message: 'old optional failure' }],
+      }))
+      if (evidence === 'different-receipt') {
+        const archive = verifiedPluginArchive(baseline.source.packageName, baseline.source.version, '>=1.0.0')
+        const replacement = { archive, source: verifiedSource(archive, baseline.source.packageName, baseline.source.version) }
+        mockVerifiedPlugins([replacement, manual])
+        await manager.mutate({ type: 'plugin-install', source: replacement.source }, hooks())
+      }
+      const storePath = join(manager.paths.profile, 'desktop-plugin-receipts.json')
+      const legacy = JSON.stringify({ schemaVersion: 1, receipts: receiptStore(manager).receipts })
+      writeFileSync(storePath, legacy)
+      expect(manager.listPlugins()).toHaveLength(2)
+      expect(readFileSync(storePath, 'utf8')).toBe(legacy)
+      const result = await manager.reconcileProvisioning({ schemaVersion: 1, mode: 'exact', plugins: [] }, hooks({
+        healthCheck: async (staging) => {
+          expect(staging).not.toBe(manager.paths.profile)
+          expect(readFileSync(storePath, 'utf8')).toBe(legacy)
+        },
+      }))
+      expect(result.removed).toEqual(evidence === 'matching' ? [baseline.source.packageName] : [])
+      expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(evidence === 'matching'
+        ? ['manual-verified'] : ['legacy-provider', 'manual-verified'])
+      expect(Object.values(receiptStore(manager).owners ?? {})).toEqual(evidence === 'matching' ? ['user'] : ['user', 'user'])
+    }, 30_000,
+  )
+
+  it.each(['identical-verified', 'changed-verified', 'registry'] as const)(
+    'preserves a user %s replacement when the next plan drops its name', async (replacement) => {
+      const { root, manager } = setup()
+      const fixture = pluginFixture('release-provider')
+      mockVerifiedPlugins([fixture])
+      const plan = { schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source: fixture.source }] }
+      await manager.applyRelease(hooks(), plan)
+      if (replacement === 'registry') {
+        await manager.mutate({ type: 'plugin-add', spec: `${fixture.source.packageName}@1.0.0` }, hooks())
+        expect(receiptStore(manager).owners).toEqual({})
+      } else {
+        const archive = replacement === 'identical-verified' ? fixture.archive
+          : verifiedPluginArchive(fixture.source.packageName, fixture.source.version, '>=1.0.0')
+        const manual = { archive, source: verifiedSource(archive, fixture.source.packageName, fixture.source.version) }
+        mockVerifiedPlugins([manual])
+        await manager.mutate({ type: 'plugin-install', source: manual.source }, hooks())
+        expect(receiptStore(manager).owners).toEqual({ 'release-provider': 'user' })
+        if (replacement === 'identical-verified') {
+          const count = calls(root).length
+          await manager.reconcileProvisioning(plan, hooks())
+          expect(calls(root)).toHaveLength(count)
+          expect(receiptStore(manager).owners).toEqual({ 'release-provider': 'user' })
+        }
+      }
+      const result = await manager.reconcileProvisioning({ schemaVersion: 1, mode: 'exact', plugins: [] }, hooks())
+      expect(result.removed).toEqual([])
+      expect(manager.listPlugins()).toHaveLength(1)
+      await manager.mutate({ type: 'plugin-remove', name: fixture.source.packageName }, hooks())
+      expect(manager.listPlugins()).toEqual([])
+      expect(receiptStore(manager)).toEqual({ schemaVersion: 1, receipts: {}, owners: {} })
+    }, 30_000,
+  )
+
+  it.each([true, false])('preserves same-source user ownership through forced rebuilds with required=%s', async (required) => {
+    const { root, manager } = setup()
+    const first = pluginFixture('first-provider')
+    const second = pluginFixture('second-provider')
+    mockVerifiedPlugins([first, second])
+    const original = { schemaVersion: 1, mode: 'exact', plugins: [{ required, source: first.source }] }
+    await manager.applyRelease(hooks(), original)
+    expect(receiptStore(manager).owners).toEqual({ 'first-provider': 'release' })
+    await manager.mutate({ type: 'plugin-install', source: first.source }, hooks())
+    expect(receiptStore(manager).owners).toEqual({ 'first-provider': 'user' })
+    const dsh = join(root, 'next-runtime')
+    runtimeFixture(dsh, '1.1.0', '24.18.0')
+    const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+    const beforeUpgrade = calls(root).length
+    await next.applyRelease(hooks(), original)
+    expect(calls(root).length).toBeGreaterThan(beforeUpgrade)
+    expect(next.releaseVersion()).toBe('1.1.0')
+    expect(receiptStore(next).owners).toEqual({ 'first-provider': 'user' })
+    const expanded = { ...original, plugins: [...original.plugins, { required: true, source: second.source }] }
+    const beforeExpansion = calls(root).length
+    await next.reconcileProvisioning(expanded, hooks())
+    expect(calls(root).length).toBeGreaterThan(beforeExpansion)
+    expect(receiptStore(next).owners).toEqual({ 'first-provider': 'user', 'second-provider': 'release' })
+    const remaining = { ...original, plugins: [{ required: true, source: second.source }] }
+    const dropped = await next.reconcileProvisioning(remaining, hooks())
+    expect(dropped.removed).toEqual([])
+    expect(next.listPlugins().map(plugin => plugin.name)).toEqual(['first-provider', 'second-provider'])
+    expect(receiptStore(next).owners).toEqual({ 'first-provider': 'user', 'second-provider': 'release' })
+    expect(() => assertDesktopProvisioningInventory(next.paths.profile, parseDesktopPluginProvisioningPlan(remaining))).not.toThrow()
+    const empty = await next.reconcileProvisioning({ ...original, plugins: [] }, hooks())
+    expect(empty.removed).toEqual(['second-provider'])
+    expect(next.listPlugins()).toMatchObject([{ name: first.source.packageName, source: first.source, enabled: true }])
+    expect(receiptStore(next).owners).toEqual({ 'first-provider': 'user' })
+    expect(readFileSync(join(next.paths.profile, '.desktop-plugin-artifacts', `${first.source.sha256}.tgz`))).toEqual(first.archive)
+  }, 30_000)
+
+  it.each(['download', 'health'] as const)('does not retain ownership after optional replacement %s failure', async (phase) => {
+    const { root, manager } = setup()
+    const target = pluginFixture('optional-target')
+    const manual = pluginFixture('manual-verified')
+    mockVerifiedPlugins([target, manual])
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-install', source: target.source }, hooks())
+    await manager.mutate({ type: 'plugin-install', source: manual.source }, hooks())
+    if (phase === 'download') vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('optional download failure'))
+    const plan = { schemaVersion: 1, mode: 'exact', plugins: [{ required: false, source: target.source }] }
+    const state = await manager.reconcileProvisioning(plan, hooks({
+      healthCheck: async (staging) => {
+        const manifest = JSON.parse(readFileSync(join(staging, 'package.json'), 'utf8')) as { dependencies: Record<string, string> }
+        if (phase === 'health' && Object.hasOwn(manifest.dependencies, target.source.packageName)) throw new Error('optional health failure')
+      },
+    }))
+    expect(state.plugins).toMatchObject([{ name: target.source.packageName, status: 'optional-failed', phase }])
+    expect(state.removed).toEqual([])
+    expect(receiptStore(manager).owners).toEqual({ 'manual-verified': 'user' })
+    expect(receiptStore(manager).receipts[target.source.packageName]).toBeUndefined()
+    expect(existsSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${target.source.sha256}.tgz`))).toBe(false)
+    expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(['manual-verified'])
+    const count = calls(root).length
+    await manager.reconcileProvisioning(plan, hooks())
+    expect(calls(root)).toHaveLength(count)
+    expect(() => assertDesktopProvisioningInventory(manager.paths.profile, parseDesktopPluginProvisioningPlan(plan))).not.toThrow()
+    mockVerifiedPlugins([target, manual])
+    await manager.mutate({ type: 'plugin-install', source: target.source }, hooks())
+    expect(() => assertDesktopProvisioningInventory(manager.paths.profile, parseDesktopPluginProvisioningPlan(plan))).toThrow('active inventory')
+  }, 30_000)
+
+  it('rejects malformed legacy ownership evidence without changing the active profile', async () => {
+    const { root, manager } = setup()
+    const fixture = pluginFixture('manual-verified')
+    mockVerifiedPlugins([fixture])
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-install', source: fixture.source }, hooks())
+    const path = join(manager.paths.profile, 'desktop-plugin-receipts.json')
+    const legacy = JSON.stringify({ schemaVersion: 1, receipts: receiptStore(manager).receipts })
+    writeFileSync(path, legacy)
+    writeFileSync(join(manager.paths.profile, 'desktop-plugin-provisioning-state.json'), '{"schemaVersion":99}')
+    const count = calls(root).length
+    await expect(manager.mutate({ type: 'plugin-toggle', name: fixture.source.packageName, enabled: false }, hooks())).rejects.toThrow('invalid state')
+    expect(calls(root)).toHaveLength(count)
+    expect(readFileSync(path, 'utf8')).toBe(legacy)
+  })
+
+  it.each(['required-health', 'final-activation'] as const)('rolls back legacy ownership migration after %s failure', async (failure) => {
+    const { manager } = setup()
+    const manual = pluginFixture('manual-verified')
+    const baseline = pluginFixture('release-provider')
+    mockVerifiedPlugins([manual, baseline])
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-install', source: manual.source }, hooks())
+    const storePath = join(manager.paths.profile, 'desktop-plugin-receipts.json')
+    const legacy = JSON.stringify({ schemaVersion: 1, receipts: receiptStore(manager).receipts })
+    writeFileSync(storePath, legacy)
+    const manifest = readFileSync(join(manager.paths.profile, 'package.json'), 'utf8')
+    const lock = readFileSync(join(manager.paths.profile, 'pnpm-lock.yaml'), 'utf8')
+    let starts = 0
+    await expect(manager.reconcileProvisioning({ schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source: baseline.source }] }, hooks({
+      healthCheck: async () => { if (failure === 'required-health') throw new Error('ownership health failure') },
+      afterChange: async () => { if (++starts === 1 && failure === 'final-activation') throw new Error('ownership activation failure') },
+    }))).rejects.toThrow(/ownership/u)
+    expect(readFileSync(storePath, 'utf8')).toBe(legacy)
+    expect(readFileSync(join(manager.paths.profile, 'package.json'), 'utf8')).toBe(manifest)
+    expect(readFileSync(join(manager.paths.profile, 'pnpm-lock.yaml'), 'utf8')).toBe(lock)
+    expect(readFileSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${manual.source.sha256}.tgz`))).toEqual(manual.archive)
+    expect(existsSync(join(manager.paths.profile, 'desktop-plugin-provisioning-state.json'))).toBe(false)
+    expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(['manual-verified'])
+  })
+
+  it.each(['null', 'array', 'missing', 'extra', 'unknown-owner', 'unknown-field', 'receipt-array'] as const)(
+    'rejects malformed private receipt ownership: %s', async (damage) => {
+      const { root, manager } = setup()
+      const fixture = pluginFixture('manual-verified')
+      mockVerifiedPlugins([fixture])
+      await manager.applyRelease()
+      await manager.mutate({ type: 'plugin-install', source: fixture.source }, hooks())
+      const store = receiptStore(manager)
+      const malformed = {
+        ...store,
+        owners: damage === 'null' ? null : damage === 'array' ? [] : damage === 'missing' ? {}
+          : damage === 'extra' ? { ...store.owners, extra: 'user' }
+            : damage === 'unknown-owner' ? { 'manual-verified': 'automatic' } : store.owners,
+        ...(damage === 'unknown-field' ? { unexpected: true } : {}),
+        ...(damage === 'receipt-array' ? { receipts: [] } : {}),
+      }
+      const path = join(manager.paths.profile, 'desktop-plugin-receipts.json')
+      writeFileSync(path, JSON.stringify(malformed))
+      const count = calls(root).length
+      const beforeChange = vi.fn(async () => {})
+      await expect(manager.mutate({ type: 'plugin-toggle', name: fixture.source.packageName, enabled: false }, hooks({ beforeChange }))).rejects.toThrow(/receipt/u)
+      expect(beforeChange).not.toHaveBeenCalled()
+      expect(calls(root)).toHaveLength(count)
+      expect(readFileSync(path, 'utf8')).toBe(JSON.stringify(malformed))
+    },
+  )
+
+  it('distinguishes extra release ownership from user inventory and allows explicit reinstall after removal', async () => {
+    const { root, manager } = setup()
+    const fixture = pluginFixture('release-provider')
+    mockVerifiedPlugins([fixture])
+    const plan = { schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source: fixture.source }] }
+    await manager.applyRelease(hooks(), plan)
+    const empty = { schemaVersion: 1, mode: 'exact', plugins: [] }
+    const removed = await manager.reconcileProvisioning(empty, hooks())
+    expect(removed.removed).toEqual([fixture.source.packageName])
+    await manager.mutate({ type: 'plugin-install', source: fixture.source }, hooks())
+    expect(() => assertDesktopProvisioningInventory(manager.paths.profile, parseDesktopPluginProvisioningPlan(empty))).not.toThrow()
+    const count = calls(root).length
+    await manager.reconcileProvisioning(empty, hooks())
+    expect(calls(root)).toHaveLength(count)
+    const store = receiptStore(manager)
+    writeFileSync(join(manager.paths.profile, 'desktop-plugin-receipts.json'), JSON.stringify({
+      ...store, owners: { [fixture.source.packageName]: 'release' },
+    }))
+    expect(() => assertDesktopProvisioningInventory(manager.paths.profile, parseDesktopPluginProvisioningPlan(empty))).toThrow('active inventory')
+    const repaired = await manager.reconcileProvisioning(empty, hooks())
+    expect(repaired.removed).toEqual([fixture.source.packageName])
+    expect(manager.listPlugins()).toEqual([])
   })
 
   it.each((['download', 'validation', 'install', 'graph', 'health'] as const).flatMap(phase =>
@@ -791,7 +1192,7 @@ describe('desktop external plugin profile', () => {
     expect(manager.listPlugins()).toEqual([])
     expect(existsSync(artifact)).toBe(false)
     expect(JSON.parse(readFileSync(join(manager.paths.profile, 'desktop-plugin-receipts.json'), 'utf8')))
-      .toEqual({ schemaVersion: 1, receipts: {} })
+      .toEqual({ schemaVersion: 1, receipts: {}, owners: {} })
   })
 
   it('reconciles release-owned plugins exactly while preserving manual plugins and shared packages', async () => {
@@ -1059,7 +1460,7 @@ describe('desktop external plugin profile', () => {
     ['source', 'verified'],
     ['verified', 'source'],
     ['source', 'registry'],
-  ] as const)('replaces %s with %s without retaining opposite provenance', async (from, to) => {
+  ] as const)('replaces %s with %s without retaining displaced source locks or receipts', async (from, to) => {
     const { root, manager } = setup()
     await manager.applyRelease()
     const bytes = verifiedPluginArchive('plugin', '1.0.0')
@@ -1085,7 +1486,7 @@ describe('desktop external plugin profile', () => {
       }
       const receipts = join(manager.paths.profile, 'desktop-plugin-receipts.json')
       if (to !== 'verified' && existsSync(receipts)) {
-        expect(JSON.parse(readFileSync(receipts, 'utf8'))).toEqual({ schemaVersion: 1, receipts: {} })
+        expect(JSON.parse(readFileSync(receipts, 'utf8'))).toEqual({ schemaVersion: 1, receipts: {}, owners: {} })
       }
       expect((JSON.parse(readFileSync(join(manager.paths.profile, 'package.json'), 'utf8')) as { dsh: { profile: { bundles: string[] } } }).dsh.profile.bundles.filter(name => name === 'plugin')).toHaveLength(1)
     } finally { globalThis.fetch = original }

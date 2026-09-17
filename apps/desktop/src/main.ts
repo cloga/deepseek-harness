@@ -81,8 +81,10 @@ const MIME: Readonly<Record<string, string>> = {
 
 interface RuntimeResources {
   readonly node: string
+  readonly hostExecutable: string
   readonly pnpm: string
   readonly dsh: string
+  readonly profileResolution?: 'runtime'
   readonly provisioning?: string
 }
 
@@ -90,13 +92,22 @@ function runtimeResources(): RuntimeResources {
   const development = !app.isPackaged
   const node = (development ? process.env.DSH_DESKTOP_NODE_BINARY : undefined)
     ?? join(process.resourcesPath, 'runtime', 'node', process.platform === 'win32' ? 'node.exe' : 'node')
+  const hostExecutable = development ? node : process.execPath
   const pnpm = (development ? process.env.DSH_DESKTOP_PNPM_ENTRY : undefined)
     ?? join(process.resourcesPath, 'runtime', 'pnpm', 'bin', 'pnpm.mjs')
-  const dsh = (development ? process.env.DSH_DESKTOP_DSH_DIR : undefined) ?? join(process.resourcesPath, 'dsh')
+  const dsh = (development ? process.env.DSH_DESKTOP_DSH_DIR : undefined)
+    ?? (development ? join(process.resourcesPath, 'dsh') : join(app.getAppPath(), 'dsh'))
   const provisioning = development
     ? undefined
     : join(process.resourcesPath, 'desktop-provisioning', DESKTOP_PLUGIN_PROVISIONING_PLAN_FILE)
-  return { node, pnpm, dsh, ...(provisioning !== undefined && existsSync(provisioning) ? { provisioning } : {}) }
+  return {
+    node,
+    hostExecutable,
+    pnpm,
+    dsh,
+    ...(development ? {} : { profileResolution: 'runtime' as const }),
+    ...(provisioning !== undefined && existsSync(provisioning) ? { provisioning } : {}),
+  }
 }
 
 function developmentHostInspectPort(enabled: boolean): number | undefined {
@@ -247,7 +258,7 @@ async function main(): Promise<void> {
   const backend = new DesktopBackendController((onFailure) => {
     if (development === undefined) manager.assertProfileRuntime(activeProject)
     const hostInspectPort = developmentHostInspectPort(development !== undefined)
-    const host = new DesktopHostProcess(resources.node, development ?? resources.dsh, activeProject,
+    const host = new DesktopHostProcess(resources.hostExecutable, development ?? resources.dsh, activeProject,
       hostInspectPort, process.env, onFailure)
     return {
       start: () => host.start(),
@@ -291,7 +302,7 @@ async function main(): Promise<void> {
     beforeChange: () => backend.stop(),
     healthCheck: async (projectDir) => {
       manager.assertProfileRuntime(projectDir)
-      const host = new DesktopHostProcess(resources.node, resources.dsh, projectDir)
+      const host = new DesktopHostProcess(resources.hostExecutable, resources.dsh, projectDir)
       try {
         await host.start()
       } finally {

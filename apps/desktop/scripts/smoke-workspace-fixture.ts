@@ -90,7 +90,7 @@ function sharedWorkspacePackages(root: string): DesktopSharedPackage[] {
 /**
  * Exercise the built loader and Models page without an installed Desktop or real authentication service.
  * @param repository - Workspace containing the completed source build.
- * @returns Directory containing this run's successful screenshots and provenance.
+ * @returns Directory containing this run's successful screenshots and build evidence.
  */
 export async function runDesktopWorkspaceFixture(repository: string): Promise<string> {
   const repo = resolve(repository)
@@ -140,7 +140,7 @@ export async function runDesktopWorkspaceFixture(repository: string): Promise<st
       files: [],
     }
     await smokeDesktopRuntime(root, process.execPath, runtime, 'msedge', output, 'workspace-linked')
-    writeFileSync(join(output, 'workspace-provenance.json'), JSON.stringify({
+    writeFileSync(join(output, 'workspace-evidence.json'), JSON.stringify({
       repository: repo,
       head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim(),
       dirtyWorktree: execFileSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' }).trim() !== '',

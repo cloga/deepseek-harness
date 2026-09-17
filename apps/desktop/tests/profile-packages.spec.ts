@@ -1,12 +1,18 @@
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, expect, it } from 'vitest'
 import { createPluginProfile } from '../src/project-manager.ts'
-import { linkDesktopHostPackages, unlinkDesktopHostPackages, validateDesktopPluginGraph } from '../src/profile-packages.ts'
+import {
+  linkDesktopHostPackages,
+  readDesktopProfileState,
+  recordDesktopRuntimeProfile,
+  unlinkDesktopHostPackages,
+  validateDesktopPluginGraph,
+} from '../src/profile-packages.ts'
 import { runtimeFixture, writePackage } from './runtime-fixture.ts'
 
 const roots: string[] = []
@@ -34,6 +40,16 @@ it('loads one shared ESM instance from both host and external plugin while keepi
   writeFileSync(entry, `import {identity} from '@deepseek-ai/cordis'; import ordinary from 'ordinary'; import * as plugin from ${JSON.stringify(pathToFileURL(join(plugin, 'index.js')).href)}; console.log(JSON.stringify({same:identity===plugin.identity, host:ordinary, plugin:plugin.ordinary}))`)
   const output = execFileSync(process.execPath, [entry], { encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' } })
   expect(JSON.parse(output)).toEqual({ same: true, host: 'host', plugin: 'plugin' })
+})
+it('runtime resolution retains and ignores an existing Link generation', () => {
+  const { dsh, runtime, profile } = fixture()
+  const links = readDesktopProfileState(profile)?.links
+  expect(links?.length).toBeGreaterThan(0)
+
+  recordDesktopRuntimeProfile(profile, runtime)
+  expect(readDesktopProfileState(profile)?.links).toEqual(links)
+  expect(lstatSync(join(profile, 'node_modules/@deepseek-ai/cordis')).isSymbolicLink()).toBe(true)
+  expect(() => { validateDesktopPluginGraph(profile, dsh, runtime, [], 'runtime') }).not.toThrow()
 })
 it.each(['nested', 'alias'])('rejects a %s second copy of a host package', (placement) => {
   const { dsh, runtime, profile } = fixture()

@@ -104,6 +104,8 @@ jobs:
         run: pnpm exec vitest run apps/desktop apps/desktop-host --maxWorkers=1
 
       - name: Prepare reviewed managed capability
+        env:
+          DSH_DESKTOP_RELEASE_GITHUB_TOKEN: ${{ github.token }}
         run: >-
           pnpm exec tsx apps/desktop/scripts/fork-release.ts prepare
           --plan ${{ env.RELEASE_PLAN }}
@@ -120,6 +122,11 @@ jobs:
           DSH_DESKTOP_PLUGIN_PROVISIONING_PLAN: ${{ github.workspace }}\${{ env.PROVISIONING_PATH }}
         run: pnpm run package:desktop:win:x64:unsigned
 
+      - name: Verify ASAR runtime inventory canaries with packaged Electron
+        run: >-
+          node apps/desktop/tests/fixtures/packaged-runtime-smoke.mjs
+          apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe
+
       - name: Verify copied helper bootstrap and acknowledgement
         run: >-
           pnpm exec tsx apps/desktop/scripts/smoke-helper.ts
@@ -134,6 +141,21 @@ jobs:
           pnpm exec tsx apps/desktop/tests/fixtures/copilot-release-smoke.ts
           --application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe
           --output dist/desktop-copilot-acceptance
+
+      - name: Verify real acceptance observer failure cleanup
+        id: observer_cleanup
+        run: >-
+          pnpm exec tsx apps/desktop/tests/fixtures/copilot-observer-smoke.ts
+          --application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe
+          --output dist/desktop-copilot-observer-canary
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && (steps.observer_cleanup.outcome == 'success' || steps.observer_cleanup.outcome == 'failure') }}
+        with:
+          name: desktop-copilot-observer-canary-${{ steps.plan.outputs.version }}
+          path: dist/desktop-copilot-observer-canary/*
+          if-no-files-found: error
+          retention-days: 7
 
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() && (steps.copilot_acceptance.outcome == 'success' || steps.copilot_acceptance.outcome == 'failure') }}
@@ -292,6 +314,8 @@ jobs:
       - run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Run the shipped source discovery against GitHub
+        env:
+          DSH_DESKTOP_RELEASE_GITHUB_TOKEN: ${{ github.token }}
         run: >-
           pnpm exec tsx apps/desktop/scripts/fork-release.ts verify-remote
           --plan ${{ env.RELEASE_PLAN }}

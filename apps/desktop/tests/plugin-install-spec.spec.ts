@@ -85,7 +85,7 @@ describe('parseDesktopPluginInstallSpec', () => {
     expect(() => parseDesktopPluginInstallSpec(input, cwd)).toThrow(/desktop plugin install:/u)
   })
 
-  it('retains requested provenance independently of normalized Windows paths', () => {
+  it('retains the requested spec independently of normalized Windows paths', () => {
     expect(parseDesktopPluginInstallSpec('  file:C:/plugins/../memory  ', '/unused')).toEqual({
       kind: 'directory', spec: 'file:C:/plugins/../memory', path: 'C:\\memory',
     })

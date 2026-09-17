@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Use `dsh-fs-local` to read, list, atomically write, and edit files on the host filesystem. Relative paths resolve from a configurable base directory, while absolute paths and parent traversal remain unrestricted. Paths and symlinks that reach the same file share one identity. Writes preserve file permissions, and optional version guards reject stale overwrites. Choose this package for direct host access; use `fs-sandbox` for confined mutations or `fs-e2b` for files in a remote execution world.
+Use `dsh-fs-local` to read, list, atomically write, and edit files on the host filesystem. Relative paths resolve from a configurable base directory, while absolute paths and parent traversal remain unrestricted. Paths and symlinks that reach the same file share one identity. Writes preserve file permissions, and optional version guards reject stale overwrites. Choose this package for direct host access; use `fs-sandbox` for confined mutations.
 
 ## Table of Contents
 
@@ -29,11 +29,11 @@ Mount this backend when a composition needs `ctx.fs` backed by the real host fil
 
 ### When to choose it
 
-Choose `fs-local` for ordinary host-file access in a single process. Choose [`fs-sandbox`](../fs-sandbox/README.md) when a session's writes and edits must be confined to its workspace and temp roots — it extends this backend and adds only the mode fence. Choose [`fs-e2b`](../../e2b/fs-e2b/README.md) when files must live in a remote execution world shared with subprocesses. `config.cwd` is a resolution default, not a containment boundary: absolute paths and `..` escape it.
+Choose `fs-local` for ordinary host-file access in a single process. Choose [`fs-sandbox`](../fs-sandbox/README.md) when a session's writes and edits must be confined to its workspace and temp roots — it extends this backend and adds only the mode fence. `config.cwd` is a resolution default, not a containment boundary: absolute paths and `..` escape it.
 
 ### Minimal configuration
 
-Load the backend with a base directory; relative paths resolve against it, and absolute paths ignore it.
+Load the backend with a base directory; relative paths resolve against it, and absolute paths ignore it. A relative base is anchored to the provider process working directory, and display paths remain absolute. On POSIX, resolution follows filesystem semantics before lexical normalization: `symlink/..` reaches the parent of the link target, including when the final file does not exist yet. Directory listings preserve the same physical traversal in displayed child paths. Windows retains native drive-relative normalization.
 
 ```yaml
 - name: '@deepseek-ai/dsh-fs-local'
@@ -127,7 +127,7 @@ No direct invalidation; the named consumer owns any request-prefix changes.
 These limits define when the local backend is a poor fit or needs special operational care. They are current package constraints, not a general filesystem comparison or a task backlog.
 
 - **`config.cwd` is not a sandbox** — it is a resolution default, not containment: absolute paths and `..` escape it. Enforce containment with a stricter `ctx.fs` backend or a permission plugin on the `tools/execute` waterfall.
-- **Version tokens depend on filesystem metadata** — they combine device, inode, size, nanosecond mtime, and nanosecond ctime; a storage layer that cannot update any of those facts for a rewrite can still defeat the stale guard.
+- **Version tokens depend on filesystem metadata** — they combine device, inode, size, and nanosecond mtime with birth time on Windows or change time elsewhere. Windows excludes change time because NTFS may advance it during a read; a storage layer that preserves every selected fact across a rewrite can still defeat the stale guard.
 - **`editText` holds the whole file (plus the edited copy) in memory** — streaming exists only on the read path.
 - **A sub-limit overwrite still buffers a contextual basis** — `writeText` may retain up to just below `config.diffBasisMaxBytes` of prior text in addition to the caller-owned replacement; the bound does not cap the returned `after` value or the whole-file presentation fallback.
 - **Binary detection is asymmetric** — reads NUL-sample only the first 8192 bytes while edits scan the whole buffer, so a file with a late NUL reads fine but rejects edits.

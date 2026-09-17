@@ -51,7 +51,7 @@ export interface DesktopManagedUpdateCapability {
     readonly maximumSequence: 1
     readonly expectedSource: {
       readonly version: string
-      readonly commit: string
+      readonly tag: string
     }
   }
 }
@@ -331,9 +331,10 @@ export function parseDesktopManagedUpdateCapability(value: unknown): DesktopMana
       throw new Error('desktop managed update: unsupported migration capability')
     }
     const legacySource = record(legacy.expectedSource, 'capability.migration.expectedSource')
-    exactKeys(legacySource, ['version', 'commit'], 'capability.migration.expectedSource')
+    exactKeys(legacySource, ['version', 'tag'], 'capability.migration.expectedSource')
     const legacyVersion = string(legacySource.version, 'capability.migration.expectedSource.version')
-    if (!SEMVER.test(legacyVersion) || typeof legacySource.commit !== 'string' || !COMMIT.test(legacySource.commit)) {
+    const legacyTag = string(legacySource.tag, 'capability.migration.expectedSource.tag')
+    if (!SEMVER.test(legacyVersion) || legacyTag !== `dsh-v${legacyVersion}`) {
       throw new Error('desktop managed update: capability migration source is invalid')
     }
     migration = {
@@ -342,7 +343,7 @@ export function parseDesktopManagedUpdateCapability(value: unknown): DesktopMana
       manifestSha256: hash(legacy.manifestSha256, 'capability.migration.manifestSha256'),
       assetSha256: hash(legacy.assetSha256, 'capability.migration.assetSha256'),
       maximumSequence: 1,
-      expectedSource: { version: legacyVersion, commit: legacySource.commit },
+      expectedSource: { version: legacyVersion, tag: legacyTag },
     }
   }
   return {

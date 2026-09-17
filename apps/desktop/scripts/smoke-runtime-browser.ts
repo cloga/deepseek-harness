@@ -234,7 +234,7 @@ export async function smokeDesktopRuntimeBrowser(
       if (failures.length > 0) throw new Error(`desktop smoke: browser errors: ${failures.join('; ')}`)
       if (bridge.errors.length > 0) throw new AggregateError(bridge.errors, 'desktop smoke: browser carrier failed')
       if (evidenceDirectory !== undefined) {
-        writeFileSync(join(evidenceDirectory, 'browser-provenance.json'), JSON.stringify({
+        writeFileSync(join(evidenceDirectory, 'browser-evidence.json'), JSON.stringify({
           origin: bridge.origin,
           viewport: { width: 1680, height: 1000 },
           capture: 'five screenshots from two acceptance pages in one isolated browser and Host run',

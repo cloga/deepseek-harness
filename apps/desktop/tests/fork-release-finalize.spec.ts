@@ -25,7 +25,9 @@ import {
   parseDesktopPluginProvisioningPlan,
 } from '../src/plugin-provisioning.ts'
 
-vi.mock('node:child_process', () => ({ execFileSync: vi.fn() }))
+vi.mock('node:child_process', async importOriginal => ({
+  ...await importOriginal<typeof import('node:child_process')>(), execFileSync: vi.fn(),
+}))
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
   return {
@@ -69,7 +71,7 @@ function fixture() {
   writeJson(provisioningPath, plan.desktopProvisioning)
   writeJson(packagedProvisioning, plan.desktopProvisioning)
   writeFileSync(join(resources, 'managed-update', 'helper.mjs'), 'export const standalone = true\n')
-  writeJson(join(resources, 'dsh', 'desktop-runtime.json'), { fixture: true })
+  writeJson(join(root, 'recorded-runtime.json'), { fixture: true })
   writeFileSync(join(artifacts, 'win-unpacked', `${plan.identity.executableName}.exe`), 'fixture executable')
   writeFileSync(join(artifacts, `cloga-deepseek-harness-${plan.version}-win-x64.exe`), 'fixture installer')
   return {
@@ -129,6 +131,10 @@ beforeEach(() => {
     }
     if (args?.includes('--version') || args?.includes('pnpm --version')) return '11.7.0'
     if (file.endsWith('powershell.exe')) return 'NotSigned'
+    if (file.endsWith('cloga-deepseek-harness.exe') && args?.[0] === '--input-type=module') {
+      expect(args[2]).toContain(JSON.stringify(join(root, 'artifacts', 'win-unpacked', 'resources', 'app.asar', 'dsh', 'desktop-runtime.json')))
+      return readFileSync(join(root, 'recorded-runtime.json'))
+    }
     throw new Error(`Unexpected subprocess: ${file} ${args?.join(' ')}`)
   })
 })
@@ -162,6 +168,7 @@ describe('Desktop fork release finalization identities', () => {
     const { receiptSha256, ...payload } = receipt
     expect(receiptSha256).toBe(managedUpdateJsonSha256(payload))
     expect(receipt.artifacts).toMatchObject({
+      runtimeSha256: hash(join(root, 'recorded-runtime.json')),
       capabilitySha256: hash(f.packagedCapability),
       provisioning: {
         sha256: hash(f.packagedProvisioning),
@@ -300,7 +307,7 @@ describe('Desktop fork release finalization identities', () => {
       'packaged capability': f.packagedCapability,
       'packaged helper': join(unpacked, 'resources', 'managed-update', 'helper.mjs'),
       'packaged executable': join(unpacked, `${f.plan.identity.executableName}.exe`),
-      'packaged runtime': join(unpacked, 'resources', 'dsh', 'desktop-runtime.json'),
+      'packaged runtime': join(root, 'recorded-runtime.json'),
       'published installer': join(f.output, installer),
       'published provisioning': join(f.output, 'desktop-provisioning.json'),
       'published manifest': join(f.output, 'release.json'),

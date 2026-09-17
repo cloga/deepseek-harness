@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { join } from 'node:path'
 import { DESKTOP_IPC, type DesktopUpdateState } from '../src/ipc.ts'
+import type { DesktopManagedUpdateSelection } from '../src/managed-update-coordinator.ts'
+import type { DesktopManagedUpdateLaunch } from '../src/managed-update-launcher.ts'
+import { managedManifest } from './managed-update-fixture.ts'
 
 const harness = await vi.hoisted(async () => {
   const { EventEmitter } = await import('node:events')
@@ -12,6 +15,8 @@ const harness = await vi.hoisted(async () => {
   }
   const windows: FakeWindow[] = []
   const hosts: FakeHost[] = []
+  const managerRuntimes: unknown[] = []
+  const managedHandoffs: Array<(selection: DesktopManagedUpdateSelection) => Promise<void>> = []
   const handlers = new Map<string, (event: { senderFrame: { url: string } }) => unknown>()
   let pluginsEnabled = false
   let preparing = deferred()
@@ -81,7 +86,8 @@ const harness = await vi.hoisted(async () => {
     }),
   })
   return {
-    windows, hosts, handlers, app, FakeWindow, FakeHost,
+    windows, hosts, managerRuntimes, managedHandoffs, handlers, app, FakeWindow, FakeHost,
+    launchUpdate: vi.fn(async (_options: DesktopManagedUpdateLaunch) => { throw new Error('helper fixture stopped') }),
     dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn() },
     menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn() },
     publishUpdate: (state: DesktopUpdateState) => updatePublisher(state),
@@ -112,7 +118,8 @@ const harness = await vi.hoisted(async () => {
     set managedUpdates(value: boolean) { managedUpdates = value },
     setHostImpacts(value: typeof hostImpacts) { hostImpacts = [...value] },
     reset() {
-      windows.length = 0; hosts.length = 0; handlers.clear(); app.removeAllListeners()
+      windows.length = 0; hosts.length = 0; managerRuntimes.length = 0; managedHandoffs.length = 0
+      handlers.clear(); app.removeAllListeners()
       app.isPackaged = true
       pluginsEnabled = false
       managedUpdates = false
@@ -149,6 +156,7 @@ vi.mock('../src/project-manager.ts', () => ({
     readonly applyRelease = harness.applyRelease
     readonly assertProfileRuntime = harness.assertProfileRuntime
     canRecoverProfile = harness.canRecoverProfile
+    constructor(_paths: unknown, runtime: unknown) { harness.managerRuntimes.push(runtime) }
     async reconcileProvisioning() {}
     async mutate(_mutation: unknown, hooks: { beforeChange(): Promise<void>; afterChange(): Promise<void> }) {
       await hooks.beforeChange()
@@ -199,10 +207,16 @@ vi.mock('../src/managed-update-state.ts', () => ({
     }
     : undefined,
 }))
+vi.mock('../src/managed-update-launcher.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/managed-update-launcher.ts')>()
+  return { ...actual, launchDesktopManagedUpdate: harness.launchUpdate }
+})
 vi.mock('../src/managed-update-coordinator.ts', () => ({
   DesktopManagedUpdateCoordinator: class {
-    constructor(_capability: unknown, _sequence: unknown, publish: (state: DesktopUpdateState) => DesktopUpdateState) {
+    constructor(_capability: unknown, _sequence: unknown, publish: (state: DesktopUpdateState) => DesktopUpdateState,
+      install: (selection: DesktopManagedUpdateSelection) => Promise<void>) {
       harness.setUpdatePublisher(publish)
+      harness.managedHandoffs.push(install)
     }
     async check() {
       harness.publishUpdate({ phase: 'checking', mode: 'github-release-managed' })
@@ -761,14 +775,45 @@ describe('desktop main startup', () => {
     expect(harness.applyRelease).toHaveBeenCalledTimes(1)
     expect(harness.assertProfileRuntime).toHaveBeenCalledWith('desktop-test-profile')
     expect(harness.hosts[0]).toMatchObject({
-      node: join('desktop-test-resources', 'runtime', 'node', process.platform === 'win32' ? 'node.exe' : 'node'),
-      runtime: join('desktop-test-resources', 'dsh'),
+      node: process.execPath,
+      runtime: join(harness.app.getAppPath(), 'dsh'),
       profile: 'desktop-test-profile',
     })
+    expect(harness.managerRuntimes[0]).toMatchObject({ profileResolution: 'runtime' })
     expect(harness.hosts[0]!.start).toHaveBeenCalledTimes(1)
     expect(harness.windows).toHaveLength(1)
     expect(window.urls).toEqual(['dsh-app://shell/startup.html', 'dsh-app://app/index.html'])
     expect(invoke(DESKTOP_IPC.backendStatus)).toEqual({ phase: 'ready' })
+  })
+
+  it('keeps Electron Host execution separate from the bundled Node used by pnpm and the copied helper', async () => {
+    harness.managedUpdates = true
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    const bundledNode = join(process.resourcesPath, 'runtime', 'node', process.platform === 'win32' ? 'node.exe' : 'node')
+    expect(harness.managerRuntimes[0]).toMatchObject({
+      node: bundledNode,
+      dsh: join(harness.app.getAppPath(), 'dsh'),
+      profileResolution: 'runtime',
+    })
+    expect(harness.hosts[0]!.node).toBe(process.execPath)
+    const manifest = managedManifest()
+    await expect(harness.managedHandoffs[0]!({
+      kind: 'source',
+      manifest,
+      manifestUrl: 'https://github.com/cloga/deepseek-harness/releases/download/example/release.json',
+      manifestSha256: manifest.manifestSha256,
+      assetSha256: manifest.installer.sha256,
+    })).rejects.toThrow('helper fixture stopped')
+    expect(harness.launchUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      nodeExecutable: bundledNode,
+      helperBundle: 'desktop-test-helper.mjs',
+    }))
+    expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
   })
 
   it('starts the unpackaged Host from the application development directory', async () => {

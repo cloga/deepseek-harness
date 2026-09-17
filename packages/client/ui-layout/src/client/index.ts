@@ -15,6 +15,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
 import type { HostObservable, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PanelInfo } from './service.ts'
 import { AppFrame } from './AppFrame.tsx'
+import { DesktopUpdateAdapter, desktopUpdateBridge } from './desktop-update-adapter.ts'
+import type { DesktopUpdateInject } from './desktop-update-adapter.ts'
 import { createLayoutStore } from './stores.ts'
 import { LayoutController } from './service.ts'
 import { ThemePresenter } from './theme-presenter.ts'
@@ -136,6 +138,8 @@ export const inject = ['slots', 'theme', 'locale']
  */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register('layout', { zh, en }), 'ui-layout: dictionaries')
+  const desktopUpdates = new DesktopUpdateAdapter(desktopUpdateBridge(window))
+  ctx.effect(() => desktopUpdates.connect(), 'ui-layout: Desktop update subscription')
   ctx.effect(() => {
     const handle = createLayoutStore()
     const instance = handle.create()
@@ -162,6 +166,10 @@ export function apply(ctx: ClientContext): void {
         'shell.overlay': { kind: 'list', scope: 'root' },
       },
       store,
+      inject: (): DesktopUpdateInject => ({
+        hooks: { desktopUpdate: desktopUpdates },
+        reviewDesktopUpdate: desktopUpdates.review,
+      }),
     }, AppFrame)
     const disposePanels = ctx.slots.subscribe('main', retainMainPanels)
     retainMainPanels()
