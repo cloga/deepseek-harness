@@ -40,6 +40,13 @@ export interface DesktopNpmRegistryPluginSource {
   readonly spec: string
 }
 
+/** General package input; source snapshots are not verified Release attestations. */
+export interface DesktopPackageSpecPluginSource {
+  readonly schemaVersion: typeof DESKTOP_PLUGIN_SOURCE_SCHEMA_VERSION
+  readonly type: 'packageSpec'
+  readonly spec: string
+}
+
 /** Immutable GitHub Release asset and dependency-registry lock. */
 export interface DesktopGithubReleasePluginSource {
   readonly schemaVersion: typeof DESKTOP_PLUGIN_SOURCE_SCHEMA_VERSION
@@ -68,7 +75,7 @@ export interface DesktopGithubReleasePluginSource {
 }
 
 /** Supported Desktop plugin package sources. */
-export type DesktopPluginSource = DesktopNpmRegistryPluginSource | DesktopGithubReleasePluginSource
+export type DesktopPluginSource = DesktopNpmRegistryPluginSource | DesktopGithubReleasePluginSource | DesktopPackageSpecPluginSource
 
 /** GitHub facts and local artifact identity established before package installation. */
 export interface DesktopVerifiedPluginArtifact {
@@ -170,6 +177,11 @@ export function parseDesktopPluginSource(value: unknown): DesktopPluginSource {
     assertKeys(value, ['schemaVersion', 'type', 'spec'])
     assertString(value.spec, 'npm registry spec')
     return { schemaVersion: 1, type: 'npmRegistry', spec: value.spec }
+  }
+  if (value.type === 'packageSpec') {
+    assertKeys(value, ['schemaVersion', 'type', 'spec'])
+    assertString(value.spec, 'package source spec')
+    return { schemaVersion: 1, type: 'packageSpec', spec: value.spec }
   }
   if (value.type !== 'githubRelease') throw new Error('desktop plugin source: unsupported source type')
   assertKeys(value, [
