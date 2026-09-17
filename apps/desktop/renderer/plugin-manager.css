@@ -102,7 +102,79 @@ li {
   margin-left: 8px;
 }
 
+.package-identity {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.package-source,
+.source-help {
+  color: GrayText;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.package-source {
+  display: block;
+  margin-top: 4px;
+}
+
+.source-help {
+  margin: 8px 0 0;
+}
+
 .package-actions {
   display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
+  max-width: 55%;
+}
+
+dialog {
+  width: min(540px, calc(100vw - 64px));
+  padding: 24px;
+  border: 1px solid ButtonBorder;
+  border-radius: 10px;
+  background: Canvas;
+  color: CanvasText;
+}
+
+dialog::backdrop {
+  background: rgb(0 0 0 / 35%);
+}
+
+dialog form {
+  margin: 0;
+}
+
+dialog label {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+dialog input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+@media (max-width: 580px) {
+  li {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .package-actions {
+    max-width: 100%;
+    justify-content: flex-start;
+  }
 }

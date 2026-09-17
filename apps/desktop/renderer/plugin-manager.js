@@ -9,7 +9,10 @@ async function main() {
   document.querySelector('#title').textContent = messages.pluginManagerTitle
   document.querySelector('#description').textContent = messages.pluginManagerDescription
   document.querySelector('#refresh').textContent = messages.refresh
-  document.querySelector('#package-label').textContent = messages.npmPackage
+  document.querySelector('#package-label').textContent = messages.pluginSource
+  document.querySelector('#package-spec').placeholder = messages.pluginSourcePlaceholder
+  document.querySelector('#source-help').textContent = messages.pluginSourceHelp
+  document.querySelector('#source-build-notice').textContent = messages.pluginSourceBuildNotice
   document.querySelector('#install').textContent = messages.install
   document.querySelector('#installed-heading').textContent = messages.installed
   document.querySelector('#empty').textContent = messages.noPlugins
@@ -24,10 +27,106 @@ async function main() {
   const form = document.querySelector('#install-form')
   const input = document.querySelector('#package-spec')
   const refresh = document.querySelector('#refresh')
+  const dialog = document.querySelector('#package-dialog')
+  const dialogInput = document.querySelector('#package-dialog-input')
+  const dialogLabel = document.querySelector('#package-dialog-label')
+  const dialogConfirm = document.querySelector('#package-dialog-confirm')
+  document.querySelector('#package-dialog-cancel').textContent = messages.cancel
+  let pendingPrompt
+  let promptOpener
+
+  function finishPrompt(value) {
+    if (!pendingPrompt) return
+    const settle = pendingPrompt
+    pendingPrompt = undefined
+    if (dialog.open) dialog.close()
+    promptOpener?.focus()
+    promptOpener = undefined
+    settle(value)
+  }
+
+  function requestInput(label, initial, confirm, opener) {
+    if (pendingPrompt) return Promise.resolve(null)
+    return new Promise(resolve => {
+      pendingPrompt = resolve
+      promptOpener = opener
+      dialogLabel.textContent = label
+      dialogInput.value = initial
+      dialogConfirm.textContent = confirm
+      dialog.showModal()
+      dialogInput.focus()
+      dialogInput.select()
+    })
+  }
+
+  document.querySelector('#package-dialog-form').addEventListener('submit', event => {
+    event.preventDefault()
+    finishPrompt(dialogInput.value.trim())
+  })
+  document.querySelector('#package-dialog-cancel').addEventListener('click', () => finishPrompt(null))
+  dialog.addEventListener('cancel', event => {
+    event.preventDefault()
+    finishPrompt(null)
+  })
 
   function setBusy(busy, statusMessage = '') {
     for (const control of document.querySelectorAll('button, input')) control.disabled = busy
     status.textContent = statusMessage
+  }
+
+  function reinstallSpec(plugin) {
+    const resolved = plugin.resolution?.resolved
+    if (resolved?.startsWith('file:')) {
+      try {
+        const url = new URL(resolved)
+        if (url.search !== '' || url.hash !== '' || /[\\\u0000-\u001f]/u.test(resolved) || /%2f|%5c/iu.test(url.pathname)) return ''
+        const path = decodeURIComponent(url.pathname)
+        if (/[\\\u0000-\u001f]/u.test(path)) return ''
+        if (url.hostname !== '' && url.hostname !== 'localhost') {
+          return `file:\\\\${url.hostname}${path.replaceAll('/', '\\')}`
+        }
+        return `file:${/^\/[A-Za-z]:\//u.test(path) ? path.slice(1) : path}`
+      } catch {
+        // A malformed stored file URL requires explicit re-entry, never a relative fallback.
+        return ''
+      }
+    }
+    const spec = plugin.source.spec
+    return /^(?:file:|link:|\.{1,2}[\\/]|[\\/]|[A-Za-z]:[\\/])/iu.test(spec) ? '' : spec
+  }
+
+  function sourceDisclosure(plugin) {
+    const source = plugin.source
+    if (source?.type !== 'packageSpec' && source?.type !== 'githubRelease') return undefined
+    const disclosure = document.createElement('span')
+    disclosure.className = 'package-source'
+    if (source.type === 'githubRelease') {
+      disclosure.textContent = message('sourceSummary', { type: messages.sourceRelease, spec: `${source.owner}/${source.repo}@${source.tag}` })
+      const guidance = document.createElement('span')
+      guidance.className = 'package-source'
+      guidance.textContent = messages.sourceReleaseUpdate
+      disclosure.append(guidance)
+      return disclosure
+    }
+    const resolution = plugin.resolution
+    const type = resolution?.commit ? messages.sourceGithub
+      : resolution?.resolved.startsWith('file:') ? messages.sourceLocal
+        : resolution?.resolved.startsWith('https:') ? messages.sourceArchive : messages.sourcePackage
+    disclosure.textContent = message('sourceSummary', { type, spec: source.spec })
+    if (resolution) {
+      const details = document.createElement('span')
+      details.className = 'package-source'
+      details.textContent = [
+        ...(resolution.commit ? [message('sourceCommit', { commit: resolution.commit.slice(0, 12) })] : []),
+        message('sourceDigest', { sha256: resolution.sha256.slice(0, 12) }),
+      ].join(' · ')
+      details.title = [message('sourceResolved', { resolved: resolution.resolved }),
+        ...(resolution.commit ? [message('sourceCommit', { commit: resolution.commit })] : []),
+        message('sourceDigest', { sha256: resolution.sha256 }),
+      ].join('\n')
+      disclosure.append(details)
+    }
+    return disclosure
   }
 
   async function render() {
@@ -38,10 +137,13 @@ async function main() {
     list.replaceChildren(...plugins.map(plugin => {
       const item = document.createElement('li')
       const identity = document.createElement('span')
+      identity.className = 'package-identity'
       const version = document.createElement('span')
       version.className = 'package-version'
       version.textContent = plugin.enabled ? plugin.version : `${plugin.version} · ${messages.disabled}`
       identity.append(document.createTextNode(plugin.name), version)
+      const disclosure = sourceDisclosure(plugin)
+      if (disclosure) identity.append(disclosure)
       const remove = document.createElement('button')
       remove.type = 'button'
       remove.textContent = messages.remove
@@ -51,10 +153,16 @@ async function main() {
       ))
       const update = document.createElement('button')
       update.type = 'button'
-      update.textContent = messages.update
-      update.addEventListener('click', () => {
-        const next = window.prompt(message('targetVersion', { name: plugin.name }), plugin.version)?.trim()
-        if (next === undefined || next === '' || next === plugin.version) return
+      update.textContent = plugin.source?.type === 'packageSpec' ? messages.reinstallFromSource : messages.update
+      update.addEventListener('click', async () => {
+        if (plugin.source?.type === 'packageSpec') {
+          const next = await requestInput(message('reinstallSourcePrompt', { name: plugin.name, spec: plugin.source.spec }), reinstallSpec(plugin), messages.reinstallFromSource, update)
+          if (next === null || next === '') return
+          void run(() => api.plugins.add(next), message('installing', { spec: next }))
+          return
+        }
+        const next = await requestInput(message('targetVersion', { name: plugin.name }), plugin.version, messages.update, update)
+        if (next === null || next === '' || next === plugin.version) return
         void run(() => api.plugins.update(plugin.name, next), message('updating', { name: plugin.name }))
       })
       const actions = document.createElement('span')
@@ -65,7 +173,9 @@ async function main() {
       toggle.addEventListener('click', () => void run(
         () => api.plugins.toggle(plugin.name, !plugin.enabled), messages.changingActivation,
       ))
-      actions.append(toggle, update, remove)
+      actions.append(toggle)
+      if (plugin.source?.type !== 'githubRelease') actions.append(update)
+      actions.append(remove)
       item.append(identity, actions)
       return item
     }))
