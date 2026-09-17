@@ -27,6 +27,8 @@ The local startup page exposes startup status and available recovery actions; th
 
 Electron chooses typed English or Chinese shell copy from its application locale and falls back to English. Menus, native dialogs, the startup page, and the plugin-management renderer use the same locale payload; the repository Client UI i18n gate checks these desktop sources.
 
+Windows packaging and every application window use [assets/whale.png](assets/whale.png), a 256-pixel transparent rendering of the shared [whale favicon](../web/public/favicon.svg). Packaging includes this asset inside the application archive and uses it for the executable and installer-generated shortcut icons; a missing or malformed image fails packaging. Changing a shortcut alone does not replace a running window's icon. Install the updated release and reopen Desktop only after saving active work.
+
 ### Runtime and plugin activation
 
 The signed `resources/dsh/desktop-runtime.json` binds the shell version, bundled Node version, platform, architecture, shared package versions, and final file inventory. Startup reads the metadata and checks shared package records. Release schema, shell version, target compatibility, and file integrity are verified during packaging. Core packages are never copied into profile storage or installed by pnpm at first launch.
