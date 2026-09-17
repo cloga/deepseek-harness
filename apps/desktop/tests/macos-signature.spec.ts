@@ -126,6 +126,8 @@ describe('desktop macOS release signature', () => {
       DSH_DESKTOP_MANAGED_UPDATE_CAPABILITY: 'C:\\release\\capability.json',
       DSH_DESKTOP_PLUGIN_PROVISIONING_PLAN: 'C:\\release\\provisioning.json',
     }, 'win32', 'x64')
+    expect(portablePath(config.win.icon)).toMatch(/\/assets\/whale\.png$/u)
+    expect(config.files).toContain('assets/whale.png')
     expect(config.extraResources).toContainEqual({
       from: 'C:\\release\\capability.json',
       to: 'managed-update/capability.json',

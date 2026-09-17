@@ -41,7 +41,7 @@ const harness = await vi.hoisted(async () => {
     readonly show = vi.fn()
     readonly focus = vi.fn()
     readonly restore = vi.fn()
-    constructor(readonly options: { show: boolean }) { super(); windows.push(this) }
+    constructor(readonly options: { show: boolean; icon: string }) { super(); windows.push(this) }
     isDestroyed() { return this.destroyed }
     isMinimized() { return false }
     async loadURL(url: string) {
@@ -240,6 +240,12 @@ afterEach(async () => {
 })
 
 describe('desktop main startup', () => {
+  it('uses the packaged whale icon before the Host is ready', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    expect(harness.windows[0]!.options.icon).toBe(join(harness.app.getAppPath(), 'assets', 'whale.png'))
+  })
+
   it.each([0, 1])('automatically discovers updates and requires installation consent: response %s', async (response) => {
     harness.managedUpdates = true
     harness.dialog.showMessageBox.mockResolvedValue({ response })

@@ -62,6 +62,12 @@ export function createElectronBuilderConfig(
     : resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
   const buildPaths = desktopTargetBuildPaths(resolveDesktopBuildTarget(env, hostPlatform, hostArch))
   const runtimeVersion = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
+  const iconPath = fileURLToPath(new URL('./assets/whale.png', import.meta.url))
+  const icon = readFileSync(iconPath)
+  if (icon.length < 24 || icon.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a'
+    || icon.readUInt32BE(16) !== 256 || icon.readUInt32BE(20) !== 256) {
+    throw new Error('desktop package: whale icon must be a 256x256 PNG')
+  }
   return {
     appId,
     productName: forkRelease?.productName ?? 'DeepSeek Harness',
@@ -78,6 +84,7 @@ export function createElectronBuilderConfig(
       'lib/*.js',
       'lib/*.cjs',
       'renderer/**/*',
+      'assets/whale.png',
       'package.json',
       { from: buildPaths.dsh, to: 'dsh', filter: ['**/*'] },
       // electron-builder excludes a source directory's root node_modules.
@@ -140,6 +147,7 @@ export function createElectronBuilderConfig(
       )
     },
     win: {
+      icon: iconPath,
       forceCodeSigning: !unsigned,
       signtoolOptions: {
         sign: windowsSigner,
