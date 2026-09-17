@@ -12,6 +12,7 @@ import { DesktopProjectManager, type DesktopProjectHooks } from '../src/project-
 import type { DesktopPluginProvisioningEntry } from '../src/plugin-provisioning.ts'
 import { resolveDesktopPaths } from '../src/paths.ts'
 import { runtimeFixture, writePackage } from './runtime-fixture.ts'
+import { observeFixturePnpm } from './pnpm-fixture-observer.ts'
 
 interface FixturePnpmLock {
   readonly importers: Record<string, {
@@ -27,6 +28,7 @@ it.each(['activate', 'health-failure', 'activation-failure'] as const)(
   'preserves real pnpm verified file provenance through %s',
   async (outcome) => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'desktop-verified-pnpm-')))
+    const observer = observeFixturePnpm(root, join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs'), 'verified-fixture-plugin')
     const originalFetch = globalThis.fetch
     try {
       const name = 'verified-fixture-plugin'
@@ -72,7 +74,7 @@ it.each(['activate', 'health-failure', 'activation-failure'] as const)(
       const dsh = join(root, 'dsh')
       runtimeFixture(dsh)
       const manager = new DesktopProjectManager(resolveDesktopPaths(join(root, '.dsh')), {
-        node: process.execPath, pnpm: join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs'), dsh,
+        node: process.execPath, pnpm: observer.entry, dsh,
       })
       await manager.applyRelease()
       const before = readFileSync(join(manager.paths.profile, 'package.json'), 'utf8')
@@ -212,6 +214,9 @@ it.each(['activate', 'health-failure', 'activation-failure'] as const)(
         expect(manager.listPlugins()).toEqual([])
         expect(existsSync(join(manager.paths.profile, 'desktop-plugin-receipts.json'))).toBe(false)
       }
+    } catch (error) {
+      observer.reportFailure()
+      throw error
     } finally {
       globalThis.fetch = originalFetch
       rmSync(root, { recursive: true, force: true })

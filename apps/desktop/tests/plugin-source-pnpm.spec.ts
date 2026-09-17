@@ -8,10 +8,12 @@ import { DesktopProjectManager, type DesktopProjectHooks } from '../src/project-
 import { readDesktopPackageLocks } from '../src/plugin-package-lock.ts'
 import { resolveDesktopPaths } from '../src/paths.ts'
 import { runtimeFixture, writePackage } from './runtime-fixture.ts'
+import { observeFixturePnpm } from './pnpm-fixture-observer.ts'
 
 // Offline, zero-dependency scenarios budget packing and several fresh pnpm processes, not network retries.
 it.each(['directory', 'link', 'tarball', 'github', 'remoteTarball'] as const)('installs and removes a %s snapshot through real pnpm without source preparation', async (kind) => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'desktop-source-pnpm-')))
+  const observer = observeFixturePnpm(root, join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs'), 'memory-like-plugin', true)
   const originalFetch = globalThis.fetch
   try {
     const sentinel = join(root, 'source-hook-executed')
@@ -39,11 +41,8 @@ it.each(['directory', 'link', 'tarball', 'github', 'remoteTarball'] as const)('i
     }
     const dsh = join(root, 'dsh')
     runtimeFixture(dsh)
-    const pnpm = join(root, 'offline-pnpm.mjs')
-    const realPnpm = pathToFileURL(join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs')).href
-    writeFileSync(pnpm, `process.argv.push('--config.offline=true'); await import(${JSON.stringify(realPnpm)})\n`)
     const manager = new DesktopProjectManager(resolveDesktopPaths(join(root, '.dsh')), {
-      node: process.execPath, pnpm, dsh,
+      node: process.execPath, pnpm: observer.entry, dsh,
     })
     await manager.applyRelease()
     let healthChecks = 0
@@ -92,6 +91,9 @@ it.each(['directory', 'link', 'tarball', 'github', 'remoteTarball'] as const)('i
     })
     expect(manager.listPlugins()).toEqual([])
     expect(readDesktopPackageLocks(manager.paths.profile)).toEqual({})
+  } catch (error) {
+    observer.reportFailure()
+    throw error
   } finally {
     globalThis.fetch = originalFetch
     rmSync(root, { recursive: true, force: true })

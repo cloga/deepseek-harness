@@ -25,6 +25,7 @@ export const DESKTOP_IPC = {
   applicationRestart: 'dsh-desktop:application-restart',
   configurationReset: 'dsh-desktop:configuration-reset',
   backendState: 'dsh-desktop:backend-state',
+  updatesStatus: 'dsh-desktop:updates-status',
   updatesCheck: 'dsh-desktop:updates-check',
   updatesInstall: 'dsh-desktop:updates-install',
   updatesState: 'dsh-desktop:updates-state',
@@ -109,5 +110,11 @@ export interface DshDesktopApplicationApi {
   readonly protocolVersion: 2
   readonly updates: {
     reportImpact(impact: DesktopRendererUpdateImpact): void
+    /** Read the retained notification, including updates discovered before this document loaded. */
+    status(): Promise<DesktopUpdateState>
+    /** Subscribe to notification changes; call status after subscribing for the initial snapshot. */
+    subscribe(listener: (state: DesktopUpdateState) => void): () => void
+    /** Open the native confirmation; managed updates recheck active work. Reject on check or installation failure. */
+    review(): Promise<void>
   }
 }

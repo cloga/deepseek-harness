@@ -29,6 +29,10 @@ kind: "package-reference"
 
 全局面板占据 root 作用域的 `main` keyed slot；`conversation` 是为会话界面保留的 key。`ctx.layout.selectPanel(id)` 选中已注册面板，`null` 则选中会话界面，但不改变当前会话。默认组合不注册任何全局面板。
 
+### Desktop 更新提示
+
+当 Desktop preload 提供更新状态、订阅和查看接口时，框架在主面板上方显示窄提示栏。切换会话或面板时保持挂载，空闲时不占空间，也不抢焦点。“查看更新”打开 Desktop 现有的确认流程；渲染本身不触发检查、下载或安装。文案归 `layout` locale namespace 所有。普通 Web 和旧 Desktop 桥接保持不变。详见 [Desktop 更新提示决策](../../../.agents/notes/implemented/feature/2026-09-17-persistent-desktop-update-notice.zh.md)。
+
 ### 主题呈现
 
 呈现器消费解析后的主题快照，并投影到 document：`html { color-scheme }` 驱动原生 UA 控件，依据当前配色方案设置 `body[data-ds-dark-theme]`，把主题的别名 token 与 `--dsh-content-font-size` 设为 body 上的内联变量，并持有一个 `<meta name="theme-color">`，其内容随计算后的 body 背景色更新。对呈现器执行 dispose（资源释放）时，它会连同其他全局写入一起移除自己的元数据节点。
