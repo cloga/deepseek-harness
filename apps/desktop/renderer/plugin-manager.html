@@ -25,9 +25,11 @@
       <form id="install-form">
         <label id="package-label" for="package-spec"></label>
         <div class="install-row">
-          <input id="package-spec" name="package-spec" autocomplete="off" placeholder="@scope/plugin@1.2.3" required>
+          <input id="package-spec" name="package-spec" autocomplete="off" aria-describedby="source-help source-build-notice" required>
           <button id="install" type="submit"></button>
         </div>
+        <p id="source-help" class="source-help"></p>
+        <p id="source-build-notice" class="source-help"></p>
       </form>
       <p id="status" role="status" aria-live="polite"></p>
       <section aria-labelledby="installed-heading">
@@ -36,6 +38,16 @@
         <p id="empty"></p>
       </section>
     </main>
+    <dialog id="package-dialog" aria-labelledby="package-dialog-label">
+      <form id="package-dialog-form">
+        <label id="package-dialog-label" for="package-dialog-input"></label>
+        <input id="package-dialog-input" autocomplete="off">
+        <div class="dialog-actions">
+          <button id="package-dialog-cancel" type="button" class="quiet"></button>
+          <button id="package-dialog-confirm" type="submit"></button>
+        </div>
+      </form>
+    </dialog>
     <script src="plugin-manager.js"></script>
   </body>
 </html>
