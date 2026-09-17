@@ -1035,29 +1035,39 @@ describe('desktop external plugin profile', () => {
     expect(manager.listPlugins()).toEqual([{ name: 'plugin', version: '1.0.0', enabled: true }])
   })
 
-  it('replaces registry, source, and verified origins without retaining opposite provenance', async () => {
+  it.each([
+    ['registry', 'source'],
+    ['source', 'verified'],
+    ['verified', 'source'],
+    ['source', 'registry'],
+  ] as const)('replaces %s with %s without retaining opposite provenance', async (from, to) => {
     const { root, manager } = setup()
     await manager.applyRelease()
     const bytes = verifiedPluginArchive('plugin', '1.0.0')
     const path = join(root, 'repository-name-is-not-package-name.tgz')
     writeFileSync(path, bytes)
-    await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
-    await manager.mutate({ type: 'plugin-add', spec: path }, hooks())
-    expect(manager.listPlugins()[0]?.source?.type).toBe('packageSpec')
-    expect(readDesktopPackageLocks(manager.paths.profile).plugin?.packageName).toBe('plugin')
     const source = verifiedSource(bytes, 'plugin', '1.0.0')
     const original = globalThis.fetch
     globalThis.fetch = verifiedFetch(source, bytes)
+    const install = async (origin: 'registry' | 'source' | 'verified', version = '1.0.0'): Promise<void> => {
+      if (origin === 'verified') await manager.mutate({ type: 'plugin-install', source }, hooks())
+      else await manager.mutate({ type: 'plugin-add', spec: origin === 'source' ? path : `plugin@${version}` }, hooks())
+    }
     try {
-      await manager.mutate({ type: 'plugin-install', source }, hooks())
-      expect(manager.listPlugins()[0]?.source?.type).toBe('githubRelease')
-      expect(readDesktopPackageLocks(manager.paths.profile)).toEqual({})
-      await manager.mutate({ type: 'plugin-add', spec: path }, hooks())
-      expect(manager.listPlugins()[0]?.source?.type).toBe('packageSpec')
-      expect(JSON.parse(readFileSync(join(manager.paths.profile, 'desktop-plugin-receipts.json'), 'utf8'))).toEqual({ schemaVersion: 1, receipts: {} })
-      await manager.mutate({ type: 'plugin-add', spec: 'plugin@2.0.0' }, hooks())
-      expect(manager.listPlugins()).toEqual([{ name: 'plugin', version: '2.0.0', enabled: true }])
-      expect(readDesktopPackageLocks(manager.paths.profile)).toEqual({})
+      await install(from)
+      await install(to, to === 'registry' ? '2.0.0' : '1.0.0')
+      if (to === 'source') {
+        expect(manager.listPlugins()[0]?.source?.type).toBe('packageSpec')
+        expect(readDesktopPackageLocks(manager.paths.profile).plugin?.packageName).toBe('plugin')
+      } else {
+        expect(readDesktopPackageLocks(manager.paths.profile)).toEqual({})
+        if (to === 'verified') expect(manager.listPlugins()[0]?.source?.type).toBe('githubRelease')
+        else expect(manager.listPlugins()).toEqual([{ name: 'plugin', version: '2.0.0', enabled: true }])
+      }
+      const receipts = join(manager.paths.profile, 'desktop-plugin-receipts.json')
+      if (to !== 'verified' && existsSync(receipts)) {
+        expect(JSON.parse(readFileSync(receipts, 'utf8'))).toEqual({ schemaVersion: 1, receipts: {} })
+      }
       expect((JSON.parse(readFileSync(join(manager.paths.profile, 'package.json'), 'utf8')) as { dsh: { profile: { bundles: string[] } } }).dsh.profile.bundles.filter(name => name === 'plugin')).toHaveLength(1)
     } finally { globalThis.fetch = original }
   })
