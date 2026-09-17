@@ -1,6 +1,10 @@
 /** Electron-builder fields asserted by the Desktop release tests. */
 export interface DesktopElectronBuilderConfig {
   readonly appId: string
+  readonly files: readonly string[]
+  readonly win: {
+    readonly icon: string
+  }
   readonly directories: {
     readonly output: string
   }
