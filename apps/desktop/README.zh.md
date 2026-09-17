@@ -23,7 +23,7 @@
 
 Electron 拥有 `$DSH_HOME/profiles/desktop`。其 `dependencies` 只包含精确版本的 registry 插件或由 receipt 证明的本地 tgz 文件；`dsh.profile.bundles` 包含内置 bundle，后接已启用插件。签名应用从 `resources/dsh` 提供 dsh、私有 Desktop Host 及其生产依赖。共享包链接解析到这些实际目录。宿主与插件在同一个内置上游 Node 进程中执行，使用正常的 realpath 解析；Desktop 不启用 `--preserve-symlinks`。在 profile 组合前，Host 把 profile `node_modules` 下物理模块发起的 bare package 请求限制到该 profile，或打包 runtime 中与 profile link 匹配的 package real path。祖先 package 与未链接的 runtime package 对这些请求不可用，而内置模块及显式 relative、absolute 或 URL file load 保持 Node.js 行为。CLI 不能启动或修改此 profile。
 
-本地启动页提供启动状态和可用恢复操作；加载后的 dsh 渲染进程仅接收桌面协议标记。独立插件窗口接收结构化的列表、锁定来源安装、删除、更新、capability 和更新检查操作；两个渲染进程都无法访问文件系统、原始 Electron IPC、shell、任意下载 URL 或任意 pnpm 参数。
+本地启动页提供启动状态和可用恢复操作；加载后的 dsh 渲染进程接收传输标记、未保存输入影响上报，以及受限的更新状态、订阅和查看接口。查看更新始终进入现有用户确认流程，不开放直接安装或任意 IPC 能力。独立插件窗口接收结构化的列表、锁定来源安装、删除、更新、capability 和更新检查操作；两个渲染进程都无法访问文件系统、原始 Electron IPC、shell、任意下载 URL 或任意 pnpm 参数。
 
 Electron 根据应用 locale 选择类型化的英文或中文桌面壳文案，并以英文作为 fallback。菜单、原生对话框、启动页与插件管理渲染进程使用同一 locale 数据；仓库的 Client UI i18n gate 会检查这些桌面源文件。
 
@@ -63,7 +63,7 @@ Windows Ops 验证 `resources/managed-update/capability.json` 中的 `desktopNat
 
 ### Fork 拥有的 Windows 托管更新
 
-Desktop 在启动十秒后自动检查更新。你也可以使用应用菜单中的 **Check for updates**。发现更新后，Desktop 会先要求确认，再下载、验证并打开安装程序；选择 **Later** 不会安装。你无需手动下载安装程序。这是交互式更新，而非无人值守安装：Windows 警告、安装选项与 UAC 仍需你批准。
+Desktop 在启动十秒后静默检查更新，此后运行期间每六小时检查一次。可用版本持续显示在主内容区上方；点击“查看更新”或应用菜单中的 **Check for updates** 才进入现有确认及活动任务检查。后台检查不弹安装对话框，也不自动安装。选择 **Later** 后提示栏仍保留。临时检查失败时保留此前验证过的可用版本；重叠检查会合并，确认与安装期间跳过，退出时停止定时检查并忽略迟到结果。详见[更新提示决策](../../.agents/notes/implemented/feature/2026-09-17-persistent-desktop-update-notice.zh.md)。Windows 警告、安装选项与 UAC 仍需你批准。
 
 发现更新、helper acknowledgement、安装完成与经过认证的模型使用是独立检查。复制后的 helper 必须仅凭其 Node 可执行文件与 bundle 启动，才能确认 handoff。确认前失败会保持 Desktop 运行，并在所属 managed-update operation 目录中的 `helper-startup-error.json` 记录有界、脱敏的 stderr。
 

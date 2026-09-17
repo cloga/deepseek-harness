@@ -1,13 +1,80 @@
 /** Run offline browser acceptance against built workspace packages in a disposable Desktop runtime. */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { cpSync, existsSync, globSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DESKTOP_HOST_PROTOCOL_VERSION } from '../src/host-protocol.ts'
 import { removeOwnedDirectory } from '../src/owned-directory.ts'
 import type { DesktopRuntimeDescriptor, DesktopSharedPackage } from '../src/runtime-tree.ts'
 import { prepareDevelopmentProject } from './development-project.ts'
 import { smokeDesktopRuntime } from './smoke-runtime.ts'
+
+function inside(root: string, path: string): boolean {
+  const child = relative(root, path)
+  return child === '' || (!isAbsolute(child) && child !== '..' && !child.startsWith(`..${sep}`))
+}
+
+function publicFixturePath(path: string): boolean {
+  return path.split(/[\\/]/u).every(part => !part.startsWith('.')
+    && !['node_modules', 'private', 'secrets', 'profiles', 'sessions'].includes(part)
+    && !/^(?:credentials|secrets)(?:\.|$)|\.(?:pem|key|p12|pfx)$/iu.test(part))
+}
+
+function copyPublicFixtureTree(source: string, destination: string): void {
+  cpSync(source, destination, {
+    recursive: true,
+    filter: path => publicFixturePath(relative(source, path)) && !lstatSync(path).isSymbolicLink(),
+  })
+}
+
+/**
+ * Copy first-party published payloads into the owned runtime so the unmodified realpath policy accepts them.
+ * Third-party packages remain workspace-linked; this is not an integrity-verified release artifact.
+ * @param root - Disposable runtime whose first-party entries were just created as package junctions.
+ * @param repository - Trusted source workspace; package and config-tree sources must remain inside it.
+ */
+export function materializeWorkspaceHostPackages(root: string, repository: string): void {
+  const repo = realpathSync.native(repository)
+  const scope = join(root, 'node_modules', '@deepseek-ai')
+  for (const name of readdirSync(scope)) {
+    const destination = join(scope, name)
+    if (!lstatSync(destination).isSymbolicLink()) throw new Error(`desktop fixture: expected generated package link ${name}`)
+    const source = realpathSync.native(destination)
+    if (!inside(repo, source)) throw new Error(`desktop fixture: package source outside workspace: ${name}`)
+    const manifest = JSON.parse(readFileSync(join(source, 'package.json'), 'utf8')) as {
+      files?: string[]
+      dsh?: { configTrees?: { path: string; mount: string }[] }
+    }
+    unlinkSync(destination)
+    mkdirSync(destination)
+    // Prefer each package's publish allowlist, not a recursive copy of workspace/private contents.
+    const patterns = manifest.files ?? ['lib', 'dist', 'config', 'presets']
+    for (const pattern of ['package.json', ...patterns]) {
+      if (isAbsolute(pattern) || pattern.split(/[\\/]/u).includes('..')) {
+        throw new Error(`desktop fixture: nonlocal published path ${pattern}`)
+      }
+      for (const entry of globSync(pattern, {
+        cwd: source,
+        withFileTypes: true,
+        exclude: entry => !publicFixturePath(relative(source, join(entry.parentPath, entry.name))) || entry.isSymbolicLink(),
+      })) {
+        const file = relative(source, join(entry.parentPath, entry.name))
+        if (!publicFixturePath(file) || entry.isSymbolicLink()) continue
+        copyPublicFixtureTree(join(source, file), join(destination, file))
+      }
+    }
+    for (const tree of manifest.dsh?.configTrees ?? []) {
+      const treeSource = realpathSync.native(resolve(source, tree.path))
+      const treeDestination = resolve(destination, tree.mount)
+      if (!inside(repo, treeSource) || !inside(destination, treeDestination) || !publicFixturePath(tree.mount)) {
+        throw new Error('desktop fixture: configuration tree must stay in workspace and generated package')
+      }
+      copyPublicFixtureTree(treeSource, treeDestination)
+      tree.path = tree.mount
+    }
+    writeFileSync(join(destination, 'package.json'), JSON.stringify(manifest, undefined, 2) + '\n')
+  }
+}
 
 function sharedWorkspacePackages(root: string): DesktopSharedPackage[] {
   const scope = join(root, 'node_modules', '@deepseek-ai')
@@ -63,6 +130,7 @@ export async function runDesktopWorkspaceFixture(repository: string): Promise<st
       dependencyDir: join(repo, 'node_modules', '.pnpm', 'node_modules'),
       release,
     })
+    materializeWorkspaceHostPackages(root, repo)
     const runtime: DesktopRuntimeDescriptor = {
       schemaVersion: 1,
       release,
@@ -77,6 +145,9 @@ export async function runDesktopWorkspaceFixture(repository: string): Promise<st
       head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim(),
       dirtyWorktree: execFileSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' }).trim() !== '',
       runtimeKind: 'workspace-linked',
+      firstPartyPackages: 'copied published workspace payloads and relocated config trees inside owned runtime',
+      thirdPartyPackages: 'workspace-linked; not an integrity-verified release artifact',
+      artifactIntegrityVerified: false,
       browser: 'isolated headless msedge',
       inspector: 'OS-assigned loopback port; no existing debugger attached',
       immutableAlpha19Gate: false,

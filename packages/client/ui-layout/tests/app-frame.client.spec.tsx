@@ -179,6 +179,28 @@ afterEach(() => {
 })
 
 describe('AppFrame', () => {
+  it('keeps the Desktop notice above the main panel across Session and panel changes', async () => {
+    const review = vi.fn(async () => {})
+    replaceProperty(window as Window & { dshDesktop?: unknown }, 'dshDesktop', {
+      protocolVersion: 2,
+      updates: {
+        status: async () => ({ phase: 'available', version: '2.0.0' }),
+        subscribe: () => () => {},
+        review,
+      },
+    })
+    const { container, getByTestId, rerenderFrame, instance } = mountFrame()
+    await act(async () => { await Promise.resolve() })
+    const notice = container.querySelector('[data-desktop-update-notice]')!
+    expect(notice.textContent).toContain('2.0.0')
+    expect(notice.nextElementSibling?.contains(getByTestId('main-content'))).toBe(true)
+    selectedSession = undefined
+    rerenderFrame()
+    act(() => { instance.actions.selectPanel('panel-a' as MainPanelId) })
+    expect(container.querySelector('[data-desktop-update-notice]')).toBe(notice)
+    expect(review).not.toHaveBeenCalled()
+  })
+
   it('localizes the product title without a configured build title', () => {
     mountFrame()
     expect(document.title).toBe('DSH Local Build')

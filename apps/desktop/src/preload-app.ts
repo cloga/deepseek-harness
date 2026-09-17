@@ -1,9 +1,10 @@
-/** Startup controls for shell documents; application documents receive only the carrier marker. */
+/** Startup controls for shell documents; application documents receive fixed update notification controls. */
 
 import { contextBridge, ipcRenderer } from 'electron'
 import {
   DESKTOP_IPC,
   type DesktopRendererUpdateImpact,
+  type DesktopUpdateState,
   type DshDesktopApplicationApi,
   type DshDesktopStartupApi,
 } from './ipc.ts'
@@ -28,6 +29,16 @@ const startup: DshDesktopStartupApi = {
 const application: DshDesktopApplicationApi = {
   protocolVersion: 2,
   updates: {
+    status: () => ipcRenderer.invoke(DESKTOP_IPC.updatesStatus) as Promise<DesktopUpdateState>,
+    subscribe(listener) {
+      const handle = (_event: Electron.IpcRendererEvent, state: DesktopUpdateState): void => {
+        try { listener(state) }
+        catch (error) { console.error('desktop update notification listener failed', error) }
+      }
+      ipcRenderer.on(DESKTOP_IPC.updatesState, handle)
+      return () => { ipcRenderer.off(DESKTOP_IPC.updatesState, handle) }
+    },
+    review: () => ipcRenderer.invoke(DESKTOP_IPC.updatesInstall) as Promise<void>,
     reportImpact(impact: DesktopRendererUpdateImpact): void {
       ipcRenderer.send(DESKTOP_IPC.updatesImpactReport, impact)
     },
