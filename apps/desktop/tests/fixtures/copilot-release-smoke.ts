@@ -30,6 +30,7 @@ import {
   verifyPackagedDesktopRuntime,
 } from '../../scripts/packaged-runtime.mjs'
 import { inspectPackagedGraphResolution, packagedGraphCheckArguments } from './packaged-graph-check.ts'
+import { inspectPackagedCopilotSettings } from './copilot-settings-smoke.ts'
 
 /** Paths available only during the awaited, read-only post-acceptance inspection. */
 export interface PackagedCopilotProfileInspection {
@@ -176,6 +177,11 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       await account.getByRole('region', { name: 'GitHub Copilot account management', exact: true })
         .waitFor({ state: 'visible' })
       await page.screenshot({ path: join(output, `${phase}-account.png`) })
+      const settingsEvidence = await inspectPackagedCopilotSettings(settings)
+      writeFileSync(join(output, `${phase}-settings-readonly.json`), JSON.stringify(settingsEvidence, undefined, 2) + '\n')
+      await settings.locator('[data-dsh-dual-model-card]').screenshot({ path: join(output, `${phase}-model-roles.png`) })
+      await settings.locator('[data-dsh-web-search-routing]').screenshot({ path: join(output, `${phase}-search-catalog.png`) })
+      record(`${phase}:settings-readonly`)
       assertDesktopProvisioningInventory(profile, plan)
       const plugins = plan.plugins.map(entry => entry.source.packageName)
       writeFileSync(join(output, `${phase}-runner-resolution.json`), JSON.stringify({
@@ -241,8 +247,11 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       ancestorSdkJunction: true,
       ancestorSdkLoaded: false,
       accountEntryVisible: true,
+      modelRolesViewLoaded: true,
+      searchProviderCatalogLoaded: true,
       realOAuth: false,
       realModelRound: false,
+      realSearch: false,
       installerUpgradeVerified: false,
       timeline,
     }, undefined, 2) + '\n')

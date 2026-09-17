@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { load } from 'js-yaml'
+import { assertReleaseTestCollection } from '../scripts/verify-release-test-collection.mjs'
 import {
   createDesktopForkReleaseCapability,
   parseDesktopForkReleasePlan,
@@ -55,14 +56,58 @@ function assertMetadataAuthScope(workflow: ReleaseWorkflow): void {
   expect(authenticatedSteps).toEqual(['build', 'remote-check'])
 }
 
+function assertProjectFixtureSelection(workflow: ReleaseWorkflow): void {
+  const ci = load(readFileSync(resolve(repositoryRoot, '.github', 'workflows', 'ci.yml'), 'utf8')) as ReleaseWorkflow
+  const budget = ci.jobs['windows-coverage']!.env!.DSH_COVERAGE_TEST_TIMEOUT_MS!
+  expect(budget).toBe('90000')
+  const file = 'apps/desktop/tests/project-manager.spec.ts'
+  const steps = workflow.jobs.build!.steps
+  const collection = steps.findIndex(step => step.name === 'Verify Desktop test collection')
+  const ordinary = steps.findIndex(step => step.name === 'Verify Desktop release code')
+  expect(collection).toBeGreaterThanOrEqual(0)
+  expect(steps[collection]?.run).toBe('node apps/desktop/scripts/verify-release-test-collection.mjs')
+  expect(ordinary).toBeGreaterThan(collection)
+  const transactions = steps.findIndex(step => step.name === 'Verify Desktop project transactions')
+  const prepare = steps.findIndex(step => step.name === 'Prepare reviewed managed capability')
+  expect(steps[ordinary]?.run?.trim()).toBe('pnpm exec vitest run apps/desktop apps/desktop-host --config=vitest.desktop-release.config.ts --maxWorkers=1')
+  expect(steps[transactions]?.run?.trim()).toBe(
+    `pnpm exec vitest run ${file} --maxWorkers=1 --testTimeout=${budget} --hookTimeout=${budget}`,
+  )
+  expect(transactions).toBeGreaterThan(ordinary)
+  expect(prepare).toBeGreaterThan(transactions)
+}
+
 describe('Desktop fork release plan', () => {
+  it('rejects omitted or duplicated actual collection entries', () => {
+    const transaction = 'thread-safe:apps/desktop/tests/project-manager.spec.ts'
+    const ordinary = 'thread-safe:apps/desktop/tests/fork-release.spec.ts'
+    expect(() => { assertReleaseTestCollection([ordinary, transaction], [ordinary], [transaction]) }).not.toThrow()
+    expect(() => { assertReleaseTestCollection([ordinary, transaction], [ordinary, transaction], [transaction]) }).toThrow()
+    expect(() => { assertReleaseTestCollection([ordinary, transaction], [], [transaction]) }).toThrow()
+    expect(() => { assertReleaseTestCollection([ordinary, transaction], [ordinary, ordinary], [transaction]) }).toThrow()
+    expect(() => { assertReleaseTestCollection([ordinary, transaction, 'thread-safe:missing'], [ordinary], [transaction]) }).toThrow()
+  })
+  it('runs every Desktop suite once while assigning only project transactions the Windows process budget', () => {
+    assertProjectFixtureSelection(readReleaseWorkflow())
+  })
+
+  it.each(['duplicate', 'omitted', 'test-budget', 'hook-budget'])('rejects a %s transaction test selection', (damage) => {
+    const workflow = readReleaseWorkflow()
+    const ordinary = workflow.jobs.build!.steps.find(step => step.name === 'Verify Desktop release code')!
+    const transactions = workflow.jobs.build!.steps.find(step => step.name === 'Verify Desktop project transactions')!
+    if (damage === 'duplicate') ordinary.run = ordinary.run!.replace(' --config=vitest.desktop-release.config.ts', '')
+    else if (damage === 'omitted') transactions.run = 'pnpm exec vitest run apps/desktop/tests/locale.spec.ts'
+    else if (damage === 'test-budget') transactions.run = transactions.run!.replace('--testTimeout=90000', '--testTimeout=5000')
+    else transactions.run = transactions.run!.replace(' --hookTimeout=90000', '')
+    expect(() => { assertProjectFixtureSelection(workflow) }).toThrow()
+  })
   it('defines a monotonic source-owned release after the Windows Ops bridge', () => {
     const plan = parseDesktopForkReleasePlan(planValue())
     expect(plan).toMatchObject({
       schemaVersion: 2,
       channel: 'cloga-windows-x64',
-      version: '0.1.6-alpha.1.cloga.1',
-      sequence: 11,
+      version: '0.1.6-alpha.1.cloga.2',
+      sequence: 12,
       upstreamVersion: '0.1.6-alpha.1',
       migration: {
         owner: 'cloga/dsh-windows-ops',
@@ -80,24 +125,24 @@ describe('Desktop fork release plan', () => {
           type: 'githubRelease',
           owner: 'cloga',
           repo: 'dsh-github-copilot',
-          tag: 'v0.4.0-alpha.22',
-          asset: 'dsh-github-copilot-0.4.0-alpha.22.tgz',
-          assetId: 567596250,
+          tag: 'v0.4.0-alpha.24',
+          asset: 'dsh-github-copilot-0.4.0-alpha.24.tgz',
+          assetId: 570924251,
           packageName: 'dsh-github-copilot',
-          version: '0.4.0-alpha.22',
-          size: 651444,
-          sha256: 'e749d982ac55752eeca4cf4819b9751144cda1c2dc06033e4b42240151e40e0e',
-          integrity: 'sha512-HkGACgfUrTREbtbUgZJ6Sb02hqKseCtldW16ZBounQZahTpeKWW5bqj5TNb1MD6X7y4e5MI0Q5edYLCF71ybnQ==',
-          targetCommit: '479340f965c5be7b4408e4f1e6c9dda6c421d37b',
+          version: '0.4.0-alpha.24',
+          size: 660977,
+          sha256: 'f28dd95e136e203948be8af43745c43ed32bd0bb9b84a44107c4b11ebf7e75cd',
+          integrity: 'sha512-F0kqe2wy2kHgodDw69Ouz1Gm/MSWEkkNloNs2yiskYH0790rMntvRO8ytJFSr33OsGbJkyXGx/oWl5xXlPTnGg==',
+          targetCommit: 'e49bf7c9307cf22dd9ea720bed8750101fc986ed',
           dependencyRegistry: 'https://packagefeedproxy.microsoft.io/npm/',
           checksumManifest: {
             format: 'sha256sums',
             asset: 'SHA256SUMS',
-            assetId: 567596283,
-            url: 'https://github.com/cloga/dsh-github-copilot/releases/download/v0.4.0-alpha.22/SHA256SUMS',
+            assetId: 570924385,
+            url: 'https://github.com/cloga/dsh-github-copilot/releases/download/v0.4.0-alpha.24/SHA256SUMS',
             size: 104,
-            sha256: 'cdc2a7e8df955c9136c6c79c25adaaf929bee815308ff3ceb6c9cfb948c03546',
-            integrity: 'sha512-Q6hlYjOSZU397FlT180MK8NgkEdDct20KPEpk7q1PB19Y1HkpiTweqFenptizstFrCm6u0fTl6gDEK3mEGMD/Q==',
+            sha256: '2480327ffa2b6154ad8d151db97329c26b680f898a0c823f9706ec1131b6c0aa',
+            integrity: 'sha512-4XktFQTeZ7ZYfI9X6Y7jrVS2+G34FExWoEnsBDHxhN5BtClc0ZedV/LOw6zHDYZQeQ7yHAo+40+EOVT5jHGKHg==',
           },
         },
       }],
@@ -107,7 +152,7 @@ describe('Desktop fork release plan', () => {
       mode: 'github-release-managed',
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
-      currentSequence: 11,
+      currentSequence: 12,
       minimumSequence: 2,
       provisioning: {
         capability: { id: 'desktopNativePluginProvisioning' },

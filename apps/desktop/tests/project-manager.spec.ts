@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { gzipSync } from 'node:zlib'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it as registerTest, vi } from 'vitest'
 import { resolveDesktopPaths } from '../src/paths.ts'
 import { assertDesktopProvisioningInventory, DesktopProjectManager, packageNameFromSpec, type DesktopProjectHooks } from '../src/project-manager.ts'
 import type { DesktopGithubReleasePluginSource, DesktopPluginProvisionReceipt } from '../src/plugin-source.ts'
@@ -13,7 +13,11 @@ import { parseDesktopPluginProvisioningPlan } from '../src/plugin-provisioning.t
 import { readDesktopProfileState } from '../src/profile-packages.ts'
 import { readDesktopPackageLocks } from '../src/plugin-package-lock.ts'
 import { runtimeFixture } from './runtime-fixture.ts'
+import { ProjectFixtureWork, trackProjectFixtureTests } from './fixtures/project-fixture-work.ts'
 
+const fixtureWork = new ProjectFixtureWork()
+const it = trackProjectFixtureTests(registerTest, fixtureWork)
+let originalFetch: typeof fetch
 const roots: string[] = []
 const releaseWorkers: Array<() => Promise<void>> = []
 const targetCommit = '08bfccc3b5930b93ef2fe31d9cf9e509f34a8704'
@@ -21,6 +25,23 @@ const targetCommit = '08bfccc3b5930b93ef2fe31d9cf9e509f34a8704'
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
   return { ...actual, renameSync: vi.fn(actual.renameSync) }
+})
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return { ...actual, spawn: (...args: Parameters<typeof actual.spawn>) => {
+    const cwd = args[2]?.cwd
+    const owned = typeof cwd === 'string' && roots.some((root) => {
+      const path = relative(root, cwd)
+      return !isAbsolute(path) && path !== '..' && !path.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)
+    })
+    if (!owned) return actual.spawn(...args)
+    fixtureWork.assertOpen()
+    const child = actual.spawn(...args)
+    const verb = args[1]?.find(value => ['install', 'add', 'remove', 'rebuild'].includes(value)) ?? 'unknown'
+    fixtureWork.child(child, `pnpm:${verb}`)
+    return child
+  } }
 })
 
 function octal(value: number, width: number): Buffer {
@@ -227,11 +248,24 @@ if (command !== 'rebuild') {
 function hooks(overrides: Partial<DesktopProjectHooks> = {}): DesktopProjectHooks {
   return { beforeChange: async () => {}, healthCheck: async () => {}, afterChange: async () => {}, ...overrides }
 }
+function trackedProjectManager(...args: ConstructorParameters<typeof DesktopProjectManager>): DesktopProjectManager {
+  const manager = new DesktopProjectManager(...args)
+  const applyRelease = manager.applyRelease.bind(manager)
+  const mutate = manager.mutate.bind(manager)
+  const reconcileProvisioning = manager.reconcileProvisioning.bind(manager)
+  const resetConfiguration = manager.resetConfiguration.bind(manager)
+  manager.applyRelease = (...values) => fixtureWork.track('apply release', () => applyRelease(...values))
+  manager.mutate = (...values) => fixtureWork.track(`mutate:${values[0].type}`, () => mutate(...values))
+  manager.reconcileProvisioning = (...values) => fixtureWork.track('reconcile provisioning', () => reconcileProvisioning(...values))
+  manager.resetConfiguration = (...values) => fixtureWork.track('reset configuration', () => resetConfiguration(...values))
+  return manager
+}
+
 function setup(): { root: string; manager: DesktopProjectManager } {
   const root = temporaryRoot()
   const dsh = join(root, 'resources', 'dsh')
   runtimeFixture(dsh)
-  return { root, manager: new DesktopProjectManager(resolveDesktopPaths(join(root, '.dsh')), { node: process.execPath, pnpm: writeFakePnpm(root), dsh }) }
+  return { root, manager: trackedProjectManager(resolveDesktopPaths(join(root, '.dsh')), { node: process.execPath, pnpm: writeFakePnpm(root), dsh }) }
 }
 function calls(root: string): { args: string[]; project: string; registry: string; credentials: Record<string, string | undefined> }[] {
   const path = join(root, 'pnpm-log.jsonl')
@@ -242,14 +276,27 @@ function calls(root: string): { args: string[]; project: string; registry: strin
     credentials: Record<string, string | undefined>
   }) : []
 }
-afterEach(async () => {
+beforeEach(() => {
+  fixtureWork.begin()
+  originalFetch = globalThis.fetch
+})
+afterEach(async ({ task }) => {
+  const releases = releaseWorkers.splice(0).map(cleanup => fixtureWork.track('worker release', cleanup))
+  const results = Promise.allSettled(releases)
+  try {
+    await fixtureWork.close()
+  } catch (error) {
+    console.error('project fixture cleanup failed', fixtureWork.snapshot())
+    throw error
+  }
+  if (task.result?.state === 'fail') console.error('project fixture phases', fixtureWork.snapshot())
+  // Original test continuations and pnpm close events settle before shared mocks or private roots disappear.
   vi.restoreAllMocks()
   vi.mocked(fs.renameSync).mockReset()
-  const cleanups = releaseWorkers.splice(0)
+  globalThis.fetch = originalFetch
   const directories = roots.splice(0)
-  const results = await Promise.allSettled(cleanups.map(cleanup => cleanup()))
   for (const root of directories) rmSync(root, { recursive: true, force: true })
-  const failures: unknown[] = results.flatMap((result): unknown[] => result.status === 'rejected' ? [result.reason] : [])
+  const failures: unknown[] = (await results).flatMap((result): unknown[] => result.status === 'rejected' ? [result.reason] : [])
   if (failures.length > 0) throw new AggregateError(failures, 'desktop worker cleanup failed')
 })
 
@@ -262,7 +309,7 @@ describe('desktop external plugin profile', () => {
 
     const dsh = join(root, 'next-runtime', 'dsh')
     runtimeFixture(dsh, '1.1.0')
-    const runtimeManager = new DesktopProjectManager(manager.paths, {
+    const runtimeManager = trackedProjectManager(manager.paths, {
       ...manager.runtime,
       dsh,
       profileResolution: 'runtime',
@@ -313,7 +360,7 @@ describe('desktop external plugin profile', () => {
       expect(previous).toBeDefined()
       const dsh = join(root, 'next-runtime', 'dsh')
       runtimeFixture(dsh, '1.1.0')
-      const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh, profileResolution: 'runtime' })
+      const next = trackedProjectManager(manager.paths, { ...manager.runtime, dsh, profileResolution: 'runtime' })
       let starts = 0
       await expect(next.applyRelease(hooks({ afterChange: async () => {
         if (++starts === 1) throw new Error('retention upgrade final activation rejected')
@@ -366,33 +413,18 @@ describe('desktop external plugin profile', () => {
 
   describe.each(['registry', 'alternate-artifact', 'artifact-bytes', 'missing-package', 'missing-row', 'empty-extra'] as const)('repairs exact restart inventory after %s drift', (drift) => {
     let manager: DesktopProjectManager
-    let original: typeof fetch
     const archive = verifiedPluginArchive()
     const source = verifiedSource(archive)
     const plan = { schemaVersion: 1, mode: 'exact', plugins: drift === 'empty-extra' ? [] : [{ required: true, source }] }
-    const pending: Promise<unknown>[] = []
-    function track<T>(task: () => Promise<T>): Promise<T> {
-      const result = task()
-      pending.push(result)
-      return result
-    }
 
-    beforeEach(() => {
-      original = globalThis.fetch
-      return track(async () => {
-        manager = setup().manager
-        await manager.applyRelease()
-        globalThis.fetch = verifiedFetch(source, archive)
-        await manager.reconcileProvisioning(plan, hooks())
-      })
-    })
-    afterEach(async () => {
-      // Timeouts do not cancel async fixture work: drain setup and repair before
-      // restoring shared fetch or letting the outer hook remove fixture roots.
-      try { await Promise.allSettled(pending.splice(0)) } finally { globalThis.fetch = original }
-    })
+    beforeEach(() => fixtureWork.track('drift setup', async () => {
+      manager = setup().manager
+      await manager.applyRelease()
+      globalThis.fetch = verifiedFetch(source, archive)
+      await manager.reconcileProvisioning(plan, hooks())
+    }))
 
-    it('restores the planned inventory', () => track(async () => {
+    it('restores the planned inventory', async () => {
       if (drift === 'registry') {
         await manager.mutate({ type: 'plugin-update', name: source.packageName, version: source.version }, hooks())
       } else if (drift === 'alternate-artifact') {
@@ -423,7 +455,7 @@ describe('desktop external plugin profile', () => {
         expect(manager.listPlugins()[0]?.source).toEqual(source)
         expect(receiptStore(manager).owners?.[source.packageName]).toBe('release')
       }
-    }))
+    })
   })
 
   it('retains user verified plugins across exact reconciliation, runtime changes, empty plans and reuse', async () => {
@@ -445,7 +477,7 @@ describe('desktop external plugin profile', () => {
     expect(calls(root)).toHaveLength(count)
     const dsh = join(root, 'updated-runtime')
     runtimeFixture(dsh, '1.1.0', '24.18.0')
-    const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+    const next = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
     await next.applyRelease(hooks(), plan)
     const empty = { schemaVersion: 1, mode: 'exact', plugins: [] }
     const state = await next.reconcileProvisioning(empty, hooks())
@@ -564,7 +596,7 @@ describe('desktop external plugin profile', () => {
     expect(receiptStore(manager).owners).toEqual({ 'first-provider': 'user' })
     const dsh = join(root, 'next-runtime')
     runtimeFixture(dsh, '1.1.0', '24.18.0')
-    const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+    const next = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
     const beforeUpgrade = calls(root).length
     await next.applyRelease(hooks(), original)
     expect(calls(root).length).toBeGreaterThan(beforeUpgrade)
@@ -772,7 +804,7 @@ describe('desktop external plugin profile', () => {
     await manager.mutate({ type: 'plugin-add', spec: 'manual-plugin@1.0.0' }, hooks())
     const dsh = join(root, 'new-runtime')
     runtimeFixture(dsh, '1.1.0', '24.18.0')
-    const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+    const next = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
     await next.applyRelease()
     expect(calls(root).every(call => call.project !== manager.paths.profile)).toBe(true)
   })
@@ -800,7 +832,7 @@ describe('desktop external plugin profile', () => {
       await manager.reconcileProvisioning({ schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source }] }, hooks())
       const dsh = join(root, 'next-major')
       runtimeFixture(dsh, '2.0.0')
-      const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+      const next = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
       const replacementArchive = verifiedPluginArchive(source.packageName, '1.0.0', '^2.0.0')
       const replacement = verifiedSource(replacementArchive, source.packageName, '1.0.0')
       globalThis.fetch = verifiedFetch(replacement, replacementArchive)
@@ -818,7 +850,7 @@ describe('desktop external plugin profile', () => {
     await manager.applyRelease()
     const dsh = join(root, 'new-runtime')
     runtimeFixture(dsh, '1.1.0')
-    const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+    const next = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
     let starts = 0
     await expect(next.applyRelease(hooks({
       afterChange: async () => {
@@ -1001,11 +1033,11 @@ describe('desktop external plugin profile', () => {
     runtimeFixture(dsh, '1.1.0', '24.18.0')
     const failing = join(root, 'fail-install.mjs')
     writeFileSync(failing, 'process.exitCode = 1')
-    const worker = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh, pnpm: failing })
+    const worker = trackedProjectManager(manager.paths, { ...manager.runtime, dsh, pnpm: failing })
     await expect(worker.applyRelease()).rejects.toThrow('pnpm exited with 1')
     expect(existsSync(join(manager.paths.profile, 'node_modules/plugin'))).toBe(true)
     expect(manager.releaseVersion()).toBe('1.0.0')
-    const retry = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+    const retry = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
     await expect(retry.applyRelease()).resolves.toBe(true)
     expect(retry.listPlugins()).toEqual([{ name: 'plugin', version: '1.0.0', enabled: true }])
     await expect(retry.applyRelease()).resolves.toBe(false)
@@ -1032,7 +1064,7 @@ describe('desktop external plugin profile', () => {
     }
     const failing = join(root, 'fail-rebuild.mjs')
     writeFileSync(failing, `await import(${JSON.stringify(pathToFileURL(manager.runtime.pnpm).href)}); if (process.argv.includes('rebuild')) process.exitCode = 1`)
-    const worker = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh, pnpm: failing })
+    const worker = trackedProjectManager(manager.paths, { ...manager.runtime, dsh, pnpm: failing })
     if (operation === 'plugin-add') {
       await worker.applyRelease()
       await expect(worker.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())).rejects.toThrow('pnpm exited with 1')
@@ -1041,14 +1073,14 @@ describe('desktop external plugin profile', () => {
       expect(() => { worker.assertProfileRuntime(worker.paths.profile) }).not.toThrow()
       expect(worker.listPlugins()).toEqual([])
       await expect(worker.applyRelease()).resolves.toBe(false)
-      const retry = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+      const retry = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
       await retry.applyRelease()
       await expect(retry.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())).resolves.toBeUndefined()
       return
     }
     expect(() => { worker.assertProfileRuntime(worker.paths.profile) }).toThrow('profile does not match this application runtime')
     const count = calls(root).length
-    const retry = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+    const retry = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
     await expect(retry.applyRelease()).resolves.toBe(true)
     expect(calls(root).slice(count).map(call => call.args.find(arg => !arg.startsWith('--config.')))).toEqual(['install', 'rebuild'])
     await expect(retry.applyRelease()).resolves.toBe(false)
@@ -1113,7 +1145,7 @@ describe('desktop external plugin profile', () => {
   it.skipIf(process.platform !== 'win32')('reuses the profile when the launch path changes only Windows letter casing', async () => {
     const { manager } = setup()
     await manager.applyRelease()
-    const relaunched = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh: manager.runtime.dsh.toUpperCase() })
+    const relaunched = trackedProjectManager(manager.paths, { ...manager.runtime, dsh: manager.runtime.dsh.toUpperCase() })
     await expect(relaunched.applyRelease()).resolves.toBe(false)
   })
 
@@ -1124,7 +1156,7 @@ describe('desktop external plugin profile', () => {
     if (operation === 'extra') writeFileSync(join(manager.runtime.dsh, 'extra'), '')
     if (operation === 'missing') unlinkSync(join(manager.runtime.dsh, 'package.json'))
     await expect(manager.applyRelease()).resolves.toBe(true)
-    const relaunched = new DesktopProjectManager(manager.paths, manager.runtime)
+    const relaunched = trackedProjectManager(manager.paths, manager.runtime)
     await expect(relaunched.applyRelease()).resolves.toBe(false)
     expect(existsSync(manager.paths.profile)).toBe(true)
     expect(calls(root)).toEqual([])
@@ -1371,7 +1403,7 @@ describe('desktop external plugin profile', () => {
     writeFileSync(join(manager.paths.profile, 'cordis.patch.yml'), '[]\n')
     const nextRoot = join(root, 'relocated', 'dsh')
     runtimeFixture(nextRoot, '1.1.0')
-    const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh: nextRoot })
+    const next = trackedProjectManager(manager.paths, { ...manager.runtime, dsh: nextRoot })
     await expect(next.applyRelease()).resolves.toBe(true)
     expect(next.listPlugins()).toEqual(manager.listPlugins())
     expect(next.releaseVersion()).toBe('1.1.0')
@@ -1387,7 +1419,7 @@ describe('desktop external plugin profile', () => {
     await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
     const dsh = join(root, 'new-node')
     runtimeFixture(dsh, '1.1.0', '24.18.0')
-    const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+    const next = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
     await next.applyRelease()
     expect(calls(root).slice(2).map(call => call.args.filter(arg => !arg.startsWith('--config.')))).toEqual([
       ['install', '--frozen-lockfile', '--ignore-scripts'], ['rebuild', '--pending'],
@@ -1401,7 +1433,7 @@ describe('desktop external plugin profile', () => {
     await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
     const dsh = join(root, 'next-major')
     runtimeFixture(dsh, '2.0.0')
-    const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
+    const next = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
     await expect(next.applyRelease()).rejects.toThrow(/requires @deepseek-ai\/cordis/u)
     expect(next.releaseVersion()).toBe('1.0.0')
     await next.mutate({ type: 'plugins-disable-all' }, hooks())
@@ -1440,7 +1472,7 @@ describe('desktop external plugin profile', () => {
     await manager.applyRelease()
     const failingPnpm = join(root, 'failing.mjs')
     writeFileSync(failingPnpm, `await import(${JSON.stringify(pathToFileURL(manager.runtime.pnpm).href)}); process.exitCode = 1`)
-    const worker = new DesktopProjectManager(manager.paths, { ...manager.runtime, pnpm: failingPnpm })
+    const worker = trackedProjectManager(manager.paths, { ...manager.runtime, pnpm: failingPnpm })
     await worker.applyRelease()
     let starts = 0
     await expect(worker.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks({
@@ -1582,7 +1614,7 @@ describe('desktop external plugin profile', () => {
     const release = join(root, 'release')
     const blocker = join(root, 'blocking.mjs')
     writeFileSync(blocker, `import {existsSync, writeFileSync} from 'node:fs'; import {setTimeout as sleep} from 'node:timers/promises'; writeFileSync(${JSON.stringify(ready)}, String(process.pid)); while (!existsSync(${JSON.stringify(release)})) await sleep(10); await import(${JSON.stringify(pathToFileURL(manager.runtime.pnpm).href)})`)
-    const worker = new DesktopProjectManager(manager.paths, { ...manager.runtime, pnpm: blocker })
+    const worker = trackedProjectManager(manager.paths, { ...manager.runtime, pnpm: blocker })
     await worker.applyRelease()
     const pending = worker.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
     // Teardown observes failures even if the runner has abandoned the test body.

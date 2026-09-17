@@ -152,6 +152,50 @@ describe('MenuView', () => {
     expect(screen.queryByRole('status')).toBeNull()
   })
 
+  it('marks the current query busy while its highlighted rows are retained from an earlier query', () => {
+    const ready = openState({
+      hit: { ...hit, trigger: '@', query: 'folder' },
+      groups: [{ source: 'reference', status: 'ready', items: [{ name: 'folderx/', drill: true }] }],
+      highlight: { source: 'reference', index: 0 },
+    })
+    const { menu } = mount(ready)
+    const listbox = screen.getByRole('listbox')
+    const folder = screen.getByRole('option')
+    expect(listbox.getAttribute('data-trigger-query')).toBe('folder')
+    expect(listbox.getAttribute('aria-busy')).toBe('false')
+    expect(folder.getAttribute('data-source')).toBe('reference')
+    expect(folder.getAttribute('data-source-status')).toBe('ready')
+    const pending: MenuState = {
+      ...ready,
+      hit: { ...hit, trigger: '@', query: 'folderx' },
+      generation: ready.generation + 1,
+      groups: ready.groups.map(group => ({ ...group, status: 'pending' })),
+    }
+    act(() => { menu.set(pending) })
+    expect(screen.getByRole('option')).toBe(folder)
+    expect(folder.getAttribute('aria-selected')).toBe('true')
+    expect(listbox.getAttribute('data-trigger-query')).toBe('folderx')
+    expect(listbox.getAttribute('aria-busy')).toBe('true')
+    expect(folder.getAttribute('data-source-status')).toBe('pending')
+    expect(screen.queryByRole('status')).toBeNull()
+    act(() => {
+      menu.set({ ...pending, groups: [...ready.groups, { source: 'other', status: 'pending', items: [] }] })
+    })
+    expect(listbox.getAttribute('data-trigger-query')).toBe('folderx')
+    expect(listbox.getAttribute('aria-busy')).toBe('true')
+    expect(folder.getAttribute('data-source-status')).toBe('ready')
+    expect(folder.getAttribute('aria-selected')).toBe('true')
+    act(() => { menu.set({ ...pending, groups: ready.groups }) })
+    expect(listbox.getAttribute('data-trigger-query')).toBe('folderx')
+    expect(listbox.getAttribute('aria-busy')).toBe('false')
+    expect(folder.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('omits the query marker when an open menu has no trigger hit', () => {
+    mount(openState({ hit: null }))
+    expect(screen.getByRole('listbox').hasAttribute('data-trigger-query')).toBe(false)
+  })
+
   it('titles each group with the localized source name, raw name for unknown sources, none for empty ready groups', () => {
     const { view } = mount(openState({
       groups: [

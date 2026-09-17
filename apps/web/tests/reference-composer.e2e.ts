@@ -37,6 +37,13 @@ const MODE = webSnapshotMode()
 const SOURCE_SESSION_ID = 'reference-source-session'
 const TARGET_SESSION_ID = 'reference-order-target-session'
 
+/** Match the highlighted reference row only after its current query's source has settled. */
+function readyReferenceOption(menu: Locator, query: string, name: RegExp): Locator {
+  return menu.and(menu.page().locator(`[data-trigger-query=${JSON.stringify(query)}]`))
+    .getByRole('option', { name, selected: true })
+    .and(menu.page().locator('[data-source="reference"][data-source-status="ready"]'))
+}
+
 async function settledSourceOption(menu: Locator): Promise<Locator> {
   await expect.poll(
     () => menu.getByRole('option', { name: new RegExp(TARGET_SESSION_ID) }).count(),
@@ -295,7 +302,7 @@ describe.skipIf(MODE === 'record')('web e2e: file and session references through
     // as an atomic chip — folder glyph, no trigger character, one unit.
     await writeComposerDraft(page, input, '@folderx')
     // First folder query on this page: allow the Host index a cold start.
-    await menu.getByRole('option', { name: /^folderx\// }).waitFor({ timeout: 60_000 })
+    await readyReferenceOption(menu, 'folderx', /^folderx\//).waitFor({ timeout: 60_000 })
     await page.keyboard.press('Enter')
     const chip = input.locator('[data-composer-chip]').last()
     await expect.poll(() => chip.textContent()).toBe('folderx/')
@@ -305,7 +312,7 @@ describe.skipIf(MODE === 'record')('web e2e: file and session references through
     // Tab drills: the literal descent text stays editable and the open menu
     // lists the folder's children.
     await writeComposerDraft(page, input, '@folderx')
-    await menu.getByRole('option', { name: /^folderx\// }).waitFor()
+    await readyReferenceOption(menu, 'folderx', /^folderx\//).waitFor()
     await page.keyboard.press('Tab')
     await expect.poll(() => input.textContent()).toBe('@folderx/')
     await menu.getByRole('option', { name: /child\.txt/ }).waitFor()
@@ -313,7 +320,7 @@ describe.skipIf(MODE === 'record')('web e2e: file and session references through
     // The row chevron drills the same way by pointer, header included: a
     // pointer descent reaches the same listing a Tab descent does.
     await writeComposerDraft(page, input, '@folderx')
-    const row = menu.getByRole('option', { name: /^folderx\// })
+    const row = readyReferenceOption(menu, 'folderx', /^folderx\//)
     await row.waitFor()
     await row.getByRole('button', { name: 'Browse folder' }).click()
     await expect.poll(() => input.textContent()).toBe('@folderx/')
@@ -341,10 +348,12 @@ describe.skipIf(MODE === 'record')('web e2e: file and session references through
     await menu.getByRole('option', { name: /child\.txt/ }).waitFor({ timeout: 60_000 })
     await expect.poll(() => crumbs.count()).toBe(0)
 
-    // The same listing reached by drilling owes the user the way back.
+    // A retained row can still be pending, and the slashless query also finds
+    // child.txt: only the draft rewrite establishes that Tab drilled.
     await writeComposerDraft(page, input, '@folderx')
-    await menu.getByRole('option', { name: /^folderx\// }).waitFor()
+    await readyReferenceOption(menu, 'folderx', /^folderx\//).waitFor()
     await page.keyboard.press('Tab')
+    await expect.poll(() => input.textContent()).toBe('@folderx/')
     await menu.getByRole('option', { name: /child\.txt/ }).waitFor()
     await crumbs.waitFor()
     await expect.poll(() => crumbs.getByRole('button').allTextContents())
@@ -359,7 +368,7 @@ describe.skipIf(MODE === 'record')('web e2e: file and session references through
     // header, which now names the step it returned to.
     await writeComposerDraft(page, input, '@folderx/nested')
     await expect.poll(() => menu.getByRole('option', { name: /child\.txt/ }).count()).toBe(0)
-    const nested = menu.getByRole('option', { name: /^nested\// })
+    const nested = readyReferenceOption(menu, 'folderx/nested', /^nested\//)
     await nested.waitFor()
     await nested.getByRole('button', { name: 'Browse folder' }).click()
     await expect.poll(() => input.textContent()).toBe('@folderx/nested/')
