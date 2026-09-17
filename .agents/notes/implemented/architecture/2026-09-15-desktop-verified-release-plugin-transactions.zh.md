@@ -10,6 +10,8 @@ Status: implemented
 
 ## Decision
 
+[插件保留决策](../bug-fix/2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md)取代本记录中基于 receipt 的归属与删除规则。本记录继续负责来源获取、依赖图验证与事务激活。
+
 Desktop 接受版本化的 `githubRelease` 来源，其中锁定仓库所有者、仓库、tag、artifact asset id 与名称、包名、包版本、字节大小、SHA-256、可选 SHA-512 integrity、目标 commit、可选依赖 registry 与可选 checksum-manifest 资产。由 Release 拥有的自动 provisioning 要求 checksum manifest。它的 lock 包含精确 asset id、规范 GitHub Release URL、名称、字节大小、SHA-256、`sha256sums` 格式与可选 SHA-512 integrity。Desktop 要求存在且只存在一个匹配的 `<sha256>  <artifact>` 行，并拒绝缺失、重复、格式错误、重命名或不匹配的条目。Desktop 根据 repository 与锁定 asset id 构造 GitHub API 请求。它拒绝可变 Release 选择器、未批准的重定向主机、Release 或 tag commit 不匹配、资产元数据不匹配、归档路径逃逸、逃逸链接、异常归档根目录、包身份不匹配与包生命周期脚本。
 
 根包是经过验证的本地 tgz。内置 pnpm 只通过显式、无凭据的 HTTPS registry 解析其传递依赖，忽略生命周期脚本，使用 Desktop 自有的 store 与配置路径，并且不接收继承的包管理器凭据或 secret 环境变量。普通 npm 来源保持其精确 registry 包行为。经过验证的制品仍必须满足目标共享包依赖图：应用拥有的包必须声明为 peer，而非普通或 optional dependency，即使相同名称也出现在 peer 中。制品完整性不能授权第二个 Host 包身份。在 profile 组合前，Desktop Host 为 profile `node_modules` 下的物理模块及锁定 runtime generation 使用的精确 fallback-parent URL 注册同步 package-resolution policy。其 bare package 请求经过 realpath 规范化后只能解析到 profile 内，或打包 runtime 下的同名 package 内，无需旧 profile link。该策略固定公共 Harness-home resolver 的 profiles scope，以及配置路径和规范路径对应的活动 profile scope；托管 profile 使用 home 的 `package.json` 作为 fallback anchor，外部 staging profile 则使用父目录的 `package.json`。使用这些精确 anchor URL 的真实调用者也有意接受同样严格的策略，因为 hook 无法将其与 generation 的合成查找区分。祖先 optional peer 呈现 module-not-found 语义；必需的外部依赖仍无效。内置模块、显式 file 请求及其他 scope 外调用者保持 Node.js 行为。继承 preload 的默认与嵌套 Worker 使用 Worker environment data 中经过验证的版本化根路径记录，而非任务参数或 Worker 自身的 home 变量；显式丢弃 preload 的 Worker 不属于该覆盖范围。
@@ -20,9 +22,9 @@ Desktop 保留旧 profile，直到 staged 健康检查、激活重命名、最�
 
 经过验证的安装在版本化 receipt 中持久保存锁定来源、GitHub Release 与资产标识、产物 hash、包身份与事务状态，并在 profile 私有目录中保留本地 tgz。类型化 preload API 暴露 source schema version 1 与 capability `{ id: "desktopNativeVerifiedRelease", schemaVersion: 1 }`，但不暴露自由格式下载 URL。一个事务只接受一种来源路径，因此外部 provisioner 与原生安装器不能同时提供根包。
 
-Desktop release 也可以携带通用的 `desktopNativePluginProvisioning` schema 1 精确状态 plan。启动协调 receipt-owned 插件，同时保留无关的手动 registry 插件和应用拥有的 shared package。Required 条目建立经过验证的基线。Optional 条目在独立 candidate 中测试，因此 download、validation、install、graph 或 health 失败只排除对应条目。其持久结果记录阶段与原因，不包含成功 receipt；required 失败保留先前 profile。
+Desktop release 也可以携带通用的 `desktopNativePluginProvisioning` schema 1 精确状态 plan。启动协调 release-owned 插件，同时保留无关的手动 registry、来源快照与 verified-release 插件和应用拥有的 shared package。Required 条目建立经过验证的基线。Optional 条目在独立 candidate 中测试，因此 download、validation、install、graph 或 health 失败只排除对应条目。其持久结果记录阶段与原因，不包含成功 receipt；required 失败保留先前 profile。
 
-活动 profile 存储规范 plan hash、逐插件 source 与 receipt、required 标记、组合状态、被删除的 receipt-owned 包、rollback 状态和 verification 状态。复用要求 desired/result 成员完全一致，已安装版本、启用状态、receipt 与来源、本地 artifact 字节均匹配，且没有多余 receipt-owned 根包，空 plan 也不例外。托管 completion 在最终位置的 Host ready 后独立验证此清单。Neutral browser 证据证明通用 Models 组合与认证 dispatch，而不是某个外部 provider release。
+活动 profile 存储规范 plan hash、逐插件 source 与 receipt、required 标记、组合状态、被删除的 release-owned 包、rollback 状态和 verification 状态。复用要求 desired/result 成员完全一致，已安装版本、启用状态、receipt 与来源、本地 artifact 字节均匹配，且没有多余 release-owned 根包，空 plan 也不例外。托管 completion 在最终位置的 Host ready 后独立验证此清单。Neutral browser 证据证明通用 Models 组合与认证 dispatch，而不是某个外部 provider release。
 
 ## Consumer transition
 
@@ -40,6 +42,6 @@ Windows Ops 在由源码拥有的 Desktop release plan 中选择插件 lock。�
 
 ## Consequences
 
-插件变更需要临时磁盘空间并重建包，即使只是兼容运行时升级或 bundle toggle。Required 与 optional 健康检查增加启动工作，但阻止失败 candidate 修改活动依赖图。精确状态删除只作用于 receipt-owned 插件；无关手动插件仍由用户拥有。测试覆盖多来源 checksum acquisition、来源与清单漂移、Host peer 替换/删除、按阶段隔离 optional 失败、最终激活失败、rollback 恢复失败、中断重命名以及拒绝提前 completion。每个选定 provider release 都需要其实际不可变制品、目标共享包依赖图及 Models、account、discovery、device-code 行为的独立证据；neutral fixture 不能证明其符合要求。
+插件变更需要临时磁盘空间并重建包，即使只是兼容运行时升级或 bundle toggle。Required 与 optional 健康检查增加启动工作，但阻止失败 candidate 修改活动依赖图。精确状态删除只作用于 release-owned 插件；无关手动插件仍由用户拥有。测试覆盖多来源 checksum acquisition、来源与清单漂移、Host peer 替换/删除、按阶段隔离 optional 失败、最终激活失败、rollback 恢复失败、中断重命名以及拒绝提前 completion。每个选定 provider release 都需要其实际不可变制品、目标共享包依赖图及 Models、account、discovery、device-code 行为的独立证据；neutral fixture 不能证明其符合要求。
 
 经过评审的 release plan 选择不可变的 `dsh-github-copilot@0.4.0-alpha.22`，其打包的 authorization 与 Schemastery 依赖均为必需的 Host peer。React 是 Client external，而非必需的 Node peer 或第二份私有运行时副本。已发布制品和历史共享清单检查不证明新 Desktop 的物化或已安装 UI 行为。Models、account、discovery、device-code 与更新持久性仍属于 rehearsal 和 release 的验收义务。
