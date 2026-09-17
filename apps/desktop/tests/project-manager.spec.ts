@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { gzipSync } from 'node:zlib'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resolveDesktopPaths } from '../src/paths.ts'
 import { DesktopProjectManager, packageNameFromSpec, type DesktopProjectHooks } from '../src/project-manager.ts'
 import type { DesktopGithubReleasePluginSource } from '../src/plugin-source.ts'
@@ -253,16 +253,35 @@ describe('desktop external plugin profile', () => {
     } finally { globalThis.fetch = original }
   })
 
-  it.each(['registry', 'alternate-artifact', 'artifact-bytes', 'missing-package', 'missing-row', 'empty-extra'] as const)('repairs exact restart inventory after %s drift', async (drift) => {
-    const { manager } = setup()
-    await manager.applyRelease()
+  describe.each(['registry', 'alternate-artifact', 'artifact-bytes', 'missing-package', 'missing-row', 'empty-extra'] as const)('repairs exact restart inventory after %s drift', (drift) => {
+    let manager: DesktopProjectManager
+    let original: typeof fetch
     const archive = verifiedPluginArchive()
     const source = verifiedSource(archive)
-    const original = globalThis.fetch
-    globalThis.fetch = verifiedFetch(source, archive)
     const plan = { schemaVersion: 1, mode: 'exact', plugins: drift === 'empty-extra' ? [] : [{ required: true, source }] }
-    try {
-      await manager.reconcileProvisioning(plan, hooks())
+    const pending: Promise<unknown>[] = []
+    function track<T>(task: () => Promise<T>): Promise<T> {
+      const result = task()
+      pending.push(result)
+      return result
+    }
+
+    beforeEach(() => {
+      original = globalThis.fetch
+      return track(async () => {
+        manager = setup().manager
+        await manager.applyRelease()
+        globalThis.fetch = verifiedFetch(source, archive)
+        await manager.reconcileProvisioning(plan, hooks())
+      })
+    })
+    afterEach(async () => {
+      // Timeouts do not cancel async fixture work: drain setup and repair before
+      // restoring shared fetch or letting the outer hook remove fixture roots.
+      try { await Promise.allSettled(pending.splice(0)) } finally { globalThis.fetch = original }
+    })
+
+    it('restores the planned inventory', () => track(async () => {
       if (drift === 'registry') {
         await manager.mutate({ type: 'plugin-update', name: source.packageName, version: source.version }, hooks())
       } else if (drift === 'alternate-artifact') {
@@ -288,7 +307,7 @@ describe('desktop external plugin profile', () => {
         expect(state.plugins).toHaveLength(1)
         expect(manager.listPlugins()[0]?.source).toEqual(source)
       }
-    } finally { globalThis.fetch = original }
+    }))
   })
 
   it.each((['download', 'validation', 'install', 'graph', 'health'] as const).flatMap(phase =>
