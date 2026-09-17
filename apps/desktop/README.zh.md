@@ -93,6 +93,8 @@ Windows Ops 验证 `resources/managed-update/capability.json` 中的 `desktopNat
 
 Desktop 在启动十秒后静默检查更新，此后运行期间每六小时检查一次。可用版本持续显示在主内容区上方；点击“查看更新”或应用菜单中的 **Check for updates** 才进入现有确认及活动任务检查。后台检查不弹安装对话框，也不自动安装。选择 **Later** 后提示栏仍保留。临时检查失败时保留此前验证过的可用版本；重叠检查会合并，确认与安装期间跳过，退出时停止定时检查并忽略迟到结果。详见[更新提示决策](../../.agents/notes/implemented/feature/2026-09-17-persistent-desktop-update-notice.zh.md)。Windows 警告、安装选项与 UAC 仍需你批准。
 
+托管更新检查失败时，提示会指出出错的是读取版本列表、验证版本标签还是下载更新清单。已知的连接重置、超时、DNS、网络可达性和证书错误会提供本地化恢复建议；取消操作单独说明。未知网络原因保留通用表述，证书建议要求保持验证开启。完整性与元数据校验错误保留原有诊断。这些提示不改变更新来源、下载路径或重试行为。
+
 发现更新、helper acknowledgement、安装完成与经过认证的模型使用是独立检查。复制后的 helper 必须仅凭其 Node 可执行文件与 bundle 启动，才能确认 handoff。确认前失败会保持 Desktop 运行，并在所属 managed-update operation 目录中的 `helper-startup-error.json` 记录有界、脱敏的 stderr。
 
 已发布的 `0.1.5-rc.3.cloga.1` 和 `.cloga.2` helper 包含无法解析的 `semver` import，无法通过失效的 handoff 自我修复。恢复需要通过更新器之外的途径取得较新的已验证 installer。先保存或完成活动工作，明确关闭 Desktop，并验证其精确应用与 Host 进程均已退出，再启动经过 hash 验证的交互式 installer。不要重跑旧 handoff、修改已安装 helper 文件、复制 `node_modules` 或在活动 Desktop profile 中运行 pnpm。Windows 警告与 UAC 仍由用户决定。
