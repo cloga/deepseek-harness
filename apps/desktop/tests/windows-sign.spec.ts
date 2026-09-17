@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -28,6 +29,25 @@ const CERTIFICATE_FILE = 'C:\\release\\server.cer'
 const SIGN_SCRIPT = resolve(import.meta.dirname, '../scripts/windows-sign.cmd')
 
 describe('Windows token signing', () => {
+  it('does not initialize the Wine adapter for metadata imports or other platforms', { timeout: 30_000 }, () => {
+    const moduleUrl = new URL('../scripts/windows-sign.mjs', import.meta.url).href
+    const output = execFileSync(process.execPath, ['--input-type=module', '--eval', `
+import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
+const require = createRequire(${JSON.stringify(moduleUrl)})
+const wine = require.resolve('app-builder-lib/out/vm/WineVm.js')
+const { installWindowsNsisBootstrapSigner } = await import(${JSON.stringify(moduleUrl)})
+assert.equal(require.cache[wine], undefined)
+installWindowsNsisBootstrapSigner({ platform: 'darwin', sign: async () => {} })
+assert.equal(require.cache[wine], undefined)
+process.stdout.write('metadata-only')
+`], {
+      env: { ...scrubWindowsSigningEnvironment(process.env), NODE_OPTIONS: undefined, NODE_PATH: undefined },
+      encoding: 'utf8', timeout: 10_000, windowsHide: true,
+    })
+    expect(output).toBe('metadata-only')
+  })
+
   it('passes only the validated BAT fields to the signing command interpreter', () => {
     expect(buildWindowsSigningEnvironment({
       SystemRoot: 'C:\\Windows',

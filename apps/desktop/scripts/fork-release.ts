@@ -40,6 +40,7 @@ import {
 import { discoverDesktopManagedSourceRelease } from '../src/managed-update-coordinator.ts'
 import { resolveDesktopPackageRegistry } from './desktop-release-environment.mjs'
 import { assertStandaloneDesktopHelper } from './helper-standalone.ts'
+import { packagedDesktopRuntimeRoot, readPackagedDesktopRuntimeDescriptor } from './packaged-runtime.mjs'
 
 const APP_ROOT = resolve(import.meta.dirname, '..')
 const REPOSITORY_ROOT = resolve(APP_ROOT, '..', '..')
@@ -353,16 +354,11 @@ export function finalizeDesktopForkRelease(
   }
   assertUnsignedInstaller(installerPath)
   const executablePath = join(artifactsRoot, 'win-unpacked', `${IDENTITY.executableName}.exe`)
-  const runtimePath = join(
-    artifactsRoot,
-    'win-unpacked',
-    'resources',
-    'dsh',
-    'desktop-runtime.json',
-  )
-  if (!existsSync(executablePath) || !existsSync(runtimePath)) {
-    throw new Error('desktop fork release: installed executable or runtime descriptor is missing')
+  if (!existsSync(executablePath)) {
+    throw new Error('desktop fork release: installed executable is missing')
   }
+  const runtimeRoot = packagedDesktopRuntimeRoot(join(artifactsRoot, 'win-unpacked', 'resources'))
+  const runtimeBytes = readPackagedDesktopRuntimeDescriptor(executablePath, runtimeRoot)
   const installerSha256 = fileSha256(installerPath)
   const packagedProvisioningSha256 = sha256(packagedProvisioningBytes)
   rmSync(outputRoot, { recursive: true, force: true })
@@ -404,7 +400,7 @@ export function finalizeDesktopForkRelease(
         signature: 'NotSigned',
       },
       executableSha256: fileSha256(executablePath),
-      runtimeSha256: fileSha256(runtimePath),
+      runtimeSha256: sha256(runtimeBytes),
       helperSha256: sha256(helperBytes),
       capabilitySha256: sha256(packagedCapabilityBytes),
       provisioning: {
@@ -502,11 +498,13 @@ export function finalizeDesktopForkRelease(
     [packagedCapabilityPath, receipt.artifacts.capabilitySha256, 'packaged capability'],
     [helperPath, receipt.artifacts.helperSha256, 'packaged helper'],
     [executablePath, receipt.artifacts.executableSha256, 'packaged executable'],
-    [runtimePath, receipt.artifacts.runtimeSha256, 'packaged runtime descriptor'],
     [receiptPath, receiptFileSha256, 'build receipt'],
     [manifestPath, sha256(jsonText(manifest)), 'published manifest'],
   ] as const) {
     assertFileSha256(path, expected, label)
+  }
+  if (sha256(readPackagedDesktopRuntimeDescriptor(executablePath, runtimeRoot)) !== receipt.artifacts.runtimeSha256) {
+    throw new Error('desktop fork release: packaged runtime descriptor does not match the recorded SHA-256')
   }
   const files = [installerName, provisioningName, basename(receiptPath), basename(manifestPath)]
   writeFileSync(join(outputRoot, 'SHA256SUMS'), `${files.map(name => `${fileSha256(join(outputRoot, name))}  ${name}`).join('\n')}\n`)

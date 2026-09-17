@@ -1,11 +1,8 @@
-/** Read-only graph verification under the packaged Node, without source-runner module paths. */
+/** Packaged Electron Node-mode graph acceptance; requires Desktop's built lib/types validators. */
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { isAbsolute, join } from 'node:path'
-import { validateDesktopPluginGraph } from '../../src/profile-packages.ts'
-import { readDesktopRuntime } from '../../src/runtime-tree.ts'
 
 function lookup(anchor: string | undefined, name: string) {
   if (anchor === undefined) return undefined
@@ -56,18 +53,44 @@ export function inspectPackagedGraphResolution(profile: string) {
   }
 }
 
-if (import.meta.main) {
-  const [profile, runtimeRoot, ...plugins] = process.argv.slice(2)
-  assert(profile && runtimeRoot && plugins.length > 0, 'Profile, runtime and plugin names are required')
+/**
+ * Launch the built production graph validator without TypeScript hooks or runner module overrides.
+ * This checks the graph inventory, not module loading; the real Host acceptance owns that evidence.
+ * @param profile - Absolute active Desktop profile.
+ * @param runtimeRoot - Absolute ASAR-backed dsh directory visible to Electron's patched filesystem.
+ * @param plugins - Active release-owned plugin names.
+ * @returns Arguments for the packaged Electron executable with ELECTRON_RUN_AS_NODE=1.
+ */
+export function packagedGraphCheckArguments(profile: string, runtimeRoot: string, plugins: readonly string[]): string[] {
   assert(isAbsolute(profile) && isAbsolute(runtimeRoot), 'Profile and runtime must be absolute')
-  const observation = inspectPackagedGraphResolution(profile)
-  const runtimeSha256 = createHash('sha256')
-    .update(readFileSync(join(runtimeRoot, 'desktop-runtime.json'))).digest('hex')
-  try {
-    validateDesktopPluginGraph(profile, runtimeRoot, readDesktopRuntime(runtimeRoot), plugins)
-    console.log(JSON.stringify({ valid: true, runtimeSha256, ...observation }))
-  } catch (error) {
-    console.log(JSON.stringify({ valid: false, runtimeSha256, ...observation, error: String(error) }))
-    process.exitCode = 1
-  }
+  assert(plugins.length > 0, 'Active plugin names are required')
+  const validator = new URL('../../lib/types/profile-packages.js', import.meta.url).href
+  const reader = new URL('../../lib/types/runtime-tree.js', import.meta.url).href
+  const script = `
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { validateDesktopPluginGraph } from ${JSON.stringify(validator)}
+import { readDesktopRuntime } from ${JSON.stringify(reader)}
+const [profile, runtimeRoot, ...plugins] = process.argv.slice(1)
+const observation = {
+  executable: process.execPath,
+  nodeVersion: process.versions.node,
+  electronVersion: process.versions.electron ?? null,
+  runAsNode: process.env.ELECTRON_RUN_AS_NODE ?? null,
+  nodePath: process.env.NODE_PATH ?? null,
+  nodeOptionsPresent: Boolean(process.env.NODE_OPTIONS),
+  electronNoAsarPresent: Boolean(process.env.ELECTRON_NO_ASAR),
+  cwd: process.cwd(), profile, runtimeRoot, resolutionMode: 'runtime',
+}
+try {
+  const runtimeSha256 = createHash('sha256').update(readFileSync(join(runtimeRoot, 'desktop-runtime.json'))).digest('hex')
+  validateDesktopPluginGraph(profile, runtimeRoot, readDesktopRuntime(runtimeRoot), plugins, 'runtime')
+  console.log(JSON.stringify({ valid: true, runtimeSha256, ...observation }))
+} catch (error) {
+  console.log(JSON.stringify({ valid: false, ...observation, error: String(error) }))
+  process.exitCode = 1
+}
+`
+  return ['--input-type=module', '--eval', script, profile, runtimeRoot, ...plugins]
 }

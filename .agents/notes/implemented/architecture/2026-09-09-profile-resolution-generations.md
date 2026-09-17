@@ -78,7 +78,7 @@ The `dsh` launcher selects link mode when an ordinary Node caller omits `resolut
 
 Runtime mode requires a supported Node Internal loader interface and does not create, update, or retire fallback links. Dual mode retains link writes and fails when Node's disk result differs from the generation. Writable profile state and package-manager transactions remain outside the resolver.
 
-Pkg and packaged Electron carriers force runtime resolution. The Electron Host runs through the Electron executable with `ELECTRON_RUN_AS_NODE=1`, reads its dsh tree from ASAR, and maps executable ASAR entries to electron-builder's unpacked tree. Neither carrier creates, updates, or removes legacy resolution links.
+Pkg and packaged Electron carriers force runtime resolution. The Electron Host runs through the Electron executable with `ELECTRON_RUN_AS_NODE=1`, reads its dsh tree from ASAR, and maps executable ASAR entries to electron-builder's unpacked tree. Neither carrier creates, updates, or removes legacy resolution links. This supersedes the execution and link choices in the [Desktop bundled-runtime decision](2026-09-08-desktop-bundled-runtime-and-external-plugins.md), which continues to own bundled core packages and external plugin isolation.
 
 ### Performance and verification
 

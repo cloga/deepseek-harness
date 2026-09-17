@@ -139,5 +139,18 @@ describe('Desktop fork release plan', () => {
       env: { PLAYWRIGHT_BROWSERS_PATH: '${{ runner.temp }}/desktop-playwright' },
     })
     expect(steps[packaging]?.env?.PLAYWRIGHT_BROWSERS_PATH).toBe(steps[browser]?.env?.PLAYWRIGHT_BROWSERS_PATH)
+    const runtimeCanaries = steps.findIndex(step => step.name === 'Verify ASAR runtime inventory canaries with packaged Electron')
+    const finalize = steps.findIndex(step => step.name === 'Finalize release manifest and receipts')
+    expect(runtimeCanaries).toBeGreaterThan(packaging)
+    expect(finalize).toBeGreaterThan(runtimeCanaries)
+    const acceptance = steps.findIndex(step => step.name === 'Verify packaged Copilot account and restart')
+    const observerCleanup = steps.findIndex(step => step.name === 'Verify real acceptance observer failure cleanup')
+    expect(observerCleanup).toBeGreaterThan(acceptance)
+    expect(finalize).toBeGreaterThan(observerCleanup)
+    expect(steps[observerCleanup]?.run).toContain('apps/desktop/tests/fixtures/copilot-observer-smoke.ts')
+    expect(steps[runtimeCanaries]?.run?.trim()).toBe(
+      'node apps/desktop/tests/fixtures/packaged-runtime-smoke.mjs '
+      + 'apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe',
+    )
   })
 })

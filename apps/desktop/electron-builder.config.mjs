@@ -15,6 +15,7 @@ import {
 } from './scripts/windows-sign.mjs'
 import { resolveDesktopAutoUpdateConfig } from './scripts/desktop-auto-update-environment.mjs'
 import { desktopTargetBuildPaths, resolveDesktopBuildTarget } from './scripts/desktop-build-paths.mjs'
+import { packagedDesktopRuntimeRoot, verifyPackagedDesktopRuntime } from './scripts/packaged-runtime.mjs'
 
 /**
  * Create electron-builder configuration from one release environment.
@@ -113,14 +114,20 @@ export function createElectronBuilderConfig(
       writeUpdateInfo: false,
     },
     afterPack: async context => {
-      const { verifyDesktopRuntime } = await import('./lib/types/runtime-tree.js')
-      await verifyDesktopRuntime(join(context.packager.getResourcesDir(context.appOutDir), 'dsh'),
+      const name = context.packager.appInfo.productFilename
+      const executable = resolvedPlatform === 'darwin'
+        ? join(context.appOutDir, `${name}.app`, 'Contents', 'MacOS', name)
+        : join(context.appOutDir, `${name}${resolvedPlatform === 'win32' ? '.exe' : ''}`)
+      await verifyPackagedDesktopRuntime(executable,
+        packagedDesktopRuntimeRoot(context.packager.getResourcesDir(context.appOutDir)),
         runtimeVersion, { platform: resolvedPlatform, arch: resolvedArch })
     },
     afterSign: async context => {
       if (context.electronPlatformName !== 'darwin') return
-      const { verifyDesktopRuntime } = await import('./lib/types/runtime-tree.js')
-      await verifyDesktopRuntime(join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, 'Contents', 'Resources', 'dsh'),
+      const name = context.packager.appInfo.productFilename
+      const contents = join(context.appOutDir, `${name}.app`, 'Contents')
+      await verifyPackagedDesktopRuntime(join(contents, 'MacOS', name),
+        packagedDesktopRuntimeRoot(join(contents, 'Resources')),
         runtimeVersion, { platform: 'darwin', arch: resolvedArch })
       verifyMacOSSignatureAfterSign(context, macOSSigning ?? resolveMacOSSigningEnvironment(env))
     },

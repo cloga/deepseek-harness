@@ -37,6 +37,18 @@ export interface DesktopElectronBuilderConfig {
   readonly nsis: {
     readonly include: string
   }
+  readonly afterPack: (context: {
+    readonly appOutDir: string
+    readonly packager: {
+      readonly appInfo: { readonly productFilename: string }
+      getResourcesDir(appOutDir: string): string
+    }
+  }) => Promise<void>
+  readonly afterSign: (context: {
+    readonly appOutDir: string
+    readonly electronPlatformName: string
+    readonly packager: { readonly appInfo: { readonly productFilename: string } }
+  }) => Promise<void>
   readonly artifactBuildCompleted: (artifact: { readonly file: string }) => Promise<void> | undefined
   readonly publish: readonly [{ readonly provider: 'generic', readonly url: string }] | null
 }

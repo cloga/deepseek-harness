@@ -78,7 +78,7 @@ link、dual 与 runtime 模式使用同一种 generation schema 和依赖选择�
 
 runtime 模式要求受支持的 Node Internal loader 接口，并且不会创建、更新或退休 fallback 链接。dual 模式保留链接写入，并在 Node 的磁盘结果与 generation 不同时失败。可写 profile 状态和包管理器事务不属于 resolver。
 
-pkg 与打包 Electron 载体强制使用 runtime 解析。Electron Host 通过设置 `ELECTRON_RUN_AS_NODE=1` 的 Electron 可执行文件运行，从 ASAR 读取 dsh 依赖树，并把 ASAR 中的可执行条目映射到 electron-builder 的 unpacked 目录。两种载体都不会创建、更新或删除旧解析链接。
+pkg 与打包 Electron 载体强制使用 runtime 解析。Electron Host 通过设置 `ELECTRON_RUN_AS_NODE=1` 的 Electron 可执行文件运行，从 ASAR 读取 dsh 依赖树，并把 ASAR 中的可执行条目映射到 electron-builder 的 unpacked 目录。两种载体都不会创建、更新或删除旧解析链接。这取代 [Desktop 内置运行时决策](2026-09-08-desktop-bundled-runtime-and-external-plugins.zh.md)中的执行与链接选择；该记录继续负责内置核心包与外部插件隔离。
 
 ### 性能与验证
 

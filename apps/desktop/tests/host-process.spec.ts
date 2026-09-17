@@ -1,8 +1,10 @@
-import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DesktopHostProcess } from '../src/host-process.ts'
 import { writePackage } from './runtime-fixture.ts'
 
@@ -62,21 +64,33 @@ process.on('message', message => {
 })
 `
 
+function copyResolutionPolicy(project: string): string {
+  const policy = join(project, 'register-module-resolution-policy.mjs')
+  copyFileSync(resolve(import.meta.dirname, '../../desktop-host/register-module-resolution-policy.mjs'), policy)
+  const helper = writePackage(join(project, 'node_modules'), '@deepseek-ai/dsh-home-paths')
+  copyFileSync(resolve(import.meta.dirname, '../../../packages/util/home-paths/lib/types/index.js'), join(helper, 'index.js'))
+  return policy
+}
+
 function projectWithHost(source: string): string {
   const project = mkdtempSync(join(tmpdir(), 'dsh-desktop-host-test-'))
   roots.push(project)
   const packageRoot = join(project, 'node_modules', '@deepseek-ai', 'dsh-desktop-host')
   mkdirSync(join(packageRoot, 'lib'), { recursive: true })
   writeFileSync(join(packageRoot, 'package.json'), '{"name":"@deepseek-ai/dsh-desktop-host","type":"module"}\n')
-  copyFileSync(
-    resolve(import.meta.dirname, '..', '..', 'desktop-host', 'register-module-resolution-policy.mjs'),
-    join(packageRoot, 'register-module-resolution-policy.mjs'),
-  )
+  copyResolutionPolicy(packageRoot)
   writeFileSync(join(packageRoot, 'lib', 'index.js'), `${HOST_WIRE}\n${source}`)
   return project
 }
 
+beforeEach(() => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-host-owned-home-'))
+  roots.push(home)
+  vi.stubEnv('DSH_HOME', home)
+})
+
 afterEach(() => {
+  vi.unstubAllEnvs()
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
@@ -190,6 +204,181 @@ function onRequestFrame(frame) {
         workspace: 'workspace',
       })
     } finally { await host.stop() }
+  })
+
+  it.each(['managed', 'staged'] as const)('keeps %s runtime peers unlinked and confines exact after-fallback anchors', (location) => {
+    const root = mkdtempSync(join(tmpdir(), 'desktop-runtime-policy-'))
+    roots.push(root)
+    const runtime = join(root, 'runtime')
+    const home = join(root, 'home')
+    const profile = location === 'managed' ? join(home, 'profiles', 'desktop') : join(root, 'stage', 'candidate')
+    const fallbackRoot = location === 'managed' ? home : join(root, 'stage')
+    const fallbackAnchor = join(fallbackRoot, 'package.json')
+    const plugin = writePackage(join(profile, 'node_modules'), 'plugin')
+    const shared = writePackage(join(runtime, 'node_modules'), 'shared-peer', {}, 'export const marker = "runtime"\n')
+    const canary = join(root, 'ancestor-loaded')
+    const ancestor = writePackage(join(root, 'legacy'), '@modelcontextprotocol/sdk', {},
+      `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(canary)}, 'loaded'); export const marker = 'ancestor'\n`)
+    mkdirSync(join(fallbackRoot, 'node_modules', '@modelcontextprotocol'), { recursive: true })
+    symlinkSync(ancestor, join(fallbackRoot, 'node_modules', '@modelcontextprotocol', 'sdk'), process.platform === 'win32' ? 'junction' : 'dir')
+    writeFileSync(join(runtime, 'package.json'), '{"type":"module"}\n')
+    writePackage(join(root, 'node_modules'), 'outside-peer', {}, 'export const marker = "outside"\n')
+    const workspace = join(root, 'workspace.mjs')
+    writeFileSync(workspace, 'export { marker } from "outside-peer"\n')
+    writeFileSync(join(plugin, 'local.mjs'), 'export const marker = "local"\n')
+    writeFileSync(join(plugin, 'explicit.mjs'), `
+import { sep } from 'node:path'
+import { marker } from './local.mjs'
+export const local = marker
+export const builtin = sep
+export const load = url => import(url)
+`)
+    const runtimeAlias = join(profile, 'node_modules', 'runtime-alias')
+    symlinkSync(shared, runtimeAlias, process.platform === 'win32' ? 'junction' : 'dir')
+    for (const [name, specifier] of [['shared', 'shared-peer'], ['ancestor', '@modelcontextprotocol/sdk'], ['alias', 'runtime-alias']]) {
+      writeFileSync(join(plugin, `${name}.mjs`), `export { marker } from ${JSON.stringify(specifier)}\n`)
+      writeFileSync(join(plugin, `${name}.cjs`), `module.exports = require(${JSON.stringify(specifier)})\n`)
+    }
+    const resolver = resolve(import.meta.dirname, '../../../packages/boot/app-boot/lib/types/profile-resolution/resolver.js')
+    const addon = createRequire(resolver).resolve('node-addon-require-builtin')
+    const entry = join(root, 'probe.mjs')
+    const generation = {
+      profilesDir: join(home, 'profiles'), profileDir: profile, localPackageNames: ['plugin'],
+      entries: [{ name: 'shared-peer', version: '1.0.0', packageDir: shared, declarer: join(runtime, 'package.json'), scope: 'installation' }],
+    }
+    const cjsWorker = join(root, 'probe.cjs')
+    writeFileSync(cjsWorker, `void import(${JSON.stringify(pathToFileURL(entry).href)})\n`)
+    writeFileSync(entry, `
+import assert from 'node:assert/strict'
+import Module, { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
+import { isMainThread, parentPort, Worker, workerData } from 'node:worker_threads'
+const require = createRequire(import.meta.url)
+async function runWorker(url, nested) {
+  const worker = new Worker(url, {
+    workerData: nested,
+    ...(nested ? { argv: ['not-runtime', 'not-profile'], env: { ...process.env, DSH_HOME: ${JSON.stringify(join(root, 'unrelated-home'))} } } : {}),
+  })
+  let message, failure, exit
+  worker.on('message', value => { message = value })
+  worker.on('error', error => { failure = error })
+  await new Promise(resolve => worker.on('exit', code => { exit = code; resolve() }))
+  if (failure) throw failure
+  assert.equal(exit, 0)
+  assert(message)
+  return message
+}
+// Substitute only the native accessor; routing and both Node loader objects remain real.
+assert.equal(require('internal/modules/cjs/loader').Module, Module)
+require.cache[${JSON.stringify(addon)}] = { exports: { requireBuiltin: id => require(id) } }
+const { installProfileResolution } = await import(${JSON.stringify(pathToFileURL(resolver).href)})
+const registration = installProfileResolution(${JSON.stringify(generation)})
+const result = {}
+try {
+  for (const name of ['shared', 'ancestor', 'alias']) {
+    for (const kind of ['mjs', 'cjs']) {
+      const path = ${JSON.stringify(plugin)} + '/' + name + '.' + kind
+      try { result[name + ':' + kind] = (kind === 'mjs' ? await import(pathToFileURL(path).href) : require(path)).marker }
+      catch (error) { result[name + ':' + kind] = error.code }
+    }
+  }
+  const anchor = ${JSON.stringify(fallbackAnchor)}
+  try { result.anchorCjs = createRequire(anchor)('@modelcontextprotocol/sdk').marker }
+  catch (error) { result.anchorCjs = error.code }
+  const loader = require('internal/modules/esm/loader').getOrInitializeCascadedLoader()
+  try { result.anchorEsm = (await loader.import('@modelcontextprotocol/sdk', pathToFileURL(anchor).href, {})).marker }
+  catch (error) { result.anchorEsm = error.code }
+  const explicit = await import(${JSON.stringify(pathToFileURL(join(plugin, 'explicit.mjs')).href)})
+  result.explicit = { local: explicit.local, builtin: explicit.builtin,
+    workspace: (await explicit.load(${JSON.stringify(pathToFileURL(workspace).href)})).marker }
+  result.outsideCjs = require('outside-peer').marker
+  if (isMainThread) {
+    result.workers = [await runWorker(new URL(import.meta.url), false), await runWorker(new URL(${JSON.stringify(pathToFileURL(cjsWorker).href)}), false)]
+    console.log(JSON.stringify(result))
+  } else {
+    assert.equal(process.argv.length, workerData ? 4 : 2)
+    if (!workerData) result.nested = await runWorker(new URL(import.meta.url), true)
+    parentPort.postMessage(result)
+  }
+} finally { registration.dispose() }
+`)
+    const env: NodeJS.ProcessEnv = { ...process.env, DSH_HOME: home }
+    delete env.NODE_OPTIONS
+    delete env.NODE_PATH
+    const unprotected = spawnSync(process.execPath, ['--expose-internals', entry, runtime, profile],
+      { cwd: profile, env, encoding: 'utf8', timeout: 30_000 })
+    expect(unprotected.error).toBeUndefined()
+    expect(unprotected.signal).toBeNull()
+    expect(unprotected.status, unprotected.stderr).toBe(0)
+    expect(JSON.parse(unprotected.stdout)).toMatchObject({
+      'ancestor:mjs': 'ancestor', 'ancestor:cjs': 'ancestor', anchorCjs: 'ancestor', anchorEsm: 'ancestor',
+    })
+    expect(existsSync(canary)).toBe(true)
+    unlinkSync(canary)
+    const result = spawnSync(process.execPath, ['--expose-internals', '--import',
+      pathToFileURL(copyResolutionPolicy(root)).href,
+      entry, runtime, profile,
+    ], { cwd: profile, env, encoding: 'utf8', timeout: 30_000 })
+    expect(result.error).toBeUndefined()
+    expect(result.signal).toBeNull()
+    expect(result.status, result.stderr).toBe(0)
+    const expected = {
+      'shared:mjs': 'runtime', 'shared:cjs': 'runtime',
+      'ancestor:mjs': 'ERR_MODULE_NOT_FOUND', 'ancestor:cjs': 'MODULE_NOT_FOUND',
+      'alias:mjs': 'ERR_MODULE_NOT_FOUND', 'alias:cjs': 'MODULE_NOT_FOUND',
+      anchorCjs: 'MODULE_NOT_FOUND', anchorEsm: 'ERR_MODULE_NOT_FOUND',
+      explicit: { local: 'local', builtin: process.platform === 'win32' ? '\\' : '/', workspace: 'outside' },
+      outsideCjs: 'outside',
+    }
+    const expectedWorker = { ...expected, nested: expected }
+    expect(JSON.parse(result.stdout)).toEqual({ ...expected, workers: [expectedWorker, expectedWorker] })
+    expect(existsSync(fallbackAnchor)).toBe(false)
+    expect(existsSync(canary)).toBe(false)
+    expect(existsSync(join(profile, 'node_modules', 'shared-peer'))).toBe(false)
+  })
+
+  it('rejects missing main argv and missing or malformed inherited Worker roots', () => {
+    const root = mkdtempSync(join(tmpdir(), 'desktop-worker-policy-'))
+    roots.push(root)
+    const policy = pathToFileURL(copyResolutionPolicy(root)).href
+    const env: NodeJS.ProcessEnv = { ...process.env }
+    delete env.NODE_OPTIONS
+    delete env.NODE_PATH
+    const missingArgs = spawnSync(process.execPath, ['--import', policy, '--input-type=module', '--eval', 'process.stdout.write("unexpected")'],
+      { cwd: root, env, encoding: 'utf8', timeout: 30_000 })
+    expect(missingArgs.error).toBeUndefined()
+    expect(missingArgs.signal).toBeNull()
+    expect(missingArgs.status).toBe(1)
+    expect(missingArgs.stdout).toBe('')
+    expect(missingArgs.stderr).toContain('module resolution policy requires runtime and profile directories')
+    const worker = join(root, 'worker.mjs')
+    writeFileSync(worker, 'import { parentPort } from "node:worker_threads"; parentPort.postMessage("unexpected")\n')
+    const entry = join(root, 'main.mjs')
+    const valid = { schemaVersion: 1, runtimeDir: root, profileDir: root, home: root }
+    const invalid = [null, [], { ...valid, schemaVersion: 2 }, { ...valid, runtimeDir: 'relative' }, { ...valid, extra: true }]
+    writeFileSync(entry, `
+import { setEnvironmentData, Worker } from 'node:worker_threads'
+const results = []
+for (const value of [undefined, ...${JSON.stringify(invalid)}]) {
+  setEnvironmentData('@deepseek-ai/dsh-desktop-host/module-resolution-policy', value)
+  const worker = new Worker(new URL(${JSON.stringify(pathToFileURL(worker).href)}), {
+    execArgv: ['--import', ${JSON.stringify(policy)}], argv: [${JSON.stringify(root)}, ${JSON.stringify(root)}],
+  })
+  const result = { ran: false }
+  worker.on('message', () => { result.ran = true })
+  worker.on('error', error => { result.error = error.message })
+  await new Promise(resolve => worker.on('exit', code => { result.exit = code; resolve() }))
+  results.push(result)
+}
+console.log(JSON.stringify(results))
+`)
+    const result = spawnSync(process.execPath, [entry], { cwd: root, env, encoding: 'utf8', timeout: 30_000 })
+    expect(result.error).toBeUndefined()
+    expect(result.signal).toBeNull()
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual(Array.from({ length: invalid.length + 1 }, () => ({
+      ran: false, exit: 1, error: 'dsh desktop: module resolution policy requires valid inherited Worker roots',
+    })))
   })
 
   it('carries raw request and response bytes and shuts the child down cleanly', async () => {
