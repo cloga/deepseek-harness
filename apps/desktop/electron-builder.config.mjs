@@ -16,6 +16,7 @@ import {
 import { resolveDesktopAutoUpdateConfig } from './scripts/desktop-auto-update-environment.mjs'
 import { desktopTargetBuildPaths, resolveDesktopBuildTarget } from './scripts/desktop-build-paths.mjs'
 import { packagedDesktopRuntimeRoot, verifyPackagedDesktopRuntime } from './scripts/packaged-runtime.mjs'
+import { DESKTOP_PACKAGE_METADATA_OPTIONS } from './scripts/runtime-package-metadata.mjs'
 
 /**
  * Create electron-builder configuration from one release environment.
@@ -69,6 +70,7 @@ export function createElectronBuilderConfig(
     throw new Error('desktop package: whale icon must be a 256x256 PNG')
   }
   return {
+    ...DESKTOP_PACKAGE_METADATA_OPTIONS,
     appId,
     productName: forkRelease?.productName ?? 'DeepSeek Harness',
     executableName: forkRelease?.executableName,

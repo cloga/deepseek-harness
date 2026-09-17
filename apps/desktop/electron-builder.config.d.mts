@@ -1,6 +1,8 @@
 /** Electron-builder fields asserted by the Desktop release tests. */
 export interface DesktopElectronBuilderConfig {
   readonly appId: string
+  readonly removePackageScripts: true
+  readonly removePackageKeywords: true
   readonly win: {
     readonly icon: string
   }

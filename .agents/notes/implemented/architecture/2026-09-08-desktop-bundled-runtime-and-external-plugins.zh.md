@@ -20,7 +20,13 @@ Desktop 初始化时安装核心依赖图，会重复发布构建器已经完成
 
 ## 包归属
 
-资源描述文件记录精确发布版本、Node 版本、平台、架构、共享包版本和最终文件哈希。构建准备复制普通文件，不保留指回 pnpm 构建 store 的链接；打包将该依赖树放入 ASAR，并解包原生可执行入口。原生 Mach-O 文件先签名再哈希，应用签名器保留其字节。明确的 `dsh/node_modules` 文件映射绕过 electron-builder 对根 `node_modules` 的排除。打包清单验证在封装后和 macOS 签名后运行，使用归档中的字节与可执行标志，以及精确的物理解包文件集合与模式；Electron 在一次性验证副本上运行未修改的验证器。
+资源描述文件记录精确发布版本、Node 版本、平台、架构、共享包版本和最终文件哈希。构建准备复制普通文件，不保留指回 pnpm 构建 store 的链接，先规范化打包元数据并签名原生 Mach-O 文件，然后才记录清单。原生产物、完整 Host 与浏览器 smoke 使用经过规范化并封存的依赖树。打包将该依赖树放入 ASAR，并解包原生可执行入口；应用签名器保留预先签名的原生字节。明确的 `dsh/node_modules` 文件映射绕过 electron-builder 对根 `node_modules` 的排除。打包清单验证在封装后和 macOS 签名后运行，使用归档中的字节与可执行标志，以及精确的物理解包文件集合与模式；Electron 在一次性验证副本上运行未修改的验证器。
+
+即使通过自定义文件映射传入，锁定版本的 builder 仍会转换嵌套 `node_modules` 包的 manifest。因此，封存原始 npm 元数据会记录与打包结果不同的字节。[元数据规范化](../../../../apps/desktop/scripts/runtime-package-metadata.mjs)在签名或封存之前调用 `app-builder-lib` 26.15.3 的同一个内部 `createTransformer`。准备与打包共享显式的 `removePackageScripts: true` 和 `removePackageKeywords: true` 设置。转换器使用 shell 应用目录来判定主 manifest，不向运行时包传入 fork `extraMetadata`。规范化拒绝已经封存的根目录和文件系统链接；它只修改独占的生产副本，绝不修改工作区依赖或用户 profile。
+
+转换保留包名和版本、`type`、`main`、`exports`、`imports`、dependency 与 peer 声明及 `dsh` 元数据等运行时声明。它删除 scripts、keywords 以及锁定版本 builder 选定的开发或发布元数据；由于运行时代码可以读取自己的 manifest，这些删除并非在所有情况下都不影响语义。精确的内部 API 与序列化行为存在版本耦合：更换 builder 版本需要评审并重新验证，而不是静默 fallback。描述文件字节与打包后清单相等检查保持严格。不会为适应转换后的字节而在打包后重新封存、扩大文件排除范围或跳过运行时构建。
+
+维护中的 [ASAR canary](../../../../apps/desktop/tests/fixtures/packaged-runtime-smoke.mjs)在 Electron 44 下执行真实 builder 转换和归档流水线。负向对照拒绝在规范化之前封存的清单；正向对照验证规范化后的打包及 smart-unpacked manifest 字节与未改变的描述文件，同时检查保留文件与篡改。这一小型 fixture（测试前置数据）不能证明完整生产依赖图的兼容性或安装包验证成功；完整规范化产物与打包 Desktop 的演练仍是独立的发布要求。清单失配诊断报告计数及最多五个相对路径样本，每个路径最多 160 个字符，并附带大小、hash 和适用的可执行标志，绝不输出文件内容。
 
 [桌面文件规则](../../../../apps/desktop/scripts/runtime-file-policy.ts)在生产 npm 依赖安装之后、原生签名或描述文件生成之前执行。npm 发布列表服务于库的使用者，可以包含声明、map、测试和原生构建输入，不能直接表示桌面进程需要哪些文件。桌面副本排除声明和已识别的 source map，因为 Host 执行 JavaScript 和生成的 Typert 产物，清除继承的 `NODE_OPTIONS`，且不开启源码映射。经过审核的插件生命周期构建面向原生依赖，不执行任意 TypeScript 编译。已发布的 npm 包和外部插件目录保留各自的文件。源码调试导航由开发包提供。
 

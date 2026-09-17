@@ -31,7 +31,9 @@ Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.
 
 ### 运行时与插件激活
 
-打包的 `resources/app.asar/dsh/desktop-runtime.json` 绑定 shell 版本、记录的 Node 版本、平台、架构、共享包版本和最终文件清单。启动读取元数据，并检查共享包记录。打包流程通过一次性验证副本检查发布身份、目标兼容性及完整的归档与物理解包清单，不依赖 Electron 的虚拟文件 stat。首次启动不会把核心包复制到 profile 存储或通过 pnpm 安装核心包。
+打包的 `resources/app.asar/dsh/desktop-runtime.json` 绑定 shell 版本、记录的 Node 版本、平台、架构、共享包版本和最终文件清单。在原生签名与清单生成之前，运行时准备对私有生产副本应用锁定版本打包器的包元数据转换。原生、Host 与浏览器 smoke 使用经过规范化并封存的依赖树。打包流程通过一次性验证副本检查发布身份、目标兼容性及完整的归档与物理解包清单，不依赖 Electron 的虚拟文件 stat。描述文件字节和严格的打包后检查保持不变；打包绝不通过重新封存归档来修复失配。启动读取元数据，并检查共享包记录。首次启动不会把核心包复制到 profile 存储或通过 pnpm 安装核心包。
+
+准备与打包共享 `app-builder-lib` 26.15.3 的元数据转换，并显式启用 script/keyword 删除设置。运行时包名、版本、模块入口声明、依赖与 `dsh` 元数据仍与 shell 的 fork 元数据分离。删除包元数据并非在所有情况下都不影响行为：依赖可能在运行时读取被删除的字段，因此小型 ASAR canary 不能替代完整规范化产物的 smoke 与打包发布演练。[内置运行时决策](../../.agents/notes/implemented/architecture/2026-09-08-desktop-bundled-runtime-and-external-plugins.zh.md)负责内部 API 版本耦合与验证范围限制。
 
 1. 主窗口在 profile 准备或后端启动前显示本地加载页。新 profile 创建清单并记录运行时身份，不物化共享包链接。复用会检查运行时身份与锁文件内容；打包的插件 plan 还必须准确核对已安装版本、receipt、本地产物哈希与启用状态。
 2. 应用升级先把目标运行时元数据和目标插件清单一起暂存，再检查 peer。过时的 release-owned 插件不会阻止计划中的替换或删除。Profile 配置和手动插件版本会保留。
