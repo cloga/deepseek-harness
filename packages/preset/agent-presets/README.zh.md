@@ -29,6 +29,8 @@ kind: "package-reference"
 
 随附 Web 的 `standard`、`ptc` 与 `cordis` preset 包含[显式文件交付](../../client/ui-deliverables/README.zh.md#explicit-deliveries)。`minimal` preset 保留固定的双工具训练配置。
 
+`cordis` preset 将相邻的 `skills/` 目录注册为 `bundledSkillDir`，路径相对于 preset 文件解析。这些部署自带的 skill 即使打包在 Electron ASAR 中，也由宿主读取；项目、用户及自定义根目录仍使用已配置的文件系统服务。用户 skill 会覆盖同名的随附 skill。参见[随附 skill 决策](../../../.agents/notes/implemented/bug-fix/2026-09-18-cordis-bundled-skill-root.zh.md)。
+
 ### preset 给会话带来什么
 
 从 preset 组装的会话会运行该 preset `agent.cordis.yml` 所列插件：它的工具、提示词段落与 skill。加入同一 preset 的会话共享一份已安装的组装，且各会话的状态彼此隔离。subagent 会加入其父方的组装，因此它看到的工具与提示词段落和创建它的 agent 相同。
