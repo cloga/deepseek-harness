@@ -54,7 +54,9 @@ function networkMessage(stage: DesktopUpdateNetworkStage, failure: NetworkFailur
 class DesktopUpdateNetworkError extends Error {
   constructor(readonly stage: DesktopUpdateNetworkStage, readonly failure: NetworkFailure, cause: unknown) {
     super(networkMessage(stage, failure, en), { cause })
-    this.name = 'DesktopUpdateNetworkError'
+    // Build-time discovery sanitizers recognize these standard cancellation names.
+    const causeName = cause instanceof Error ? cause.name : undefined
+    this.name = causeName === 'TimeoutError' || causeName === 'AbortError' ? causeName : 'DesktopUpdateNetworkError'
   }
 }
 

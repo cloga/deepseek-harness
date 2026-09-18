@@ -45,12 +45,14 @@ describe('Desktop update network error messages', () => {
 
   it('does not turn cancellation into network unreachability', async () => {
     const error = await caught(new DOMException('secret', 'AbortError'), 'release-tag')
+    expect(error).toMatchObject({ name: 'AbortError' })
     expect(describeDesktopUpdateError(error, zh)).toBe('校验发布标签时请求已取消。\n需要检查更新时，请重新发起检查。')
     expect(describeDesktopUpdateError(error, en)).not.toContain('could not be reached')
   })
 
   it('recognizes the timeout signal without printing its raw message', async () => {
     const error = await caught(new DOMException('private detail', 'TimeoutError'))
+    expect(error).toMatchObject({ name: 'TimeoutError' })
     expect(describeDesktopUpdateError(error, zh)).toContain('请求超时')
     expect(describeDesktopUpdateError(error, zh)).not.toContain('private')
   })
