@@ -29,7 +29,7 @@ kind: "package-reference"
 
 随附 Web 的 `standard`、`ptc` 与 `cordis` preset 包含[显式文件交付](../../client/ui-deliverables/README.zh.md#explicit-deliveries)。`minimal` preset 保留固定的双工具训练配置。
 
-`cordis` preset 将相邻的 `skills/` 目录注册为 `bundledSkillDir`，路径相对于 preset 文件解析。这些部署自带的 skill 即使位于 Electron ASAR 中，也由宿主读取；项目、用户及自定义根目录仍使用已配置的文件系统服务。用户 skill 会覆盖同名的随附 skill。[Skill 文件系统](../../skill/skill-filesystem/README.zh.md)规定根目录排序与读取规则。
+`cordis` preset 将相邻的 `skills/` 目录注册为 `bundledSkillDir`，路径相对于 preset 文件解析。这些部署自带的 skill 即使位于 Electron ASAR 中，也由宿主读取；项目、用户及自定义根目录仍使用已配置的文件系统服务。用户 skill 会覆盖同名的随附 skill。[Skill 文件系统](../../skill/skill-filesystem/README.zh.md)规定根目录排序与读取规则；[随附 skill 决策](../../../.agents/notes/implemented/bug-fix/2026-09-18-cordis-bundled-skill-root.zh.md)记录这项纠正。
 
 ### preset 给会话带来什么
 

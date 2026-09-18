@@ -29,7 +29,7 @@ Mount this package in a composition that should give each agent session its own 
 
 The shipped Web `standard`, `ptc`, and `cordis` presets include [explicit file delivery](../../client/ui-deliverables/README.md#explicit-deliveries). The `minimal` preset keeps its fixed two-tool training configuration.
 
-The `cordis` preset registers its adjacent `skills/` directory as `bundledSkillDir`, resolved relative to the preset file. These deployment-owned skills use the host reader even inside Electron ASAR; project, user, and custom roots retain the configured filesystem service. User skills override bundled skills with the same name. [Skill filesystem](../../skill/skill-filesystem/README.md) owns root ordering and reading rules.
+The `cordis` preset registers its adjacent `skills/` directory as `bundledSkillDir`, resolved relative to the preset file. These deployment-owned skills use the host reader even inside Electron ASAR; project, user, and custom roots retain the configured filesystem service. User skills override bundled skills with the same name. [Skill filesystem](../../skill/skill-filesystem/README.md) owns root ordering and reading rules; the [bundled-skill decision](../../../.agents/notes/implemented/bug-fix/2026-09-18-cordis-bundled-skill-root.md) records the correction.
 
 ### What a preset gives a session
 
