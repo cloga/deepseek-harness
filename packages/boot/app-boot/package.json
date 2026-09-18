@@ -18,6 +18,10 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./types": {
+      "types": "./lib/types/types.d.ts",
+      "default": "./lib/types/types.js"
+    },
     "./worker/profile-resolution-bootstrap": {
       "types": "./lib/types/profile-resolution/worker-bootstrap.d.ts",
       "default": "./lib/worker/profile-resolution-bootstrap.js"
@@ -27,6 +31,7 @@
   },
   "files": [
     "lib/index.js",
+    "lib/types/types.js",
     "lib/worker/profile-resolution-bootstrap.js",
     "lib/types/**/*.d.ts"
   ],

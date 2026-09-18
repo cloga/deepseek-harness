@@ -55,7 +55,7 @@
 
 ### `plugin_manager`
 
-列出当前 profile 中的插件或组合包，启用或禁用它们，安装组合包或移除已安装的组合包。每项操作都要求 danger-full-access 权限或本次调用的批准。批准不改变会话权限模式。变更影响该 profile 的所有会话。先列出条目以获取准确标识。包安装可能运行已获批准的构建脚本。支持热更新的 profile 立即应用变更；仅启动时加载的 profile 需要重启。
+列出当前 profile 中的插件或组合包，启用或禁用它们，安装组合包或移除已安装的组合包。每项操作都要求 danger-full-access 权限或本次调用的批准。批准不改变会话权限模式。变更影响该 profile 的所有会话。先列出条目以获取准确标识。包安装可能运行已获批准的构建脚本。普通的实时 profile 立即应用变更；仅启动时加载的 profile 需要重启。由启动器暂存的 profile 返回已准备的变更，当前启用的 profile 保持不变；激活需要 shell 单独确认。使用 list_pending 恢复事务标识，使用 cancel_pending 丢弃暂存变更，而不移除已激活的插件。
 
 ```json
 {
@@ -67,6 +67,8 @@
       "enum": [
         "list_plugins",
         "list_bundles",
+        "list_pending",
+        "cancel_pending",
         "set_plugin",
         "set_bundle",
         "install_bundle",
@@ -75,7 +77,7 @@
     },
     "target": {
       "type": "string",
-      "description": "Plugin entry id, bundle package name, or installation spec, according to action."
+      "description": "Plugin entry id, bundle package name, installation spec, or prepared transaction UUID, according to action."
     },
     "enabled": {
       "type": "boolean",
@@ -83,7 +85,7 @@
     },
     "approvedBuilds": {
       "type": "array",
-      "description": "For install_bundle: pass names from pendingBuilds only after the user explicitly approves running their install scripts in the conversation. This grants persistent permission for this profile.",
+      "description": "For install_bundle: pass names from pendingBuilds only after the user explicitly approves running their install scripts in the conversation. This grants persistent permission in the resulting profile; on staged launchers it does not change the active profile before activation.",
       "items": {
         "type": "string"
       }

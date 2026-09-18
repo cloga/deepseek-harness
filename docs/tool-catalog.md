@@ -51,7 +51,7 @@ This table connects model-visible tool names to the plugin package and service s
 
 ### `plugin_manager`
 
-List plugins or bundles in the current profile, enable or disable them, install a bundle, or remove an installed bundle. Every action requires danger-full-access permission or approval for this call. Approval does not change the session permission mode. Changes affect every session in this profile. List first to obtain exact identifiers. Package installation can execute allowed build scripts. Live profiles apply changes immediately; startup profiles require restart.
+List plugins or bundles in the current profile, enable or disable them, install a bundle, or remove an installed bundle. Every action requires danger-full-access permission or approval for this call. Approval does not change the session permission mode. Changes affect every session in this profile. List first to obtain exact identifiers. Package installation can execute allowed build scripts. Ordinary live profiles apply changes immediately; startup profiles require restart. Launcher-staged profiles return prepared changes with the active profile untouched; activation requires separate shell confirmation. Use list_pending to recover transaction identities and cancel_pending to discard a stage without removing an active plugin.
 
 ```json
 {
@@ -63,6 +63,8 @@ List plugins or bundles in the current profile, enable or disable them, install 
       "enum": [
         "list_plugins",
         "list_bundles",
+        "list_pending",
+        "cancel_pending",
         "set_plugin",
         "set_bundle",
         "install_bundle",
@@ -71,7 +73,7 @@ List plugins or bundles in the current profile, enable or disable them, install 
     },
     "target": {
       "type": "string",
-      "description": "Plugin entry id, bundle package name, or installation spec, according to action."
+      "description": "Plugin entry id, bundle package name, installation spec, or prepared transaction UUID, according to action."
     },
     "enabled": {
       "type": "boolean",
@@ -79,7 +81,7 @@ List plugins or bundles in the current profile, enable or disable them, install 
     },
     "approvedBuilds": {
       "type": "array",
-      "description": "For install_bundle: pass names from pendingBuilds only after the user explicitly approves running their install scripts in the conversation. This grants persistent permission for this profile.",
+      "description": "For install_bundle: pass names from pendingBuilds only after the user explicitly approves running their install scripts in the conversation. This grants persistent permission in the resulting profile; on staged launchers it does not change the active profile before activation.",
       "items": {
         "type": "string"
       }

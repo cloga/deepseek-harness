@@ -110,7 +110,7 @@ Loader 结算后，app-boot 在仅 optional 条目未激活时输出警告。如
 ### 设计说明
 
 - **Profile 启动数据。** `ctx.profileContext` 包含 profile 位置、启动时组合包名称、已解析的调用级 overlay、遥测退出值、可选的内置包管理器信息，以及启动器的暂存要求。`readProfilePatches()` 组合传入的启动 profile，或读取这些位置上的当前文件；调用方负责调度和应用结果。
-- **启动器拥有的包暂存。** 带版本号的 `profilePackageTransactions` 契约区分暂存图与激活。返回的 UUID 及标量指纹不是已激活收据。共享兄弟锁在目录替换后仍保持有效；调用方先获取该锁再进入 HMR，不能通过 IPC 回调再次获取。启动器在 profile 行挂载前提供后端；要求暂存却无可用服务时拒绝启动。[Plugin Manager](../plugin-manager/README.zh.md#launcher-owned-staging) 持有用户入口。
+- **启动器拥有的包暂存。** 带版本号的 `profilePackageTransactions` 契约区分暂存图与激活。从 `@deepseek-ai/dsh-app-boot/types` 导入可序列化的来源及暂存结果类型，无需加载 Host 启动代码。返回的 UUID 及标量指纹不是已激活收据。共享兄弟锁在目录替换后仍保持有效；调用方先获取该锁再进入 HMR，不能通过 IPC 回调再次获取。启动器在 profile 行挂载前提供后端；要求暂存却无可用服务时拒绝启动。[Plugin Manager](../plugin-manager/README.zh.md#launcher-owned-staging) 持有用户入口。
 - **进程内模块解析。** runtime 和 dual 模式会在挂载 profile 条目前，将一份 generation 安装到 Node 的 ESM 与 CommonJS 内部 resolver；link 模式不修改这两个 resolver。exports、conditions、subpath、模块缓存和错误码仍由 Node 负责；路由后的 ESM 失败会报告原始 importer，而不是内部查找锚点。`ctx.pluginPackages` 从同一 generation 提供 package metadata，不记录 Entry import；安装 generation 后，即使查询未命中也以 generation 为准，仅安装服务而未提供 generation 的底层嵌入方仍使用 Node 原生查找。
 - **两个 Loader builtin。** `mountRootInclude` 把 `cordis:include` 与 `cordis:group` 注册为 Loader builtin：group 行能把一个提供方与它的消费方放进同一个 `isolate` realm，而位于本工作区之外的 agent preset 无法按名称解析 `@deepseek-ai/cordis-plugin-group`。两者都通过宿主的模块管线加载，而非被包含树自身的说明符解析。
 - **由 consumer 持有严格语义。** 普通 Loader group 保留成功 sibling。App-boot 在首次结算后应用全局 required-entry policy；agent preset 与动态多 entry 组合在需要 all-or-nothing setup 时，持有并拆卸各自的独立 generation。App-boot 读取 failed fiber 来报告已记录的错误，并在一个进程检查点内合并 Loader 重复的 rejection 通知。

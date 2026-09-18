@@ -4,32 +4,8 @@ import { basename, dirname, join, resolve } from 'node:path'
 import type {} from '@deepseek-ai/cordis'
 import { withFileLock } from '@deepseek-ai/dsh-atomic-write'
 
-/** Exact immutable GitHub Release identity verified by the acquisition backend. */
-export interface ProfileVerifiedReleaseSource {
-  readonly schemaVersion: 1
-  readonly type: 'githubRelease'
-  readonly owner: string
-  readonly repo: string
-  readonly tag: string
-  readonly asset: string
-  readonly assetId: number
-  readonly packageName: string
-  readonly version: string
-  readonly size: number
-  readonly sha256: string
-  readonly integrity?: string
-  readonly targetCommit: string
-  readonly dependencyRegistry?: string
-  readonly checksumManifest?: {
-    readonly format: 'sha256sums'
-    readonly asset: string
-    readonly assetId: number
-    readonly url: string
-    readonly size: number
-    readonly sha256: string
-    readonly integrity?: string
-  }
-}
+import type { ProfilePreparedPackageChange, ProfileVerifiedReleaseSource } from './types.ts'
+export type { ProfilePreparedPackageChange, ProfileVerifiedReleaseSource } from './types.ts'
 
 /** Structured source identity; a verified source never silently degrades to a package string. */
 export type ProfilePackageSource = ProfileVerifiedReleaseSource
@@ -40,15 +16,6 @@ export type ProfilePackageSource = ProfileVerifiedReleaseSource
 export type ProfilePackageMutation =
   | { readonly kind: 'install'; readonly source: ProfilePackageSource; readonly enabled?: boolean; readonly approvedBuilds?: readonly string[] }
   | { readonly kind: 'remove'; readonly name: string }
-
-/** Durable staging outcome, not an active receipt or proof of runtime health. */
-export interface ProfilePreparedPackageChange {
-  readonly transactionId: string
-  readonly state: 'prepared'
-  readonly packageName: string
-  readonly baseFingerprint: string
-  readonly health: 'pending' | 'passed'
-}
 
 /** Settled bootstrap observation supplied to a launcher before it releases API admission. */
 export interface ProfilePackageHealth {
@@ -68,7 +35,11 @@ export interface ProfilePackageTransactions {
   cancel(transactionId: string): Promise<void>
 }
 
-/** @param value - Caller-supplied operation identity. @returns Valid lowercase UUID. */
+/**
+ * Validate a transaction identity before addressing its staged directory.
+ * @param value - Caller-supplied operation identity.
+ * @returns Valid lowercase UUID.
+ */
 export function parseProfileTransactionId(value: unknown): string {
   if (typeof value !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u.test(value)) {
     throw new Error('profile packages: invalid transaction id')
@@ -76,7 +47,11 @@ export function parseProfileTransactionId(value: unknown): string {
   return value
 }
 
-/** @param value - Untrusted backend result. @returns Validated scalar prepared record. */
+/**
+ * Validate the backend's prepared record without treating it as active package state.
+ * @param value - Untrusted backend result.
+ * @returns Validated scalar prepared record.
+ */
 export function parseProfilePreparedChange(value: unknown): ProfilePreparedPackageChange {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('profile packages: invalid prepared result')
   const input = value as Record<string, unknown>

@@ -16,8 +16,9 @@ import {
 } from '@deepseek-ai/dsh-app-boot'
 import type {} from '@deepseek-ai/dsh-hmr'
 import type {
-  ProfileContext, ProfileManifest, ProfilePackageMutation, ProfilePreparedPackageChange, ProfileVerifiedReleaseSource,
+  ProfileContext, ProfileManifest, ProfilePackageMutation,
 } from '@deepseek-ai/dsh-app-boot'
+import type { ProfilePreparedPackageChange, ProfileVerifiedReleaseSource } from '@deepseek-ai/dsh-app-boot/types'
 import { bundleManifest, runProfilePnpm, saveManifest, viewProfilePackage } from './operations.ts'
 import { classifyInstallFailure } from './install-failure.ts'
 import { InvalidInstallSpecError, parseInstallSpec } from './install-spec.ts'
@@ -495,7 +496,10 @@ export class PluginManager extends TypertRemoteService {
     await service.cancel(parseProfileTransactionId(transactionId))
   }
 
-  /** @returns Pending package changes owned by this launcher's fixed profile. */
+  /**
+   * List prepared changes without claiming activation or runtime health.
+   * @returns Pending package changes, or an empty list when the profile does not require staging.
+   */
   @Remote
   async listPendingPackageChanges(): Promise<readonly ProfilePreparedPackageChange[]> {
     if (this.profile.stagedPackageTransactions !== true) return []

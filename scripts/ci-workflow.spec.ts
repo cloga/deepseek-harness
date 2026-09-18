@@ -1172,7 +1172,7 @@ describe('Issue lifecycle workflow', () => {
     expect(policyPullRequest.types).toContain('ready_for_review')
   })
 
-  it('mints Project credentials only after preflight and always revalidates current metadata', () => {
+  it('scopes upstream preflight to its repository before minting credentials and revalidating metadata', () => {
     const policy = loadWorkflow('.github/workflows/issue-policy.yml')
     const policyJob = workflowJob(policy, 'policy')
     if (!Array.isArray(policyJob.steps)) throw new TypeError('Issue policy job must define steps')
@@ -1183,7 +1183,7 @@ describe('Issue lifecycle workflow', () => {
     expect(preflightStep).toMatchObject({ shell: 'bash' })
     expect(preflightStep?.run).toContain('if [ -f .github/issue-management/selective-preflight.json ]; then')
     expect(preflightStep?.run).toContain('node .github/issue-management/policy.mjs pr-preflight')
-    expect(preflightStep?.if).toBeUndefined()
+    expect(preflightStep?.if).toBe("github.repository == 'deepseek-ai/deepseek-harness'")
     expect(policyJob.if).toBeUndefined()
     const projectGate =
       "github.repository == 'deepseek-ai/deepseek-harness' && steps.preflight.outputs.needs-project == 'true'"
