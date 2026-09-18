@@ -3,7 +3,7 @@ import { en, zh } from '../src/locale.ts'
 import { describeDesktopUpdateError, withDesktopUpdateNetworkError } from '../src/update-network-error.ts'
 
 async function caught(error: unknown, stage: 'release-list' | 'release-tag' | 'manifest-download' = 'manifest-download'): Promise<unknown> {
-  try { await withDesktopUpdateNetworkError(stage, () => Promise.reject(error)) }
+  try { await withDesktopUpdateNetworkError(stage, async () => { throw error }) }
   catch (failure) { return failure }
   throw new Error('expected failure')
 }
