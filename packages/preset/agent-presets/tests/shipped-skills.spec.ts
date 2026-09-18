@@ -40,6 +40,10 @@ async function mountSkills(preset: string, home: string, customRoot?: string) {
   const row = (parsed as EntryOptions[]).find(entry => entry.id === 'skill-filesystem')
   if (row === undefined) throw new Error('the shipped preset must register skill-filesystem')
   expect(row.name).toBe('@deepseek-ai/dsh-skill-filesystem')
+  const config: unknown = row.config
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+    throw new TypeError('the shipped skill row must configure a mapping')
+  }
 
   const ctx = new Context()
   contexts.push(ctx)
@@ -66,7 +70,7 @@ async function mountSkills(preset: string, home: string, customRoot?: string) {
   const entry = await ctx.loader.create({
     ...row,
     config: {
-      ...row.config,
+      ...config,
       dshHome: home,
       agentsHome: join(home, 'agents'),
       watch: false,
