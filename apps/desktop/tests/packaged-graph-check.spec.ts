@@ -36,8 +36,10 @@ try {
 `
 
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), 'desktop-graph-plane-'))
-  roots.push(root)
+  const created = mkdtempSync(join(tmpdir(), 'desktop-graph-plane-'))
+  roots.push(created)
+  // Match the official plain-Node bundle resolver's spelling, including Windows short-name aliases.
+  const root = realpathSync.native(created)
   const home = join(root, 'home')
   mkdirSync(home)
   const profile = join(home, 'profiles', 'desktop')
@@ -61,7 +63,8 @@ function fixture() {
 function exited(result: ReturnType<typeof spawnSync>, status: number): void {
   expect(result.error).toBeUndefined()
   expect(result.signal).toBeNull()
-  expect(result.status, result.stderr?.toString()).toBe(status)
+  const output = [result.stderr?.toString(), result.stdout?.toString()].filter(Boolean).join('\n')
+  expect(result.status, output.slice(-16_384)).toBe(status)
 }
 
 it('emits packaged generation inspection and carrier evidence without source-loader hooks', () => {

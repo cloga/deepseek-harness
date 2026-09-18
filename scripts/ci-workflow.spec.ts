@@ -765,6 +765,24 @@ describe('Runtime and LLM e2e Blacksmith routing', () => {
 })
 
 describe('DeepSeek e2e workflow', () => {
+  it('pins the reviewed bubblewrap bytes to an official snapshot before extraction and probing', () => {
+    const script = readFileSync(resolve(root, 'scripts/prepare-ci-bubblewrap.sh'), 'utf8')
+    expect(script).toContain("readonly BUBBLEWRAP_VERSION='0.9.0-1ubuntu0.1'")
+    expect(script).toContain("readonly BUBBLEWRAP_SHA256='1b506492bd9c7fd0cdb4f02ac822f1d3e336b0aead5113c1239baf8db5db562a'")
+    expect(script).toContain('readonly BUBBLEWRAP_URL="https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/'
+      + 'pool/main/b/bubblewrap/bubblewrap_${BUBBLEWRAP_VERSION}_amd64.deb"')
+    expect(script).toContain('set -euo pipefail')
+    expect(script).toContain('curl --fail --silent --show-error --location --retry 3 --retry-all-errors')
+    const verification = script.indexOf('sha256sum --check --status')
+    const extraction = script.indexOf('dpkg-deb --extract "$archive" "$root"')
+    const probe = script.indexOf('"$root/usr/bin/bwrap" --ro-bind / / --dev /dev'
+      + ' --unshare-pid --proc /proc --die-with-parent -- true')
+    expect(verification).toBeGreaterThan(-1)
+    expect(extraction).toBeGreaterThan(verification)
+    expect(probe).toBeGreaterThan(extraction)
+    expect(script).toContain('"$root/usr/bin/bwrap" --version')
+  })
+
   it('prepares bubblewrap from the pinned payload without a package transaction', () => {
     const workflow = loadWorkflow('.github/workflows/e2e.yml')
     const e2e = workflowJob(workflow, 'e2e')
