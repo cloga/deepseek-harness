@@ -98,7 +98,8 @@ const GROUP_ORDER = [
   'ui',
 ]
 
-const SERVICE_ROLES: ServiceRole[] = [
+/** Curated ownership roles for every source-discovered Host service. */
+export const SERVICE_ROLES: readonly ServiceRole[] = [
   {
     key: 'hmr',
     pkg: 'hmr',
@@ -122,6 +123,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     mode: 'core',
     consumers: ['plugin-manager'],
     note: 'The dsh launcher supplies data-only profile locations and composition inputs; reload scheduling belongs to dsh-hmr.',
+  },
+  {
+    key: 'profilePackageTransactions',
+    pkg: 'app-boot',
+    title: 'Launcher-owned package preparation',
+    mode: 'core',
+    consumers: ['plugin-manager'],
+    note: 'Desktop Host supplies fixed-profile preparation and cancellation; Electron owns acquisition and separate activation.',
   },
   {
     key: 'connection',

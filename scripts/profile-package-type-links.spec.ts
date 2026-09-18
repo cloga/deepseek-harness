@@ -1,9 +1,16 @@
 import { readFileSync } from 'node:fs'
 import { expect, it } from 'vitest'
 import { FOUNDATION_TYPE_NAMES, LINK_MAP, SERVICE_PAGE, TYPE_LINK_EXEMPTIONS } from './gen-cordis-catalog.ts'
+import { SERVICE_ROLES } from './gen-doc-graphs.ts'
 
 it('assigns the launcher staging service to the boot subsystem', () => {
   expect(SERVICE_PAGE.profilePackageTransactions).toBe('boot.md')
+})
+
+it('classifies staging with its declaration owner and actual manager consumer', () => {
+  const roles = SERVICE_ROLES.filter(role => role.key === 'profilePackageTransactions')
+  expect(roles).toHaveLength(1)
+  expect(roles[0]).toMatchObject({ pkg: 'app-boot', mode: 'core', consumers: ['plugin-manager'] })
 })
 
 it.each(['ProfilePackageMutation', 'ProfilePreparedPackageChange', 'ProfileVerifiedReleaseSource'])(

@@ -1,0 +1,118 @@
+# TEMPORARY: remove this workflow and its audit helper after accepting the generated artifact.
+name: Temporary Core alpha2 official generated docs
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    paths:
+      - '.github/workflows/core-alpha2-generated-docs.yml'
+      - '.github/scripts/core-alpha2-generated-docs-audit.mjs'
+      - 'scripts/gen-cordis-catalog.ts'
+      - 'scripts/gen-doc-graphs.ts'
+      - 'scripts/cordis-core-api.ts'
+      - 'packages/**'
+      - 'docs/**'
+      - 'apps/cli/composition.md'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-alpha2-generated-docs-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  generate:
+    if: >-
+      github.repository == 'cloga/deepseek-harness'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.head.ref == 'cloga-official-first-016a2'
+      && github.event.pull_request.draft == true
+    runs-on: windows-2025
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DSH_TELEMETRY_DISABLED: '1'
+      EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.7.0'
+          run_install: false
+          dest: ${{ runner.temp }}/core-docs-pnpm-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Allocate owned evidence and bind every tracked input
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidence = Join-Path $env:RUNNER_TEMP "core-alpha2-docs-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if (Test-Path -LiteralPath $evidence) { throw 'Evidence directory must be new' }
+          New-Item -ItemType Directory -Path $evidence | Out-Null
+          $env:DOCS_EVIDENCE = $evidence
+          "DOCS_EVIDENCE=$evidence" >> $env:GITHUB_ENV
+          $cache = Join-Path $env:RUNNER_TEMP 'core-alpha2-docs-node-cache'
+          "NODE_COMPILE_CACHE=$cache" >> $env:GITHUB_ENV
+          if ((& pnpm --version).Trim() -ne '11.7.0' -or $LASTEXITCODE -ne 0) { throw 'Unexpected pnpm version' }
+          node .github/scripts/core-alpha2-generated-docs-audit.mjs before
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install exact dependencies through the normal frozen workflow
+        run: |
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run only the two reviewed official generators
+        id: generate
+        run: |
+          pnpm run gen-cordis-catalog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm run gen-doc-graphs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Require both official freshness checks
+        id: check
+        run: |
+          pnpm run verify-cordis-catalog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm run verify-doc-graphs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Audit generated output and retain failures honestly
+        if: always() && env.DOCS_EVIDENCE != ''
+        env:
+          GENERATION_OUTCOME: ${{ steps.generate.outcome }}
+          CHECKS_OUTCOME: ${{ steps.check.outcome }}
+        run: |
+          node .github/scripts/core-alpha2-generated-docs-audit.mjs after
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        if: always() && env.DOCS_EVIDENCE != ''
+        with:
+          name: core-alpha2-generated-docs-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.DOCS_EVIDENCE }}/inputs.json
+            ${{ env.DOCS_EVIDENCE }}/outputs.json
+            ${{ env.DOCS_EVIDENCE }}/generated.diff
+            ${{ env.DOCS_EVIDENCE }}/before/**
+            ${{ env.DOCS_EVIDENCE }}/generated/**
+          if-no-files-found: error
+          retention-days: 7
