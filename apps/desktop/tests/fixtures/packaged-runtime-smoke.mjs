@@ -32,7 +32,9 @@ try {
   process.env.DSH_DESKTOP_TARGET_PLATFORM = 'win32'
   process.env.DSH_DESKTOP_TARGET_ARCH = 'x64'
   process.env.DSH_DESKTOP_UNSIGNED = '1'
-  const { createElectronBuilderConfig } = await import('../../electron-builder.config.mjs')
+  process.env.DSH_DESKTOP_AUTO_UPDATE_ENV = 'test'
+  process.env.DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN = 'https://policy.example.invalid'
+  const { createElectronBuilderConfig } = await import('../../scripts/electron-builder-config.mjs')
   const config = createElectronBuilderConfig(process.env, 'win32', 'x64')
   const version = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
   const source = join(root, 'prepared-dsh')

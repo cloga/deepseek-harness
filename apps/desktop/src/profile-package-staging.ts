@@ -1239,8 +1239,13 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
         }
         committed = true
         return result
-      } finally {
-        if (!committed) removeOwnedTree(root)
+      } catch (primary) {
+        if (!committed) {
+          try { removeOwnedTree(root) } catch (cleanup) {
+            throw new AggregateError([primary, cleanup], 'desktop package staging: preparation failed and cleanup is incomplete', { cause: primary })
+          }
+        }
+        throw primary
       }
     }, wait, signal)
   }

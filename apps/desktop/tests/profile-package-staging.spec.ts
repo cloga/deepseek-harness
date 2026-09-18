@@ -569,17 +569,21 @@ describe('Desktop stage-only package transactions', () => {
     expect(existsSync(join(f.transaction(id), 'DISCARDED.json'))).toBe(false)
   })
 
-  it('reports discard cleanup failure and resumes it without silently restaging the UUID', async () => {
+  it.each([
+    { label: 'Error', failure: Object.assign(new Error('discard cleanup denied'), { code: 'EPERM' }) },
+    { label: 'string', failure: 'discard cleanup denied' },
+    { label: 'undefined', failure: undefined },
+  ])('preserves a cleanup-only $label rejection and resumes discard without restaging the UUID', async ({ failure }) => {
     const f = fixture()
     const id = randomUUID()
     await f.backend.stage(id, f.mutation, new AbortController().signal)
     const remove = fs.rmSync
     const fault = vi.spyOn(fs, 'rmSync').mockImplementation((path, options) => {
-      if (String(path) === join(f.transaction(id), 'profile', 'package.json')) throw Object.assign(new Error('discard cleanup denied'), { code: 'EPERM' })
+      if (String(path) === join(f.transaction(id), 'profile', 'package.json')) throw failure
       remove(path, options)
     })
     syncBuiltinESMExports()
-    try { await expect(f.backend.cancel(id)).rejects.toThrow('discard cleanup denied') }
+    try { await expect(f.backend.cancel(id)).rejects.toBe(failure) }
     finally { fault.mockRestore(); syncBuiltinESMExports() }
     await expect(f.backend.status(id)).rejects.toThrow('cleanup is incomplete')
     await expect(f.backend.stage(id, f.mutation, new AbortController().signal)).rejects.toThrow('cleanup is incomplete')
@@ -1436,8 +1440,37 @@ describe('Desktop stage-only package transactions', () => {
       const id = randomUUID()
       const staged = backend.stage(id, f.mutation, new AbortController().signal)
       if (mode !== 'ready') {
-        await expect(staged).rejects.toThrow(/staged frozen reconstruction[\s\S]*(?:offline|integrity|store)/iu)
+        const settled = await staged.then(() => ({ rejected: false as const }),
+          (error: unknown) => ({ rejected: true as const, error }))
+        expect(settled.rejected).toBe(true)
+        if (!settled.rejected) throw new Error('negative cache fixture unexpectedly prepared successfully')
+        const failure = settled.error
+        const redact = (text: string): string => text.replace(/(https?:\/\/)[^/\s@]+:[^/\s@]+@/giu, '$1[redacted]@')
+          .replace(/(https?:\/\/[^?\s"'<>]+)\?[^\s"'<>]*/gu, '$1?[redacted]')
+          .replace(/((?:authorization|token|password|secret|api[_-]?key)\s*[:=]\s*)(?:bearer\s+)?[^\s"',;]+/giu, '$1[redacted]')
+        const describeFailure = (error: unknown): string => {
+          const lines: string[] = []
+          let current = error
+          for (let depth = 0; depth < 3; depth++) {
+            if (!(current instanceof Error)) { lines.push(typeof current === 'string' ? redact(current).slice(0, 512) : typeof current); break }
+            for (const field of ['name', 'message', 'stack', 'code', 'syscall', 'path']) {
+              try {
+                const value: unknown = Reflect.get(current, field)
+                if (typeof value === 'string') lines.push(`${depth}.${field}: ${redact(value).slice(0, field === 'stack' ? 768 : 512)}`)
+              } catch (_error) { lines.push(`${depth}.${field}: [unreadable]`) }
+            }
+            try { current = current.cause } catch (_error) { lines.push('[unreadable cause]'); break }
+          }
+          return lines.join('\n').slice(0, 4096)
+        }
+        const failures: unknown = failure instanceof AggregateError ? failure.errors : undefined
+        const diagnostic = failure instanceof AggregateError
+          ? `Cleanup incomplete; primary: ${describeFailure(failure.cause)}\nCleanup: ${describeFailure(isArray(failures) ? failures[1] : undefined)}`
+          : describeFailure(failure)
+        expect(failure instanceof AggregateError, diagnostic).toBe(false)
+        expect(() => { throw failure }, diagnostic).toThrow(/staged frozen reconstruction[\s\S]*(?:offline|integrity|store)/iu)
         expect(inventoryDesktopRuntime(f.profile)).toEqual(before)
+        expect(existsSync(f.transaction(id)), diagnostic).toBe(false)
         expect(await backend.status(id)).toBeUndefined()
         return
       }
@@ -1506,6 +1539,89 @@ describe('Desktop stage-only package transactions', () => {
     await f.backend.stage(id, f.mutation, new AbortController().signal)
     writeFileSync(join(f.runtimeDir, 'runtime.js'), 'export const changed = true\n')
     await expect(f.backend.status(id)).rejects.toThrow('runtime file inventory changed')
+  })
+
+  it.each([
+    { label: 'Error', primary: new Error('injected preparation failure') },
+    { label: 'string', primary: 'injected preparation failure' },
+    { label: 'undefined', primary: undefined },
+  ])('preserves the original $label rejection when failed preparation cleanup completes', async ({ primary }) => {
+    const f = fixture({ pnpmRunner: async () => { throw primary } })
+    const before = f.active()
+    const id = randomUUID()
+    await expect(f.backend.stage(id, f.mutation, new AbortController().signal)).rejects.toBe(primary)
+    expect(existsSync(f.transaction(id))).toBe(false)
+    expect(await f.backend.status(id)).toBeUndefined()
+    expect(f.active()).toEqual(before)
+  })
+
+  it.each([
+    { label: 'Error identities', primary: new Error('injected preparation failure'), cleanup: new Error('injected cleanup failure') },
+    { label: 'undefined primary', primary: undefined, cleanup: 'injected cleanup failure' },
+    { label: 'undefined cleanup', primary: 'injected preparation failure', cleanup: undefined },
+  ])('retains both failures and reports incomplete cleanup: $label', async ({ primary, cleanup }) => {
+    const f = fixture({ pnpmRunner: async () => { throw primary } })
+    const before = f.active()
+    const id = randomUUID()
+    const remove = fs.rmSync
+    const fault = vi.spyOn(fs, 'rmSync').mockImplementation((path, options) => {
+      if (String(path) === join(f.transaction(id), 'profile')) throw cleanup
+      remove(path, options)
+    })
+    syncBuiltinESMExports()
+    try {
+      const observed: unknown = await f.backend.stage(id, f.mutation, new AbortController().signal).catch((error: unknown) => error)
+      expect(observed).toBeInstanceOf(AggregateError)
+      if (!(observed instanceof AggregateError)) throw new Error('expected a combined staging and cleanup failure')
+      expect(observed.message).toContain('cleanup is incomplete')
+      expect(observed.cause).toBe(primary)
+      const failures: unknown = observed.errors
+      if (!isArray(failures)) throw new Error('expected an owned error list')
+      expect(failures).toHaveLength(2)
+      expect(failures[0]).toBe(primary)
+      expect(failures[1]).toBe(cleanup)
+      expect(existsSync(f.transaction(id))).toBe(true)
+      expect(existsSync(join(f.transaction(id), 'PREPARED.json'))).toBe(false)
+      expect(f.active()).toEqual(before)
+    } finally { fault.mockRestore(); syncBuiltinESMExports() }
+  })
+
+  it('rejects cancellation with both original failures when aborted preparation cleanup cannot finish', async () => {
+    const entered = deferred<AbortSignal>()
+    const cleanup = Object.assign(new Error('injected cleanup denied'), { code: 'EPERM' })
+    const f = fixture({ pnpmRunner: async (request) => {
+      const aborted = new Promise<void>((resolve) => { request.signal.addEventListener('abort', () => { resolve() }, { once: true }) })
+      entered.resolve(request.signal)
+      await aborted
+      request.signal.throwIfAborted()
+      return { exitCode: 0 }
+    } })
+    const before = f.active()
+    const id = randomUUID()
+    const remove = fs.rmSync
+    const fault = vi.spyOn(fs, 'rmSync').mockImplementation((path, options) => {
+      if (String(path) === join(f.transaction(id), 'profile')) throw cleanup
+      remove(path, options)
+    })
+    syncBuiltinESMExports()
+    try {
+      const staged = f.backend.stage(id, f.mutation, new AbortController().signal).catch((error: unknown) => error)
+      const signal = await entered.promise
+      const cancelled = f.backend.cancel(id).catch((error: unknown) => error)
+      const [stageFailure, cancelFailure] = await Promise.all([staged, cancelled])
+      expect(stageFailure).toBeInstanceOf(AggregateError)
+      if (!(stageFailure instanceof AggregateError)) throw new Error('expected incomplete cancellation cleanup')
+      expect(cancelFailure).toBe(stageFailure)
+      expect(stageFailure.cause).toBe(signal.reason)
+      const failures: unknown = stageFailure.errors
+      if (!isArray(failures)) throw new Error('expected an owned error list')
+      expect(failures).toHaveLength(2)
+      expect(failures[0]).toBe(signal.reason)
+      expect(failures[1]).toBe(cleanup)
+      expect(existsSync(f.transaction(id))).toBe(true)
+      expect(existsSync(join(f.transaction(id), 'PREPARED.json'))).toBe(false)
+      expect(f.active()).toEqual(before)
+    } finally { fault.mockRestore(); syncBuiltinESMExports() }
   })
 
   it('does not hide runner failure behind a cancellation acknowledgement', async () => {

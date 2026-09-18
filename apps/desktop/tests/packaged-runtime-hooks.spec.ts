@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { runInNewContext } from 'node:vm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const checks = vi.hoisted(() => ({ runtime: vi.fn(async () => {}), tree: vi.fn(async () => ({})), signature: vi.fn() }))
@@ -42,6 +43,41 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllEnvs() })
 
 describe('packaged runtime hooks', () => {
+  it('constructs the synthetic inventory config from explicit test policy settings', async () => {
+    const source = readFileSync(new URL('./fixtures/packaged-runtime-smoke.mjs', import.meta.url), 'utf8')
+    const start = source.indexOf('  for (const name of Object.keys(process.env))')
+    const end = source.indexOf("  const { createElectronBuilderConfig } = await import('../../scripts/electron-builder-config.mjs')")
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(end).toBeGreaterThan(start)
+    const env: NodeJS.ProcessEnv = {
+      DSH_DESKTOP_AUTO_UPDATE_ENV: 'production',
+      DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN: 'https://production.example.invalid',
+      DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN: 'http://stale.example.invalid',
+      DSH_DESKTOP_FORK_RELEASE_VERSION: '0.0.0',
+    }
+    runInNewContext(source.slice(start, end), { process: { env } }, { timeout: 1000 })
+    expect(env).toEqual({
+      DSH_DESKTOP_APP_ID: 'com.example.runtime-smoke',
+      DSH_DESKTOP_TARGET_PLATFORM: 'win32',
+      DSH_DESKTOP_TARGET_ARCH: 'x64',
+      DSH_DESKTOP_UNSIGNED: '1',
+      DSH_DESKTOP_AUTO_UPDATE_ENV: 'test',
+      DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN: 'https://policy.example.invalid',
+    })
+    const { createElectronBuilderConfig } = await import('../scripts/electron-builder-config.mjs')
+    expect(createElectronBuilderConfig(env, 'win32', 'x64')).toMatchObject({
+      appId: 'com.example.runtime-smoke', publish: null,
+      extraMetadata: { dshMandatoryUpdatePolicy: { origin: 'https://policy.example.invalid', authentication: 'feishu-test' } },
+    })
+    for (const origin of [undefined, 'http://policy.example.invalid']) {
+      expect(() => createElectronBuilderConfig({ ...env, DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN: origin }, 'win32', 'x64'))
+        .toThrow('HTTPS origin')
+    }
+    expect(checks.runtime).not.toHaveBeenCalled()
+    expect(checks.tree).not.toHaveBeenCalled()
+    expect(checks.signature).not.toHaveBeenCalled()
+  })
+
   it.each(['win32', 'darwin'] as const)('dispatches source-tree and packaged-runtime checks after packing %s', async (platform) => {
     const { createElectronBuilderConfig } = await import('../electron-builder.config.mjs')
     const config = createElectronBuilderConfig(platform === 'darwin' ? macEnvironment : {

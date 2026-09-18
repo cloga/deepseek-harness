@@ -34,7 +34,7 @@ const runtimeDefaults: CoverageNoticeRuntime = {
     timer.unref()
     return () => { clearTimeout(timer) }
   },
-  emit: line => { console.log(line) },
+  emit: (line) => { console.log(line) },
 }
 
 const silentProgress: CoverageNoticeProgress = {
