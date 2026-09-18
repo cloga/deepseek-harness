@@ -50,6 +50,41 @@ export interface PackagedCopilotAcceptanceOptions {
 }
 
 /**
+ * Prepare private home settings and the ancestor SDK canary without claiming Desktop profile ownership.
+ * @param home - Newly allocated fixture home.
+ * @param legacySdk - Separately allocated fixture package directory.
+ */
+export function preparePackagedCopilotHome(home: string, legacySdk: string): void {
+  const profile = join(home, 'profiles', 'desktop')
+  assert(!existsSync(profile), 'The shell must exclusively create the fresh Desktop profile')
+  writeFileSync(join(legacySdk, 'package.json'), JSON.stringify({
+    name: '@modelcontextprotocol/sdk', version: '1.0.0', type: 'module', exports: './index.js',
+  }))
+  writeFileSync(join(legacySdk, 'index.js'), [
+    'import { writeFileSync } from "node:fs"',
+    `writeFileSync(${JSON.stringify(join(legacySdk, 'loaded'))}, '')`,
+    'export const legacy = true',
+    '',
+  ].join('\n'))
+  const ancestorSdk = join(home, 'profiles', 'node_modules', '@modelcontextprotocol', 'sdk')
+  mkdirSync(dirname(ancestorSdk), { recursive: true })
+  symlinkSync(legacySdk, ancestorSdk, process.platform === 'win32' ? 'junction' : 'dir')
+  assert(!realpathSync.native(ancestorSdk).startsWith(resolve(profile)),
+    'Legacy SDK fixture must resolve outside the Desktop profile')
+  // The product permits an absent profile .env; the isolated home and scrubbed environment own startup values.
+  writeFileSync(join(home, '.env'), '')
+  writeFileSync(join(home, 'settings.yaml'), 'ui-onboarding:\n  welcomeNoticeVersion: "2026-08-13.1"\n')
+  assert(!existsSync(profile), 'Fixture preparation must leave Desktop initialization to the shell')
+}
+
+/** Browser-serialized readiness predicate for the official application URL or a visible startup failure. */
+export function packagedCopilotStartupReady(): boolean {
+  const error = document.querySelector<HTMLElement>('#error')
+  return location.href === 'dsh-app://app/'
+    || Boolean(error !== null && !error.hidden && error.textContent?.trim())
+}
+
+/**
  * Exercise actual packaged Copilot UI and restart acceptance with an isolated, temporary profile.
  * @param options - Application and evidence paths; the optional observer must finish all read-only work before returning.
  * @returns Resolves after acceptance, any observer, and owned cleanup; no installed application qualification is implied.
@@ -79,29 +114,9 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
   mkdirSync(scratch, { recursive: true })
   const home = mkdtempSync(join(scratch, 'packaged-copilot-'))
   const profile = join(home, 'profiles', 'desktop')
-  mkdirSync(profile, { recursive: true })
   const legacySdk = mkdtempSync(join(scratch, 'legacy-mcp-sdk-'))
   const legacySdkLoaded = join(legacySdk, 'loaded')
-  writeFileSync(join(legacySdk, 'package.json'), JSON.stringify({
-    name: '@modelcontextprotocol/sdk',
-    version: '1.0.0',
-    type: 'module',
-    exports: './index.js',
-  }))
-  writeFileSync(join(legacySdk, 'index.js'), [
-    'import { writeFileSync } from "node:fs"',
-    `writeFileSync(${JSON.stringify(legacySdkLoaded)}, '')`,
-    'export const legacy = true',
-    '',
-  ].join('\n'))
-  const ancestorSdk = join(home, 'profiles', 'node_modules', '@modelcontextprotocol', 'sdk')
-  mkdirSync(dirname(ancestorSdk), { recursive: true })
-  symlinkSync(legacySdk, ancestorSdk, process.platform === 'win32' ? 'junction' : 'dir')
-  assert(!realpathSync.native(ancestorSdk).startsWith(realpathSync.native(profile)),
-    'Legacy SDK fixture must resolve outside the Desktop profile')
-  writeFileSync(join(home, '.env'), '')
-  writeFileSync(join(profile, '.env'), '')
-  writeFileSync(join(home, 'settings.yaml'), 'ui-onboarding:\n  welcomeNoticeVersion: "2026-08-13.1"\n')
+  preparePackagedCopilotHome(home, legacySdk)
   const environment = desktopSmokeEnvironment(home)
   const userData = join(home, 'electron-user-data')
   const inventories: string[] = []
@@ -153,12 +168,8 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       assert.equal(resolve(await app.evaluate(({ app }) => app.getPath('userData'))), userData)
       page = await app.firstWindow()
       page.setDefaultTimeout(120_000)
-      await page.waitForFunction(() => {
-        const error = document.querySelector<HTMLElement>('#error')
-        return location.href === 'dsh-app://app/index.html'
-        || Boolean(error !== null && !error.hidden && error.textContent?.trim())
-      }, undefined, { timeout: 300_000 })
-      if (page.url() !== 'dsh-app://app/index.html') {
+      await page.waitForFunction(packagedCopilotStartupReady, undefined, { timeout: 300_000 })
+      if (page.url() !== 'dsh-app://app/') {
         throw new Error(`Packaged Desktop startup failed: ${safeDiagnostic(await page.locator('#error').innerText())}`)
       }
       record(`${phase}:application`)
@@ -239,7 +250,7 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       desktopVersion: reviewed.version,
       runtimeVersion: runtime.release.version,
       plugin: copilot.source,
-      transport: 'packaged Electron dsh-app byte pipes',
+      transport: 'official Web-backed Desktop Host with packaged Electron dsh-app origin bridge',
       isolatedHome: true,
       onboardingNoticeDismissed: true,
       restartReceiptSha256: inventories[0],
