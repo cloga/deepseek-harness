@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { dump, JSON_SCHEMA, load } from 'js-yaml'
 import { c } from 'tar'
 import { expect, it } from 'vitest'
-import { boot, readProfilePatches, type ProfileContext } from '@deepseek-ai/dsh-app-boot'
+import { boot, readProfilePatches, withProfilePackageLease, type ProfileContext } from '@deepseek-ai/dsh-app-boot'
 import PluginManager from '@deepseek-ai/dsh-plugin-manager'
 import { DesktopProjectManager } from '../src/project-manager.ts'
 import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, type DesktopGithubReleasePluginSource } from '../src/plugin-source.ts'
@@ -90,23 +90,46 @@ it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy sepa
     })
     const initializer = new DesktopProjectManager(resolveDesktopPaths(join(root, '.dsh')), { dsh })
     await initializer.applyRelease()
-    const originalProfile = initializer.paths.profile
-    const originalBytes = inventoryDesktopRuntime(originalProfile)
+    const profile = initializer.paths.profile
+    const operations = backend(profile)
+    const originalBytes = inventoryDesktopRuntime(profile)
+    // Adopt only fixture seed graphs through validated real swaps at the fixed profile.
+    // Re-staging inside a prior candidate incorrectly compounds private stage paths.
+    const adoptSeed = (id: string, unchanged: ReturnType<typeof inventoryDesktopRuntime>) => withProfilePackageLease(profile, async () => {
+      expect(inventoryDesktopRuntime(profile)).toEqual(unchanged)
+      const input = await operations.readPreparedForActivation(id)
+      if (input === undefined) throw new Error('fixture seed is not prepared')
+      expect(input.owner.profile).toBe(profile)
+      expect(input.prepared).toMatchObject({ state: 'prepared', health: 'pending' })
+      expect(input.candidateDir).toBe(candidate(profile, id))
+      expect(dirname(input.transactionDir)).toBe(dirname(profile))
+      await operations.verifyActivationTree(id, 'candidate')
+      renameSync(profile, input.rollbackDir)
+      renameSync(input.candidateDir, profile)
+      await operations.verifyActivationTree(id, 'active')
+      await operations.verifyActivationTree(id, 'rollback')
+      expect(inventoryDesktopRuntime(input.rollbackDir)).toEqual(unchanged)
+      return input.rollbackDir
+    }, 0)
     const seed = randomUUID()
-    await backend(originalProfile).stage(seed, { kind: 'install', source }, new AbortController().signal)
-    const first = candidate(originalProfile, seed)
+    expect(await operations.stage(seed, { kind: 'install', source }, new AbortController().signal))
+      .toMatchObject({ state: 'prepared', health: 'pending' })
+    const firstRollback = await adoptSeed(seed, originalBytes)
     // Fixture-only committed-receipt shape: real source bytes were acquired above,
     // but this test neither starts a Host nor claims production activation health.
-    writeFileSync(join(first, 'desktop-plugin-receipts.json'), JSON.stringify({ schemaVersion: 1,
+    // Write it only after the sealed candidate has been adopted and verified.
+    writeFileSync(join(profile, 'desktop-plugin-receipts.json'), JSON.stringify({ schemaVersion: 1,
       receipts: { [name]: { schemaVersion: 1, capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
         source, releaseId: 2, assetId: 1, packageName: name, version: '1.0.0', artifactSha256: source.sha256,
         states: { staged: true, health: 'passed', activated: true, rolledBack: false, verified: true } } }, owners: { [name]: 'user' } }))
-    writeFileSync(join(first, 'desktop-plugin-package-locks.json'), JSON.stringify({ schemaVersion: 1, packages: {} }))
+    writeFileSync(join(profile, 'desktop-plugin-package-locks.json'), JSON.stringify({ schemaVersion: 1, packages: {} }))
     const removable = writePackage(root, 'removable-source', { name: 'removable-source-plugin', dsh: { bundle: { patch: 'bundle.yml' } } })
     writeFileSync(join(removable, 'bundle.yml'), '[]\n')
+    const beforeSecondSeed = inventoryDesktopRuntime(profile)
     const secondId = randomUUID()
-    await backend(first).stage(secondId, { kind: 'install', source: { schemaVersion: 1, type: 'packageSpec', spec: removable } }, new AbortController().signal)
-    const profile = candidate(first, secondId)
+    expect(await operations.stage(secondId, { kind: 'install', source: { schemaVersion: 1, type: 'packageSpec', spec: removable } }, new AbortController().signal))
+      .toMatchObject({ state: 'prepared', health: 'pending' })
+    const secondRollback = await adoptSeed(secondId, beforeSecondSeed)
     const manifestPath = join(profile, 'package.json')
     const originalManifest = readManifest(manifestPath)
     const lockPath = join(profile, 'pnpm-lock.yaml')
@@ -133,7 +156,7 @@ it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy sepa
       }
       const ctx = await boot('dsh', join(profile, 'cordis.yml'), readProfilePatches('dsh', profileContext), (ctx) => {
         ctx.provide('profileContext', profileContext)
-        ctx.provide('profilePackageTransactions', backend(profile))
+        ctx.provide('profilePackageTransactions', operations)
         ctx.provide('appReady', { onReady: (listener: () => void) => { listener(); return () => {} } })
       })
       try {
@@ -155,7 +178,7 @@ it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy sepa
       const added = writePackage(root, 'addon', { name: 'new-source-plugin', dsh: { bundle: { patch: 'bundle.yml' } } })
       writeFileSync(join(added, 'bundle.yml'), '[]\n')
       const id = randomUUID()
-      expect(await backend(profile).stage(id, action === 'add'
+      expect(await operations.stage(id, action === 'add'
         ? { kind: 'install', source: { schemaVersion: 1, type: 'packageSpec', spec: added } }
         : { kind: 'remove', name: 'removable-source-plugin' }, new AbortController().signal))
         .toMatchObject({ state: 'prepared', health: 'pending' })
@@ -174,6 +197,7 @@ it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy sepa
       expect(inventoryDesktopRuntime(profile)).toEqual(before)
       expect(readFileSync(lockPath, 'utf8')).toBe(seededLock)
     }
-    expect(inventoryDesktopRuntime(originalProfile)).toEqual(originalBytes)
+    expect(inventoryDesktopRuntime(firstRollback)).toEqual(originalBytes)
+    expect(inventoryDesktopRuntime(secondRollback)).toEqual(beforeSecondSeed)
   } finally { rmSync(root, { recursive: true, force: true }) }
 }, 120000)
