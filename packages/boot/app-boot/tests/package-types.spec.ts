@@ -12,8 +12,12 @@ describe('public package transaction types', () => {
       types: './lib/types/types.d.ts',
       default: './lib/types/types.js',
     })
-    expect(manifest.files).toContain('lib/types/types.js')
-    expect(manifest.files).toContain('lib/types/**/*.d.ts')
+    expect(manifest.files).toEqual([
+      'lib/index.js',
+      'lib/worker/profile-resolution-bootstrap.js',
+      'lib/types/**/*.js',
+      'lib/types/**/*.d.ts',
+    ])
   })
 
   it('loads the shared source entry without Host runtime exports', () => {

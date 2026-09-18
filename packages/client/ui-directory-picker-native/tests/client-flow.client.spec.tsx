@@ -11,20 +11,29 @@ import { apply as nodeApply } from '../src/index.ts'
 
 const desktopIpc = await vi.hoisted(async () => {
   const { createRequire } = await import('node:module')
+  const { EventEmitter } = await import('node:events')
   const path = await import('node:path')
   // Electron belongs to the Desktop app; resolve its mock from that workspace.
   const electron = createRequire(path.resolve(import.meta.dirname, '../../../../apps/desktop/package.json')).resolve('electron')
-  return { invoke: vi.fn(), electron }
+  const renderer = Object.assign(new EventEmitter(), { invoke: vi.fn(), send: vi.fn() })
+  return { invoke: renderer.invoke, renderer, electron }
 })
 vi.mock(desktopIpc.electron, () => ({
-  ipcRenderer: { invoke: desktopIpc.invoke },
+  ipcRenderer: desktopIpc.renderer,
   contextBridge: { exposeInMainWorld: (name: string, value: unknown) => { vi.stubGlobal(name, value) } },
 }))
 vi.mock('../../../../apps/desktop/src/preload-platform.ts', () => ({ markDocumentPlatform: vi.fn() }))
 vi.mock('../../../../apps/desktop/src/preload-theme.ts', () => ({ syncNativeTheme: vi.fn() }))
 vi.mock('../../../../apps/desktop/src/preload-windows.ts', () => ({ syncWindowsAppearance: vi.fn() }))
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => {
+  cleanup()
+  // Destroy the fixture renderer's document-lifetime preload subscriptions.
+  desktopIpc.renderer.removeAllListeners()
+  desktopIpc.invoke.mockReset()
+  desktopIpc.renderer.send.mockReset()
+  vi.unstubAllGlobals()
+})
 
 const HOLES = ['conversation.hero.workspace.directoryFlow', 'sidebar.workspaces.directoryFlow'] as const
 
@@ -169,6 +178,9 @@ describe('directory-picker-native client half', () => {
     // Desktop's preload is typechecked by its own compiler program.
     const preload = '../../../../apps/desktop/src/preload-app.ts'
     await import(/* @vite-ignore */ preload)
+    expect(desktopIpc.renderer.listenerCount('dsh-desktop:updates-impact-request')).toBe(1)
+    desktopIpc.renderer.emit('dsh-desktop:updates-impact-request', {}, 1)
+    expect(desktopIpc.renderer.send).not.toHaveBeenCalled()
     desktopIpc.invoke.mockResolvedValue('/desktop/workspace')
     const b = await bench()
     const dispose = b.declare()

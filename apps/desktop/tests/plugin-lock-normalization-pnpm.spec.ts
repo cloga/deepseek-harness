@@ -124,6 +124,7 @@ it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy sepa
       }
       const ctx = await boot('dsh', join(profile, 'cordis.yml'), readProfilePatches('dsh', profileContext), ctx => {
         ctx.provide('profileContext', profileContext)
+        ctx.provide('profilePackageTransactions', backend(profile))
         ctx.provide('appReady', { onReady: (listener: () => void) => { listener(); return () => {} } })
       })
       try {

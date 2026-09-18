@@ -2,13 +2,15 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const checks = vi.hoisted(() => ({ runtime: vi.fn(async () => {}), signature: vi.fn() }))
+const checks = vi.hoisted(() => ({ runtime: vi.fn(async () => {}), tree: vi.fn(async () => ({})), signature: vi.fn() }))
 vi.mock('../scripts/packaged-runtime.mjs', async importOriginal => ({
   ...await importOriginal<typeof import('../scripts/packaged-runtime.mjs')>(),
   verifyPackagedDesktopRuntime: checks.runtime,
 }))
 vi.mock('../scripts/verify-macos-signature.mjs', () => ({ verifyMacOSSignatureAfterSign: checks.signature }))
-vi.mock('../lib/types/runtime-tree.js', () => ({ verifyDesktopRuntime: vi.fn(async () => ({})), writeDesktopRuntime: vi.fn() }))
+// The root test config resolves this one afterPack built import to real source.
+// These are hook-dispatch doubles, not verification of a packed ASAR or runtime tree.
+vi.mock('../src/runtime-tree.ts', () => ({ verifyDesktopRuntime: checks.tree, writeDesktopRuntime: vi.fn() }))
 vi.mock('../scripts/macos-app-update-config.mjs', async importOriginal => ({
   ...await importOriginal<typeof import('../scripts/macos-app-update-config.mjs')>(),
   writeMacOSAppUpdateConfig: vi.fn(async () => {}), verifyMacOSAppUpdateConfig: vi.fn(async () => {}),
@@ -34,12 +36,13 @@ beforeEach(() => {
   vi.stubEnv('DSH_DESKTOP_TARGET_PLATFORM', 'win32')
   vi.stubEnv('DSH_DESKTOP_UNSIGNED', '1')
   checks.runtime.mockReset().mockResolvedValue(undefined)
+  checks.tree.mockReset().mockResolvedValue({})
   checks.signature.mockReset()
 })
 afterEach(() => { vi.unstubAllEnvs() })
 
 describe('packaged runtime hooks', () => {
-  it.each(['win32', 'darwin'] as const)('verifies ASAR resources after packing %s', async (platform) => {
+  it.each(['win32', 'darwin'] as const)('dispatches source-tree and packaged-runtime checks after packing %s', async (platform) => {
     const { createElectronBuilderConfig } = await import('../electron-builder.config.mjs')
     const config = createElectronBuilderConfig(platform === 'darwin' ? macEnvironment : {
       DSH_DESKTOP_APP_ID: 'io.github.cloga.deepseek-harness.desktop',
@@ -53,6 +56,9 @@ describe('packaged runtime hooks', () => {
     const context = { appOutDir, electronPlatformName: platform,
       packager: { appInfo: { productFilename, updaterCacheDirName: 'fixture' }, config: { publish: config.publish }, getResourcesDir: () => resources } }
     await config.afterPack(context)
+    expect(checks.tree).toHaveBeenCalledExactlyOnceWith(
+      expect.any(String), version, { platform, arch: platform === 'darwin' ? 'arm64' : 'x64' },
+    )
     expect(checks.runtime).toHaveBeenCalledWith(
       platform === 'win32' ? join(appOutDir, `${productFilename}.exe`) : join(bundle, 'MacOS', productFilename),
       join(resources, 'app.asar', 'dsh'), version,
@@ -60,9 +66,13 @@ describe('packaged runtime hooks', () => {
     )
     checks.runtime.mockRejectedValueOnce(new Error('desktop runtime: integrity verification failed'))
     await expect(config.afterPack(context)).rejects.toThrow('integrity verification failed')
+    checks.runtime.mockClear()
+    checks.tree.mockRejectedValueOnce(new Error('source tree integrity verification failed'))
+    await expect(config.afterPack(context)).rejects.toThrow('source tree integrity verification failed')
+    expect(checks.runtime).not.toHaveBeenCalled()
   })
 
-  it('verifies final ASAR bytes before the macOS signature check and propagates failure', async () => {
+  it('dispatches the packaged-runtime check before macOS signature checking and propagates failure', async () => {
     const { createElectronBuilderConfig } = await import('../electron-builder.config.mjs')
     const config = createElectronBuilderConfig(macEnvironment, 'darwin', 'arm64')
     const context = { appOutDir: 'output', electronPlatformName: 'darwin',

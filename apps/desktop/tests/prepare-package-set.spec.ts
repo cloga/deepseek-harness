@@ -78,15 +78,18 @@ describe('desktop package-set selection', () => {
     ])
   })
 
-  it('requires the Desktop Host entry', () => {
-    const files = [
-      'package/lib/index.js',
-    ]
-    expect(() => {
-      assertDesktopHostPackageFiles(files)
-    }).not.toThrow()
-    expect(() => {
-      assertDesktopHostPackageFiles(files.slice(1))
-    }).toThrow(/lib\/index\.js/u)
+  // This unit fixture models a tarball path listing, not packed or executable Host bytes.
+  const hostFiles = [
+    'package/lib/index.js',
+    'package/register-module-resolution-policy.mjs',
+  ]
+
+  it('accepts the Desktop Host entry and required policy preload in the tarball listing', () => {
+    expect(() => assertDesktopHostPackageFiles(hostFiles)).not.toThrow()
+  })
+
+  it.each(hostFiles)('rejects a tarball listing missing %s', missing => {
+    expect(() => assertDesktopHostPackageFiles(hostFiles.filter(file => file !== missing)))
+      .toThrow(`tarball omits required file(s): ${missing}`)
   })
 })

@@ -31,8 +31,8 @@
   },
   "files": [
     "lib/index.js",
-    "lib/types/types.js",
     "lib/worker/profile-resolution-bootstrap.js",
+    "lib/types/**/*.js",
     "lib/types/**/*.d.ts"
   ],
   "license": "MIT",

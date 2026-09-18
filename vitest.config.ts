@@ -19,6 +19,20 @@ const uncoveredLocationsReporter = fileURLToPath(new URL('./scripts/coverage-unc
 // lib/ never loads a second module-singleton copy.
 const pathsPlugin = (): ReturnType<typeof tsconfigPaths> => tsconfigPaths({ projects: ['./tsconfig.base.json'] })
 
+// afterPack hook unit tests run from source, before Desktop lib/ exists. Resolve
+// only this packaging-script edge to its real source; child artifact/ASAR probes
+// retain the production built path, and no other lib/ import is redirected.
+const desktopRuntimeTreeSourcePlugin = () => ({
+  name: 'desktop-after-pack-source-runtime-tree',
+  resolveId(id: string, importer?: string): string | undefined {
+    const owner = fileURLToPath(new URL('./apps/desktop/scripts/electron-builder-config.mjs', import.meta.url)).replaceAll('\\', '/')
+    if (id === '../lib/types/runtime-tree.js' && importer?.split('?')[0]?.replaceAll('\\', '/') === owner) {
+      return fileURLToPath(new URL('./apps/desktop/src/runtime-tree.ts', import.meta.url))
+    }
+    return undefined
+  },
+})
+
 const windowsUnsupportedPackages = process.platform === 'win32'
   ? [
       // Bash-requiring suites (a real POSIX shell is unavailable on Windows).
@@ -161,7 +175,7 @@ const processBoundTests = [
 ]
 
 export default defineConfig({
-  plugins: [pathsPlugin(), standardDecoratorPlugin()],
+  plugins: [pathsPlugin(), standardDecoratorPlugin(), desktopRuntimeTreeSourcePlugin()],
   test: {
     setupFiles: ['./scripts/test-proxy-environment.ts', './scripts/test-invariants.ts'],
     // .tsx: client component specs (jsdom via per-file @vitest-environment pragma).
@@ -171,7 +185,7 @@ export default defineConfig({
     // Node stability; process-bound suites stay separate for inventory control.
     projects: [
       {
-        plugins: [pathsPlugin(), standardDecoratorPlugin()],
+        plugins: [pathsPlugin(), standardDecoratorPlugin(), desktopRuntimeTreeSourcePlugin()],
         test: {
           name: 'thread-safe',
           execArgv: vitestExecArgv,
@@ -189,7 +203,7 @@ export default defineConfig({
         },
       },
       {
-        plugins: [pathsPlugin(), standardDecoratorPlugin()],
+        plugins: [pathsPlugin(), standardDecoratorPlugin(), desktopRuntimeTreeSourcePlugin()],
         test: {
           name: 'process-bound',
           execArgv: vitestExecArgv,
