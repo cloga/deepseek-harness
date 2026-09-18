@@ -1,0 +1,120 @@
+# TEMPORARY: remove after reviewing native diagnostics and before final CI approval.
+name: Temporary Core alpha2 native lint diagnostics
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-alpha2-lint-diagnostics-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  diagnose:
+    if: >-
+      github.repository == 'cloga/deepseek-harness'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.head.ref == 'cloga-official-first-016a2'
+      && github.event.pull_request.draft == true
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      DSH_TELEMETRY_DISABLED: '1'
+      DSH_BUILD_CLIENT_PROFILE: official
+      DSH_OXLINT_THREADS: '2'
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.7.0'
+          run_install: false
+          dest: ${{ runner.temp }}/lint-pnpm-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Bind diagnostics to the reviewed head and frozen lock
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $head = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:EXPECTED_HEAD_SHA) { throw 'Unexpected diagnostic source head' }
+          $status = @(& git status --porcelain --untracked-files=all)
+          if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) { throw 'Diagnostics require a clean checkout' }
+          $lockHash = (Get-FileHash -LiteralPath pnpm-lock.yaml -Algorithm SHA256).Hash.ToLowerInvariant()
+          "LINT_LOCK_SHA256=$lockHash" >> $env:GITHUB_ENV
+          "NODE_COMPILE_CACHE=$(Join-Path $env:RUNNER_TEMP 'lint-node-cache')" >> $env:GITHUB_ENV
+
+      - name: Install exact dependencies normally
+        run: |
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build the normal Host and Client contracts
+        run: |
+          pnpm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect native JSON and preserve the lint exit code
+        id: lint
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $root = Join-Path $env:RUNNER_TEMP "core-alpha2-lint-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if (Test-Path -LiteralPath $root) { throw 'Diagnostic directory must be new' }
+          New-Item -ItemType Directory -Path $root | Out-Null
+          $raw = Join-Path $root 'native-lint.json'
+          $privateError = Join-Path $root 'private-stderr.log'
+          & node --import tsx/esm scripts/run-oxlint.ts . --format=json 1> $raw 2> $privateError
+          $lintExit = $LASTEXITCODE
+          if ($null -eq $lintExit) { throw 'Native lint exit code is missing' }
+          $head = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:EXPECTED_HEAD_SHA) { throw 'Diagnostic head changed' }
+          & git diff --quiet HEAD -- 1>$null 2>$null
+          if ($LASTEXITCODE -ne 0) { throw 'Tracked diagnostic inputs changed' }
+          & git diff --cached --quiet -- 1>$null 2>$null
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic index changed' }
+          $untracked = @(& git ls-files --others --exclude-standard)
+          if ($LASTEXITCODE -ne 0 -or $untracked.Count -ne 0) { throw 'Unexpected untracked diagnostic output' }
+          $lockHash = (Get-FileHash -LiteralPath pnpm-lock.yaml -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($lockHash -cne $env:LINT_LOCK_SHA256) { throw 'Frozen lock changed during diagnostics' }
+          $file = Get-Item -LiteralPath $raw
+          if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $file.Length -gt 67108864) {
+            throw 'Native diagnostic file is redirected or exceeds its bound'
+          }
+          & node --input-type=module -e 'import { readFileSync } from "node:fs"; try { const value = JSON.parse(readFileSync(process.argv[1], "utf8")); if (value === null || typeof value !== "object") process.exit(2); } catch { process.exit(2); }' $raw
+          if ($LASTEXITCODE -ne 0) { throw 'Native lint did not produce valid JSON diagnostics' }
+          $upload = Join-Path $root 'upload'
+          New-Item -ItemType Directory -Path $upload | Out-Null
+          Copy-Item -LiteralPath $raw -Destination (Join-Path $upload 'native-lint.json')
+          $digest = (Get-FileHash -LiteralPath $raw -Algorithm SHA256).Hash.ToLowerInvariant()
+          [ordered]@{
+            schemaVersion = 1; headSha = $head; lockSha256 = $lockHash
+            command = 'node --import tsx/esm scripts/run-oxlint.ts . --format=json'
+            lintExitCode = $lintExit; diagnosticSha256 = $digest; diagnosticBytes = $file.Length
+            qualification = 'native lint diagnostics only; no rules or source changed; nonzero lint remains failed'
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $upload 'receipt.json') -Encoding utf8NoBOM
+          "path=$upload" >> $env:GITHUB_OUTPUT
+          'validated=true' >> $env:GITHUB_OUTPUT
+          exit $lintExit
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.lint.outputs.validated == 'true' }}
+        with:
+          name: core-alpha2-native-lint-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          path: ${{ steps.lint.outputs.path }}/*
+          if-no-files-found: error
+          retention-days: 7

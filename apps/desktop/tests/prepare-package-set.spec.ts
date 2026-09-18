@@ -85,11 +85,11 @@ describe('desktop package-set selection', () => {
   ]
 
   it('accepts the Desktop Host entry and required policy preload in the tarball listing', () => {
-    expect(() => assertDesktopHostPackageFiles(hostFiles)).not.toThrow()
+    expect(() => { assertDesktopHostPackageFiles(hostFiles) }).not.toThrow()
   })
 
-  it.each(hostFiles)('rejects a tarball listing missing %s', missing => {
-    expect(() => assertDesktopHostPackageFiles(hostFiles.filter(file => file !== missing)))
+  it.each(hostFiles)('rejects a tarball listing missing %s', (missing) => {
+    expect(() => { assertDesktopHostPackageFiles(hostFiles.filter(file => file !== missing)) })
       .toThrow(`tarball omits required file(s): ${missing}`)
   })
 })
