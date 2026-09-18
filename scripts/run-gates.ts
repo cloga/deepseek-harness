@@ -19,6 +19,7 @@ import {
   parseCoveragePartitionCount,
 } from './coverage-partitions.ts'
 import { pnpmInvocation } from './pnpm-invocation.ts'
+import { coverageNoticeChildEnvironment, withWindowsCoverageNotices } from './windows-coverage-notices.ts'
 
 /** A named aggregate exposed by the gate runner. */
 export type Mode =
@@ -113,11 +114,25 @@ async function main(args: string[]): Promise<number> {
   const startedAt = performance.now()
   console.log(`run-gates: ${mode} running ${gates.length} gate(s) with ${maxConcurrency} worker(s) from ${concurrencySource}${failFast ? ', fail-fast after first blocking failure' : ''}.`)
 
-  const results = await runGates(gates, maxConcurrency, runGate, printResult, cliGateOptions(failFast))
-  printSummary(results, performance.now() - startedAt)
-  return results.some(result => result.gate.allowFailure !== true && (result.status === 'failed' || result.status === 'skipped'))
-    ? 1
-    : 0
+  return withWindowsCoverageNotices(mode, async (progress) => {
+    const execute: GateExecutor = async (gate, signal) => {
+      progress.started()
+      try {
+        return await runGate(gate, signal)
+      } finally {
+        progress.finished()
+      }
+    }
+    const observe: ResultObserver = (result) => {
+      progress.result(result.status)
+      printResult(result)
+    }
+    const results = await runGates(gates, maxConcurrency, execute, observe, cliGateOptions(failFast))
+    printSummary(results, performance.now() - startedAt)
+    return results.some(result => result.gate.allowFailure !== true && (result.status === 'failed' || result.status === 'skipped'))
+      ? 1
+      : 0
+  })
 }
 
 /**
@@ -1086,7 +1101,8 @@ export async function runGate(gate: Gate, signal?: AbortSignal): Promise<GateRes
   }>((resolveExit) => {
     const child = spawn(gate.command, gate.args, {
       cwd: root,
-      env: { ...process.env, ...gate.env },
+      // Only this aggregate emits the bounded notices, not nested gates or test fixtures.
+      env: coverageNoticeChildEnvironment(process.env, gate.env),
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: signal !== undefined && process.platform !== 'win32',
     })

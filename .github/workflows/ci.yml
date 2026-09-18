@@ -647,8 +647,13 @@ jobs:
       # suites (webworker-packer image-loadable, webworker-runtime
       # transform-corpus, client ui-trajectory client-bundle) self-skip on
       # unbuilt checkouts.
+      - name: Verify coverage notice diagnostics
+        shell: pwsh
+        run: node --test scripts/windows-coverage-notices.test.mjs
       - name: Run Windows coverage
         shell: pwsh
+        env:
+          DSH_WINDOWS_COVERAGE_NOTICES: '1'
         run: pnpm run check:ci:coverage
       - name: Save coverage duration history
         # Coverage flakes must not prevent the cache from building; the
