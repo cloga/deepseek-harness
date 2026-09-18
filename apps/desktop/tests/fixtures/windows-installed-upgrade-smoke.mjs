@@ -7,6 +7,7 @@ import { parseArgs } from 'node:util'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { assertUpgradeRunner, ownedUpgradePath, upgradeFileHash, verifyUpgradeRelease } from './windows-installed-upgrade-contract.mjs'
+import { retainPrimaryFailure } from './windows-packaged-package-acceptance.mjs'
 
 const baseline = JSON.parse(readFileSync(new URL('./windows-upgrade-baseline.json', import.meta.url), 'utf8'))
 const json = path => JSON.parse(readFileSync(path, 'utf8'))
@@ -17,7 +18,7 @@ const safeError = error => String(error).replace(/(https?:\/\/[^?\s"'<>]+)\?[^\s
 async function main() {
   assertUpgradeRunner(process.env)
   const { values } = parseArgs({ options: Object.fromEntries(['phase', 'run-root', 'baseline-directory', 'candidate-directory', 'expected-source'].map(name => [name, { type: 'string' }])) })
-  assert.ok(['validate', 'baseline', 'candidate', 'cleanup'].includes(values.phase))
+  assert.ok(['validate', 'baseline', 'candidate', 'package', 'cleanup'].includes(values.phase))
   assert.ok(values['run-root'])
   const root = ownedUpgradePath(process.env.RUNNER_TEMP, values['run-root'])
   const owner = json(join(root, 'owner.json'))
@@ -49,14 +50,19 @@ async function main() {
   }
   const validated = json(join(root, 'validated.json'))
   assert.equal(validated.ownerToken, owner.token)
+  if (values.phase === 'package') {
+    const { runPackagedPackageAcceptance } = await import('./windows-packaged-package-acceptance.mjs')
+    await runPackagedPackageAcceptance(root)
+    return
+  }
   if (values.phase === 'cleanup') {
     const { removeOwnedDirectory } = await import('../../src/owned-directory.ts')
-    for (const name of ['home', 'electron-user-data']) {
+    for (const name of ['home', 'electron-user-data', 'package-home', 'package-electron-user-data', 'package-workspace', 'package-fixture-data']) {
       const path = ownedUpgradePath(root, join(root, name))
       if (existsSync(path)) removeOwnedDirectory(path)
       assert.equal(existsSync(path), false)
     }
-    save(join(evidence, 'profile-cleanup.json'), { ownedHomeRemoved: true, ownedElectronDataRemoved: true })
+    save(join(evidence, 'profile-cleanup.json'), { ownedHomeRemoved: true, ownedElectronDataRemoved: true, isolatedPackageAcceptanceDataRemoved: true })
     return
   }
   const expected = values.phase === 'baseline' ? validated.previous : validated.candidate
@@ -82,7 +88,9 @@ async function main() {
   for (const round of rounds) {
     let app
     let page
+    let roundFailure
     const errors = []
+    const secondaryErrors = []
     try {
       app = await _electron.launch({ executablePath: application, args: [`--user-data-dir=${userData}`], env, timeout: 120_000 })
       const identity = await app.evaluate(({ app }) => ({ executable: process.execPath, userData: app.getPath('userData'), version: app.getVersion(), packaged: app.isPackaged }))
@@ -136,11 +144,19 @@ async function main() {
         realOAuth: false, realModelRound: false, managedHandoffVerified: false,
       })
     } catch (error) {
-      save(join(evidence, `${round}-failure.json`), { error: safeError(error), pageErrors: errors })
-      throw error
+      roundFailure = error
     } finally {
-      await app?.close()
+      try { await app?.close() }
+      catch (error) { roundFailure = retainPrimaryFailure(roundFailure, error, 'round-owned-close', secondaryErrors) }
+      if (roundFailure !== undefined) {
+        try { save(join(evidence, `${round}-failure.json`), { error: safeError(roundFailure), pageErrors: errors, secondaryErrors }) }
+        catch (error) {
+          roundFailure = retainPrimaryFailure(roundFailure, error, 'round-failure-evidence-write', secondaryErrors)
+          console.error('Installed acceptance secondary failures:', secondaryErrors)
+        }
+      }
     }
+    if (roundFailure !== undefined) throw roundFailure
   }
 }
 

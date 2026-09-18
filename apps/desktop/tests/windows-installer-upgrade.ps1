@@ -36,8 +36,11 @@ $candidate = [IO.Path]::GetFullPath($CandidateDirectory).TrimEnd('\')
 $token = [guid]::NewGuid().ToString()
 $processes = [Collections.Generic.List[Diagnostics.Process]]::new()
 $cleanupErrors = [Collections.Generic.List[string]]::new()
+$secondaryErrors = [Collections.Generic.List[string]]::new()
 $failure = $null
 $success = $false
+$packageAcceptanceSuccess = $false
+$packageAcceptanceAttempted = $false
 $registration = $null
 $monitor = $null
 $installationAttempted = $false
@@ -96,6 +99,21 @@ function Start-Owned([string]$File, [string]$Arguments, [switch]$Fixture) {
 function Wait-Exit([Diagnostics.Process]$Process, [int]$Seconds, [int]$Expected = 0) {
     if (-not $Process.WaitForExit($Seconds * 1000)) { throw 'Owned qualification process exceeded its deadline' }
     if ($Process.ExitCode -ne $Expected) { throw "Owned qualification process returned $($Process.ExitCode), expected $Expected" }
+}
+# Process handles remain retained until the final pass, including handles added by uninstall/profile cleanup.
+function Stop-OwnedProcesses {
+    param($OwnedProcesses, $Errors)
+    $stopped = $true
+    foreach ($process in $OwnedProcesses) {
+        try {
+            if (-not $process.HasExited) {
+                try { $process.Kill($true) }
+                catch { $Errors.Add('Could not request owned process termination: ' + $_.Exception.Message); $stopped = $false }
+            }
+            if (-not $process.WaitForExit(10000)) { $Errors.Add('Owned qualification process did not exit after termination'); $stopped = $false }
+        } catch { $Errors.Add('Could not verify owned process exit: ' + $_.Exception.Message); $stopped = $false }
+    }
+    return $stopped
 }
 function Start-Fixture([string]$Phase) {
     $args = @('--import','tsx/esm',$fixture,'--phase',$Phase,'--run-root',$root)
@@ -217,17 +235,30 @@ try {
     Assert-NoTransactionDirectories
     Wait-Exit (Start-Fixture candidate) 900
     Wait-NoProductProcesses
+    # This fresh-home, same-version package case does not qualify choices across the installer upgrade.
+    $packageAcceptanceAttempted = $true
+    Wait-Exit (Start-Fixture package) 1800
+    Wait-NoProductProcesses
+    $packageAcceptance = Get-Content -LiteralPath (Join-Path $root 'evidence/package-acceptance.json') -Raw | ConvertFrom-Json
+    if ($packageAcceptance.sourceCommit -cne $ExpectedSourceCommit -or $packageAcceptance.scope -cne 'candidate-installed-desktop-same-version-isolated-home') { throw 'Package acceptance identifies another source or scope' }
+    foreach ($field in @('succeeded','preparedGraphVerified','declinePreservedGraphVerified','discardPreservedGraphVerified','liveDraftAttachmentVetoVerified','attachmentOnlyVetoVerified','draftOnlyVetoVerified','consentGraphPromotionVerified','newHostGenerationVerified','installedDisabledAfterConsentVerified','enabledFixtureRunningAfterSeparateRestartVerified','copilotDisabledChoiceAcrossRestartVerified','copilotRemovalChoiceAcrossRestartVerified','zeroModelRequestsVerified','cleanupVerified')) {
+        if ($packageAcceptance.$field -isnot [bool] -or $packageAcceptance.$field -ne $true) { throw "Package acceptance did not verify $field" }
+    }
+    $packageAcceptanceSuccess = $true
     $success = $true
 } catch {
     $failure = $_
 } finally {
-    foreach ($process in $processes) {
-        if (-not $process.HasExited) {
-            try { $process.Kill($true); [void]$process.WaitForExit(10000) } catch { $cleanupErrors.Add('Could not stop an owned qualification process') }
-        }
-    }
+    $initialReaped = Stop-OwnedProcesses $processes $cleanupErrors
     if ($installationAttempted) {
         try {
+            if (-not $initialReaped) { throw 'Owned process exit is unconfirmed; retain installation and profiles for VM teardown' }
+            if ($packageAcceptanceAttempted) {
+                $packageEvidence = Join-Path $root 'evidence/package-acceptance.json'
+                if (-not (Test-Path -LiteralPath $packageEvidence -PathType Leaf)) { throw 'Package fixture has no exit evidence; retain installation and profiles for VM teardown' }
+                $packageCleanup = Get-Content -LiteralPath $packageEvidence -Raw | ConvertFrom-Json
+                if ($packageCleanup.cleanupVerified -isnot [bool] -or $packageCleanup.cleanupVerified -ne $true) { throw 'Package process cleanup is unconfirmed; retain installation and profiles for VM teardown' }
+            }
             $hasRegistration = @(Product-Registrations).Count -ne 0
             $hasPayload = (Test-Path -LiteralPath $installPath -PathType Container) -and @(Get-ChildItem -LiteralPath $installPath -Force).Count -ne 0
             if ($hasRegistration -or $hasPayload) {
@@ -249,18 +280,34 @@ try {
                 if ((Get-FileHash -LiteralPath $retainedFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $retained.envSha256) { throw 'Uninstall modified isolated application data' }
             }
             Wait-Exit (Start-Fixture cleanup) 120
-        } catch { $cleanupErrors.Add('Installed product cleanup failed: ' + $_.Exception.Message) }
+        } catch {
+            $cleanupErrors.Add('Installed product cleanup failed: ' + $_.Exception.Message)
+            if ($null -eq $failure) { $failure = $_ }
+        }
     }
-    foreach ($process in $processes) { $process.Dispose() }
-    [ordered]@{
-        schemaVersion = 1; sourceCommit = $ExpectedSourceCommit; succeeded = ($success -and $cleanupErrors.Count -eq 0)
-        installerUpgradeVerified = $success; runningApplicationRefusalVerified = $success; sameCustomPathVerified = $success
-        actualInstalledHostAndClientVerified = $success; candidateRestartVerified = $success
-        retainedHomeFileVerified = $success; pluginUserChoicesVerified = $false; draftAttachmentRefusalVerified = $false
-        promotionFailureRollbackVerified = $false; managedHandoffVerified = $false; postSuccessDowngradeVerified = $false
-        installationRoot = $installPath; cleanupErrors = @($cleanupErrors)
-        failure = $(if ($null -ne $failure) { $failure.Exception.Message } else { $null })
-    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $root 'evidence/installer-upgrade.json') -Encoding utf8NoBOM
+    # Cleanup itself can start processes after the first pass; kill AND acknowledge every late handle before disposal.
+    [void](Stop-OwnedProcesses $processes $cleanupErrors)
+    foreach ($process in $processes) {
+        try { $process.Dispose() }
+        catch { $cleanupErrors.Add('Owned process handle disposal failed: ' + $_.Exception.Message); if ($null -eq $failure) { $failure = $_ } }
+    }
+    try {
+        [ordered]@{
+            schemaVersion = 1; sourceCommit = $ExpectedSourceCommit; succeeded = ($success -and $cleanupErrors.Count -eq 0)
+            installerUpgradeVerified = $success; runningApplicationRefusalVerified = $success; sameCustomPathVerified = $success
+            actualInstalledHostAndClientVerified = $success; candidateRestartVerified = $success
+            retainedHomeFileVerified = $success; pluginUserChoicesVerified = $false; draftAttachmentRefusalVerified = $false
+            promotionFailureRollbackVerified = $false; managedHandoffVerified = $false; postSuccessDowngradeVerified = $false
+            separateSameVersionPackagedPluginAcceptanceVerified = $packageAcceptanceSuccess
+            installationRoot = $installPath; cleanupErrors = @($cleanupErrors); secondaryErrors = @($secondaryErrors)
+            failure = $(if ($null -ne $failure) { $failure.Exception.Message } else { $null })
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $root 'evidence/installer-upgrade.json') -Encoding utf8NoBOM
+    } catch {
+        $secondaryErrors.Add('Installer acceptance evidence write failed: ' + $_.Exception.Message)
+        if ($null -eq $failure) { $failure = $_ }
+        try { [Console]::Error.WriteLine(('Secondary qualification failures: ' + ($secondaryErrors -join '; '))) }
+        catch { $secondaryErrors.Add('Secondary diagnostic output failed: ' + $_.Exception.Message) }
+    }
 }
 if ($null -ne $failure) { throw $failure }
 if ($cleanupErrors.Count -ne 0) { throw 'Installer qualification cleanup failed; inspect evidence' }

@@ -12,6 +12,7 @@ Installed qualification can opt into `DSH_DESKTOP_UPDATE_JOURNAL_DIR`, an absolu
 
 - [Evidence](#verification-evidence)
 - [Manual walkthrough](#verification-interactive)
+- [Hosted installer and package acceptance](#verification-hosted)
 - [Open verification](#verification-open)
 
 <a id="verification-interactive"></a>
@@ -55,6 +56,16 @@ The [signed-download runner](../scripts/test-signed-updates.mjs) connects real E
 
 With an old installer and both original blockmaps, the same runner additionally verifies single-range and multipart-range reconstruction, missing-old-blockmap fallback, and rejected-range fallback. Reconstructed executables pass SHA-512 and Authenticode checks. Request records distinguish differential payload bytes from full downloads; a full fallback cannot satisfy a differential-success assertion. These loopback results do not certify CDN Range support or an installed application's cache.
 
+<a id="verification-hosted"></a>
+
+## Hosted installer and package acceptance
+
+The [cloga release workflow](../../../.github/workflows/desktop-fork-release.yml) runs [installer qualification](windows-installer-upgrade.ps1) only on a disposable GitHub-hosted Windows runner. Select a reviewed branch with `rehearsal: true` and the exact [release-plan version](../release/cloga-windows-x64.json); rehearsal cannot publish. The driver rejects pre-existing product installations and verifies baseline and candidate identities before using the real interactive installers. It disables automatic launch, starts the installed application with isolated data, checks the custom install path and restart, then uninstalls. Acquisition credentials are not passed to the application or native helper.
+
+A separate [package scenario](fixtures/windows-packaged-package-acceptance.mjs) uses another private home and actual Plugin Manager controls, titlebar menu, shell confirmation and replacement Host. It archives the existing private test bundle unchanged. Installation first promotes a graph with that bundle disabled; the official Enable switch and a separate clean restart must precede a Running-row claim. A custom provider configured through real settings uses a loopback test endpoint; the scenario asserts no model requests. Combined, attachment-only and draft-only inputs must prevent activation while preserving the live input. Copilot disablement and removal are checked across same-version restarts; removal absence also requires a positively loaded retained fixture.
+
+The [native UI helper](windows-desktop-ui.ps1) binds actions to owned process incarnations and windows. Unknown launch ownership or unconfirmed process exit cannot certify cleanup. Reports and screenshots remain separate from finalized release assets, and reporting failures do not replace a prior qualification error. Unit tests and parser checks do not establish hosted UI success. Read each run's scoped flags: this lane does not establish choices across installer upgrades, unsent draft persistence across quitting, promotion-failure rollback, post-success downgrade or a published managed-update handoff. No current local Desktop is an implicit test target.
+
 <a id="verification-open"></a>
 
 ## Open verification
@@ -63,7 +74,7 @@ The following items are not passing evidence and must remain visible during revi
 
 - Electron `capturePage()` captures individual windows. Windows interactive observations include composed dialogs and native menu selection, but cross-platform Figma/layout acceptance and a complete recording remain unverified. The automated workspace runner invokes the menu handler directly.
 - The development launcher encounters a dangling optional Linux ARM64 dependency junction in this Windows checkout; the qualification runners link the existing dependency graph directly and do not validate that launcher's projection.
-- The fixture does not execute an installer, overwrite an installed application, or establish that a new version starts successfully. Signed Windows and macOS installed-version qualification remains required for release.
+- The local updater fixture does not execute an installer, overwrite an installed application, or establish that a new version starts successfully. Signed Windows and macOS installed-version qualification remains required for their release channels; the separate cloga hosted lane does not certify signed releases.
 - Two isolated Windows test installers pass signed-package inspection, including their embedded feed configuration. Installed startup, failure/retry, automatic restart, and data retention remain operator verification; file inspection does not certify a release.
 - Live policy origins, gateway behavior, rate limits, approved page origins, and deployed policy configuration are pending backend integration. Local responses are not proof of a live service.
 - Policy, updater feed, and updater download stalls reach their real deadlines and recover. Injected download-write `ENOSPC` is covered; actual volume exhaustion and installed-upgrade disk pressure remain unverified. Differential download and publisher rejection are verified through real Electron downloads, but not yet in a newly packaged application's installed-upgrade path.

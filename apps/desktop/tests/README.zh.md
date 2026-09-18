@@ -12,6 +12,7 @@
 
 - [验证证据](#verification-evidence)
 - [手动演练](#verification-interactive)
+- [托管 runner 安装器与包验收](#verification-hosted)
 - [待验证事项](#verification-open)
 
 <a id="verification-interactive"></a>
@@ -55,6 +56,16 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 提供旧安装器和两个原始 blockmap 后，同一运行器还会验证单段 Range、多段 Range 重建、缺少旧 blockmap 时回退，以及 Range 被拒绝时回退。重建的可执行文件通过 SHA-512 和 Authenticode 检查。请求记录区分差分负载字节与全量下载；全量回退不能满足差分成功断言。这些回环结果不证明 CDN Range 支持或已安装应用的缓存可用。
 
+<a id="verification-hosted"></a>
+
+## 托管 runner 安装器与包验收
+
+[cloga 发布工作流](../../../.github/workflows/desktop-fork-release.yml)仅在一次性的 GitHub 托管 Windows runner 上运行[安装器验收](windows-installer-upgrade.ps1)。选择经过评审的分支，设置 `rehearsal: true` 并填写精确的[发布计划版本](../release/cloga-windows-x64.json)；演练不能发布。驱动会拒绝已有的产品安装，并在调用真实交互式安装器前验证基线与候选版本的身份。它关闭自动启动，使用隔离数据启动已安装应用，检查自定义安装路径和重启，最后卸载。获取产物所用的凭据不会传给应用或原生辅助程序。
+
+独立的[包操作场景](fixtures/windows-packaged-package-acceptance.mjs)使用另一个私有 home，以及真实的 Plugin Manager 控件、标题栏菜单、shell 确认和替代 Host。它将现有的私有测试组合包原样归档。安装首先提升一个仍禁用该组合包的图；必须经过官方 Enable 开关和另一次正常重启，才能报告行状态为 Running。通过真实设置配置的自定义提供方使用回环测试端点；场景断言不发出模型请求。组合输入、仅附件和仅草稿输入都必须阻止激活，同时保留实时输入。Copilot 的禁用与移除选择在同版本重启后检查；确认移除后不存在时，还必须看到已正确加载的保留 fixture。
+
+[原生 UI 辅助程序](windows-desktop-ui.ps1)将操作绑定到自有进程的具体实例及窗口。启动归属不明或未确认进程退出时，不能认证清理完成。报告和截图独立于已定稿的发布产物，报告写入失败不会替换先前的验收错误。单元测试和解析检查不能证明托管 UI 已通过。应读取每次运行中明确限定范围的标志：本流程不证明跨安装器升级的选择保持、退出后未发送草稿的持久化、提升失败回滚、成功升级后的降级，或已发布渠道的 managed-update 交接。当前本地 Desktop 不是默认测试目标。
+
 <a id="verification-open"></a>
 
 ## 待验证事项
@@ -63,7 +74,7 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 - Electron `capturePage()` 捕获单个窗口。Windows 交互观测包含合成弹窗和原生菜单选择，但跨平台 Figma／布局验收与完整录制仍未验证。自动化工作区运行器直接调用菜单处理器。
 - 开发启动器在此 Windows 工作区遇到指向缺失目标的可选 Linux ARM64 依赖 junction；验收运行器直接链接已有依赖图，不验证该启动器的依赖投影。
-- fixture（测试前置数据）不执行安装器，不覆盖已安装应用，也不证明新版本成功启动。发布前仍需签名 Windows 和 macOS 的已安装版本验收。
+- 本地 updater 的 fixture（测试前置数据）不执行安装器，不覆盖已安装应用，也不证明新版本成功启动。签名 Windows 和 macOS 发布渠道仍需已安装版本验收；独立的 cloga 托管流程不认证签名发布。
 - 两个隔离 Windows 测试安装包通过签名包检查，包括内嵌清单配置。安装后启动、失败重试、自动重启和数据保留仍待操作者验证；文件检查不认证发布。
 - 真实策略源站、网关行为、限流、批准的页面源站和已部署策略配置仍待后端联调。本地响应不能证明线上服务可用。
 - 策略、updater 清单与下载停滞均达到真实截止时间并可恢复。下载写入的 `ENOSPC` 故障注入已覆盖；真实卷耗尽与已安装版本升级的磁盘压力仍未验证。差分下载和发布者拒绝已通过真实 Electron 下载验证，但尚未在新打包应用的已安装版本升级路径中验证。

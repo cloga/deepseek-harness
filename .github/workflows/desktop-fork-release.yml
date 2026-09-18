@@ -242,7 +242,7 @@ jobs:
       - name: Verify installer-upgrade guard tests
         shell: pwsh
         run: |
-          node --test apps/desktop/tests/windows-installed-upgrade.test.mjs
+          node --test apps/desktop/tests/windows-installed-upgrade.test.mjs apps/desktop/tests/windows-packaged-package-acceptance.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify real installed Desktop upgrade

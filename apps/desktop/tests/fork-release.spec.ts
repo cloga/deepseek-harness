@@ -262,7 +262,9 @@ describe('Desktop fork release plan', () => {
     expect(seal).toBeGreaterThan(upgrade)
     expect(steps[acquire]?.run).toContain('$release.immutable -isnot [bool]')
     expect(steps[acquire]?.run).toContain('$assets[0].digest -cne "sha256:$($expected.sha256)"')
-    expect(steps[guards]?.run).toContain('node --test apps/desktop/tests/windows-installed-upgrade.test.mjs')
+    expect(steps[guards]?.run).toContain(
+      'node --test apps/desktop/tests/windows-installed-upgrade.test.mjs apps/desktop/tests/windows-packaged-package-acceptance.test.mjs',
+    )
     expect(steps[upgrade]?.id).toBe('installed_upgrade')
     expect(steps[upgrade]?.run).toContain('./apps/desktop/tests/windows-installer-upgrade.ps1')
     expect(steps[upgrade]?.run).toContain('-ExpectedSourceCommit $env:GITHUB_SHA')
