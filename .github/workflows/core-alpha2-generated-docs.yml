@@ -92,8 +92,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm run verify-doc-graphs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git diff --check
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --check *> $null
+          $whitespaceExit = $LASTEXITCODE
+          if ($whitespaceExit -ne 0) { Write-Output 'Generated-docs whitespace check failed'; exit $whitespaceExit }
 
       - name: Audit generated output and retain failures honestly
         if: always() && env.DOCS_EVIDENCE != ''
@@ -109,10 +110,9 @@ jobs:
         with:
           name: core-alpha2-generated-docs-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
           path: |
-            ${{ env.DOCS_EVIDENCE }}/inputs.json
-            ${{ env.DOCS_EVIDENCE }}/outputs.json
-            ${{ env.DOCS_EVIDENCE }}/generated.diff
-            ${{ env.DOCS_EVIDENCE }}/before/**
-            ${{ env.DOCS_EVIDENCE }}/generated/**
+            ${{ env.DOCS_EVIDENCE }}/upload/inputs.json
+            ${{ env.DOCS_EVIDENCE }}/upload/outputs.json
+            ${{ env.DOCS_EVIDENCE }}/upload/generated.diff
+            ${{ env.DOCS_EVIDENCE }}/upload/generated/**
           if-no-files-found: error
           retention-days: 7
