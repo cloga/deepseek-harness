@@ -21,7 +21,15 @@ type ReleaseWorkflow = {
   jobs: Record<string, {
     permissions?: Record<string, string>
     env?: Record<string, string>
-    steps: Array<{ name?: string; run?: string; env?: Record<string, string> }>
+    steps: Array<{
+      name?: string
+      id?: string
+      uses?: string
+      if?: string
+      run?: string
+      env?: Record<string, string>
+      with?: Record<string, unknown>
+    }>
   }>
 }
 
@@ -34,26 +42,34 @@ function readReleaseWorkflow(): ReleaseWorkflow {
 function assertMetadataAuthScope(workflow: ReleaseWorkflow): void {
   expect(workflow.env ?? {}).not.toHaveProperty(metadataTokenEnv)
   const authenticatedSteps: string[] = []
+  const baselineAcquisitions: string[] = []
   for (const [jobName, job] of Object.entries(workflow.jobs)) {
     expect(job.env ?? {}).not.toHaveProperty(metadataTokenEnv)
     for (const step of job.steps) {
       const metadataStep = (jobName === 'build' && step.name === 'Prepare reviewed managed capability')
         || (jobName === 'remote-check' && step.name === 'Run the shipped source discovery against GitHub')
+      const baselineStep = jobName === 'build' && step.name === 'Acquire the verified installer-upgrade baseline'
       if (metadataStep) {
         expect(job.permissions ?? workflow.permissions).toEqual({ contents: 'read' })
-        expect(step.env?.[metadataTokenEnv]).toBe('${{ github.token }}')
+        expect(step.env).toEqual({ [metadataTokenEnv]: '${{ github.token }}' })
         authenticatedSteps.push(jobName)
+      } else if (baselineStep) {
+        expect(job.permissions ?? workflow.permissions).toEqual({ contents: 'read' })
+        expect(step.env).toEqual({ GH_TOKEN: '${{ github.token }}' })
+        expect(step.run).not.toMatch(/Start-Process|electron\.launch|ELECTRON_RUN_AS_NODE/u)
+        baselineAcquisitions.push(jobName)
       } else {
         expect(step.env ?? {}).not.toHaveProperty(metadataTokenEnv)
       }
-      // Neither packaging nor any Electron/helper/Copilot acceptance process inherits a CI credential.
-      if (!metadataStep && (jobName === 'build' || jobName === 'remote-check')) {
+      // Neither packaging nor any Electron/helper/Copilot/installer acceptance process inherits a CI credential.
+      if (!metadataStep && !baselineStep && (jobName === 'build' || jobName === 'remote-check')) {
         expect(Object.keys({ ...workflow.env, ...job.env, ...step.env }).filter(key => /token|secret|password/iu.test(key))).toEqual([])
       }
       expect(step.run ?? '').not.toMatch(/DSH_DESKTOP_RELEASE_GITHUB_TOKEN|github\.token|GITHUB_ENV/u)
     }
   }
   expect(authenticatedSteps).toEqual(['build', 'remote-check'])
+  expect(baselineAcquisitions).toEqual(['build'])
 }
 
 function assertProjectFixtureSelection(workflow: ReleaseWorkflow): void {
@@ -194,14 +210,14 @@ describe('Desktop fork release plan', () => {
     })).toThrow(/advance/u)
   })
 
-  it('opts into read-only metadata auth only in the two remote release-script steps', () => {
+  it('limits release-script auth to metadata steps and isolates baseline acquisition', () => {
     assertMetadataAuthScope(readReleaseWorkflow())
     const script = readFileSync(resolve(repositoryRoot, 'apps/desktop/scripts/fork-release.ts'), 'utf8')
     expect(script.match(/discoverDesktopReleaseForBuild\(capability, process\.env\.DSH_DESKTOP_RELEASE_GITHUB_TOKEN\)/gu)).toHaveLength(2)
     expect(script).not.toMatch(/process\.env\.(?:GH_TOKEN|GITHUB_TOKEN)/u)
   })
 
-  it.each(['workflow', 'job', 'package', 'account', 'observer', 'helper'])('rejects metadata token propagation to %s scope', (scope) => {
+  it.each(['workflow', 'job', 'package', 'account', 'observer', 'helper', 'upgrade', 'baseline'])('rejects metadata token propagation to %s scope', (scope) => {
     const workflow = readReleaseWorkflow()
     const build = workflow.jobs.build!
     const env = { [metadataTokenEnv]: '${{ github.token }}' }
@@ -213,11 +229,61 @@ describe('Desktop fork release plan', () => {
         account: 'Verify packaged Copilot account and restart',
         observer: 'Verify real acceptance observer failure cleanup',
         helper: 'Verify copied helper bootstrap and acknowledgement',
+        upgrade: 'Verify real installed Desktop upgrade',
+        baseline: 'Acquire the verified installer-upgrade baseline',
       }
       const step = build.steps.find(candidate => candidate.name === names[scope])!
       step.env = { ...step.env, ...env }
     }
     expect(() => { assertMetadataAuthScope(workflow) }).toThrow()
+  })
+
+  it.each(['Build unsigned interactive NSIS installer', 'Verify real installed Desktop upgrade', 'Verify copied helper bootstrap and acknowledgement'])(
+    'does not forward the baseline acquisition token to %s', (name) => {
+      const workflow = readReleaseWorkflow()
+      const step = workflow.jobs.build!.steps.find(candidate => candidate.name === name)!
+      step.env = { ...step.env, GH_TOKEN: '${{ github.token }}' }
+      expect(() => { assertMetadataAuthScope(workflow) }).toThrow()
+    },
+  )
+
+  it('requires actual installer qualification after finalization and before release asset sealing', () => {
+    const workflow = readReleaseWorkflow()
+    const steps = workflow.jobs.build!.steps
+    const finalize = steps.findIndex(step => step.name === 'Finalize release manifest and receipts')
+    const acquire = steps.findIndex(step => step.name === 'Acquire the verified installer-upgrade baseline')
+    const guards = steps.findIndex(step => step.name === 'Verify installer-upgrade guard tests')
+    const upgrade = steps.findIndex(step => step.name === 'Verify real installed Desktop upgrade')
+    const seal = steps.findIndex(step => step.name === 'Verify release asset checksums')
+    expect(finalize).toBeGreaterThanOrEqual(0)
+    expect(acquire).toBeGreaterThan(finalize)
+    expect(guards).toBeGreaterThan(acquire)
+    expect(upgrade).toBeGreaterThan(guards)
+    expect(seal).toBeGreaterThan(upgrade)
+    expect(steps[acquire]?.run).toContain('$release.immutable -isnot [bool]')
+    expect(steps[acquire]?.run).toContain('$assets[0].digest -cne "sha256:$($expected.sha256)"')
+    expect(steps[guards]?.run).toContain('node --test apps/desktop/tests/windows-installed-upgrade.test.mjs')
+    expect(steps[upgrade]?.id).toBe('installed_upgrade')
+    expect(steps[upgrade]?.run).toContain('./apps/desktop/tests/windows-installer-upgrade.ps1')
+    expect(steps[upgrade]?.run).toContain('-ExpectedSourceCommit $env:GITHUB_SHA')
+    expect(steps[upgrade]?.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }')
+    for (const index of [acquire, guards, upgrade]) {
+      expect(steps[index]).not.toHaveProperty('continue-on-error')
+      expect(steps[index]).not.toHaveProperty('if')
+    }
+    const evidence = steps.find(step => step.with?.name === 'desktop-installer-upgrade-${{ steps.plan.outputs.version }}')
+    expect(evidence?.uses).toBe('actions/upload-artifact@v4')
+    expect(evidence?.if).toContain("steps.installed_upgrade.outcome == 'failure'")
+    expect(evidence?.with?.path).toContain('/evidence/*')
+    expect(evidence?.with?.path).toContain('/acquisition.json')
+    expect(evidence?.with?.path).not.toMatch(/home|userData|release-assets/u)
+  })
+
+  it('formats the source commit in release notes without an interpolated Markdown here-string', () => {
+    const publish = readReleaseWorkflow().jobs.release!.steps.find(step => step.name === 'Publish reviewed release')
+    expect(publish?.run).toContain("('- Source commit: `{0}`' -f $env:SOURCE_SHA)")
+    expect(publish?.run).toContain("'- Native `electron-updater`: disabled; no `app-update.yml`'")
+    expect(publish?.run).not.toContain('@"')
   })
 
   it('keeps write permission in the reviewed release job and pins build tools', () => {

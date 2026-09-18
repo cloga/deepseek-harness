@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "repository": "cloga/deepseek-harness",
+  "releaseId": 391052820,
+  "tag": "dsh-desktop-v0.1.6-alpha.1.cloga.2",
+  "sourceCommit": "65a236bd65f2971f98b11a0efd020b8860144924",
+  "version": "0.1.6-alpha.1.cloga.2",
+  "upstreamVersion": "0.1.6-alpha.1",
+  "sequence": 12,
+  "manifest": {
+    "file": "release.json",
+    "assetId": 571106876,
+    "bytes": 2562,
+    "sha256": "724214036567ddea1d6fb79bbfd4daa6c87eada4c00022ef4b0fa9170d93ff59"
+  },
+  "installer": {
+    "file": "cloga-deepseek-harness-0.1.6-alpha.1.cloga.2-win-x64.exe",
+    "assetId": 571106914,
+    "bytes": 171301229,
+    "sha256": "cf140d49b8df9096b52fba365066ef4eeee06eed57ca0f16c2fc319f1e5f0970",
+    "sha512": "AzDSnhao/33/Lems7XU6QmgWLqm2o0shvp2U9lyGtiHGvo+Z9ITf86JOV9dIdM8AdXSqLSXMSQ5CofXy7klJqA=="
+  },
+  "applicationUrl": "dsh-app://app/index.html"
+}
