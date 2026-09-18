@@ -36,13 +36,17 @@ jobs:
       DSH_TELEMETRY_DISABLED: '1'
       EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       EXPECTED_SEED_LOCK_SHA256: '78ded9094a8f51be418ed327a0eb7e2fa78334327dc242bb29741de1a74bb198'
-      NODE_COMPILE_CACHE: ${{ runner.temp }}/core-alpha2-node-cache
 
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
+
+      - name: Use runner-owned Node compile cache
+        run: |
+          $cache = Join-Path $env:RUNNER_TEMP 'core-alpha2-node-cache'
+          "NODE_COMPILE_CACHE=$cache" >> $env:GITHUB_ENV
 
       - uses: actions/setup-node@v6
         with:
@@ -131,7 +135,7 @@ jobs:
             requiredReview = 'Only apps/desktop and apps/desktop-host importer additions, plus explicitly reviewed necessary lock metadata; reject all unexplained graph drift'
             publishOrCommitPerformed = $false
           } | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8NoBOM (Join-Path $env:LOCK_EVIDENCE 'diff.json')
-          if ($unexpected.Count -ne 0 -or $inputDrift.Count -ne 0 -or $staged.Count -ne 0) { throw 'pnpm changed inputs or source outside the lockfile' }
+          if ($unexpected.Count -ne 0 -or $inputDrift.Count -ne 0 -or $staged.Count -ne 0 -or $unexpectedUntracked.Count -ne 0) { throw 'pnpm changed inputs or source outside the lockfile' }
           if ($env:GENERATION_OUTCOME -ne 'success') { throw 'No successful generated lockfile is certified by this artifact' }
 
       - name: Upload lockfile and review evidence only
