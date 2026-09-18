@@ -33,6 +33,10 @@ const PLUGINS: PluginInfo[] = [
 const INSPECTED = { status: 'accepted' as const, kind: 'registry' as const, name: 'dsh-better-sidebar', version: '1.0.0', bundle: true }
 
 const APPLIED: ChangeResult = { changed: true, application: 'applied', stage: 'enable', target: 'dsh-better-sidebar' }
+const PREPARED: NonNullable<ChangeResult['prepared']> = {
+  transactionId: '22222222-2222-4222-8222-222222222222', state: 'prepared',
+  packageName: 'prepared-plugin', baseFingerprint: 'b'.repeat(64), health: 'pending',
+}
 
 /** A change the Host could not apply, with the refusal it names. */
 function failed(error?: ManagementError, packageResult?: ChangeResult['packageResult']): ChangeResult {
@@ -103,6 +107,75 @@ it('recovers prepared transactions independently of installed inventory and disc
     await vi.waitFor(() => { expect(b.state().pendingPackages).toEqual([]) })
     expect(b.plugins.cancelPendingPackageChange).toHaveBeenCalledExactlyOnceWith(pending.transactionId)
     expect(b.plugins.removeBundle).not.toHaveBeenCalled()
+  } finally { b.controller.dispose() }
+})
+
+it.each(['refused', 'rejected'] as const)('keeps a prepared transaction visible when discard is %s', async (failure) => {
+  const cancelPendingPackageChange = failure === 'refused'
+    ? vi.fn().mockResolvedValue(refused('gateway/internal', 'discard unavailable'))
+    : vi.fn().mockRejectedValue(new Error('discard transport failed'))
+  const b = bench({
+    listPendingPackageChanges: vi.fn().mockResolvedValue(ok([PREPARED])),
+    cancelPendingPackageChange,
+  })
+  try {
+    await b.controller.load()
+    b.face.cancelPrepared?.(PREPARED.transactionId)
+    await vi.waitFor(() => { expect(b.state().status).toBe('error') })
+    expect(b.state().pendingPackages).toEqual([PREPARED])
+    expect(b.state().packages).toEqual([packageView(BUNDLE, PLUGINS)])
+    expect(cancelPendingPackageChange).toHaveBeenCalledExactlyOnceWith(PREPARED.transactionId)
+    expect(b.plugins.listPendingPackageChanges).toHaveBeenCalledTimes(1)
+    expect(b.plugins.removeBundle).not.toHaveBeenCalled()
+  } finally { b.controller.dispose() }
+})
+
+it.each([true, false])('reports a prepared change with transaction identity present=%s without activating it', async (hasIdentity) => {
+  const b = bench({
+    setBundleEnabled: vi.fn().mockResolvedValue(ok({
+      ...APPLIED, changed: false, application: 'prepared',
+      ...(hasIdentity ? { prepared: PREPARED } : {}),
+    })),
+  })
+  try {
+    await b.controller.load()
+    b.face.setEnabled(BUNDLE.name, true)
+    await vi.waitFor(() => {
+      expect(b.state().notice).toEqual(hasIdentity
+        ? { kind: 'prepared', transactionId: PREPARED.transactionId, seq: 1 }
+        : { kind: 'failed', action: 'enable', packageName: BUNDLE.name,
+          reason: 'Prepared package change has no transaction identity', seq: 1 })
+      expect(b.state().busy).toEqual([])
+    })
+    expect(b.state().packages).toEqual([packageView(BUNDLE, PLUGINS)])
+    expect(b.state().packages[0]?.enabled).toBe(false)
+    expect(b.plugins.setBundleEnabled).toHaveBeenCalledExactlyOnceWith(BUNDLE.name, true)
+  } finally { b.controller.dispose() }
+})
+
+it('settles preparation as done but not installed, enabled, or restart-qualified', async () => {
+  const answer: ChangeResult = {
+    changed: false, application: 'prepared', stage: 'install', target: PREPARED.packageName,
+    bundle: PREPARED.packageName, prepared: PREPARED,
+  }
+  const b = bench({ installBundle: vi.fn().mockResolvedValue(ok(answer)) })
+  try {
+    await b.controller.load()
+    b.face.openInstall()
+    b.face.editInstallSpec(PREPARED.packageName)
+    b.face.runInstall()
+    await vi.waitFor(() => { expect(b.state().install.phase).toBe('done') })
+    expect(b.state().install).toMatchObject({
+      open: true, installed: null, prepared: PREPARED, restartRequired: false, enabling: false,
+    })
+    expect(b.plugins.installBundle).toHaveBeenCalledWith(PREPARED.packageName, {
+      enabled: false, requestId: expect.any(String),
+    })
+    expect(b.state().packages.some(pkg => pkg.name === PREPARED.packageName)).toBe(false)
+    b.face.closeInstall()
+    expect(b.state().install.open).toBe(false)
+    expect(b.state().highlight).toBeNull()
+    expect(b.plugins.setBundleEnabled).not.toHaveBeenCalled()
   } finally { b.controller.dispose() }
 })
 

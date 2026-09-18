@@ -42,6 +42,11 @@ const IDLE_INSTALL: InstallState = {
   installed: null, restartRequired: false, failure: null, approvedBuilds: [], enabling: false,
 }
 
+const PREPARED: NonNullable<InstallState['prepared']> = {
+  transactionId: '22222222-2222-4222-8222-222222222222', state: 'prepared',
+  packageName: 'prepared-plugin', baseFingerprint: 'b'.repeat(64), health: 'pending',
+}
+
 const READY: PluginManagerState = {
   status: 'ready',
   packages: [],
@@ -57,7 +62,7 @@ type SlotBodies = Record<string, (view: 'summary' | 'page') => ReactNode>
 
 const NO_CONFIG: ConfigLedger = { items: [], bundles: new Set(), rows: new Set() }
 
-function renderTab(state: Partial<PluginManagerState> = {}, config: Partial<ConfigLedger> = {}, bodies: SlotBodies = {}) {
+function renderTab(state: Partial<PluginManagerState> = {}, config: Partial<ConfigLedger> = {}, bodies: SlotBodies = {}, canDiscardPrepared = false) {
   const store = createSnapshotStore<PluginManagerState>({ ...READY, ...state })
   const ledger = createSnapshotStore<ConfigLedger>({ ...NO_CONFIG, ...config })
   const actions = {
@@ -79,6 +84,7 @@ function renderTab(state: Partial<PluginManagerState> = {}, config: Partial<Conf
     cancelConfirm: vi.fn(),
     setRowEnabled: vi.fn(),
     dismissNotice: vi.fn(),
+    ...(canDiscardPrepared ? { cancelPrepared: vi.fn() } : {}),
   }
   const props = {
     t,
@@ -535,6 +541,47 @@ describe('PluginManagerPage', () => {
     expect(screen.getByRole('button', { name: en.installCancel })).toHaveProperty('disabled', false)
   })
 
+  it.each([en, zh])('shows preparation as awaiting separate activation, not an installed package: $preparedTitle', (dict) => {
+    const { actions, setLanguage } = renderTab({
+      install: { ...IDLE_INSTALL, open: true, phase: 'done', spec: PREPARED.packageName, prepared: PREPARED },
+    })
+    setLanguage(dict)
+    const dialog = screen.getByRole('dialog', { name: dict.preparedTitle })
+    expect(within(dialog).getByText(dict.preparedNotice.replace('{id}', PREPARED.transactionId))).toBeTruthy()
+    expect(within(dialog).queryByText(dict.installedTitle)).toBeNull()
+    expect(within(dialog).queryByText(dict.installDoneNothing)).toBeNull()
+    expect(within(dialog).queryByText(dict.installDoneRestart)).toBeNull()
+    expect(within(dialog).queryByRole('button', { name: dict.installEnableNow })).toBeNull()
+    expect(within(dialog).queryByRole('button', { name: dict.installRetry })).toBeNull()
+    fireEvent.click(within(dialog).getByRole('button', { name: dict.installClose }))
+    expect(actions.closeInstall).toHaveBeenCalledOnce()
+    expect(actions.enableInstalled).not.toHaveBeenCalled()
+    expect(actions.runInstall).not.toHaveBeenCalled()
+  })
+
+  it('lists each recovered stage independently and discards only the selected transaction', () => {
+    const second = { ...PREPARED, transactionId: '33333333-3333-4333-8333-333333333333', packageName: 'another-prepared-plugin' }
+    const { actions } = renderTab({ pendingPackages: [PREPARED, second] }, {}, {}, true)
+    const statuses = screen.getAllByRole('status')
+    expect(statuses).toHaveLength(2)
+    expect(statuses[0]?.textContent).toContain(`${PREPARED.packageName}: ${en.preparedNotice.replace('{id}', PREPARED.transactionId)}`)
+    expect(statuses[1]?.textContent).toContain(`${second.packageName}: ${en.preparedNotice.replace('{id}', second.transactionId)}`)
+    fireEvent.click(within(statuses[1]!).getByRole('button', { name: en.discardPrepared }))
+    expect(actions.cancelPrepared).toHaveBeenCalledExactlyOnceWith(second.transactionId)
+    expect(actions.uninstall).not.toHaveBeenCalled()
+    expect(actions.setEnabled).not.toHaveBeenCalled()
+    expect(document.querySelector('[data-plugin-package]')).toBeNull()
+  })
+
+  it('keeps pending stages read-only when no discard action is supplied and inventory is loading', () => {
+    renderTab({ status: 'loading', pendingPackages: [PREPARED] })
+    expect(screen.getByRole('status').textContent).toContain(en.preparedNotice.replace('{id}', PREPARED.transactionId))
+    expect(screen.queryByRole('button', { name: en.discardPrepared })).toBeNull()
+    expect(screen.getByRole('button', { name: en.addPlugin })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: en.refresh })).toHaveProperty('disabled', true)
+    expect(screen.queryByRole('switch')).toBeNull()
+  })
+
   it('offers to enable what a finished install added, and says when it waits for a restart', () => {
     const subject = { spec: '/plugins/dsh-x', status: 'accepted', kind: 'path', name: 'dsh-x', bundle: true } as const
     const { actions, set } = renderTab({
@@ -722,6 +769,9 @@ describe('PluginManagerPage', () => {
       expect(screen.getByRole('alert').textContent).toContain(en.failedDisable.replace('{reason}', en.reasonOperationError))
       set({ notice: { kind: 'failed', action: 'rowEnable', reason: 'x', packageName: 'pkg-1', seq: 8 } })
       expect(screen.getByRole('alert').textContent).toContain(en.failedRowEnable.replace('{reason}', 'x'))
+      set({ notice: { kind: 'prepared', transactionId: PREPARED.transactionId, seq: 9 } })
+      expect(screen.getByRole('alert').textContent).toContain(en.preparedNotice.replace('{id}', PREPARED.transactionId))
+      expect(screen.getByRole('alert').textContent).not.toContain(en.restartNotice)
       // No button to press: the toast retires on its own and the store forgets it.
       expect(screen.queryByRole('button', { name: /got it/i })).toBeNull()
       expect(actions.dismissNotice).not.toHaveBeenCalled()

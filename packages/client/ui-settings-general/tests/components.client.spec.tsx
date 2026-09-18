@@ -41,6 +41,27 @@ const kit = {
 }
 
 describe('Desktop collapsed update badge', () => {
+  it.each(['preserved-user-choice', 'pending'] as const)('shows idle baseline attention only while present: %s', (status) => {
+    let state: DesktopUpdateView = { failed: false, opening: false, presentation: { phase: 'idle' } }
+    const props = { ...kit, t,
+      useDesktopUpdate: (select => select(state)) as Parameters<typeof DesktopUpdateBadge>[0]['useDesktopUpdate'],
+      useConnectionState: (select => select('connected')) as Parameters<typeof DesktopUpdateBadge>[0]['useConnectionState'],
+    }
+    const view = render(<DesktopUpdateBadge {...props} />)
+    expect(screen.queryByRole('img')).toBeNull()
+    state = { ...state, presentation: { phase: 'idle', baseline: { status, packageName: 'fixture-provider' } } }
+    view.rerender(<DesktopUpdateBadge {...props} />)
+    const label = en[status === 'preserved-user-choice' ? 'desktop.baseline.preserved' : 'desktop.baseline.pending']
+    expect(screen.getByRole('img', { name: label }).getAttribute('data-error')).toBe('true')
+    expect(screen.queryByRole('button')).toBeNull()
+    state = { ...state, presentation: { phase: 'available', version: '1.0.1' } }
+    view.rerender(<DesktopUpdateBadge {...props} />)
+    expect(screen.getByRole('img', { name: 'Update' }).hasAttribute('data-error')).toBe(false)
+    state = { ...state, presentation: { phase: 'idle' } }
+    view.rerender(<DesktopUpdateBadge {...props} />)
+    expect(screen.queryByRole('img')).toBeNull()
+  })
+
   it('shows update status, marks failures, and yields to connection feedback', () => {
     let state: DesktopUpdateView = { failed: false, opening: false }
     let connection: 'connected' | 'connecting' | 'disconnected' = 'connected'

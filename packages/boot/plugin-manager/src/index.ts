@@ -84,15 +84,18 @@ class InstallCancelledError extends Error {
   }
 }
 
+/** One complete installation outcome, including rejection before a result can be returned. */
+type InstallSettlement =
+  | { status: 'outcome'; outcome: ChangeResult }
+  | { status: 'failure'; error: Error }
+
 /** One installation the manager owns until its call settles. */
 interface InstallControl {
   readonly abort: AbortController
   /** `applying` once pnpm has exited and the bundle is being selected and loaded, which cannot be stopped. */
   phase: 'installing' | 'applying'
   /** Settlement of the install call, whichever way it ended. */
-  settled: Promise<void>
-  outcome?: ChangeResult
-  failure?: Error
+  settled: Promise<InstallSettlement>
 }
 
 /** A manifest field that is a string, when the manifest carries one. */
@@ -348,7 +351,7 @@ export class PluginManager extends TypertRemoteService {
       error: { code: 'invalid-spec', diagnostic: 'Verified Release sources require launcher-owned package staging' },
     })
     const requestId = options?.requestId
-    const settlement = Promise.withResolvers<void>()
+    const settlement = Promise.withResolvers<InstallSettlement>()
     const control: InstallControl = { abort: new AbortController(), phase: 'installing', settled: settlement.promise }
     const stopped = (): boolean => control.abort.signal.aborted
     if (requestId !== undefined) this.installs.set(requestId, control)
@@ -405,8 +408,8 @@ export class PluginManager extends TypertRemoteService {
       })
     }, { stage: 'install', target: spec, enabled: options?.enabled !== false }, 'install')
     /* v8 ignore next -- change() folds every failure into its result; only a lock or disposal error rejects */
-    void result.then((value) => { control.outcome = value; settlement.resolve() }, (error: unknown) => {
-      control.failure = error instanceof Error ? error : new Error(messageOf(error)); settlement.resolve()
+    void result.then((outcome) => { settlement.resolve({ status: 'outcome', outcome }) }, (error: unknown) => {
+      settlement.resolve({ status: 'failure', error: error instanceof Error ? error : new Error(messageOf(error)) })
     })
     return result.finally(() => { if (requestId !== undefined) this.installs.delete(requestId) })
   }
@@ -423,10 +426,9 @@ export class PluginManager extends TypertRemoteService {
     if (control.phase === 'applying') return { status: 'too-late' }
     this.ownerContext.emit('plugin-manager/install-state', { requestId, phase: 'cancelling' })
     control.abort.abort()
-    await control.settled
-    if (control.failure !== undefined) throw control.failure
-    const outcome = control.outcome
-    if (outcome === undefined) throw new Error('Package cancellation was not acknowledged')
+    const settled = await control.settled
+    if (settled.status === 'failure') throw settled.error
+    const outcome = settled.outcome
     if (outcome.application === 'failed') throw new Error(outcome.error?.diagnostic ?? 'Package cleanup failed; cancellation was not confirmed')
     if (outcome.application === 'cancelled') return { status: 'cancelled' }
     // A durable prepare or completed application can win the race; neither is a cancelled operation.
@@ -515,7 +517,7 @@ export class PluginManager extends TypertRemoteService {
     const target = typeof spec === 'string' ? spec : spec.packageName
     if (this.installs.has(requestId)) return Promise.resolve({ stage: 'install', target, changed: false, application: 'failed',
       error: { code: 'operation-error', diagnostic: 'An installation with this request id is already running' } })
-    const settlement = Promise.withResolvers<void>()
+    const settlement = Promise.withResolvers<InstallSettlement>()
     const control: InstallControl = { abort: new AbortController(), phase: 'installing', settled: settlement.promise }
     this.installs.set(requestId, control)
     this.ownerContext.emit('plugin-manager/install-state', { requestId, phase: 'installing' })
@@ -525,8 +527,8 @@ export class PluginManager extends TypertRemoteService {
       ...(options?.enabled === undefined ? {} : { enabled: options.enabled }),
       ...(options?.approvedBuilds === undefined ? {} : { approvedBuilds: options.approvedBuilds }),
     }, { stage: 'install', target }, control)
-    void result.then((value) => { control.outcome = value; settlement.resolve() }, (error: unknown) => {
-      control.failure = error instanceof Error ? error : new Error(messageOf(error)); settlement.resolve()
+    void result.then((outcome) => { settlement.resolve({ status: 'outcome', outcome }) }, (error: unknown) => {
+      settlement.resolve({ status: 'failure', error: error instanceof Error ? error : new Error(messageOf(error)) })
     })
     return result.finally(() => { this.installs.delete(requestId) })
   }

@@ -777,6 +777,10 @@ describe('staged package transactions', () => {
   const prepared = (packageName = 'addon', transactionId: string = requestId): ProfilePreparedPackageChange => ({
     transactionId, state: 'prepared', packageName, baseFingerprint: 'a'.repeat(64), health: 'pending',
   })
+  const verifiedRelease = (): ProfileVerifiedReleaseSource => ({
+    schemaVersion: 1, type: 'githubRelease', owner: 'fixture', repo: 'addon', tag: 'v2.0.0', asset: 'addon-2.0.0.tgz',
+    assetId: 17, packageName: 'addon', version: '2.0.0', size: 123, sha256: 'b'.repeat(64), targetCommit: 'c'.repeat(40),
+  })
   const transactions = () => ({
     protocolVersion: 1 as const,
     stage: vi.fn<ProfilePackageTransactions['stage']>().mockResolvedValue(prepared()),
@@ -822,6 +826,78 @@ describe('staged package transactions', () => {
     }
   }
 
+  it('refuses verified Release input on a normal profile before invoking stock mutation', async () => {
+    const { ctx, dir, manager } = await fixture('startup')
+    const unchanged = observeActiveProfile(ctx, dir)
+    expect(await manager.installBundle(verifiedRelease(), { requestId, approvedBuilds: ['native'] })).toEqual({
+      stage: 'install', target: 'addon', changed: false, application: 'failed',
+      error: { code: 'invalid-spec', diagnostic: 'Verified Release sources require launcher-owned package staging' },
+    })
+    expect(await manager.cancelInstall(requestId)).toEqual({ status: 'not-running' })
+    unchanged()
+  })
+
+  it('propagates a real stock writer-lock failure to an already joined cancellation', async () => {
+    const { ctx, dir, manager } = await fixture('startup', false, undefined, { lockWaitMs: 0 })
+    const unchanged = observeActiveProfile(ctx, dir)
+    const manifest = join(dir, 'package.json')
+    await atomicWrite.withFileLock(manifest, async () => {
+      const ownerBytes = readFileSync(`${manifest}.lock`, 'utf8')
+      const installing = manager.installBundle('addon', { requestId })
+      const cancelling = manager.cancelInstall(requestId)
+      await Promise.all([
+        expect(installing).rejects.toThrow('writer lock'),
+        expect(cancelling).rejects.toThrow('writer lock'),
+      ])
+      expect(readFileSync(`${manifest}.lock`, 'utf8')).toBe(ownerBytes)
+      expect(await manager.cancelInstall(requestId)).toEqual({ status: 'not-running' })
+      unchanged()
+    })
+    expect(existsSync(`${manifest}.lock`)).toBe(false)
+  })
+
+  it('does not report cancellation when an invalid stock spec wins without a diagnostic', async () => {
+    const { manager } = await fixture('startup')
+    const pnpm = vi.spyOn(operations, 'runProfilePnpm')
+    onTestFinished(() => { pnpm.mockRestore() })
+    const installing = manager.installBundle('', { requestId })
+    const cancelling = manager.cancelInstall(requestId)
+    await expect(cancelling).rejects.toThrow('Package cleanup failed; cancellation was not confirmed')
+    expect(await installing).toMatchObject({ application: 'failed', changed: false, error: { code: 'invalid-spec' } })
+    expect((await installing).error?.diagnostic).toBeUndefined()
+    expect(pnpm).not.toHaveBeenCalled()
+    expect(await manager.cancelInstall(requestId)).toEqual({ status: 'not-running' })
+  })
+
+  it.each([
+    { label: 'non-array reply', reply: { records: [] }, diagnostic: 'invalid pending transaction list' },
+    { label: 'oversized reply', reply: Array.from({ length: 101 }, () => prepared()), diagnostic: 'invalid pending transaction list' },
+    { label: 'malformed member', reply: [{ ...prepared(), baseFingerprint: 'damaged' }], diagnostic: 'invalid prepared result' },
+  ])('refuses a $label at the public launcher pending-list boundary', async ({ reply, diagnostic }) => {
+    const service = transactions()
+    const listPending = vi.fn(async () => reply)
+    // A launcher IPC adapter can return malformed data despite the same-process service's static type.
+    expect(Reflect.set(service, 'listPending', listPending)).toBe(true)
+    const { ctx, dir, manager } = await stagedFixture(service)
+    const unchanged = observeActiveProfile(ctx, dir)
+    await expect(manager.listPendingPackageChanges()).rejects.toThrow(diagnostic)
+    expect(listPending).toHaveBeenCalledExactlyOnceWith()
+    expect(service.stage).not.toHaveBeenCalled()
+    expect(service.cancel).not.toHaveBeenCalled()
+    unchanged()
+  })
+
+  it.each(['missing-bundle', 'core'])('refuses staged removal of an unknown or protected bundle: %s', async (name) => {
+    const service = transactions()
+    const { ctx, dir, manager } = await stagedFixture(service)
+    const unchanged = observeActiveProfile(ctx, dir)
+    expect(await manager.removeBundle(name)).toMatchObject({
+      stage: 'remove', target: name, application: 'failed', changed: false, error: { code: 'not-removable' },
+    })
+    expect(service.stage).not.toHaveBeenCalled()
+    unchanged()
+  })
+
   it('fails closed without the required launcher service, never falling back to stock mutation', async () => {
     const { ctx, dir, manager } = await stagedFixture()
     const unchanged = observeActiveProfile(ctx, dir)
@@ -832,7 +908,11 @@ describe('staged package transactions', () => {
       changed: false, application: 'failed', stage: 'remove', error: { code: 'operation-error' },
     })
     await expect(manager.pendingPackageChange(requestId)).rejects.toThrow('unavailable')
+    await expect(manager.listPendingPackageChanges()).rejects.toThrow('unavailable')
     await expect(manager.cancelPendingPackageChange(requestId)).rejects.toThrow('unavailable')
+    await expect(manager.setBundleEnabled('extra', false)).rejects.toThrow('Launcher package staging is required but unavailable')
+    const plugin = (await manager.listPlugins()).find(row => row.patchId === 'managed')!
+    await expect(manager.setPluginEnabled(plugin.entryId, false)).rejects.toThrow('Launcher package staging is required but unavailable')
     unchanged()
   })
 
@@ -891,10 +971,7 @@ describe('staged package transactions', () => {
     const service = transactions()
     const { ctx, dir, manager } = await stagedFixture(service)
     const unchanged = observeActiveProfile(ctx, dir)
-    const source: ProfileVerifiedReleaseSource = {
-      schemaVersion: 1, type: 'githubRelease', owner: 'fixture', repo: 'addon', tag: 'v2.0.0', asset: 'addon-2.0.0.tgz',
-      assetId: 17, packageName: 'addon', version: '2.0.0', size: 123, sha256: 'b'.repeat(64), targetCommit: 'c'.repeat(40),
-    }
+    const source = verifiedRelease()
     const result = await manager.installBundle(source, { requestId, enabled: false, approvedBuilds: ['native'] })
     expect(service.stage).toHaveBeenCalledExactlyOnceWith(requestId, {
       kind: 'install', source, enabled: false, approvedBuilds: ['native'],
@@ -943,6 +1020,51 @@ describe('staged package transactions', () => {
     unchanged()
   })
 
+  it('rejects a duplicate in-flight UUID without replacing its cancellation owner and permits reuse after settlement', async () => {
+    const service = transactions()
+    const entered = Promise.withResolvers<AbortSignal>()
+    service.stage.mockImplementation(async (_id, _mutation, signal) => {
+      const aborted = new Promise<void>((resolve) => { signal.addEventListener('abort', () => { resolve() }, { once: true }) })
+      entered.resolve(signal)
+      await aborted
+      throw new ProfilePackageCancelledError()
+    })
+    const { ctx, dir, manager } = await stagedFixture(service)
+    const unchanged = observeActiveProfile(ctx, dir)
+    const installing = manager.installBundle('addon', { requestId })
+    const signal = await entered.promise
+    expect(await manager.installBundle('other-bundle', { requestId })).toEqual({
+      stage: 'install', target: 'other-bundle', changed: false, application: 'failed',
+      error: { code: 'operation-error', diagnostic: 'An installation with this request id is already running' },
+    })
+    expect(signal.aborted).toBe(false)
+    expect(service.stage).toHaveBeenCalledOnce()
+    expect(await manager.cancelInstall(requestId)).toEqual({ status: 'cancelled' })
+    expect(signal.aborted).toBe(true)
+    expect(await installing).toMatchObject({ application: 'cancelled', changed: false })
+    service.stage.mockResolvedValue(prepared())
+    expect(await manager.installBundle('addon', { requestId })).toMatchObject({ application: 'prepared', prepared: prepared() })
+    expect(service.stage).toHaveBeenCalledTimes(2)
+    unchanged()
+  })
+
+  it('checks cancellation again after asynchronous validation before entering the launcher', async () => {
+    const service = transactions()
+    const { ctx, dir, manager } = await stagedFixture(service)
+    const unchanged = observeActiveProfile(ctx, dir)
+    const progress: PluginInstallProgress[] = []
+    ctx.on('plugin-manager/install-state', (update) => { progress.push(update) })
+    const installing = manager.installBundle('addon', { requestId })
+    // Unlike notification-time cancellation, stagePackage has already entered its await when this call returns.
+    const cancelling = manager.cancelInstall(requestId)
+    expect(await cancelling).toEqual({ status: 'cancelled' })
+    expect(await installing).toMatchObject({ application: 'cancelled', changed: false, stage: 'install' })
+    expect(progress).toEqual([{ requestId, phase: 'installing' }, { requestId, phase: 'cancelling' }])
+    expect(service.stage).not.toHaveBeenCalled()
+    expect(service.cancel).not.toHaveBeenCalled()
+    unchanged()
+  })
+
   it('joins a cancellation requested synchronously from the installing notification', async () => {
     const service = transactions()
     const { ctx, manager } = await stagedFixture(service)
@@ -974,6 +1096,60 @@ describe('staged package transactions', () => {
     expect(await installing).toMatchObject({ application: 'failed', changed: false,
       error: { diagnostic: 'EPERM: candidate cleanup failed' } })
     unchanged()
+  })
+
+  it.each(['null-prototype rejection', 'throwing error message'] as const)(
+    'settles installation and joined cancellation when a public launcher diagnostic cannot be formatted: %s', async (kind) => {
+      const service = transactions()
+      const entered = Promise.withResolvers<AbortSignal>()
+      const brokenError = new Error('unreadable launcher error')
+      Object.defineProperty(brokenError, 'message', { get() { throw 'launcher diagnostic getter failed' } })
+      const rejection: unknown = kind === 'null-prototype rejection' ? Object.create(null) : brokenError
+      service.stage.mockImplementation(async (_id, _mutation, signal) => {
+        const aborted = new Promise<void>((resolve) => { signal.addEventListener('abort', () => { resolve() }, { once: true }) })
+        entered.resolve(signal)
+        await aborted
+        throw rejection
+      })
+      const { ctx, dir, manager } = await stagedFixture(service)
+      const unchanged = observeActiveProfile(ctx, dir)
+      const installing = manager.installBundle('addon', { requestId }).catch((error: unknown) => error)
+      const signal = await entered.promise
+      const cancelling = manager.cancelInstall(requestId).catch((error: unknown) => error)
+      const [installFailure, cancelFailure] = await Promise.all([installing, cancelling])
+      expect(signal.aborted).toBe(true)
+      expect(cancelFailure).toBeInstanceOf(Error)
+      if (kind === 'null-prototype rejection') {
+        expect(installFailure).toBeInstanceOf(TypeError)
+        expect(cancelFailure).toBe(installFailure)
+      } else {
+        expect(installFailure).toBe('launcher diagnostic getter failed')
+        expect(cancelFailure).toMatchObject({ message: 'launcher diagnostic getter failed' })
+      }
+      expect(await manager.cancelInstall(requestId)).toEqual({ status: 'not-running' })
+      expect(service.stage).toHaveBeenCalledOnce()
+      expect(service.cancel).not.toHaveBeenCalled()
+      unchanged()
+    },
+  )
+
+  it('saves staged-profile enablement under the shared lease and succeeds again after a competing writer releases it', async () => {
+    const service = transactions()
+    const { manager, dir } = await stagedFixture(service, 'startup')
+    const patch = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')
+    const pnpm = vi.spyOn(operations, 'runProfilePnpm')
+    onTestFinished(() => { pnpm.mockRestore() })
+    expect(await manager.setBundleEnabled('extra', false)).toMatchObject({ changed: true, application: 'restart-required' })
+    expect(readProfileManifest('test', dir).dsh?.profile?.bundles).toEqual(['core'])
+    await withProfilePackageLease(dir, async () => {
+      await expect(manager.setBundleEnabled('extra', true)).rejects.toThrow('writer lock')
+      expect(readProfileManifest('test', dir).dsh?.profile?.bundles).toEqual(['core'])
+    })
+    expect(await manager.setBundleEnabled('extra', true)).toMatchObject({ changed: true, application: 'restart-required' })
+    expect(readProfileManifest('test', dir).dsh?.profile?.bundles).toEqual(['core', 'extra'])
+    expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toBe(patch)
+    expect(pnpm).not.toHaveBeenCalled()
+    expect(service.stage).not.toHaveBeenCalled()
   })
 
   it('fails busy rather than holding a configuration write across activation and Host disposal', async () => {
@@ -1081,5 +1257,7 @@ describe('staged package transactions', () => {
     await expect(manager.cancelPendingPackageChange(requestId)).rejects.toThrow('unavailable')
     expect(service.status).not.toHaveBeenCalled()
     expect(service.cancel).not.toHaveBeenCalled()
+    expect(await manager.listPendingPackageChanges()).toEqual([])
+    expect(service.listPending).not.toHaveBeenCalled()
   })
 })
