@@ -16,6 +16,7 @@ const harness = await vi.hoisted(async () => {
   const windows: FakeWindow[] = []
   const hosts: FakeHost[] = []
   const managerRuntimes: unknown[] = []
+  const managedMessages: unknown[] = []
   const managedHandoffs: Array<(selection: DesktopManagedUpdateSelection) => Promise<void>> = []
   const handlers = new Map<string, (event: { senderFrame: { url: string } }) => unknown>()
   let pluginsEnabled = false
@@ -72,7 +73,7 @@ const harness = await vi.hoisted(async () => {
     isPackaged: true,
     name: 'Desktop test',
     whenReady: () => Promise.resolve(),
-    getLocale: () => 'en-US',
+    getLocale: (): string => 'en-US',
     getVersion: () => '1.0.0',
     getAppPath: () => 'desktop-test-app',
     getPath: () => 'desktop-test-user-data',
@@ -86,7 +87,7 @@ const harness = await vi.hoisted(async () => {
     }),
   })
   return {
-    windows, hosts, managerRuntimes, managedHandoffs, handlers, app, FakeWindow, FakeHost,
+    windows, hosts, managerRuntimes, managedMessages, managedHandoffs, handlers, app, FakeWindow, FakeHost,
     launchUpdate: vi.fn(async (_options: DesktopManagedUpdateLaunch) => { throw new Error('helper fixture stopped') }),
     dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn() },
     menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn() },
@@ -118,7 +119,7 @@ const harness = await vi.hoisted(async () => {
     set managedUpdates(value: boolean) { managedUpdates = value },
     setHostImpacts(value: typeof hostImpacts) { hostImpacts = [...value] },
     reset() {
-      windows.length = 0; hosts.length = 0; managerRuntimes.length = 0; managedHandoffs.length = 0
+      windows.length = 0; hosts.length = 0; managerRuntimes.length = 0; managedMessages.length = 0; managedHandoffs.length = 0
       handlers.clear(); app.removeAllListeners()
       app.isPackaged = true
       pluginsEnabled = false
@@ -214,9 +215,10 @@ vi.mock('../src/managed-update-launcher.ts', async (importOriginal) => {
 vi.mock('../src/managed-update-coordinator.ts', () => ({
   DesktopManagedUpdateCoordinator: class {
     constructor(_capability: unknown, _sequence: unknown, publish: (state: DesktopUpdateState) => DesktopUpdateState,
-      install: (selection: DesktopManagedUpdateSelection) => Promise<void>) {
+      install: (selection: DesktopManagedUpdateSelection) => Promise<void>, _operations?: unknown, messages?: unknown) {
       harness.setUpdatePublisher(publish)
       harness.managedHandoffs.push(install)
+      harness.managedMessages.push(messages)
     }
     async check() {
       harness.publishUpdate({ phase: 'checking', mode: 'github-release-managed' })
@@ -274,6 +276,16 @@ afterEach(async () => {
 })
 
 describe('desktop main startup', () => {
+  it.each([
+    ['en-US', 'Could not {stage}: {reason}{code}.\n{advice}'],
+    ['zh-CN', '{stage}时{reason}{code}。\n{advice}'],
+  ])('uses the shell locale for managed update diagnostics: %s', async (locale, template) => {
+    harness.managedUpdates = true
+    vi.spyOn(harness.app, 'getLocale').mockReturnValue(locale)
+    await startApplication()
+    expect(harness.managedMessages).toEqual([expect.objectContaining({ updateNetworkFailure: template })])
+  })
+
   it('uses the packaged whale icon before the Host is ready', async () => {
     await import('../src/main.ts')
     await harness.preparing.promise

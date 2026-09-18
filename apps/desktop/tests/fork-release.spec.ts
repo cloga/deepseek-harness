@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -16,12 +17,13 @@ function planValue(): unknown {
 }
 
 type ReleaseWorkflow = {
+  on: { workflow_dispatch: { inputs: Record<string, { required: boolean; type: string; default?: unknown }> } }
   permissions: Record<string, string>
   env?: Record<string, string>
   jobs: Record<string, {
     permissions?: Record<string, string>
     env?: Record<string, string>
-    steps: Array<{ name?: string; run?: string; env?: Record<string, string> }>
+    steps: Array<{ name?: string; shell?: string; run?: string; env?: Record<string, string> }>
   }>
 }
 
@@ -56,6 +58,39 @@ function assertMetadataAuthScope(workflow: ReleaseWorkflow): void {
   expect(authenticatedSteps).toEqual(['build', 'remote-check'])
 }
 
+function assertReviewedSourcePin(workflow: ReleaseWorkflow): string {
+  expect(workflow.on.workflow_dispatch.inputs.expected_source_sha).toMatchObject({ required: true, type: 'string' })
+  expect(workflow.on.workflow_dispatch.inputs.expected_source_sha).not.toHaveProperty('default')
+  const steps = workflow.jobs.build!.steps
+  const guardIndex = steps.findIndex(step => step.name === 'Require current reviewed ref and version')
+  expect(guardIndex).toBeGreaterThanOrEqual(0)
+  expect(steps.findIndex(step => step.name === 'Install from frozen lockfile')).toBeGreaterThan(guardIndex)
+  expect(steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')).toBeGreaterThan(guardIndex)
+  const guard = steps[guardIndex]!
+  expect(guard.shell).toBe('pwsh')
+  expect(guard.env?.EXPECTED_SOURCE_SHA).toBe('${{ inputs.expected_source_sha }}')
+  expect(workflow.env ?? {}).not.toHaveProperty('EXPECTED_SOURCE_SHA')
+  for (const job of Object.values(workflow.jobs)) {
+    expect(job.env ?? {}).not.toHaveProperty('EXPECTED_SOURCE_SHA')
+    for (const step of job.steps) if (step !== guard) expect(step.env ?? {}).not.toHaveProperty('EXPECTED_SOURCE_SHA')
+  }
+  const script = guard.run ?? ''
+  const formatCheck = "if ($env:EXPECTED_SOURCE_SHA -cnotmatch '\\A[0-9a-f]{40}\\z')"
+  const exactCheck = 'if ($head -cne $env:EXPECTED_SOURCE_SHA)'
+  const headRead = script.indexOf('$head = git rev-parse HEAD')
+  const branchCheck = script.indexOf("if ($env:REHEARSAL -eq 'true')")
+  expect(script).toContain(`${formatCheck} {\n  throw 'Expected source SHA must be exactly 40 lowercase hexadecimal characters'\n}`)
+  expect(script).toContain(`${exactCheck} {\n  throw "Checkout does not match reviewed source: HEAD=$head expected=$($env:EXPECTED_SOURCE_SHA)"\n}`)
+  expect(headRead).toBeGreaterThan(script.indexOf(formatCheck))
+  expect(script.indexOf(exactCheck)).toBeGreaterThan(headRead)
+  expect(branchCheck).toBeGreaterThan(script.indexOf(exactCheck))
+  expect(script).toContain('if ($head -ne $selected)')
+  expect(script).toContain('if ($head -ne $master)')
+  expect(script).toContain('if ($env:CONFIRM_VERSION -ne $plan.version)')
+  expect(script).not.toContain('${{ inputs.expected_source_sha }}')
+  return script.slice(0, branchCheck)
+}
+
 function assertProjectFixtureSelection(workflow: ReleaseWorkflow): void {
   const ci = load(readFileSync(resolve(repositoryRoot, '.github', 'workflows', 'ci.yml'), 'utf8')) as ReleaseWorkflow
   const budget = ci.jobs['windows-coverage']!.env!.DSH_COVERAGE_TEST_TIMEOUT_MS!
@@ -78,6 +113,67 @@ function assertProjectFixtureSelection(workflow: ReleaseWorkflow): void {
 }
 
 describe('Desktop fork release plan', () => {
+  it('requires a step-local exact reviewed source pin before dependencies and packaging in both modes', () => {
+    assertReviewedSourcePin(readReleaseWorkflow())
+  })
+
+  it.each([
+    'missing-input', 'optional-input', 'default-source', 'wrong-env', 'insensitive-format', 'insensitive-head',
+    'loose-length', 'late-guard', 'missing-rejection', 'workflow-env', 'job-env',
+  ])('rejects a %s source pin guard', (damage) => {
+    const workflow = readReleaseWorkflow()
+    const build = workflow.jobs.build!
+    const index = build.steps.findIndex(step => step.name === 'Require current reviewed ref and version')
+    const guard = build.steps[index]!
+    if (damage === 'missing-input') delete workflow.on.workflow_dispatch.inputs.expected_source_sha
+    else if (damage === 'optional-input') workflow.on.workflow_dispatch.inputs.expected_source_sha!.required = false
+    else if (damage === 'default-source') workflow.on.workflow_dispatch.inputs.expected_source_sha!.default = '${{ github.sha }}'
+    else if (damage === 'wrong-env') guard.env!.EXPECTED_SOURCE_SHA = '${{ inputs.confirm_version }}'
+    else if (damage === 'insensitive-format') guard.run = guard.run!.replace('-cnotmatch', '-notmatch')
+    else if (damage === 'insensitive-head') guard.run = guard.run!.replace('-cne', '-ne')
+    else if (damage === 'loose-length') guard.run = guard.run!.replace('{40}', '{39,40}')
+    else if (damage === 'late-guard') build.steps.push(...build.steps.splice(index, 1))
+    else if (damage === 'missing-rejection') guard.run = guard.run!.replace('throw "Checkout', 'Write-Output "Checkout')
+    else if (damage === 'workflow-env') workflow.env = { ...workflow.env, EXPECTED_SOURCE_SHA: 'unreviewed' }
+    else build.env = { ...build.env, EXPECTED_SOURCE_SHA: 'unreviewed' }
+    expect(() => { assertReviewedSourcePin(workflow) }).toThrow()
+  })
+
+  const reviewedSha = 'a'.repeat(40)
+  it.runIf(process.platform === 'win32').each([
+    { label: 'matching source', expected: reviewedSha, head: reviewedSha, accepted: true },
+    { label: 'different source with unchanged plan', expected: reviewedSha, head: 'b'.repeat(40), accepted: false },
+    { label: 'missing source', expected: undefined, head: reviewedSha, accepted: false },
+    { label: 'empty source', expected: '', head: reviewedSha, accepted: false },
+    { label: 'short source', expected: 'a'.repeat(39), head: reviewedSha, accepted: false },
+    { label: 'long source', expected: 'a'.repeat(41), head: reviewedSha, accepted: false },
+    { label: 'uppercase source', expected: 'A'.repeat(40), head: reviewedSha, accepted: false },
+    { label: 'non-hex source', expected: 'g'.repeat(40), head: reviewedSha, accepted: false },
+    { label: 'trailing newline', expected: `${reviewedSha}\n`, head: reviewedSha, accepted: false },
+  ])('executes the Windows source pin guard: $label', { timeout: 15_000 }, ({ expected, head, accepted }) => {
+    const guard = assertReviewedSourcePin(readReleaseWorkflow())
+    const gitStub = `function git {
+  if (($args -join ' ') -cne 'rev-parse HEAD') { throw 'Unexpected Git operation in source-pin fixture' }
+  $global:LASTEXITCODE = 0
+  $env:RELEASE_TEST_HEAD
+}`
+    const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+      `${gitStub}\n${guard}\nWrite-Output 'reviewed-source-accepted'`], {
+      encoding: 'utf8', timeout: 10000,
+      env: { ...process.env, EXPECTED_SOURCE_SHA: expected, RELEASE_TEST_HEAD: head },
+    })
+    expect(result.error).toBeUndefined()
+    expect(result.signal).toBeNull()
+    if (accepted) {
+      expect(result.status).toBe(0)
+      expect(result.stdout.trim()).toBe('reviewed-source-accepted')
+    } else {
+      expect(result.status).not.toBe(0)
+      expect(result.stdout).not.toContain('reviewed-source-accepted')
+      expect(result.stderr).toContain(expected === reviewedSha ? 'Checkout does not match reviewed source' : 'Expected source SHA must be')
+    }
+  })
+
   it('rejects omitted or duplicated actual collection entries', () => {
     const transaction = 'thread-safe:apps/desktop/tests/project-manager.spec.ts'
     const ordinary = 'thread-safe:apps/desktop/tests/fork-release.spec.ts'
@@ -106,8 +202,8 @@ describe('Desktop fork release plan', () => {
     expect(plan).toMatchObject({
       schemaVersion: 2,
       channel: 'cloga-windows-x64',
-      version: '0.1.6-alpha.1.cloga.3',
-      sequence: 13,
+      version: '0.1.6-alpha.1.cloga.4',
+      sequence: 14,
       upstreamVersion: '0.1.6-alpha.1',
       migration: {
         owner: 'cloga/dsh-windows-ops',
@@ -152,7 +248,7 @@ describe('Desktop fork release plan', () => {
       mode: 'github-release-managed',
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
-      currentSequence: 13,
+      currentSequence: 14,
       minimumSequence: 2,
       provisioning: {
         capability: { id: 'desktopNativePluginProvisioning' },

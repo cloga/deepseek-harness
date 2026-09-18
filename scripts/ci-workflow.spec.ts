@@ -765,6 +765,21 @@ describe('Runtime and LLM e2e Blacksmith routing', () => {
 })
 
 describe('DeepSeek e2e workflow', () => {
+  it('retains the exact bubblewrap payload and verification order at its official archival location', () => {
+    const script = readFileSync(resolve(root, 'scripts/prepare-ci-bubblewrap.sh'), 'utf8')
+    expect(script).toContain('set -euo pipefail')
+    expect(script).toContain("readonly BUBBLEWRAP_VERSION='0.9.0-1ubuntu0.1'")
+    expect(script).toContain("readonly BUBBLEWRAP_SHA256='1b506492bd9c7fd0cdb4f02ac822f1d3e336b0aead5113c1239baf8db5db562a'")
+    expect(script).toContain('https://launchpadlibrarian.net/751286710/bubblewrap_${BUBBLEWRAP_VERSION}_amd64.deb')
+    const verify = script.indexOf('sha256sum --check --status')
+    const extract = script.indexOf('dpkg-deb --extract "$archive" "$root"')
+    const probe = script.indexOf('"$root/usr/bin/bwrap" --ro-bind / / --dev /dev --unshare-pid --proc /proc --die-with-parent -- true')
+    expect(verify).toBeGreaterThanOrEqual(0)
+    expect(extract).toBeGreaterThan(verify)
+    expect(probe).toBeGreaterThan(extract)
+    expect(script).not.toContain('--insecure')
+  })
+
   it('prepares bubblewrap from the pinned payload without a package transaction', () => {
     const workflow = loadWorkflow('.github/workflows/e2e.yml')
     const e2e = workflowJob(workflow, 'e2e')

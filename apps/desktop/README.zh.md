@@ -73,7 +73,7 @@ GitHub ref 接受分支名、tag 与 commit，包括含斜杠的分支名；不�
 
 每个条目分为 `required` 或 optional，并包含带 checksum-manifest lock 的 `githubRelease` source。GitHub 必须明确报告 `immutable: true`。Artifact lock 指定精确的 Release asset id、文件名、字节大小与 SHA-256。Checksum lock 指定精确的 asset id、规范 GitHub Release URL、文件名、字节大小、SHA-256 与 `sha256sums` 格式。每次 acquisition 使用独占私有目录，因此多个来源可以使用 `SHA256SUMS`。Desktop 验证恰好一个 `<sha256>  <artifact>` 条目；缺失、重复、格式错误、重命名或不匹配都会拒绝该来源。可选 SHA-512 SRI 字段一旦提供就必须验证。同一个 plan 的所有条目使用相同的无凭据 HTTPS dependency registry。
 
-Windows Ops 修改 [`release/cloga-windows-x64.json`](release/cloga-windows-x64.json) 中的 `desktopProvisioning`，然后运行受保护的 `desktop-fork-release.yml` workflow。直接使用现有不可变的版本化 tgz 与 `SHA256SUMS` 资产，不要重新发布。Prepare 为 packaging 设置 `DSH_DESKTOP_PLUGIN_PROVISIONING_PLAN` 并嵌入 plan 与 capability schema 3。Finalization 拒绝经过评审的输入、打包 capability 与 plan、发布字节和 receipt hash 之间的不一致。它将打包 plan 发布为 `desktop-provisioning.json`，在 `build-receipt.json` 中记录文件 hash 与规范 plan hash，并通过 `SHA256SUMS` 和 `SHA512SUMS` 覆盖 release 文件。部署需要包含实际非空 provider plan 的 release。
+Windows Ops 修改 [`release/cloga-windows-x64.json`](release/cloga-windows-x64.json) 中的 `desktopProvisioning`，然后运行受保护的 `desktop-fork-release.yml` workflow，同时传入经过评审的 plan version（`confirm_version`）与源码 commit（`expected_source_sha`）；[发布通道决策](../../.agents/notes/implemented/architecture/2026-09-15-fork-owned-windows-desktop-release-channel.zh.md)定义源码锁定校验。直接使用现有不可变的版本化 tgz 与 `SHA256SUMS` 资产，不要重新发布。Prepare 为 packaging 设置 `DSH_DESKTOP_PLUGIN_PROVISIONING_PLAN` 并嵌入 plan 与 capability schema 3。Finalization 拒绝经过评审的输入、打包 capability 与 plan、发布字节和 receipt hash 之间的不一致。它将打包 plan 发布为 `desktop-provisioning.json`，在 `build-receipt.json` 中记录文件 hash 与规范 plan hash，并通过 `SHA256SUMS` 和 `SHA512SUMS` 覆盖 release 文件。部署需要包含实际非空 provider plan 的 release。
 
 Desktop 在启动时把 release-owned 插件协调到打包 plan，同时保留计划包名之外的手动 registry、来源快照与 verified-release 插件及其启用状态。计划中的包名遵循其精确来源，即使用户曾在该名称下安装不同包。Required 条目构成经过验证的基线。每个 optional 条目加入独立 candidate；download、validation、install、graph 或 health 失败只排除该条目，并记录阶段与原因，不保留成功 receipt。Required 失败保留活动 profile。复用要求 desired/result 成员完全一致，来源、receipt、版本、产物字节与启用状态匹配，且没有额外 release-owned 根包。空 plan 只删除 release-owned 根包。
 
@@ -92,6 +92,8 @@ Windows Ops 验证 `resources/managed-update/capability.json` 中的 `desktopNat
 ### Fork 拥有的 Windows 托管更新
 
 Desktop 在启动十秒后静默检查更新，此后运行期间每六小时检查一次。可用版本持续显示在主内容区上方；点击“查看更新”或应用菜单中的 **Check for updates** 才进入现有确认及活动任务检查。后台检查不弹安装对话框，也不自动安装。选择 **Later** 后提示栏仍保留。临时检查失败时保留此前验证过的可用版本；重叠检查会合并，确认与安装期间跳过，退出时停止定时检查并忽略迟到结果。详见[更新提示决策](../../.agents/notes/implemented/feature/2026-09-17-persistent-desktop-update-notice.zh.md)。Windows 警告、安装选项与 UAC 仍需你批准。
+
+托管更新检查失败时，提示会指出出错的是读取版本列表、验证版本标签还是下载更新清单。已知的连接重置、超时、DNS、网络可达性和证书错误会提供本地化恢复建议；取消操作单独说明。未知网络原因保留通用表述，证书建议要求保持验证开启。完整性与元数据校验错误保留原有诊断。这些提示不改变更新来源、下载路径或重试行为。
 
 发现更新、helper acknowledgement、安装完成与经过认证的模型使用是独立检查。复制后的 helper 必须仅凭其 Node 可执行文件与 bundle 启动，才能确认 handoff。确认前失败会保持 Desktop 运行，并在所属 managed-update operation 目录中的 `helper-startup-error.json` 记录有界、脱敏的 stderr。
 

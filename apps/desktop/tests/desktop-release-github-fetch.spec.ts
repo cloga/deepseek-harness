@@ -226,10 +226,10 @@ describe('build/release-only GitHub metadata fetch', () => {
     assertNoSecret(error)
   })
 
-  it('preserves timeout classification through the discovery wrapper while scrubbing its message', async () => {
-    const transport = vi.fn<typeof fetch>(async () => { throw new DOMException(TOKEN, 'TimeoutError') })
+  it.each(['TimeoutError', 'AbortError'])('preserves %s classification through the discovery wrapper while scrubbing its message', async (name) => {
+    const transport = vi.fn<typeof fetch>(async () => { throw new DOMException(TOKEN, name) })
     const error: unknown = await discoverDesktopReleaseForBuild(managedCapability(), TOKEN, transport).catch((error: unknown) => error)
-    expect(error).toMatchObject({ name: 'TimeoutError' })
+    expect(error).toMatchObject({ name })
     assertNoSecret(error)
   })
 

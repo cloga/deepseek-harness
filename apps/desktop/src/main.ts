@@ -417,6 +417,8 @@ async function main(): Promise<void> {
           () => { app.quit() },
         )
       },
+      undefined,
+      messages,
     )
 
   const checkUpdates = (): Promise<DesktopUpdateState> => {
