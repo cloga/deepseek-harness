@@ -12,7 +12,7 @@
 
 `BundleInfo` 包含包名、可选的安装版本、组合层选择状态、删除可用性及可选的解析错误。
 
-`InstallBundleOptions.enabled` 默认为 true，false 表示安装但不选择组合包层。对于普通的原地安装，`approvedBuilds` 在安装前向指定的待审批包名授予持久脚本权限。由 launcher 持有的暂存可以拒绝不支持的脚本审批；在激活前绝不会将这些权限应用到当前启用的 profile。
+普通的原地安装将省略的 `InstallBundleOptions.enabled` 视为 true；false 表示跳过选择组合包层。由 launcher 持有的暂存在省略 `enabled` 时保留已声明包的选择状态，默认启用新组合包，并且只向候选图应用显式指定的选择。对于普通的原地安装，`approvedBuilds` 在安装前向指定的待审批包名授予持久脚本权限。由 launcher 持有的暂存可以拒绝不支持的脚本审批；在激活前绝不会将这些权限应用到当前启用的 profile。
 
 `ChangeResult.changed` 报告当前启用的 profile 的修改，独立于 `application`：`applied`、`restart-required`、`prepared`、`overridden`、`failed` 或 `cancelled`。`prepared` 结果保持 `changed` 为 false，并在 `prepared` 字段中携带待处理事务；激活需要 shell 单独确认。可选的 `error` 包含可本地化的错误码和外部诊断。`packageResult` 记录 pnpm 退出码、有界输出、截断标志及完整诊断日志路径。`pendingBuilds` 列出整个 profile 尚未决定的包；`approvedBuilds` 记录本次操作授予权限的包名。
 
