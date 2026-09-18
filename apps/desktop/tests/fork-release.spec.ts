@@ -27,6 +27,7 @@ type ReleaseWorkflow = {
       uses?: string
       if?: string
       run?: string
+      shell?: string
       env?: Record<string, string>
       with?: Record<string, unknown>
     }>
@@ -246,6 +247,21 @@ describe('Desktop fork release plan', () => {
       expect(() => { assertMetadataAuthScope(workflow) }).toThrow()
     },
   )
+
+  it('runs packaged skill canary guards before building and testing the actual artifact', () => {
+    const steps = readReleaseWorkflow().jobs.build!.steps
+    const guards = steps.findIndex(step => step.name === 'Verify packaged skill canary guards')
+    const build = steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')
+    const canary = steps.findIndex(step => step.name === 'Verify ASAR runtime inventory canaries with packaged Electron')
+    expect(guards).toBeGreaterThanOrEqual(0)
+    expect(build).toBeGreaterThan(guards)
+    expect(canary).toBeGreaterThan(build)
+    expect(steps[guards]?.shell).toBe('pwsh')
+    expect(steps[guards]?.run).toContain('node --test apps/desktop/tests/packaged-skills-smoke.test.mjs')
+    expect(steps[guards]?.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }')
+    expect(steps[guards]).not.toHaveProperty('continue-on-error')
+    expect(steps[guards]).not.toHaveProperty('if')
+  })
 
   it('requires actual installer qualification after finalization and before release asset sealing', () => {
     const workflow = readReleaseWorkflow()

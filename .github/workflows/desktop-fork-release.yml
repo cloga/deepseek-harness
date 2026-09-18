@@ -103,6 +103,12 @@ jobs:
       - name: Verify Desktop test collection
         run: node apps/desktop/scripts/verify-release-test-collection.mjs
 
+      - name: Verify packaged skill canary guards
+        shell: pwsh
+        run: |
+          node --test apps/desktop/tests/packaged-skills-smoke.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Verify Desktop release code
         run: pnpm exec vitest run apps/desktop apps/desktop-host --config=vitest.desktop-release.config.ts --maxWorkers=1
 

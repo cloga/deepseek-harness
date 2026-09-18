@@ -1,4 +1,4 @@
-/** Built-plane ASAR inventory smoke; requires an explicitly supplied existing Electron executable. */
+/** Built-plane ASAR inventory and minimal Context skill smoke for a supplied packaged Windows app. */
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -8,6 +8,7 @@ import { copyFiles, FileMatcher, getFileMatchers } from 'app-builder-lib/out/fil
 import { writeDesktopRuntime } from '../../lib/types/runtime-tree.js'
 import { DESKTOP_HOST_PROTOCOL_VERSION } from '../../lib/types/host-protocol.js'
 import { normalizeDesktopRuntimePackageMetadata } from '../../scripts/runtime-package-metadata.mjs'
+import { verifyPackagedSkills } from './packaged-skills-smoke.mjs'
 import {
   packagedDesktopRuntimeRoot,
   readPackagedDesktopRuntimeDescriptor,
@@ -15,7 +16,8 @@ import {
 } from '../../scripts/packaged-runtime.mjs'
 
 const executable = process.argv[2]
-assert(executable, 'Pass an existing Electron executable; this smoke never downloads Electron')
+assert(executable, 'Pass a packaged Windows Electron executable; this smoke never downloads Electron')
+await verifyPackagedSkills(executable)
 // Exercise the pinned builder's real transform and ASAR pipeline, not only the archive writer.
 const packagerRequire = createRequire(import.meta.resolve('app-builder-lib/package.json'))
 const { createTransformer } = packagerRequire('app-builder-lib/out/fileTransformer.js')

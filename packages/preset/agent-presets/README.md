@@ -29,6 +29,8 @@ Mount this package in a composition that should give each agent session its own 
 
 The shipped Web `standard`, `ptc`, and `cordis` presets include [explicit file delivery](../../client/ui-deliverables/README.md#explicit-deliveries). The `minimal` preset keeps its fixed two-tool training configuration.
 
+The `cordis` preset registers its adjacent `skills/` directory as `bundledSkillDir`, resolved relative to the preset file. These deployment-owned skills use the host reader even inside Electron ASAR; project, user, and custom roots retain the configured filesystem service. User skills override bundled skills with the same name. [Skill filesystem](../../skill/skill-filesystem/README.md) owns root ordering and reading rules.
+
 ### What a preset gives a session
 
 A session composed from a preset runs the plugins that preset's `agent.cordis.yml` names: its tools, prompt sections, and skills. Sessions joined to the same preset share one installed composition, and each session's state stays separate. A child agent (subagent) joins its parent's composition, so it sees the same tools and prompt sections as the agent that spawned it.
@@ -179,6 +181,7 @@ These limits define when the roster is a poor fit or needs special operational c
 - **Health asks what is installed, not what would import** — discovery proves the composition parses in the loader dialect, holds named rows, and that each row it can prove will start names a package present above the harness base or a file that exists; it never imports one, so a package whose own entry file is missing, a plugin that throws on apply, and one waiting forever for a service all still fail at the first session. `disabled` is the one entry field the Loader interpolates, so a row carrying an expression there is left unchecked rather than judged from the file.
 - **A copy is a snapshot that drifts** — upgrading the deployment does not update copies of shipped presets, and there is no patch semantics at this layer to express "standard plus one change"; the shipped set itself accepts the same cost — `cordis` and `code` each duplicate `standard`'s full assembly and then edit it — so the whole assembly stays readable in one file.
 - **Root scans are not watched** — every read hits the filesystem instead, which keeps the roster fresh but puts one `readdir` per root on each `list()`.
+- **Official bundled-skill support is partial in `0.1.6-alpha.2`** — the reader exists, but the shipped Cordis preset classifies its deployment-owned directory as a custom root. This fork retains only the preset-row correction, not a general filesystem adapter. Retire that correction when the official preset declares the directory as bundled and packaged discovery and user-override precedence checks pass.
 
 <a id="dev-note"></a>
 ### Dev Note
