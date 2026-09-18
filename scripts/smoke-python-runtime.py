@@ -790,6 +790,60 @@ def main() -> None:
     print(f"smoke-python-runtime: {args.scenario} passed")
 
 
+def report_office_diagnostics(stages_path: Path, output: Path, result_path: Path) -> None:
+    """Report only bounded fixture phases and expected-file metadata during failure."""
+    try:
+        stages: list[dict[str, object]] = []
+        record_status = "ok"
+        try:
+            with stages_path.open(encoding="utf-8") as stream:
+                payload = stream.read(2049)
+            lines = payload.splitlines()
+            if len(payload) > 2048 or len(lines) > 10:
+                raise ValueError("oversized phase record")
+            for line in lines:
+                record = json.loads(line)
+                if (
+                    not isinstance(record, dict)
+                    or set(record) != {"phase", "state", "elapsedMs"}
+                    or record["phase"] not in ("import", "create", "render", "result-write", "dispose")
+                    or record["state"] not in ("start", "done", "fail")
+                    or type(record["elapsedMs"]) is not int
+                    or not 0 <= record["elapsedMs"] <= 2_147_483_647
+                ):
+                    raise ValueError("invalid phase record")
+                stages.append({key: record[key] for key in ("phase", "state", "elapsedMs")})
+        except FileNotFoundError:
+            record_status = "missing"
+        except OSError:
+            record_status = "unavailable"
+        except (ValueError, TypeError):
+            record_status = "invalid"
+            stages = []
+
+        def metadata(path: Path) -> dict[str, object]:
+            try:
+                size = path.stat().st_size
+                if not 0 <= size <= 9_223_372_036_854_775_807:
+                    return {"status": "unavailable"}
+                return {"exists": True, "bytes": size}
+            except FileNotFoundError:
+                return {"exists": False}
+            except OSError:
+                return {"status": "unavailable"}
+
+        summary = {
+            "recordStatus": record_status,
+            "stages": stages,
+            "output": metadata(output),
+            "result": metadata(result_path),
+        }
+        print("smoke-python-runtime: office diagnostics " + json.dumps(summary, separators=(",", ":")), file=sys.stderr, flush=True)
+    except BaseException as error:
+        # Best-effort diagnostics must not replace the smoke's original exception.
+        pass
+
+
 def smoke_sdk_office(executable: Path) -> None:
     """Relocate the wheel payload and convert a real DOCX with the target platform engine."""
     from deepseek_harness import DeepSeekHarness
@@ -827,33 +881,38 @@ def smoke_sdk_office(executable: Path) -> None:
         mode = expected_backend
         output = root / f"{mode}.pdf"
         result_path = root / f"{mode}.json"
+        stages_path = root / "office-phases.jsonl"
         patch = root / f"{mode}.patch.yml"
         patch.write_text(json.dumps([{"insert": [{
             "id": "python-sdk-office-smoke",
             "name": plugin.as_uri(),
-            "config": {"input": str(document), "output": str(output), "result": str(result_path)},
+            "config": {"input": str(document), "output": str(output), "result": str(result_path), "diagnostics": str(stages_path)},
         }]}]))
-        with DeepSeekHarness(
-            provider="deepseek-official",
-            model="smoke-model",
-            cwd=str(root),
-            dsh_bin=str(relocated),
-            dsh_home=str(root / f"home-{mode}"),
-            patches=(str(patch),),
-            api_key="sk-keyless-smoke",
-            base_url="http://127.0.0.1:9",
-            env={"DSH_PERMISSION_MODE": "danger-full-access", "DSH_TELEMETRY_DISABLED": "1"},
-            request_timeout_seconds=180,
-        ):
-            pass
-        result = json.loads(result_path.read_text())
-        if result["backend"] != expected_backend:
-            raise AssertionError(f"Office conversion did not use {expected_backend}: {result}")
-        if not result["moduleUrl"].startswith(office.as_uri() + "/"):
-            raise AssertionError(f"Office module was not loaded from the relocated wheel: {result}")
-        pdf = output.read_bytes()
-        if len(pdf) < 100 or not pdf.startswith(b"%PDF-"):
-            raise AssertionError(f"Office conversion produced an invalid PDF at {output}")
+        try:
+            with DeepSeekHarness(
+                provider="deepseek-official",
+                model="smoke-model",
+                cwd=str(root),
+                dsh_bin=str(relocated),
+                dsh_home=str(root / f"home-{mode}"),
+                patches=(str(patch),),
+                api_key="sk-keyless-smoke",
+                base_url="http://127.0.0.1:9",
+                env={"DSH_PERMISSION_MODE": "danger-full-access", "DSH_TELEMETRY_DISABLED": "1"},
+                request_timeout_seconds=180,
+            ):
+                pass
+            result = json.loads(result_path.read_text())
+            if result["backend"] != expected_backend:
+                raise AssertionError(f"Office conversion did not use {expected_backend}: {result}")
+            if not result["moduleUrl"].startswith(office.as_uri() + "/"):
+                raise AssertionError(f"Office module was not loaded from the relocated wheel: {result}")
+            pdf = output.read_bytes()
+            if len(pdf) < 100 or not pdf.startswith(b"%PDF-"):
+                raise AssertionError(f"Office conversion produced an invalid PDF at {output}")
+        except BaseException:
+            report_office_diagnostics(stages_path, output, result_path)
+            raise
         print(f"smoke-python-runtime: relocated Office {result['backend']} DOCX produced {len(pdf)} PDF bytes")
 
 

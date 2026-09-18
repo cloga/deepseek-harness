@@ -505,6 +505,12 @@ jobs:
         with:
           node-version: 24
 
+      - name: Test bounded Office fixture phase diagnostics
+        run: node --test scripts/python-sdk-office-diagnostics.test.mjs
+
+      - name: Test Office failure summaries without launching a runtime
+        run: python scripts/test_smoke_python_runtime_diagnostics.py
+
       - name: Test production blame scoring
         run: uv run --python 3.10 --with-requirements .github/review-ownership/requirements.txt python -m unittest discover -s .github/review-ownership -p 'test_*.py'
 
