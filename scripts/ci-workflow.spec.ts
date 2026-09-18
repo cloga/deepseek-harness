@@ -25,6 +25,58 @@ describe('CI workflow', () => {
     expect(steps[preparation]).not.toHaveProperty('continue-on-error', true)
   })
 
+  it('selects patched latest stable Node 24 only for Windows coverage before installation', () => {
+    const workflow = loadWorkflow('.github/workflows/ci.yml')
+    const coverage = workflowJob(workflow, 'windows-coverage')
+    if (!isRecord(workflow.env) || !isRecord(workflow.jobs) || !Array.isArray(coverage.steps)) {
+      throw new TypeError('CI must define its primary Node version and Windows coverage steps')
+    }
+    expect(workflow.env.PRIMARY_NODE_VERSION).toBe('24')
+    const steps = coverage.steps.filter(isRecord)
+    const setupIndex = steps.findIndex(step => step.uses === 'actions/setup-node@v6')
+    const guardIndex = steps.findIndex(step => step.name === 'Require patched stable Node 24 for Windows coverage')
+    const installIndex = steps.findIndex(step => step.name === 'Install (immutable)')
+    expect(setupIndex).toBeGreaterThanOrEqual(0)
+    expect(steps[setupIndex]).toMatchObject({ with: {
+      'node-version': '${{ env.PRIMARY_NODE_VERSION }}', 'check-latest': true,
+    } })
+    expect(guardIndex).toBe(setupIndex + 1)
+    expect(installIndex).toBeGreaterThan(guardIndex)
+    const guard = steps[guardIndex]
+    if (typeof guard?.run !== 'string') throw new TypeError('Windows coverage must execute its Node version guard')
+    expect(guard.shell).toBe('pwsh')
+    expect(guard).not.toHaveProperty('continue-on-error')
+    expect(guard).not.toHaveProperty('if')
+    expect(guard.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }')
+    const script = /^node -e '([^'\r\n]+)'$/mu.exec(guard.run)?.[1]
+    if (script === undefined) throw new TypeError('Node version guard must run its actual process version check')
+    for (const [version, accepted] of [
+      ['24.21.0', true], ['24.21.1', true], ['24.22.0', true], ['24.100.0', true],
+      ['24.20.99', false], ['24.13.0', false], ['22.19.0', false], ['25.0.0', false], ['26.0.0', false],
+      ['24.21.0-rc.1', false], ['24.22.0-nightly', false], ['24.21.0+custom', false],
+      ['24.021.0', false], ['24.21.00', false], ['24.21', false], ['v24.21.0', false], ['24.21.0\n', false],
+    ] as const) {
+      const termination = {}
+      let exitCode: number | undefined
+      try {
+        runInNewContext(script, {
+          process: { versions: { node: version }, exit: (code: number) => { exitCode = code; throw termination } },
+          console: { log() {}, error() {} },
+        }, { timeout: 1000 })
+      } catch (error) {
+        if (error !== termination) throw error
+      }
+      expect(exitCode, version).toBe(accepted ? undefined : 1)
+    }
+    for (const [name, job] of Object.entries(workflow.jobs)) {
+      if (name === 'windows-coverage' || !isRecord(job) || !Array.isArray(job.steps)) continue
+      for (const step of job.steps.filter(isRecord)) {
+        if (step.uses !== 'actions/setup-node@v6' || !isRecord(step.with)) continue
+        expect(step.with, name).not.toHaveProperty('check-latest')
+      }
+    }
+  })
+
   it.each(['ci.yml', 'ci-master.yml', 'e2e.yml', 'release.yml', 'release-vendor.yml'])(
     '%s cancels superseded validation runs without crossing workflow or ref boundaries', (name) => {
       const workflow = loadWorkflow('.github/workflows/' + name)

@@ -629,6 +629,13 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          # Node 24.21 backports libuv/libuv#5152 (nodejs/node#65118).
+          check-latest: true
+      - name: Require patched stable Node 24 for Windows coverage
+        shell: pwsh
+        run: |
+          node -e 'const version = process.versions.node; const match = /^24\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(version); console.log("Windows coverage Node: " + version); if (match === null || match[0] !== version || Number(match[1]) < 21) { console.error("Windows coverage requires stable Node 24 >=24.21.0 (libuv fs-event fix)"); process.exit(1); }'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install (immutable)
         shell: pwsh
         # See 2026-08-30-windows-refs-store-block-clone-install for the
