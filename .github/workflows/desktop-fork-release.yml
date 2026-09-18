@@ -100,8 +100,18 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/desktop-playwright
         run: node apps/desktop/node_modules/playwright/cli.js install chromium
 
+      - name: Verify Desktop test collection
+        run: node apps/desktop/scripts/verify-release-test-collection.mjs
+
       - name: Verify Desktop release code
-        run: pnpm exec vitest run apps/desktop apps/desktop-host --maxWorkers=1
+        run: pnpm exec vitest run apps/desktop apps/desktop-host --config=vitest.desktop-release.config.ts --maxWorkers=1
+
+      # The transaction fixture launches real Node children; match its Windows coverage test/hook budget.
+      # Other Desktop tests retain their existing default budgets, and each file runs in exactly one step.
+      - name: Verify Desktop project transactions
+        run: >-
+          pnpm exec vitest run apps/desktop/tests/project-manager.spec.ts
+          --maxWorkers=1 --testTimeout=90000 --hookTimeout=90000
 
       - name: Prepare reviewed managed capability
         env:

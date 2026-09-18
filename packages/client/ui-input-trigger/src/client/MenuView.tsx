@@ -7,7 +7,9 @@
  * rows only while it has none; pointer picks route back through
  * the service (combobox pattern — focus never leaves the textarea, so rows
  * are mousedown-handled and the highlight is exposed via
- * aria-activedescendant on the listbox). A row reads title, then the
+ * aria-activedescendant on the listbox). The listbox exposes its current query
+ * and busy state; each option exposes its source and that source's readiness,
+ * independently of a retained highlight. A row reads title, then the
  * command-name alias when the title is not the name in another letter case
  * (a localized title), then the description right-aligned. A source publishing crumbs gets a breadcrumb
  * header pinned above the scrolling list.
@@ -123,6 +125,8 @@ export function MenuView({ menu, headers, onPick, onCrumb, onHover, onDismiss, t
         className={css.viewport}
         role="listbox"
         aria-label={t('suggestions.aria')}
+        aria-busy={state.groups.some(group => group.status === 'pending')}
+        data-trigger-query={state.hit?.query}
         aria-activedescendant={highlight !== null ? optionId(highlight.source, highlight.index) : undefined}
         onScroll={updateOverflowHint}
       >
@@ -155,6 +159,8 @@ export function MenuView({ menu, headers, onPick, onCrumb, onHover, onDismiss, t
                         type="button"
                         role="option"
                         aria-selected={active}
+                        data-source={group.source}
+                        data-source-status={group.status}
                         className={clsx(css.item, active && css.active)}
                         // mousedown, not click: the textarea keeps focus (combobox
                         // pattern) — preventing default stops the focus steal, and the

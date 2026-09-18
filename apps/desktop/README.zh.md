@@ -229,7 +229,7 @@ pnpm run package:desktop:win:x64:unsigned
 
 每个 release 包含交互式 NSIS installer、`release.json`、`build-receipt.json`、`SHA256SUMS` 与 `SHA512SUMS`。Manifest 与 receipt 锁定源码 commit 与 tree、lockfile 与 plan hash、构建工具与依赖 registry、fork package identity、installer size 与 hash、插件 capability 与结构化 source/receipt 版本、允许的 origin 与 redirect，以及重启后 completion 语义。Workflow 不会启动 installer。
 
-在 finalization 前，[打包 Copilot 验收](tests/fixtures/copilot-release-smoke.ts) 使用全新的 Harness 与 Electron 数据目录启动 unpacked Electron 应用。它要求真实 Settings > Models 账户、登录入口与 Manage 面板可见，验证已安装插件依赖图和 provisioning 清单，并在退出后重新启动时重复这些观察。独立的七天 workflow artifact 记录截图、receipt、打包 runtime/capability/plan 记录、可执行文件元数据与精确源码身份。失败运行保留脱敏启动诊断和 receipt/state 是否存在，不保留凭据或 profile 副本。它既不点击登录，也不调用模型。这些检查不证明 OAuth 成功、模型可用或旧版本到新版本的 installer 升级；rehearsal artifact 不是不可变 Release。
+在 finalization 前，[打包 Copilot 验收](tests/fixtures/copilot-release-smoke.ts) 使用全新的 Harness 与 Electron 数据目录启动 unpacked Electron 应用。它要求真实 Settings > Models 账户、登录入口、Manage 面板、成功加载的只读 Model roles 视图及已注册搜索提供方目录。它验证已安装插件依赖图和 provisioning 清单，再在退出后重新启动时重复这些观察。独立的七天 workflow artifact 记录截图、安全的设置观察、receipt、打包 runtime/capability/plan 记录、可执行文件元数据与精确源码身份。失败运行保留脱敏启动诊断和 receipt/state 是否存在，不保留凭据或 profile 副本。夹具绝不保存设置、创建 Session、登录或调用模型与搜索提供方。目录注册不等于提供方可用；这些检查不证明 OAuth 成功、模型可用、搜索路由或回退行为，也不证明旧版本到新版本的 installer 升级。Rehearsal artifact 不是不可变 Release。
 
 独立依赖图检查以打包 Electron 的 Node 模式针对 `app.asar/dsh` 运行构建后的验证器，选择运行时解析，并以活动 profile 为工作目录。它移除继承的 `NODE_PATH`、`NODE_OPTIONS` 与 ASAR 覆盖项，不使用 tsx loader，并将结果绑定到原始运行时描述文件哈希。这只验证包清单；真实 Host 验收单独验证模块加载。源码 runner 的查找路径仅用于诊断。缺失的可选 peer，以及仅在 profile 之外找到的可选非宿主 peer，均被视为缺失；profile 之外的必需依赖仍会报错。
 
