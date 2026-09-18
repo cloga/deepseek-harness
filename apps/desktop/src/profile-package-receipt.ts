@@ -48,14 +48,18 @@ function readOptional(path: string): string | null {
 }
 
 function store(text: string | null): DesktopPluginReceiptStore {
-  if (text === null) return { schemaVersion: 1, receipts: Object.create(null), owners: Object.create(null) }
+  if (text === null) return {
+    schemaVersion: 1,
+    receipts: Object.create(null) as DesktopPluginReceiptStore['receipts'],
+    owners: Object.create(null) as DesktopPluginReceiptStore['owners'],
+  }
   if (Buffer.byteLength(text) > MAX_BYTES) fail()
   const value: unknown = JSON.parse(text)
   if (!record(value) || value.schemaVersion !== 1 || !record(value.receipts) || !record(value.owners)
     || Object.keys(value).sort().join(',') !== 'owners,receipts,schemaVersion'
     || Object.keys(value.receipts).length !== Object.keys(value.owners).length) fail()
-  const receipts: DesktopPluginReceiptStore['receipts'] = Object.create(null)
-  const owners: DesktopPluginReceiptStore['owners'] = Object.create(null)
+  const receipts = Object.create(null) as DesktopPluginReceiptStore['receipts']
+  const owners = Object.create(null) as DesktopPluginReceiptStore['owners']
   for (const [name, raw] of Object.entries(value.receipts)) {
     const receipt = parseDesktopPluginProvisionReceipt(raw)
     const owner = value.owners[name]
@@ -70,7 +74,8 @@ function provisioningOwner(input: DesktopPreparedPackageActivation): 'user' | 'r
   const context = input.provisioning
   if (context === undefined) return 'user'
   const resource = input.owner.provisioningPlanResource
-  if (context.schemaVersion !== 1 || resource === undefined || context.planSha256 !== resource.planSha256
+  const schemaVersion: unknown = context.schemaVersion
+  if (schemaVersion !== 1 || resource === undefined || context.planSha256 !== resource.planSha256
     || context.planResourceSha256 !== resource.sha256 || JSON.stringify(context.source) !== JSON.stringify(input.verifiedRelease?.source)
     || !['create-release-owned', 'replace-release-owned'].includes(context.ownerDecision)
     || (context.ownerDecision === 'replace-release-owned' && !context.previousSelected)) fail()
@@ -144,7 +149,10 @@ export function validateDesktopReceiptTransition(input: DesktopPreparedPackageAc
 
 /** @param proof - Validated journal proof. @returns The exact one or two fixed evidence-file transitions. */
 export function desktopReceiptFileTransitions(proof: DesktopReceiptTransition): readonly DesktopReceiptFileTransition[] {
-  return [{ file: proof.file, before: proof.before, after: proof.after }, ...(proof.provisioningState === undefined ? [] : [proof.provisioningState])]
+  return [
+    { file: proof.file, before: proof.before, after: proof.after },
+    ...(proof.provisioningState === undefined ? [] : [proof.provisioningState]),
+  ]
 }
 
 /**
@@ -171,7 +179,7 @@ export function prepareDesktopPackageReceipt(input: DesktopPreparedPackageActiva
 /** @param input - Validated transaction. @param value - Bound proof. @returns Exact before, after, or valid mixed two-write progress. */
 export function desktopPackageReceiptPosition(input: DesktopPreparedPackageActivation, value: DesktopReceiptTransition): 'before' | 'after' | 'mixed' {
   const proof = validateDesktopReceiptTransition(input, value)
-  const positions = desktopReceiptFileTransitions(proof).map(file => {
+  const positions = desktopReceiptFileTransitions(proof).map((file) => {
     const current = readOptional(join(input.owner.profile, file.file))
     if (current === file.after) return 'after'
     if (current === file.before) return 'before'
@@ -185,7 +193,10 @@ export function desktopPackageReceiptPosition(input: DesktopPreparedPackageActiv
  * @param input - Validated active transaction.
  * @param value - Proof durably recorded before writing; absent means no receipt is earned.
  */
-export async function commitDesktopPackageReceipt(input: DesktopPreparedPackageActivation, value?: DesktopReceiptTransition): Promise<void> {
+// oxlint-disable-next-line typescript/require-await -- Preserve synchronous writes and Promise-based failure delivery.
+export async function commitDesktopPackageReceipt(
+  input: DesktopPreparedPackageActivation, value?: DesktopReceiptTransition,
+): Promise<void> {
   if (value === undefined || desktopPackageReceiptPosition(input, value) === 'after') return
   const proof = validateDesktopReceiptTransition(input, value)
   for (const file of desktopReceiptFileTransitions(proof)) {

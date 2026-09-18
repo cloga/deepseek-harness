@@ -24,15 +24,17 @@ it('limits product documents to update status and a native confirmation action',
   expect(api).not.toHaveProperty('backend')
   expect(api.updates).not.toHaveProperty('install')
   const impact = { hasDraft: true, attachmentCount: 1, submitting: false }
-  expect(api.updates.reportImpact).toEqual(expect.any(Function))
+  expect(typeof api.updates.reportImpact).toBe('function')
   api.updates.reportImpact!(impact)
   expect(electron.ipcRenderer.send).not.toHaveBeenCalled()
-  const request = electron.ipcRenderer.on.mock.calls.find(([channel]) => channel === DESKTOP_IPC.updatesImpactRequest)![1] as (event: unknown, generation: unknown) => void
+  const request = electron.ipcRenderer.on.mock.calls.find(([channel]) => channel === DESKTOP_IPC.updatesImpactRequest)![1] as
+    (event: unknown, generation: unknown) => void
   request({}, 7)
   expect(electron.ipcRenderer.send).toHaveBeenCalledExactlyOnceWith(DESKTOP_IPC.updatesImpact, 7, impact)
   const listener = vi.fn()
   const dispose = api.updates.subscribe(listener)
-  const handler = electron.ipcRenderer.on.mock.calls.find(([channel]) => channel === DESKTOP_IPC.updatesPresentation)?.[1] as (event: unknown, state: unknown) => void
+  const handler = electron.ipcRenderer.on.mock.calls.find(([channel]) => channel === DESKTOP_IPC.updatesPresentation)?.[1] as
+    (event: unknown, state: unknown) => void
   handler({}, { visible: false })
   expect(listener).toHaveBeenCalledWith({ visible: false })
   dispose()

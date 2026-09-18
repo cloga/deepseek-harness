@@ -79,7 +79,7 @@ export async function assertDesktopUpdateNoticeInBrowser(
   await composer.waitFor({ state: 'visible' })
   assert.equal(await indicator.count(), 0, 'idle updater must not render the official indicator')
   await composer.focus()
-  await page.evaluate(version => {
+  await page.evaluate((version) => {
     (window as unknown as UpdateNoticeFixtureWindow).__dshDesktopUpdateNoticeFixture.publish({ phase: 'available', version })
   }, fixtureVersion)
   await indicator.waitFor({ state: 'visible' })

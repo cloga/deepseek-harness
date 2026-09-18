@@ -29,7 +29,7 @@ const packageReview = vi.hoisted(() => ({
   confirmed: undefined as ((accepted: boolean) => void) | undefined,
 }))
 
-vi.mock('../src/profile-package-activation.ts', async importOriginal => {
+vi.mock('../src/profile-package-activation.ts', async (importOriginal) => {
   const original = await importOriginal<typeof import('../src/profile-package-activation.ts')>()
   return { ...original, createDesktopProfilePackageActivation: (options: DesktopProfilePackageActivationOptions) => {
     const input = packageReview.input
@@ -144,7 +144,10 @@ const harness = await vi.hoisted(async () => {
     readonly exited = deferred()
     readonly stopping = deferred()
     packages: readonly ProfilePackageHealth[] = []
-    readonly start = vi.fn(() => { hostStarted.resolve(); return this.ready.promise.then(() => ({ url: this.url, injections: [], packages: this.packages })) })
+    readonly start = vi.fn(() => {
+      hostStarted.resolve()
+      return this.ready.promise.then(() => ({ url: this.url, injections: [], packages: this.packages }))
+    })
     readonly stop = vi.fn(() => {
       this.stopping.resolve()
       this.ready.reject(new Error('child stopped'))
@@ -781,7 +784,7 @@ describe('desktop main startup', () => {
   function reportInput(impact: unknown) {
     const sender = harness.windows[0]!.webContents
     const listener = harness.ipcOn.mock.calls.find(([channel]) => channel === DESKTOP_IPC.updatesImpact)![1]
-    const generation = sender.send.mock.calls.findLast(([channel]) => channel === DESKTOP_IPC.updatesImpactRequest)?.[1]
+    const generation: unknown = sender.send.mock.calls.findLast(([channel]) => channel === DESKTOP_IPC.updatesImpactRequest)?.[1]
     listener({ sender, senderFrame: sender.mainFrame }, generation, impact)
   }
 
@@ -1056,7 +1059,7 @@ describe('desktop main startup', () => {
     { hasDraft: true, attachmentCount: 0, submitting: false },
     { hasDraft: false, attachmentCount: 1, submitting: false },
     { hasDraft: false, attachmentCount: 0, submitting: true },
-  ])('does not stop the Host while unsent input remains: %j', async impact => {
+  ])('does not stop the Host while unsent input remains: %j', async (impact) => {
     const host = await readyForUpdate()
     reportInput(impact)
     await expect(harness.prepareUpdate()).rejects.toThrow('unsent or unconfirmed input')
@@ -1067,7 +1070,7 @@ describe('desktop main startup', () => {
   it('rechecks unsent input after task admission and restores the main window on rejection', async () => {
     const host = await readyForUpdate()
     harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
-    host.updateTasks.mockImplementation(async action => {
+    host.updateTasks.mockImplementation(async (action) => {
       if (action === 'lock') reportInput({ hasDraft: true, attachmentCount: 0, submitting: false })
       return false
     })
@@ -1077,7 +1080,7 @@ describe('desktop main startup', () => {
     expect(harness.windows[0]!.setEnabled.mock.calls).toEqual([[false], [true]])
   })
 
-  it.each(['load', 'preload', 'renderer'] as const)('invalidates a formerly clear input report after %s failure', async failure => {
+  it.each(['load', 'preload', 'renderer'] as const)('invalidates a formerly clear input report after %s failure', async (failure) => {
     const host = await readyForUpdate()
     const sender = harness.windows[0]!.webContents
     if (failure === 'load') sender.emit('did-fail-load', {}, -2, 'fixture load failure', 'dsh-app://app/', true)
@@ -1114,7 +1117,7 @@ describe('desktop main startup', () => {
   }
 
   it.each(['removed', 'installed-override', 'disabled', 'ambiguous-legacy'] as const)(
-    'boots preserved user choice without staging or certifying the baseline: %s', async reason => {
+    'boots preserved user choice without staging or certifying the baseline: %s', async (reason) => {
       managedFixture()
       baseline.assess.mockResolvedValue({ status: 'preserved-user-choice', reason, packageName: 'fixture-provider',
         planSha256: 'a'.repeat(64), planResourceSha256: 'b'.repeat(64) })
@@ -1129,7 +1132,7 @@ describe('desktop main startup', () => {
     })
 
   it.each(['qualified', 'unhealthy', 'work-observed', 'stale-assessment'] as const)(
-    'qualifies exact user-owned baseline only under readiness admission: %s', async mode => {
+    'qualifies exact user-owned baseline only under readiness admission: %s', async (mode) => {
       managedFixture()
       baseline.assess.mockResolvedValue({ status: 'exact-satisfied', packageOwner: 'user', qualification: 'pending',
         packageName: 'fixture-provider', planSha256: 'a'.repeat(64), planResourceSha256: 'b'.repeat(64),
@@ -1169,7 +1172,7 @@ describe('desktop main startup', () => {
     expect(baseline.completion.mock.lastCall?.[8]).toBe('pending')
   })
 
-  it.each(['invalid-evidence', 'failed-release-repair'] as const)('does not relabel damaged baseline evidence as a user choice: %s', async mode => {
+  it.each(['invalid-evidence', 'failed-release-repair'] as const)('does not relabel damaged baseline evidence as a user choice: %s', async (mode) => {
     managedFixture()
     const identity = { packageName: 'fixture-provider', planSha256: 'a'.repeat(64), planResourceSha256: 'b'.repeat(64) }
     baseline.assess.mockResolvedValue(mode === 'invalid-evidence'
@@ -1220,7 +1223,7 @@ describe('desktop main startup', () => {
     Reflect.apply(action!.click!, undefined, [])
     expect(await reviewed.promise).toBe(false)
     expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
-      title: en.packageReview, detail: expect.stringContaining('@example/plugin@1.2.3'), defaultId: 1, cancelId: 1,
+      title: en.packageReview, detail: expect.stringContaining('@example/plugin@1.2.3') as unknown, defaultId: 1, cancelId: 1,
     }))
     const detail = (harness.dialog.showMessageBox.mock.lastCall?.[0] as MessageBoxOptions).detail!
     expect(detail).toContain(integrity)
@@ -1232,9 +1235,9 @@ describe('desktop main startup', () => {
 
   it('keeps the Host alive until managed helper acknowledgement and passes only fixed handoff fields', async () => {
     const selected = managedFixture()
-    const entered = Promise.withResolvers<void>()
+    const entered = Promise.withResolvers<undefined>()
     const acknowledgement = Promise.withResolvers<DesktopManagedUpdateAcknowledgement>()
-    managed.acknowledge.mockImplementation(() => { entered.resolve(); return acknowledgement.promise })
+    managed.acknowledge.mockImplementation(() => { entered.resolve(undefined); return acknowledgement.promise })
     const host = await readyForUpdate()
     harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
     const handoff = managed.launch!(selected)
@@ -1251,7 +1254,7 @@ describe('desktop main startup', () => {
     await expect(handoff).resolves.toBe(true)
     expect(managed.abandon).not.toHaveBeenCalled()
     expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
-      detail: expect.stringContaining('installer has not been downloaded'),
+      detail: expect.stringContaining('installer has not been downloaded') as unknown,
     }))
   })
 

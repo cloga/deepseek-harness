@@ -30,8 +30,8 @@ function readJson(path: string): unknown {
 /** @param profile - Active or private candidate profile. @returns Validated receipts and conservative ownership. */
 export function readDesktopPluginReceipts(profile: string): DesktopPluginReceiptStore {
   const path = join(profile, DESKTOP_PLUGIN_RECEIPTS_FILE)
-  const receipts: Record<string, DesktopPluginProvisionReceipt> = Object.create(null)
-  const owners: Record<string, 'user' | 'release'> = Object.create(null)
+  const receipts = Object.create(null) as Record<string, DesktopPluginProvisionReceipt>
+  const owners = Object.create(null) as Record<string, 'user' | 'release'>
   if (!existsSync(path)) return { schemaVersion: 1, receipts, owners }
   const input = readJson(path)
   if (!record(input) || input.schemaVersion !== 1 || !record(input.receipts)
@@ -90,7 +90,8 @@ export function assertDesktopProvisioningInventory(profile: string, plan: Deskto
       throw new Error('desktop plugin provisioning: active inventory does not match the release plan')
     }
     if (result.status === 'optional-failed') {
-      if (entry.required || receipts[result.name] !== undefined || Object.hasOwn(manifest.dependencies, result.name) || selection.includes(result.name)) {
+      if (entry.required || receipts[result.name] !== undefined
+        || Object.hasOwn(manifest.dependencies, result.name) || selection.includes(result.name)) {
         throw new Error('desktop plugin provisioning: optional failure has active evidence')
       }
       continue
@@ -109,7 +110,8 @@ export function assertDesktopProvisioningInventory(profile: string, plan: Deskto
     const artifact = join(profile, '.desktop-plugin-artifacts', `${entry.source.sha256}.tgz`)
     const stat = lstatSync(artifact)
     if (receipt === undefined || JSON.stringify(receipt) !== JSON.stringify(result.receipt)
-      || receipt.artifactSha256 !== entry.source.sha256 || !record(plugin) || plugin.name !== result.name || plugin.version !== entry.source.version
+      || receipt.artifactSha256 !== entry.source.sha256 || !record(plugin)
+      || plugin.name !== result.name || plugin.version !== entry.source.version
       || manifest.dependencies[result.name] !== `file:.desktop-plugin-artifacts/${entry.source.sha256}.tgz` || !selection.includes(result.name)
       || !stat.isFile() || stat.isSymbolicLink() || stat.size !== entry.source.size
       || createHash('sha256').update(readFileSync(artifact)).digest('hex') !== entry.source.sha256) {

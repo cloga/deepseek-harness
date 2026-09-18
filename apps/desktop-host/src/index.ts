@@ -24,7 +24,7 @@ async function main(): Promise<void> {
     resolutionMode: process.argv[5] === 'runtime' ? 'runtime' : 'link',
     resolvedProfile: { profile, installAnchor },
     stagedPackageTransactions: process.env.DSH_DESKTOP_STAGED_PACKAGES === '1',
-    prepare: async ctx => {
+    prepare: async (ctx) => {
       control.updateTasks = installDesktopUpdateTaskControl(ctx, process.env.DSH_DESKTOP_ADMISSION_LOCKED === '1')
       if (process.env.DSH_DESKTOP_STAGED_PACKAGES === '1') await provideDesktopPackageTransactions(ctx)
     },

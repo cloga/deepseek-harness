@@ -19,7 +19,7 @@ describe('Desktop unsent input admission', () => {
     { ...clear, hasDraft: true },
     { ...clear, attachmentCount: 2 },
     { ...clear, submitting: true },
-  ])('blocks each unsent state and rejects a stale approval after it clears: %j', impact => {
+  ])('blocks each unsent state and rejects a stale approval after it clears: %j', (impact) => {
     const guard = new DesktopUpdateInputGuard()
     guard.report(clear)
     const approved = guard.check('preserve input')
@@ -33,7 +33,7 @@ describe('Desktop unsent input admission', () => {
   it('invalidates a previously clear state on malformed or overpowered IPC', () => {
     const guard = new DesktopUpdateInputGuard()
     guard.report(clear)
-    expect(() => guard.report({ ...clear, executable: 'untrusted.exe' })).toThrow('invalid update impact')
+    expect(() => { guard.report({ ...clear, executable: 'untrusted.exe' }) }).toThrow('invalid update impact')
     expect(() => guard.check('preserve input')).toThrow('preserve input')
   })
 })

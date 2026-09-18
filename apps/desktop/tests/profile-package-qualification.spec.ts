@@ -51,11 +51,11 @@ it('refuses nested Include configuration that is not represented by the sealed g
 it('requires real matching enabled and healthy bundle observations with no extra selections', () => {
   const expected = [{ name: 'addon', version: '1.0.0' }]
   const good = { ...expected[0]!, enabled: true, healthy: true }
-  expect(() => assertDesktopPackageHealth(expected, [good])).not.toThrow()
-  expect(() => assertDesktopPackageHealth(expected, undefined)).toThrow('did not report')
-  expect(() => assertDesktopPackageHealth(expected, [{ ...good, healthy: false }])).toThrow('does not match')
-  expect(() => assertDesktopPackageHealth(expected, [{ ...good, enabled: false }])).toThrow('does not match')
-  expect(() => assertDesktopPackageHealth(expected, [{ ...good, version: '2.0.0' }])).toThrow('does not match')
-  expect(() => assertDesktopPackageHealth(expected, [good, good])).toThrow('duplicate')
-  expect(() => assertDesktopPackageHealth(expected, [good, { ...good, name: 'unexpected' }])).toThrow('unexpected bundles')
+  expect(() => { assertDesktopPackageHealth(expected, [good]) }).not.toThrow()
+  expect(() => { assertDesktopPackageHealth(expected, undefined) }).toThrow('did not report')
+  expect(() => { assertDesktopPackageHealth(expected, [{ ...good, healthy: false }]) }).toThrow('does not match')
+  expect(() => { assertDesktopPackageHealth(expected, [{ ...good, enabled: false }]) }).toThrow('does not match')
+  expect(() => { assertDesktopPackageHealth(expected, [{ ...good, version: '2.0.0' }]) }).toThrow('does not match')
+  expect(() => { assertDesktopPackageHealth(expected, [good, good]) }).toThrow('duplicate')
+  expect(() => { assertDesktopPackageHealth(expected, [good, { ...good, name: 'unexpected' }]) }).toThrow('unexpected bundles')
 })

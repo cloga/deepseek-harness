@@ -19,7 +19,7 @@ function owned(test: TestContext): OwnedHostFixtures {
   fixtures.set(test, resources)
   test.onTestFinished(async () => {
     const stopped = await Promise.allSettled(resources.hosts.map(host => host.stop()))
-    const failures = stopped.filter(result => result.status === 'rejected').map(result => result.reason)
+    const failures = stopped.filter(result => result.status === 'rejected').map((result): unknown => result.reason)
     if (failures.length > 0) throw new AggregateError(failures, 'fixture Hosts did not reach quiescence')
     for (const root of resources.roots) rmSync(root, { recursive: true, force: true })
   })
@@ -140,7 +140,7 @@ describe('desktop host process', () => {
     expect(await host.start()).toEqual(ready)
     const response = await fetch(ready.url)
     expect(response.status).toBe(200)
-    const body = await response.json()
+    const body = await response.json() as { policyRoots: unknown; nodeOptions?: unknown }
     expect(body.policyRoots).toEqual({ schemaVersion: 1, runtimeDir: runtime, profileDir: runtime, home: join(runtime, 'home') })
     expect(body.nodeOptions).toBeUndefined()
     await host.stop()

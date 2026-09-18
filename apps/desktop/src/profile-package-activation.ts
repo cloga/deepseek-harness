@@ -16,13 +16,19 @@ export interface DesktopProfilePackageActivationOptions {
     'readPreparedForActivation' | 'readPreparedForRecovery' | 'verifyActivationTree'>
   /** Native confirmation, including permission to interrupt the listed live Sessions. */
   readonly confirm: (input: DesktopPreparedPackageActivation) => Promise<boolean>
-  /** Block browser/API admission across Host generations until release; direct plugin work is not sandboxed or paused. Reacquisition by the same transaction must be idempotent, and verification must inspect unexpected work. */
+  /**
+   * Block browser/API admission across Host generations until release; direct plugin work is not sandboxed or paused.
+   * Reacquisition by the same transaction must be idempotent, and verification must inspect unexpected work.
+   */
   readonly acquireAdmission: (input: DesktopPreparedPackageActivation) => Promise<() => Promise<void>>
   /** Reject unless runtime, retained graph, user ownership, ordered selection and complete config inputs are qualified. */
   readonly qualify: (input: DesktopPreparedPackageActivation, location: 'candidate' | 'active') => Promise<void>
   /** Resolve only after the shell's current or partially started Host has exited; safe when already stopped. */
   readonly stopHost: () => Promise<void>
-  /** Start the fixed Host with the launcher's admission barrier installed before Sessions become available; retain its handle even if startup rejects. */
+  /**
+   * Start the fixed Host with the launcher's admission barrier installed before Sessions become available;
+   * retain its handle even if startup rejects.
+   */
   readonly startHost: () => Promise<void>
   /** Require actual Host readiness and expected inventory, including restored inventory after rollback. */
   readonly verifyHost: (input: DesktopPreparedPackageActivation, role: 'candidate' | 'previous') => Promise<void>
@@ -110,7 +116,7 @@ function readJournal(path: string): Journal | undefined {
       || (input.phase !== 'commit-intent' && input.phase !== 'committed')))
     || input.schemaVersion !== 1 || !phases.includes(input.phase as Phase)
     || ['ownerFingerprint', 'baseFingerprint', 'baseGraphFingerprint', 'candidateFingerprint', 'intentFingerprint']
-      .some(key => typeof input[key] !== 'string' || !/^[a-f0-9]{64}$/u.test(input[key] as string))) fail('invalid activation journal fields')
+      .some(key => typeof input[key] !== 'string' || !/^[a-f0-9]{64}$/u.test(input[key]))) fail('invalid activation journal fields')
   parseProfileTransactionId(input.transactionId)
   return input as unknown as Journal
 }
@@ -227,7 +233,9 @@ export function createDesktopProfilePackageActivation(options: DesktopProfilePac
     await options.verifyHost(input, 'previous')
     save(id, journal, 'rolled-back')
   }
-  const readReceiptProof = (id: string, journal: Journal, input: DesktopPreparedPackageActivation): DesktopReceiptTransition | undefined => {
+  const readReceiptProof = (
+    id: string, journal: Journal, input: DesktopPreparedPackageActivation,
+  ): DesktopReceiptTransition | undefined => {
     if (journal.receiptSha256 === undefined) return undefined
     const path = join(paths(id).transactionDir, receiptProofName)
     const stat = lstatSync(path)
@@ -236,7 +244,9 @@ export function createDesktopProfilePackageActivation(options: DesktopProfilePac
     if (hash(text) !== journal.receiptSha256) fail('receipt proof differs from the activation journal')
     return validateDesktopReceiptTransition(input, JSON.parse(text) as unknown)
   }
-  const commit = async (id: string, journal: Journal, input: DesktopPreparedPackageActivation, proof?: DesktopReceiptTransition): Promise<void> => {
+  const commit = async (
+    id: string, journal: Journal, input: DesktopPreparedPackageActivation, proof?: DesktopReceiptTransition,
+  ): Promise<void> => {
     await options.commitReceipt(input, proof)
     await verify(id, 'active', journal, proof)
     if (proof !== undefined && desktopPackageReceiptPosition(input, proof) !== 'after') fail('receipt commit did not write the journaled result')

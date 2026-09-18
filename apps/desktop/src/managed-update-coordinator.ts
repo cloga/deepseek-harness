@@ -290,6 +290,7 @@ export class DesktopManagedUpdateCoordinator {
         throw new Error('desktop managed update: confirmed target is not ready')
       }
     } catch (error) {
+      // oxlint-disable-next-line typescript/prefer-promise-reject-errors -- Preserve validation rejection identity.
       return Promise.reject(error)
     }
     if (this.handedOff) return Promise.resolve(this.current)

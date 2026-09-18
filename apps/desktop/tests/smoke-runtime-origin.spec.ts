@@ -11,6 +11,6 @@ it.each([
   'http://127.0.0.1/',
   'http://user:password@127.0.0.1:19387/',
   'dsh-app://app/',
-])('rejects non-owned smoke endpoint %s', url => {
+])('rejects non-owned smoke endpoint %s', (url) => {
   expect(() => desktopSmokeOrigin(url)).toThrow('explicit loopback Host port')
 })

@@ -5,7 +5,10 @@ import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import type { DesktopPreparedPackageActivation } from '../src/profile-package-staging.ts'
 import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, type DesktopGithubReleasePluginSource } from '../src/plugin-source.ts'
-import { desktopPluginProvisioningPlanSha256, parseDesktopPluginProvisioningPlan } from '../src/plugin-provisioning.ts'
+import {
+  desktopPluginProvisioningPlanSha256, parseDesktopPluginProvisioningPlan, parseDesktopPluginProvisioningState,
+} from '../src/plugin-provisioning.ts'
+import { readDesktopPluginReceipts, type DesktopPluginReceiptStore } from '../src/plugin-receipts.ts'
 import { commitDesktopPackageReceipt, desktopPackageReceiptPosition, desktopReceiptFileTransitions, desktopReceiptHash, prepareDesktopPackageReceipt, validateDesktopReceiptTransition } from '../src/profile-package-receipt.ts'
 
 const roots: string[] = []
@@ -52,7 +55,7 @@ function provisioningFixture() {
   return { ...f, input, planFile: file }
 }
 
-it.each(['neither', 'receipt', 'state', 'both'] as const)('completes only the missing fixed evidence writes after %s was persisted', async persisted => {
+it.each(['neither', 'receipt', 'state', 'both'] as const)('completes only the missing fixed evidence writes after %s was persisted', async (persisted) => {
   const f = provisioningFixture()
   const proof = prepareDesktopPackageReceipt(f.input)!
   const transitions = desktopReceiptFileTransitions(proof)
@@ -66,11 +69,13 @@ it.each(['neither', 'receipt', 'state', 'both'] as const)('completes only the mi
   await commitDesktopPackageReceipt(f.input, proof)
   await commitDesktopPackageReceipt(f.input, proof)
   expect(desktopPackageReceiptPosition(f.input, proof)).toBe('after')
-  const receipts = JSON.parse(readFileSync(f.receipt, 'utf8'))
-  const state = JSON.parse(readFileSync(join(f.input.owner.profile, 'desktop-plugin-provisioning-state.json'), 'utf8'))
+  const receipts = readDesktopPluginReceipts(f.input.owner.profile)
+  const state = parseDesktopPluginProvisioningState(
+    JSON.parse(readFileSync(join(f.input.owner.profile, 'desktop-plugin-provisioning-state.json'), 'utf8')),
+  )
   expect(receipts.owners.addon).toBe('release')
   expect(state).toMatchObject({ schemaVersion: 1, composition: 'active', planSha256: f.input.provisioning!.planSha256 })
-  expect(state.plugins[0].receipt).toEqual(receipts.receipts.addon)
+  expect(state.plugins[0]!.receipt).toEqual(receipts.receipts.addon)
 })
 
 it('rejects manual escalation, modified plan bytes, and arbitrary second evidence files', async () => {
@@ -128,7 +133,7 @@ it('preserves unrelated receipt ownership and rejects a proof that changes it', 
     states: { staged: true, health: 'passed', activated: true, rolledBack: false, verified: true } }
   writeFileSync(f.receipt, JSON.stringify({ schemaVersion: 1, receipts: { other }, owners: { other: 'release' } }))
   const proof = prepareDesktopPackageReceipt(f.input)!
-  const after = JSON.parse(proof.after)
+  const after = JSON.parse(proof.after) as DesktopPluginReceiptStore
   expect(after.owners).toEqual({ other: 'release', addon: 'user' })
   after.owners.other = 'user'
   expect(() => validateDesktopReceiptTransition(f.input, { ...proof, after: JSON.stringify(after) })).toThrow('invalid or unqualified')

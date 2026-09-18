@@ -158,8 +158,8 @@ export class DesktopHostProcess {
     child.stdout?.pipe(process.stdout)
     child.on('message', (message: unknown) => {
       if (packages?.accepts(message) === true) {
-        void packages.handle(message).then(reply => {
-          if (child.connected) child.send(reply, error => { if (error !== null) console.error(error) })
+        void packages.handle(message).then((reply) => {
+          if (child.connected) child.send(reply, (error) => { if (error !== null) console.error(error) })
         }).catch((error: unknown) => { this.fail(error instanceof Error ? error : new Error(String(error))) })
         return
       }

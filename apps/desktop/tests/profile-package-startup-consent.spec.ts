@@ -28,6 +28,6 @@ it.each<[string, Partial<DesktopStartupPackageConsent>, OptionalConsentField[]?]
   ['malformed plan identity', { preparedPlanSha256: 'not-a-hash', packagedPlanSha256: 'not-a-hash' }],
 ])('requires native confirmation for %s', (_label, change, omitted = []) => {
   const input = { ...initial, ...change }
-  for (const key of omitted) delete input[key]
+  for (const key of omitted) Reflect.deleteProperty(input, key)
   expect(mayAuthorizeDesktopStartupPackage(input)).toBe(false)
 })

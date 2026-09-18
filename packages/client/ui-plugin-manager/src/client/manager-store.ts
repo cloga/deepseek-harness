@@ -369,8 +369,8 @@ export class PluginManagerController {
       hooks: { pluginManager: this.store, configLedger },
       ensure: () => { if (this.getSnapshot().status === 'idle') void this.load() },
       refresh: () => { void this.load() },
-      cancelPrepared: transactionId => {
-        void this.ctx.remote.pluginManager.cancelPendingPackageChange(transactionId).then(answer => {
+      cancelPrepared: (transactionId) => {
+        void this.ctx.remote.pluginManager.cancelPendingPackageChange(transactionId).then((answer) => {
           if (!answer.ok) this.patch({ status: 'error' })
           else void this.load()
         }).catch(() => { this.patch({ status: 'error' }) })

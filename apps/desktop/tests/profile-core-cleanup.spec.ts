@@ -209,7 +209,8 @@ it('recognizes retired managed dependency roots only through the recorded packag
   expect(existsSync(join(root, 'node_modules', core))).toBe(false)
   expect(existsSync(join(root, 'node_modules', extra))).toBe(false)
   expect(existsSync(join(root, 'pnpm-lock.yaml'))).toBe(false)
-  expect(JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).dependencies).toEqual({})
+  const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { dependencies: unknown }
+  expect(manifest.dependencies).toEqual({})
 })
 
 it('refuses retired core cleanup that would invalidate a retained external root lock', () => {

@@ -46,7 +46,10 @@ export function loadDesktopPackagePolicy(resourcesPath: string, capability: Desk
  * @returns Backend whose package processes operate only on private staging directories or data-only source packing.
  */
 export function createDesktopPackageBackend(profile: string, resources: {
-  readonly node: string; readonly pnpm: string; readonly nodeBin: string; readonly dsh: string
+  readonly node: string
+  readonly pnpm: string
+  readonly nodeBin: string
+  readonly dsh: string
 }, policy: DesktopPackagePolicy, recoveryTransactionId?: string, provisioningProfileCreated = false) {
   return createDesktopProfilePackageTransactions({
     profile,

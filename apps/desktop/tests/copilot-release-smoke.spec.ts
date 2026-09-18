@@ -54,7 +54,7 @@ it('prepares isolated home and ancestor SDK without precreating the shell-owned 
   })
   expect(existsSync(join(legacySdk, 'loaded'))).toBe(false)
   mkdirSync(profile)
-  expect(() => preparePackagedCopilotHome(home, legacySdk)).toThrow('shell must exclusively create')
+  expect(() => { preparePackagedCopilotHome(home, legacySdk) }).toThrow('shell must exclusively create')
   expect(existsSync(profile)).toBe(true)
 })
 

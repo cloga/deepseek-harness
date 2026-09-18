@@ -17,7 +17,9 @@ function inside(root: string, path: string): boolean {
  * @param root - Candidate, active, or restored profile directory selected by the shell, never a remote caller.
  * @returns Expected ordered bundle inventory; this never loads package code.
  */
-export function qualifyDesktopPackageProfile(input: DesktopPreparedPackageActivation, root: string): readonly { name: string; version: string }[] {
+export function qualifyDesktopPackageProfile(
+  input: DesktopPreparedPackageActivation, root: string,
+): readonly { name: string; version: string }[] {
   const profileRoot = realpathSync(root)
   const runtimeRoot = realpathSync(input.owner.runtimeDir)
   const allowed = (path: string): boolean => {
@@ -26,7 +28,7 @@ export function qualifyDesktopPackageProfile(input: DesktopPreparedPackageActiva
     return inside(profileRoot, canonical) || inside(runtimeRoot, canonical)
   }
   const profile = loadProfileDirectory('desktop package activation', profileRoot, input.owner.installAnchor)
-  const layers = profile.layers.map(layer => {
+  const layers = profile.layers.map((layer) => {
     if (!allowed(layer.packageDir) || !allowed(layer.patchPath)) throw new Error('desktop package activation: bundle configuration escapes the sealed graph')
     return layer.patches
   })
@@ -54,7 +56,7 @@ export function qualifyDesktopPackageProfile(input: DesktopPreparedPackageActiva
     }
   }
   visit(composeEntries(layers))
-  return profile.layers.map(layer => {
+  return profile.layers.map((layer) => {
     const manifest = JSON.parse(readFileSync(join(layer.packageDir, 'package.json'), 'utf8')) as { name?: unknown; version?: unknown }
     if (manifest.name !== layer.packageName || typeof manifest.version !== 'string') {
       throw new Error('desktop package activation: selected bundle identity is invalid')
@@ -69,14 +71,17 @@ export function qualifyDesktopPackageProfile(input: DesktopPreparedPackageActiva
  * @param observed - Leaf inventory received in this Host generation's readiness message.
  * @param requireHealthy - Newly activated targets; unrelated pre-existing optional failures do not become required startup entries.
  */
-export function assertDesktopPackageHealth(expected: readonly { name: string; version: string }[], observed: readonly ProfilePackageHealth[] | undefined,
-  requireHealthy: readonly string[] = expected.map(item => item.name)): void {
+export function assertDesktopPackageHealth(
+  expected: readonly { name: string; version: string }[], observed: readonly ProfilePackageHealth[] | undefined,
+  requireHealthy: readonly string[] = expected.map(item => item.name),
+): void {
   if (observed === undefined) throw new Error('desktop package activation: Host did not report bundle health')
   const byName = new Map(observed.map(item => [item.name, item]))
   if (byName.size !== observed.length) throw new Error('desktop package activation: Host reported duplicate bundle identities')
   for (const target of expected) {
     const actual = byName.get(target.name)
-    if (actual === undefined || !actual.enabled || (requireHealthy.includes(target.name) && !actual.healthy) || actual.version !== target.version) {
+    if (actual === undefined || !actual.enabled
+      || (requireHealthy.includes(target.name) && !actual.healthy) || actual.version !== target.version) {
       throw new Error(`desktop package activation: Host bundle health does not match ${target.name}@${target.version}`)
     }
   }

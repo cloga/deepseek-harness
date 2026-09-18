@@ -151,7 +151,7 @@ it('identifies the managed Release channel without claiming installer bytes are 
   } finally { f.view.unmount(); f.status.resolve({ phase: 'idle' }) }
 })
 
-it.each(['preserved-user-choice', 'pending'] as const)('shows an idle baseline notice without hiding update actions: %s', async status => {
+it.each(['preserved-user-choice', 'pending'] as const)('shows an idle baseline notice without hiding update actions: %s', async (status) => {
   const f = fixture()
   const baseline = { status, packageName: 'fixture-provider' }
   try {

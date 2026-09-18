@@ -18,7 +18,7 @@ export async function readDesktopPackageHealth(ctx: Context): Promise<readonly P
     name: bundle.name,
     ...(bundle.version === undefined ? {} : { version: bundle.version }),
     enabled: bundle.enabled,
-    healthy: bundle.error === undefined && (!bundle.enabled || bundle.rows.every(row => {
+    healthy: bundle.error === undefined && (!bundle.enabled || bundle.rows.every((row) => {
       const current = row.entryId === undefined ? undefined : rows.get(row.entryId)
       return current !== undefined && (!current.enabled || current.fiberPhase === 'active')
     })),

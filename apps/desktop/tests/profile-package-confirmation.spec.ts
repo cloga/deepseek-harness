@@ -13,7 +13,7 @@ it('leaves non-registry confirmation details absent', () => {
   expect(desktopRegistryConfirmationDetail(undefined, en)).toBeUndefined()
 })
 
-it.each([en, zh])('displays the exact prepared resolution in the native locale', messages => {
+it.each([en, zh])('displays the exact prepared resolution in the native locale', (messages) => {
   const before = { ...target }
   const detail = desktopRegistryConfirmationDetail(target, messages)!
   for (const value of [target.requestedSpec, `${target.packageName}@${target.version}`, target.registry, target.integrity]) {

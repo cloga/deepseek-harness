@@ -6,11 +6,11 @@ import { t } from 'tar'
 import { expect, it } from 'vitest'
 import { packDesktopSourceDirectory, runDesktopPackagePnpm } from '../src/profile-package-pnpm.ts'
 
-it.each(['pm', 'install'])('preserves the built-in command position for %s before configuration flags', { timeout: 60000 }, async command => {
+it.each(['pm', 'install'])('preserves the built-in command position for %s before configuration flags', { timeout: 60000 }, async (command) => {
   const root = mkdtempSync(join(tmpdir(), 'desktop-pnpm-argv-'))
   const stub = join(root, 'pnpm-stub.mjs')
   const result = join(root, 'argv.json')
-  writeFileSync(stub, `import { writeFileSync } from 'node:fs'; writeFileSync(process.argv.at(-1), JSON.stringify(process.argv.slice(2)));\n`)
+  writeFileSync(stub, "import { writeFileSync } from 'node:fs'; writeFileSync(process.argv.at(-1), JSON.stringify(process.argv.slice(2)));\n")
   try {
     await runDesktopPackagePnpm({ node: process.execPath, pnpm: stub, nodeBin: dirname(process.execPath) }, {
       cwd: root, args: [command, result], env: {}, signal: AbortSignal.timeout(30000),
@@ -22,7 +22,7 @@ it.each(['pm', 'install'])('preserves the built-in command position for %s befor
 })
 
 // The outer budget exceeds the owned pack process's 60-second deadline and includes file teardown.
-it.each(['files', 'npmignore'] as const)('honors %s while suppressing lifecycle, pnpmfile, workspace and package-manager redirection', { timeout: 90000 }, async mode => {
+it.each(['files', 'npmignore'] as const)('honors %s while suppressing lifecycle, pnpmfile, workspace and package-manager redirection', { timeout: 90000 }, async (mode) => {
   const root = mkdtempSync(join(tmpdir(), 'desktop-pnpm-pack-'))
   const source = join(root, 'source')
   const output = join(root, 'acquisition')
@@ -46,9 +46,11 @@ it.each(['files', 'npmignore'] as const)('honors %s while suppressing lifecycle,
     const installed = JSON.parse(readFileSync(join(dirname(pnpm), '..', 'package.json'), 'utf8')) as { name?: unknown; version?: unknown }
     expect(installed.name).toBe('pnpm')
     expect(installed.version).toBe('11.7.0')
-    await packDesktopSourceDirectory({ node: process.execPath, nodeBin: dirname(process.execPath), pnpm }, source, archive, AbortSignal.timeout(60000))
+    await packDesktopSourceDirectory(
+      { node: process.execPath, nodeBin: dirname(process.execPath), pnpm }, source, archive, AbortSignal.timeout(60000),
+    )
     const files: string[] = []
-    await t({ file: archive, onReadEntry: entry => { files.push(entry.path) } })
+    await t({ file: archive, onReadEntry: (entry) => { files.push(entry.path) } })
     expect(files.sort()).toEqual(['package/index.js', 'package/package.json'])
     expect(readFileSync(join(source, 'package.json'), 'utf8')).toBe(manifest)
     expect(existsSync(sentinel)).toBe(false)

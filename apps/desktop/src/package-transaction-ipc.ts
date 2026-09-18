@@ -25,7 +25,8 @@ export class DesktopPackageTransactionIpc {
     let acknowledgedCancellation = false
     try {
       rpcId = parseProfileTransactionId(input.rpcId)
-      if (this.disconnected || input.protocolVersion !== 1 || this.backend.protocolVersion !== 1) {
+      const backendProtocolVersion = (): unknown => this.backend.protocolVersion
+      if (this.disconnected || input.protocolVersion !== 1 || backendProtocolVersion() !== 1) {
         throw new Error('desktop packages: staging connection unavailable or unsupported')
       }
       let result: unknown
@@ -104,8 +105,11 @@ export class DesktopPackageTransactionIpc {
     const stages = [...this.stages.values()]
     for (const stage of stages) stage.abort.abort()
     const outcomes = await Promise.allSettled(stages.map(stage => stage.work))
-    const failures = outcomes.flatMap((outcome, index) => outcome.status === 'rejected'
-      && outcome.reason !== stages[index]?.abort.signal.reason ? [outcome.reason] : [])
+    const failures = outcomes.flatMap((outcome, index): unknown[] => {
+      if (outcome.status !== 'rejected') return []
+      const reason: unknown = outcome.reason
+      return reason !== stages[index]?.abort.signal.reason ? [reason] : []
+    })
     if (failures.length > 0) throw new AggregateError(failures, 'desktop packages: owned staging cleanup failed during Host disposal')
   }
 }

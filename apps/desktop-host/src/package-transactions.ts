@@ -43,7 +43,8 @@ export async function provideDesktopPackageTransactions(ctx: Context): Promise<v
   }, 'desktop package staging proxy')
 
   const call = (operation: 'hello' | 'stage' | 'status' | 'list' | 'cancel' | 'abort', fields: object = {}): Promise<unknown> => {
-    if (disposed || !process.connected || process.send === undefined) return Promise.reject(new Error('desktop packages: shell unavailable'))
+    const send = process.send?.bind(process)
+    if (disposed || !process.connected || send === undefined) return Promise.reject(new Error('desktop packages: shell unavailable'))
     if (pending.size >= 100) return Promise.reject(new Error('desktop packages: too many pending shell requests'))
     const rpcId = randomUUID()
     return new Promise((resolve, reject) => {
@@ -53,7 +54,7 @@ export async function provideDesktopPackageTransactions(ctx: Context): Promise<v
       }, 600000)
       timer.unref()
       pending.set(rpcId, { resolve, reject, timer })
-      process.send!({ type: 'package-transaction', protocolVersion: 1, rpcId, operation, ...fields }, error => {
+      send({ type: 'package-transaction', protocolVersion: 1, rpcId, operation, ...fields }, (error) => {
         if (error === null) return
         pending.delete(rpcId)
         clearTimeout(timer)

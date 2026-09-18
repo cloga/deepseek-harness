@@ -9,7 +9,8 @@ import type {} from '@deepseek-ai/dsh-client-connection'
  * Register update admission on the owning Host context.
  * @param ctx - Desktop profile owner; registration may precede services, but inspection requires them to be ready.
  * @param initiallyLocked - Launcher's generation-spanning API barrier, installed before profile entries mount.
- * @returns API admission control and work inspection. During initial locked preparation, any observed direct Agent/job work stays visible until unlock; this observer does not pause or veto plugin work.
+ * @returns API admission control and work inspection. During initial locked preparation,
+ * observed direct Agent/job work stays visible until unlock; this observer does not pause or veto plugin work.
  */
 export function installDesktopUpdateTaskControl(ctx: Context, initiallyLocked = false): (action: 'inspect' | 'lock' | 'unlock') => Promise<boolean> {
   let locked = initiallyLocked
@@ -18,7 +19,7 @@ export function installDesktopUpdateTaskControl(ctx: Context, initiallyLocked = 
   // Observe, never veto, direct Agent work; rejecting a pre-step can consume claimed inbox messages.
   ctx.on('agent/status', ({ status }) => { if (preparing && status === 'running') observedPreparationWork = true })
   ctx.on('agent/inbox/inserted', () => { if (preparing) observedPreparationWork = true })
-  ctx.inject(['agents', 'jobs'], scope => {
+  ctx.inject(['agents', 'jobs'], (scope) => {
     const registry = scope.jobs
     const observe = (owner?: Parameters<typeof registry.list>[0]): void => {
       if (preparing && registry.list(owner).length > 0) observedPreparationWork = true

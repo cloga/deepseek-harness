@@ -21,7 +21,7 @@ async function withDirectory(action: (directory: string) => Promise<void>): Prom
 
 describe('Desktop local packaging configuration', () => {
   it('keeps the explicit unsigned fork capability channel separate from official signing and policy files', async () => {
-    await withDirectory(async directory => {
+    await withDirectory(async (directory) => {
       const fork = { DSH_DESKTOP_APP_ID: 'io.github.cloga.deepseek-harness.desktop',
         DSH_DESKTOP_FORK_RELEASE_VERSION: '0.1.6-alpha.2.cloga.1',
         DSH_DESKTOP_MANAGED_UPDATE_CAPABILITY: join(directory, 'capability.json'),
@@ -34,12 +34,13 @@ describe('Desktop local packaging configuration', () => {
       expect(selected.DSH_DESKTOP_WINDOWS_TOKEN_PIN).toBeUndefined()
       expect(selected.DSH_DESKTOP_RELEASE_GITHUB_TOKEN).toBeUndefined()
       expect(selected.DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN).toBeUndefined()
-      expect(() => validateDesktopPackageEnvironment(selected, WINDOWS, { unsigned: true })).not.toThrow()
+      expect(() => { validateDesktopPackageEnvironment(selected, WINDOWS, { unsigned: true }) }).not.toThrow()
       expect(() => loadDesktopPackageEnvironment('win32', fork, directory)).toThrow('explicit unsigned Windows x64')
       expect(() => loadDesktopPackageEnvironment('darwin', fork, directory, { unsigned: true, arch: 'arm64' })).toThrow('explicit unsigned Windows x64')
-      expect(() => validateDesktopPackageEnvironment(selected, WINDOWS)).toThrow('explicit unsigned Windows x64')
-      expect(() => validateDesktopPackageEnvironment({ DSH_DESKTOP_APP_ID: 'com.example.official' }, WINDOWS, { unsigned: true }))
-        .toThrow('MANDATORY_UPDATE')
+      expect(() => { validateDesktopPackageEnvironment(selected, WINDOWS) }).toThrow('explicit unsigned Windows x64')
+      expect(() => {
+        validateDesktopPackageEnvironment({ DSH_DESKTOP_APP_ID: 'com.example.official' }, WINDOWS, { unsigned: true })
+      }).toThrow('MANDATORY_UPDATE')
     })
   })
 

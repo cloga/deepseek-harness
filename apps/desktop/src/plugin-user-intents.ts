@@ -46,7 +46,7 @@ export function readDesktopPluginUserIntents(profileDir: string): DesktopPluginU
   directories(profileDir, true)
   const path = join(profileDir, DESKTOP_PLUGIN_USER_INTENTS_FILE)
   const stat = lstatSync(path, { throwIfNoEntry: false })
-  const removed: Record<string, DesktopPluginRemovalIntent> = Object.create(null)
+  const removed = Object.create(null) as Record<string, DesktopPluginRemovalIntent>
   if (stat === undefined) return { schemaVersion: 1, removed }
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_BYTES) fail()
   const bytes = readFileSync(path)

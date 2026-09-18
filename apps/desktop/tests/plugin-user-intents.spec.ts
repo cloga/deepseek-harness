@@ -56,7 +56,7 @@ it.each([
   '{"schemaVersion":1,"removed":{"__proto__":{}}}',
   '{"schemaVersion":1,"removed":{"addon":{"observedPlanSha256":"old-plan"}}}',
   '{"schemaVersion":2,"removed":{}}',
-])('refuses unknown or overpowered intent evidence without replacing it (%s)', text => {
+])('refuses unknown or overpowered intent evidence without replacing it (%s)', (text) => {
   const f = fixture()
   const path = join(f.candidate, DESKTOP_PLUGIN_USER_INTENTS_FILE)
   writeFileSync(path, text)

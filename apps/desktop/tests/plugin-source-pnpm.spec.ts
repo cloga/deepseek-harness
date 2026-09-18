@@ -21,7 +21,8 @@ async function fixture(root: string, fetcher: typeof fetch) {
   const dsh = join(root, 'dsh')
   runtimeFixture(dsh)
   const pnpm = process.env.DSH_TEST_DESKTOP_PNPM ?? join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs')
-  expect(JSON.parse(readFileSync(join(dirname(dirname(pnpm)), 'package.json'), 'utf8')).version).toBe('11.7.0')
+  const installed = JSON.parse(readFileSync(join(dirname(dirname(pnpm)), 'package.json'), 'utf8')) as { version?: unknown }
+  expect(installed.version).toBe('11.7.0')
   const runtime = { node: process.execPath, nodeBin: dirname(process.execPath), pnpm }
   const manager = new DesktopProjectManager(resolveDesktopPaths(join(root, '.dsh')), { dsh })
   await manager.applyRelease()
@@ -39,7 +40,7 @@ async function fixture(root: string, fetcher: typeof fetch) {
 // Preparation evidence only, not Host health or activation. Native activation has its
 // own controller suite; bundle toggles belong to the official Plugin Manager.
 it.each(['directory', 'link', 'tarball', 'github', 'remoteTarball'] as const)(
-  'prepares a %s snapshot and separate removal through real pnpm without source hooks', async kind => {
+  'prepares a %s snapshot and separate removal through real pnpm without source hooks', async (kind) => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'desktop-source-pnpm-')))
     try {
       const sentinel = join(root, 'source-hook-executed')
@@ -60,7 +61,7 @@ it.each(['directory', 'link', 'tarball', 'github', 'remoteTarball'] as const)(
       ])
       const commit = 'b'.repeat(40)
       let sourceAvailable = true
-      const fetcher: typeof fetch = async input => {
+      const fetcher: typeof fetch = async (input) => {
         if (!sourceAvailable) throw new Error('source unavailable after preparation')
         const url = new URL(input instanceof Request ? input.url : input)
         if (url.pathname === '/repos/example/repository-not-package-name/commits/main') return Response.json({ sha: commit })
@@ -93,7 +94,8 @@ it.each(['directory', 'link', 'tarball', 'github', 'remoteTarball'] as const)(
       expect(existsSync(sentinel)).toBe(false)
       expect(readFileSync(join(source, 'package.json'), 'utf8')).toBe(beforeManifest)
       const manifest = JSON.parse(readFileSync(join(staged, 'package.json'), 'utf8')) as {
-        dependencies: Record<string, string>; dsh: { profile: { bundles: string[] } }
+        dependencies: Record<string, string>
+        dsh: { profile: { bundles: string[] } }
       }
       expect(manifest.dependencies['memory-like-plugin']).toBe(`file:.desktop-plugin-artifacts/${lock.sha256}.tgz`)
       expect(manifest.dsh.profile.bundles.filter(name => name === 'memory-like-plugin')).toHaveLength(1)
@@ -108,7 +110,8 @@ it.each(['directory', 'link', 'tarball', 'github', 'remoteTarball'] as const)(
         .toMatchObject({ state: 'prepared', health: 'pending' })
       const removed = candidate(staged, removal)
       expect(readDesktopPackageLocks(removed)).toEqual({})
-      expect(JSON.parse(readFileSync(join(removed, 'package.json'), 'utf8')).dependencies).toEqual({})
+      const removedManifest = JSON.parse(readFileSync(join(removed, 'package.json'), 'utf8')) as { dependencies: unknown }
+      expect(removedManifest.dependencies).toEqual({})
       expect(existsSync(join(removed, 'node_modules/memory-like-plugin'))).toBe(false)
       expect(inventoryDesktopRuntime(staged)).toEqual(stagedBefore)
       expect(inventoryDesktopRuntime(f.profile)).toEqual(before)
@@ -116,7 +119,7 @@ it.each(['directory', 'link', 'tarball', 'github', 'remoteTarball'] as const)(
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 90000)
 
-it.each(['preinstall', 'install', 'postinstall'] as const)('does not grant a source named koffi permission to run %s', async hook => {
+it.each(['preinstall', 'install', 'postinstall'] as const)('does not grant a source named koffi permission to run %s', async (hook) => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'desktop-source-build-grant-')))
   try {
     const sentinel = join(root, 'unreviewed-source-build')

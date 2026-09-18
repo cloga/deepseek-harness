@@ -8,7 +8,7 @@ const roots: string[] = []
 afterEach(() => { for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true }) })
 function root() { const path = mkdtempSync(join(tmpdir(), 'dsh-profile-root-')); roots.push(path); return path }
 
-it.each([undefined, '[]\n', '# old empty derived root\r\n[]\r\n', PROFILE_ROOT_CONFIG])('prepares supported empty roots without changing the user patch (%s)', value => {
+it.each([undefined, '[]\n', '# old empty derived root\r\n[]\r\n', PROFILE_ROOT_CONFIG])('prepares supported empty roots without changing the user patch (%s)', (value) => {
   const path = root()
   if (value !== undefined) writeFileSync(join(path, 'cordis.yml'), value)
   writeFileSync(join(path, 'cordis.patch.yml'), '- id: preserve-user\n  disabled: true\n')
@@ -21,7 +21,7 @@ it('refuses an unrecognized nonempty candidate root without overwriting it', () 
   const path = root()
   const unknown = '- id: user-written-root\n  name: custom-module\n'
   writeFileSync(join(path, 'cordis.yml'), unknown)
-  expect(() => prepareProfileRootConfig(path)).toThrow('explicit migration')
+  expect(() => { prepareProfileRootConfig(path) }).toThrow('explicit migration')
   expect(readFileSync(join(path, 'cordis.yml'), 'utf8')).toBe(unknown)
 })
 

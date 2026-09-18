@@ -7,7 +7,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import {
-  boot, composeEntries, initProfile, readProfilePatches, readProfileManifest, reconcileProfilePatches, OPTIONAL_BUNDLES, ProfilePackageCancelledError, withProfilePackageLease,
+  boot, composeEntries, initProfile, readProfilePatches, readProfileManifest, reconcileProfilePatches,
+  OPTIONAL_BUNDLES, ProfilePackageCancelledError, withProfilePackageLease,
   type ProfileContext, type ProfilePackageTransactions, type ProfilePreparedPackageChange, type ProfileVerifiedReleaseSource,
 } from '@deepseek-ai/dsh-app-boot'
 import PluginManager, { type Config, type PluginChange, type PluginInstallLogChunk, type PluginInstallProgress, type PluginInstallRequestId } from '../src/index.ts'
@@ -802,7 +803,7 @@ describe('staged package transactions', () => {
     const hmr = ctx.get('hmr')
     const exclusive = hmr === undefined ? undefined : vi.spyOn(hmr, 'runExclusive')
     const changes: PluginChange[] = []
-    ctx.on('plugin-manager/changed', change => { changes.push(change) })
+    ctx.on('plugin-manager/changed', (change) => { changes.push(change) })
     onTestFinished(() => {
       pnpm.mockRestore(); approve.mockRestore(); save.mockRestore(); write.mockRestore(); exclusive?.mockRestore()
     })
@@ -922,7 +923,7 @@ describe('staged package transactions', () => {
     const service = transactions()
     const entered = Promise.withResolvers<AbortSignal>()
     service.stage.mockImplementation(async (_id, _mutation, signal) => {
-      const aborted = new Promise<void>(resolve => { signal.addEventListener('abort', () => { resolve() }, { once: true }) })
+      const aborted = new Promise<void>((resolve) => { signal.addEventListener('abort', () => { resolve() }, { once: true }) })
       entered.resolve(signal)
       await aborted
       // The launcher transport acknowledges only after owned work and cleanup have settled.
@@ -946,7 +947,7 @@ describe('staged package transactions', () => {
     const service = transactions()
     const { ctx, manager } = await stagedFixture(service)
     let cancellation: ReturnType<typeof manager.cancelInstall> | undefined
-    ctx.on('plugin-manager/install-state', update => {
+    ctx.on('plugin-manager/install-state', (update) => {
       if (update.phase === 'installing') cancellation = manager.cancelInstall(update.requestId)
     })
     const result = await manager.installBundle('addon', { requestId })
@@ -959,7 +960,7 @@ describe('staged package transactions', () => {
     const service = transactions()
     const entered = Promise.withResolvers<AbortSignal>()
     service.stage.mockImplementation(async (_id, _mutation, signal) => {
-      const aborted = new Promise<void>(resolve => { signal.addEventListener('abort', () => { resolve() }, { once: true }) })
+      const aborted = new Promise<void>((resolve) => { signal.addEventListener('abort', () => { resolve() }, { once: true }) })
       entered.resolve(signal)
       await aborted
       throw Object.assign(new Error('EPERM: candidate cleanup failed'), { code: 'EPERM' })
@@ -989,11 +990,11 @@ describe('staged package transactions', () => {
 
   it('reports too-late when durable PREPARED wins the cancellation race', async () => {
     const service = transactions()
-    const committed = Promise.withResolvers<void>()
+    const committed = Promise.withResolvers<undefined>()
     service.stage.mockImplementation(async (_id, _mutation, signal) => {
-      const aborted = new Promise<void>(resolve => { signal.addEventListener('abort', () => { resolve() }, { once: true }) })
+      const aborted = new Promise<void>((resolve) => { signal.addEventListener('abort', () => { resolve() }, { once: true }) })
       service.status.mockResolvedValue(prepared())
-      committed.resolve()
+      committed.resolve(undefined)
       await aborted
       // The backend committed before cancellation; delivery was still in flight.
       return prepared()
@@ -1055,7 +1056,7 @@ describe('staged package transactions', () => {
 
   it('retains stock installation and live removal when a normal profile has no staging opt-in', async () => {
     const service = transactions()
-    const { ctx, dir, manager, bundle } = await fixture('live', false, ctx => { ctx.provide('profilePackageTransactions', service) })
+    const { ctx, dir, manager, bundle } = await fixture('live', false, (ctx) => { ctx.provide('profilePackageTransactions', service) })
     const pnpm = vi.spyOn(operations, 'runProfilePnpm').mockImplementation(async (_context, args) => {
       const manifest = readProfileManifest('test', dir)
       if (args[0] === 'add') {

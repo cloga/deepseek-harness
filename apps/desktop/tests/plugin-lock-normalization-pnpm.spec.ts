@@ -15,6 +15,14 @@ import { inventoryDesktopRuntime } from '../src/runtime-tree.ts'
 import { resolveDesktopPaths } from '../src/paths.ts'
 import { runtimeFixture, writePackage } from './runtime-fixture.ts'
 
+interface FixtureManifest {
+  dependencies: Record<string, string>
+  dsh: { profile: { bundles: string[] } }
+}
+function readManifest(path: string): FixtureManifest {
+  return JSON.parse(readFileSync(path, 'utf8')) as FixtureManifest
+}
+
 interface FixtureLock {
   importers: Record<string, { dependencies?: Record<string, { specifier: string; version: unknown }> }>
   packages?: Record<string, unknown>
@@ -30,7 +38,7 @@ function candidate(profile: string, id: string): string {
 // Real acquisition/pnpm preparation supplies test input graphs, not Host health.
 // The receipt below is explicitly fixture data for normalization/ownership checks.
 // Official selection-only toggles do not invoke pnpm or repair its lockfile.
-it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy separators through the current %s owner', async action => {
+it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy separators through the current %s owner', async (action) => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'desktop-legacy-lock-pnpm-')))
   try {
     const name = 'legacy-verified-plugin'
@@ -45,7 +53,7 @@ it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy sepa
       sha256: createHash('sha256').update(bytes).digest('hex'), targetCommit: 'a'.repeat(40),
     }
     let acquisitionAllowed = true
-    const fetcher: typeof fetch = async input => {
+    const fetcher: typeof fetch = async (input) => {
       if (!acquisitionAllowed) throw new Error('legacy normalization must not request a new release')
       const url = new URL(input instanceof Request ? input.url : input)
       if (url.pathname.endsWith('/releases/tags/v1.0.0')) return Response.json({
@@ -59,7 +67,8 @@ it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy sepa
     const dsh = join(root, 'dsh')
     runtimeFixture(dsh)
     const pnpm = process.env.DSH_TEST_DESKTOP_PNPM ?? join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs')
-    expect(JSON.parse(readFileSync(join(dirname(dirname(pnpm)), 'package.json'), 'utf8')).version).toBe('11.7.0')
+    const installed = JSON.parse(readFileSync(join(dirname(dirname(pnpm)), 'package.json'), 'utf8')) as { version?: unknown }
+    expect(installed.version).toBe('11.7.0')
     const runtime = { node: process.execPath, nodeBin: dirname(process.execPath), pnpm }
     const capture = join(root, 'before-first-frozen.yaml')
     const captureManifest = join(root, 'before-first-frozen-package.json')
@@ -70,7 +79,7 @@ it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy sepa
       dependencyRegistry: 'https://registry.example.test/', configPaths: [], fetcher,
       operationTimeoutMs: 60000, leaseWaitMs: 0,
       packDirectory: (directory, output, signal) => packDesktopSourceDirectory(runtime, directory, output, signal),
-      pnpmRunner: async request => {
+      pnpmRunner: async (request) => {
         invocations++
         if (capturing && request.args.includes('--frozen-lockfile') && !existsSync(capture)) {
           writeFileSync(capture, readFileSync(join(request.cwd, 'pnpm-lock.yaml')), { flag: 'wx' })
@@ -99,7 +108,7 @@ it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy sepa
     await backend(first).stage(secondId, { kind: 'install', source: { schemaVersion: 1, type: 'packageSpec', spec: removable } }, new AbortController().signal)
     const profile = candidate(first, secondId)
     const manifestPath = join(profile, 'package.json')
-    const originalManifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    const originalManifest = readManifest(manifestPath)
     const lockPath = join(profile, 'pnpm-lock.yaml')
     const expected = readLock(lockPath)
     const legacy = readLock(lockPath)
@@ -122,7 +131,7 @@ it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy sepa
         cwd: root, home: root, startedBundles: originalManifest.dsh.profile.bundles,
         stagedPackageTransactions: true, overlays: [], telemetryDisabledEnv: undefined,
       }
-      const ctx = await boot('dsh', join(profile, 'cordis.yml'), readProfilePatches('dsh', profileContext), ctx => {
+      const ctx = await boot('dsh', join(profile, 'cordis.yml'), readProfilePatches('dsh', profileContext), (ctx) => {
         ctx.provide('profileContext', profileContext)
         ctx.provide('profilePackageTransactions', backend(profile))
         ctx.provide('appReady', { onReady: (listener: () => void) => { listener(); return () => {} } })
@@ -140,7 +149,7 @@ it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy sepa
         expect(readFileSync(lockPath, 'utf8')).toBe(seededLock)
         expect(readFileSync(join(profile, 'desktop-plugin-receipts.json'), 'utf8')).toBe(receiptBytes)
         expect(readFileSync(join(profile, 'desktop-plugin-package-locks.json'), 'utf8')).toBe(sourceLockBytes)
-        expect(JSON.parse(readFileSync(manifestPath, 'utf8')).dependencies).toEqual(originalManifest.dependencies)
+        expect(readManifest(manifestPath).dependencies).toEqual(originalManifest.dependencies)
       } finally { await ctx.fiber.dispose() }
     } else {
       const added = writePackage(root, 'addon', { name: 'new-source-plugin', dsh: { bundle: { patch: 'bundle.yml' } } })
@@ -153,12 +162,12 @@ it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy sepa
       // These are the actual inputs immediately before the real frozen pnpm call,
       // not a final lockfile that pnpm may subsequently have normalized itself.
       expect(readLock(capture).importers['.']?.dependencies?.[name]).toEqual(expected.importers['.']?.dependencies?.[name])
-      const capturedDependencies = JSON.parse(readFileSync(captureManifest, 'utf8')).dependencies
+      const capturedDependencies = readManifest(captureManifest).dependencies
       expect(capturedDependencies[name]).toBe(canonical)
       expect(Object.keys(capturedDependencies).sort()).toEqual(action === 'add' ? [name, 'removable-source-plugin'].sort() : [name])
       const staged = candidate(profile, id)
       expect(readFileSync(join(staged, 'desktop-plugin-receipts.json'), 'utf8')).toBe(receiptBytes)
-      const stagedManifest = JSON.parse(readFileSync(join(staged, 'package.json'), 'utf8'))
+      const stagedManifest = readManifest(join(staged, 'package.json'))
       expect(stagedManifest.dependencies[name]).toBe(canonical)
       expect(stagedManifest.dependencies['removable-source-plugin'] !== undefined).toBe(action !== 'remove')
       expect(stagedManifest.dependencies['new-source-plugin'] !== undefined).toBe(action === 'add')

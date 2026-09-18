@@ -19,7 +19,7 @@ const product: DshDesktopProductApi = {
   updates: {
     status: () => ipcRenderer.invoke(DESKTOP_IPC.updatesStatus) as Promise<DesktopUpdatePresentation>,
     open: () => ipcRenderer.invoke(DESKTOP_IPC.updatesOpen) as Promise<void>,
-    reportImpact: impact => { latestImpact = impact; publishImpact() },
+    reportImpact: (impact) => { latestImpact = impact; publishImpact() },
     subscribe(listener) {
       const handle = (_event: Electron.IpcRendererEvent, state: DesktopUpdatePresentation): void => { listener(state) }
       ipcRenderer.on(DESKTOP_IPC.updatesPresentation, handle)

@@ -16,8 +16,8 @@ import { installDesktopUpdateTaskControl } from '../../desktop-host/src/update-t
 
 function gate() {
   return {
-    entered: Promise.withResolvers<void>(),
-    release: Promise.withResolvers<void>(),
+    entered: Promise.withResolvers<undefined>(),
+    release: Promise.withResolvers<undefined>(),
   }
 }
 
@@ -34,7 +34,7 @@ class ScriptedAdapter extends LlmAdapter {
     this.requests.push(options)
     if (entry === undefined) throw new Error('desktop direct-work script exhausted')
     if (entry.gate !== undefined) {
-      entry.gate.entered.resolve()
+      entry.gate.entered.resolve(undefined)
       await entry.gate.release.promise
     }
     for (const chunk of entry.chunks) {
@@ -61,7 +61,7 @@ async function harness(test: TestContext, script: ScriptEntry[] = [], initiallyL
   const ctx = new Context()
   // Release provider barriers before disposal awaits AgentLoop quiescence, including on timeout.
   test.onTestFinished(async () => {
-    for (const entry of script) entry.gate?.release.resolve()
+    for (const entry of script) entry.gate?.release.resolve(undefined)
     await ctx.fiber.dispose()
   })
   const control = installDesktopUpdateTaskControl(ctx, initiallyLocked)
@@ -156,7 +156,7 @@ describe('Desktop replacement Host direct-work detection with the real AgentLoop
     expect(adapter.requests[0]?.signal?.aborted).toBe(false)
     expect(effects).toEqual([])
 
-    held.release.resolve()
+    held.release.resolve(undefined)
     await agent.whenIdle()
     expect(errors).toEqual([])
     expect(agent.status).toBe('idle')
@@ -215,7 +215,7 @@ describe('Desktop replacement Host direct-work detection with the real AgentLoop
     ctx.on('agent/inbox/inserted', inserted)
     await expectApiLocked(ctx)
 
-    held.release.resolve()
+    held.release.resolve(undefined)
     await maintenance
     await agent.whenIdle()
     expect(inserted).not.toHaveBeenCalled()
@@ -239,11 +239,11 @@ describe('Desktop replacement Host direct-work detection with the real AgentLoop
     ctx.on('agent/status', ({ status }) => { statuses.push(status) })
     const maintenance = agent.runMaintenance(async (signal) => {
       // TestContext-owned Agent disposal also releases this gate if the test times out.
-      const releaseOnAbort = (): void => { held.release.resolve() }
+      const releaseOnAbort = (): void => { held.release.resolve(undefined) }
       signal.addEventListener('abort', releaseOnAbort, { once: true })
       try {
         effects.push('maintenance started')
-        held.entered.resolve()
+        held.entered.resolve(undefined)
         await held.release.promise
         if (!signal.aborted) effects.push('maintenance continued')
       } finally {
@@ -264,7 +264,7 @@ describe('Desktop replacement Host direct-work detection with the real AgentLoop
       expect(agent.session.snapshotEvents()).toEqual(history)
       expect(effects).toEqual(['maintenance started'])
 
-      held.release.resolve()
+      held.release.resolve(undefined)
       await maintenance
       await agent.whenIdle()
       expect(effects).toEqual(['maintenance started', 'maintenance continued'])
@@ -276,7 +276,7 @@ describe('Desktop replacement Host direct-work detection with the real AgentLoop
       // Only public running/inbox/job work is observed; maintenance was neither paused nor undone.
       expect(effects).toEqual(['maintenance started', 'maintenance continued'])
     } finally {
-      held.release.resolve()
+      held.release.resolve(undefined)
       await maintenance
       await agent.whenIdle()
     }
@@ -316,10 +316,10 @@ describe('Desktop replacement Host direct-work detection with the real AgentLoop
       const { ctx, control, adapter, agent } = await harness(test)
       const owner = ownership === 'agent-owned' ? agent : undefined
       const done = Promise.withResolvers<JobOutcome>()
-      const settled = Promise.withResolvers<void>()
+      const settled = Promise.withResolvers<undefined>()
       const cancel = vi.fn(() => { done.resolve({ status: 'killed' }) })
       const readOutput = vi.fn(() => 'unconsumed output')
-      ctx.jobs.onJobDone(() => { settled.resolve() })
+      ctx.jobs.onJobDone(() => { settled.resolve(undefined) })
       const run = vi.fn(() => ({ done: done.promise, cancel, readOutput }))
       const id = ctx.jobs.start({ kind: 'subagent', label: 'controlled producer', ...(owner === undefined ? {} : { owner }), run })
       const history = agent.session.snapshotEvents()

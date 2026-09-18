@@ -32,17 +32,40 @@ function write(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, `${JSON.stringify(value)}\n`)
 }
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+function object(value: unknown, ...path: readonly string[]): Record<string, unknown> {
+  let current = value
+  for (const key of path) current = object(current)[key]
+  if (!isObject(current)) throw new Error('fixture requires an object')
+  return current
+}
+function jsonObject(text: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(text)
+  return object(value)
+}
+function stringValue(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('fixture requires a string')
+  return value
+}
+function isArray(value: unknown): value is unknown[] { return Array.isArray(value) }
+function stringArray(value: unknown): string[] {
+  if (!isArray(value) || !value.every(item => typeof item === 'string')) throw new Error('fixture requires a string array')
+  return value
+}
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
   const promise = new Promise<T>((accept) => { resolve = accept })
   return { promise, resolve }
 }
 async function graph(request: DesktopStagingPnpmRequest): Promise<{ exitCode: number }> {
-  const manifest = JSON.parse(readFileSync(join(request.cwd, 'package.json'), 'utf8')) as { dependencies: Record<string, string> }
+  const manifest = jsonObject(readFileSync(join(request.cwd, 'package.json'), 'utf8'))
   const dependencies: Record<string, unknown> = {}
   const packages: Record<string, unknown> = {}
   const snapshots: Record<string, unknown> = {}
-  for (const [name, spec] of Object.entries(manifest.dependencies)) {
+  for (const [name, selector] of Object.entries(object(manifest, 'dependencies'))) {
+    const spec = stringValue(selector)
     const target = join(request.cwd, 'node_modules', name)
     mkdirSync(target, { recursive: true })
     if (spec.startsWith('file:')) {
@@ -67,8 +90,8 @@ async function registryGraph(request: DesktopStagingPnpmRequest, version = '1.2.
     const parsed = parseDesktopPluginInstallSpec(request.args[position + 1]!, request.cwd)
     if (parsed.kind !== 'registry') throw new Error('unit registry runner received a nonregistry source')
     const path = join(request.cwd, 'package.json')
-    const manifest = JSON.parse(readFileSync(path, 'utf8'))
-    manifest.dependencies[parsed.name] = version
+    const manifest = jsonObject(readFileSync(path, 'utf8'))
+    object(manifest, 'dependencies')[parsed.name] = version
     write(path, manifest)
   }
   return graph(request)
@@ -135,11 +158,11 @@ async function seedReceipt(f: ReturnType<typeof fixture>, name: string, fields: 
   const specifier = `file:.desktop-plugin-artifacts/${evidence.artifactSha256}.tgz`
   mkdirSync(join(f.profile, '.desktop-plugin-artifacts'), { recursive: true })
   copyFileSync(archive, join(f.profile, specifier.slice(5)))
-  const manifest = JSON.parse(readFileSync(join(f.profile, 'package.json'), 'utf8'))
-  manifest.dependencies[name] = specifier; manifest.dsh.profile.bundles.push(name)
+  const manifest = jsonObject(readFileSync(join(f.profile, 'package.json'), 'utf8'))
+  object(manifest, 'dependencies')[name] = specifier; stringArray(object(manifest, 'dsh', 'profile').bundles).push(name)
   write(join(f.profile, 'package.json'), manifest)
-  const store = JSON.parse(readFileSync(join(f.profile, 'desktop-plugin-receipts.json'), 'utf8'))
-  store.receipts[name] = evidence; store.owners[name] = 'release'
+  const store = jsonObject(readFileSync(join(f.profile, 'desktop-plugin-receipts.json'), 'utf8'))
+  object(store, 'receipts')[name] = evidence; object(store, 'owners')[name] = 'release'
   write(join(f.profile, 'desktop-plugin-receipts.json'), store)
   await graph({ cwd: f.profile, args: [], env: {}, signal: new AbortController().signal })
   return { evidence, specifier }
@@ -158,7 +181,7 @@ async function provisioningFixture() {
   const planFile = join(f.root, 'packaged-plan.json')
   write(planFile, plan)
   const fetcher = vi.fn<typeof fetch>(async input => {
-    const url = String(input)
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     if (url.endsWith('/releases/tags/v1.0.0')) return Response.json({ id: 10, draft: false, immutable: true, tag_name: 'v1.0.0', target_commitish: source.targetCommit,
       assets: [{ id: 11, name: 'plugin.tgz', state: 'uploaded', size: bytes.length, digest: `sha256:${source.sha256}` },
         { id: 12, name: 'SHA256SUMS', state: 'uploaded', size: checksum.length, digest: `sha256:${source.checksumManifest.sha256}`, browser_download_url: source.checksumManifest.url }] })
@@ -211,7 +234,7 @@ describe('Desktop stage-only package transactions', () => {
     const state = await f.backend.commitSatisfiedProvisioning(assessment.assessmentFingerprint)
     expect(state.planSha256).toBe(desktopPluginProvisioningPlanSha256(f.plan))
     expect(readFileSync(join(f.profile, 'desktop-plugin-receipts.json')).equals(receiptBytes)).toBe(true)
-    expect(JSON.parse(receiptBytes.toString('utf8')).owners[pluginName]).toBe('user')
+    expect(object(jsonObject(receiptBytes.toString('utf8')), 'owners')[pluginName]).toBe('user')
     expect(inventoryDesktopRuntime(f.profile).filter(entry => entry.path !== DESKTOP_PLUGIN_PROVISIONING_STATE_FILE)).toEqual(before)
     await expect(f.backend.commitSatisfiedProvisioning(assessment.assessmentFingerprint)).rejects.toThrow('stale')
     expect(f.pnpmRunner).not.toHaveBeenCalled()
@@ -226,12 +249,12 @@ describe('Desktop stage-only package transactions', () => {
     if (change === 'metadata') write(join(f.profile, 'user-note.json'), { changed: true })
     if (change === 'graph') writeFileSync(join(f.profile, 'node_modules', 'active-sentinel'), 'changed graph bytes')
     if (change === 'selection') {
-      const manifest = JSON.parse(readFileSync(join(f.profile, 'package.json'), 'utf8'))
-      manifest.dsh.profile.bundles = []; write(join(f.profile, 'package.json'), manifest)
+      const manifest = jsonObject(readFileSync(join(f.profile, 'package.json'), 'utf8'))
+      object(manifest, 'dsh', 'profile').bundles = []; write(join(f.profile, 'package.json'), manifest)
     }
     if (change === 'owner') {
-      const store = JSON.parse(readFileSync(join(f.profile, 'desktop-plugin-receipts.json'), 'utf8'))
-      store.owners[pluginName] = 'release'; write(join(f.profile, 'desktop-plugin-receipts.json'), store)
+      const store = jsonObject(readFileSync(join(f.profile, 'desktop-plugin-receipts.json'), 'utf8'))
+      object(store, 'owners')[pluginName] = 'release'; write(join(f.profile, 'desktop-plugin-receipts.json'), store)
     }
     if (change === 'resource') writeFileSync(f.planFile, `${readFileSync(f.planFile, 'utf8')} `)
     if (change === 'payload') writeFileSync(join(f.profile, 'node_modules', pluginName, 'index.js'), 'export const unrecorded = true\n')
@@ -263,15 +286,15 @@ describe('Desktop stage-only package transactions', () => {
     const f = await provisioningFixture()
     await seedExactPlanned(f)
     if (reason === 'installed-override') {
-      const manifest = JSON.parse(readFileSync(join(f.profile, 'package.json'), 'utf8'))
-      manifest.dependencies[pluginName] = '2.0.0'; write(join(f.profile, 'package.json'), manifest)
+      const manifest = jsonObject(readFileSync(join(f.profile, 'package.json'), 'utf8'))
+      object(manifest, 'dependencies')[pluginName] = '2.0.0'; write(join(f.profile, 'package.json'), manifest)
     }
     if (reason === 'disabled') {
-      const manifest = JSON.parse(readFileSync(join(f.profile, 'package.json'), 'utf8'))
-      manifest.dsh.profile.bundles = []; write(join(f.profile, 'package.json'), manifest)
+      const manifest = jsonObject(readFileSync(join(f.profile, 'package.json'), 'utf8'))
+      object(manifest, 'dsh', 'profile').bundles = []; write(join(f.profile, 'package.json'), manifest)
     }
     if (reason === 'ambiguous-legacy') {
-      const store = JSON.parse(readFileSync(join(f.profile, 'desktop-plugin-receipts.json'), 'utf8'))
+      const store = jsonObject(readFileSync(join(f.profile, 'desktop-plugin-receipts.json'), 'utf8'))
       delete store.owners; write(join(f.profile, 'desktop-plugin-receipts.json'), store)
     }
     if (reason === 'invalid-evidence') writeFileSync(join(f.profile, DESKTOP_PLUGIN_USER_INTENTS_FILE), '{invalid evidence')
@@ -287,8 +310,8 @@ describe('Desktop stage-only package transactions', () => {
     await seedExactPlanned(f)
     writeFileSync(join(f.profile, 'node_modules', pluginName, 'index.js'), 'changed while receipt and archive remain intact\n')
     expect(await f.backend.assessProvisioning()).toMatchObject({ status: 'invalid-evidence' })
-    const store = JSON.parse(readFileSync(join(f.profile, 'desktop-plugin-receipts.json'), 'utf8'))
-    store.owners[pluginName] = 'release'; write(join(f.profile, 'desktop-plugin-receipts.json'), store)
+    const store = jsonObject(readFileSync(join(f.profile, 'desktop-plugin-receipts.json'), 'utf8'))
+    object(store, 'owners')[pluginName] = 'release'; write(join(f.profile, 'desktop-plugin-receipts.json'), store)
     expect(await f.backend.assessProvisioning()).toMatchObject({ status: 'provisionable', reason: 'release-owned-repair' })
   })
 
@@ -301,7 +324,8 @@ describe('Desktop stage-only package transactions', () => {
     await f.backend.stage(removedId, { kind: 'remove', name: pluginName }, new AbortController().signal)
     const removed = (await f.backend.readPreparedForActivation(removedId))!
     expect(inventoryDesktopRuntime(f.profile)).toEqual(before)
-    expect(readDesktopPluginUserIntents(removed.candidateDir).removed[pluginName]?.observedPlanSha256).toBe(desktopPluginProvisioningPlanSha256(f.plan))
+    expect(readDesktopPluginUserIntents(removed.candidateDir).removed[pluginName]?.observedPlanSha256)
+      .toBe(desktopPluginProvisioningPlanSha256(f.plan))
     renameSync(f.profile, removed.rollbackDir); renameSync(removed.candidateDir, f.profile)
     const markerBytes = readFileSync(join(f.profile, DESKTOP_PLUGIN_USER_INTENTS_FILE))
     const nextSource = { ...f.plannedSource, tag: 'v1.0.1', assetId: 21, checksumManifest: { ...f.plannedSource.checksumManifest, assetId: 22,
@@ -322,11 +346,11 @@ describe('Desktop stage-only package transactions', () => {
   it('stages only the resource-bound singleton privately without promoting an identical manual intent', async () => {
     const f = await provisioningFixture()
     const user = await seedReceipt(f, '@example/user-owned')
-    const store = JSON.parse(readFileSync(join(f.profile, 'desktop-plugin-receipts.json'), 'utf8'))
-    store.owners['@example/user-owned'] = 'user'
+    const store = jsonObject(readFileSync(join(f.profile, 'desktop-plugin-receipts.json'), 'utf8'))
+    object(store, 'owners')['@example/user-owned'] = 'user'
     write(join(f.profile, 'desktop-plugin-receipts.json'), store)
-    const manifest = JSON.parse(readFileSync(join(f.profile, 'package.json'), 'utf8'))
-    manifest.dsh.profile.bundles = [] // The unrelated user's disabled state must remain disabled.
+    const manifest = jsonObject(readFileSync(join(f.profile, 'package.json'), 'utf8'))
+    object(manifest, 'dsh', 'profile').bundles = [] // The unrelated user's disabled state must remain disabled.
     write(join(f.profile, 'package.json'), manifest)
     const before = inventoryDesktopRuntime(f.profile)
     const id = randomUUID()
@@ -340,8 +364,8 @@ describe('Desktop stage-only package transactions', () => {
       ownerDecision: 'create-release-owned', previousSelected: false })
     expect(input.owner.provisioningPlanResource?.file).toBe(f.planFile)
     const candidate = join(f.transaction(id), 'profile')
-    expect(JSON.parse(readFileSync(join(candidate, 'package.json'), 'utf8')).dsh.profile.bundles).toEqual([pluginName])
-    expect(JSON.parse(readFileSync(join(candidate, 'desktop-plugin-receipts.json'), 'utf8'))).toEqual({ schemaVersion: 1, receipts: { '@example/user-owned': user.evidence }, owners: { '@example/user-owned': 'user' } })
+    expect(object(jsonObject(readFileSync(join(candidate, 'package.json'), 'utf8')), 'dsh', 'profile').bundles).toEqual([pluginName])
+    expect(jsonObject(readFileSync(join(candidate, 'desktop-plugin-receipts.json'), 'utf8'))).toEqual({ schemaVersion: 1, receipts: { '@example/user-owned': user.evidence }, owners: { '@example/user-owned': 'user' } })
     expect(await f.backend.stageProvisioning(id, new AbortController().signal)).toEqual(prepared)
     await expect(f.backend.stage(id, { kind: 'install', source: f.plannedSource }, new AbortController().signal)).rejects.toThrow('different mutation or purpose')
     const manualId = randomUUID()
@@ -379,7 +403,7 @@ describe('Desktop stage-only package transactions', () => {
     if (stateWritten) writeFileSync(join(f.profile, files[1]!.file), files[1]!.after)
     expect(desktopPackageReceiptPosition(input, proof)).toBe(receiptWritten === stateWritten ? (receiptWritten ? 'after' : 'before') : 'mixed')
     expect(await f.backend.verifyActivationTree(id, 'active', proof)).toMatchObject({ candidateFingerprint: input.candidateFingerprint })
-    expect(JSON.parse(proof.after).owners[pluginName]).toBe('release')
+    expect(object(jsonObject(proof.after), 'owners')[pluginName]).toBe('release')
     writeFileSync(join(f.profile, 'unrelated-user-data.json'), '{}\n')
     await expect(f.backend.verifyActivationTree(id, 'active', proof)).rejects.toThrow('active tree changed')
     rmSync(join(f.profile, 'unrelated-user-data.json'))
@@ -408,7 +432,8 @@ describe('Desktop stage-only package transactions', () => {
       write(join(f.profile, 'desktop-plugin-receipts.json'), { schemaVersion: 1, receipts: { [pluginName]: f.evidence }, owners: { [pluginName]: 'release' } })
     }
     const before = inventoryDesktopRuntime(f.profile)
-    await expect(f.backend.stageProvisioning(randomUUID(), new AbortController().signal)).rejects.toThrow(/qualify the exact installed graph|disabled|broader reconciliation/u)
+    await expect(f.backend.stageProvisioning(randomUUID(), new AbortController().signal))
+      .rejects.toThrow(/qualify the exact installed graph|disabled|broader reconciliation/u)
     expect(f.fetcher).not.toHaveBeenCalled()
     expect(inventoryDesktopRuntime(f.profile)).toEqual(before)
   })
@@ -472,14 +497,16 @@ describe('Desktop stage-only package transactions', () => {
     const before = f.active()
     const id = randomUUID()
     const result = await f.backend.stage(id, f.mutation, new AbortController().signal)
-    expect(result).toEqual({ transactionId: id, state: 'prepared', packageName: pluginName, baseFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u), health: 'pending' })
+    const expectedFingerprint: unknown = expect.stringMatching(/^[a-f0-9]{64}$/u)
+    expect(result).toEqual({ transactionId: id, state: 'prepared', packageName: pluginName,
+      baseFingerprint: expectedFingerprint, health: 'pending' })
     expect(f.active()).toEqual(before)
     const candidate = join(f.transaction(id), 'profile')
     expect(existsSync(join(candidate, 'node_modules', 'active-sentinel'))).toBe(false)
-    const manifest = JSON.parse(readFileSync(join(candidate, 'package.json'), 'utf8'))
+    const manifest = jsonObject(readFileSync(join(candidate, 'package.json'), 'utf8'))
     expect(manifest.userField).toEqual({ untouched: true })
-    expect(manifest.dependencies[pluginName]).toMatch(/^file:\.desktop-plugin-artifacts\/[a-f0-9]{64}\.tgz$/u)
-    expect(manifest.dsh.profile.bundles).toEqual([pluginName])
+    expect(object(manifest, 'dependencies')[pluginName]).toMatch(/^file:\.desktop-plugin-artifacts\/[a-f0-9]{64}\.tgz$/u)
+    expect(object(manifest, 'dsh', 'profile').bundles).toEqual([pluginName])
     expect(f.pnpmRunner).toHaveBeenCalledOnce()
     const invocation = f.pnpmRunner.mock.calls[0]![0]
     expect(invocation.args).toContain('--ignore-scripts')
@@ -487,11 +514,13 @@ describe('Desktop stage-only package transactions', () => {
     expect(invocation.env.npm_config_ignore_scripts).toBe('true')
     expect(invocation.env.NODE_OPTIONS).toBeUndefined()
     expect(readFileSync(join(candidate, 'pnpm-workspace.yaml'), 'utf8')).toContain('approved-native: true')
-    const receipt = JSON.parse(readFileSync(join(f.transaction(id), 'PREPARED.json'), 'utf8'))
+    const receipt = jsonObject(readFileSync(join(f.transaction(id), 'PREPARED.json'), 'utf8'))
     expect(receipt.mutation).toEqual(f.mutation)
-    expect(receipt.owner.profile).toBe(f.profile)
-    expect(receipt.baseFiles.map((entry: { path: string }) => entry.path)).toContain('desktop-plugin-receipts.json')
-    expect(receipt.result.health).toBe('pending')
+    expect(object(receipt, 'owner').profile).toBe(f.profile)
+    const baseFiles = receipt.baseFiles
+    if (!isArray(baseFiles)) throw new Error('prepared fixture requires an inventory array')
+    expect(baseFiles.map(entry => object(entry).path)).toContain('desktop-plugin-receipts.json')
+    expect(object(receipt, 'result').health).toBe('pending')
     expect(receipt).not.toHaveProperty('activated')
     expect(f.fetcher).not.toHaveBeenCalled()
   })
@@ -513,7 +542,7 @@ describe('Desktop stage-only package transactions', () => {
     expect(await recovered.listPending()).toEqual([])
     expect(existsSync(join(f.transaction(id), 'profile'))).toBe(false)
     expect(existsSync(join(f.transaction(id), 'PREPARED.json'))).toBe(true)
-    expect(JSON.parse(readFileSync(join(f.transaction(id), 'DISCARDED.json'), 'utf8')).state).toBe('discarded')
+    expect(jsonObject(readFileSync(join(f.transaction(id), 'DISCARDED.json'), 'utf8')).state).toBe('discarded')
     await expect(recovered.stage(id, f.mutation, new AbortController().signal)).rejects.toThrow('explicitly discarded')
     expect(f.active()).toEqual(before)
   })
@@ -521,14 +550,14 @@ describe('Desktop stage-only package transactions', () => {
   it('retains a seal won before an in-flight abort and requires a separate discard request', async () => {
     const f = fixture()
     const id = randomUUID()
-    const observed = deferred<void>()
+    const observed = deferred<undefined>()
     let cancellation: Promise<unknown> | undefined
     const rename = fs.renameSync
     const interception = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
       rename(from, to)
       if (String(to) === join(f.transaction(id), 'PREPARED.json')) queueMicrotask(() => {
-        cancellation = f.backend.cancel(id).catch(error => error)
-        observed.resolve()
+        cancellation = f.backend.cancel(id).catch((error: unknown) => error)
+        observed.resolve(undefined)
       })
     })
     syncBuiltinESMExports()
@@ -582,11 +611,12 @@ describe('Desktop stage-only package transactions', () => {
     const f = fixture()
     const id = randomUUID()
     await f.backend.stage(id, f.mutation, new AbortController().signal)
-    const entered = deferred<void>()
-    const release = deferred<void>()
+    const entered = deferred<undefined>()
+    const release = deferred<undefined>()
     const activation = createDesktopProfilePackageActivation({ profile: f.profile, backend: f.backend,
       confirm: async () => true, acquireAdmission: async () => async () => {}, qualify: async () => {},
-      stopHost: async () => { entered.resolve(); await release.promise }, startHost: async () => {}, verifyHost: async () => {}, commitReceipt: async () => {},
+      stopHost: async () => { entered.resolve(undefined); await release.promise },
+      startHost: async () => {}, verifyHost: async () => {}, commitReceipt: async () => {},
     })
     const operation = activation.activate(id)
     await entered.promise
@@ -594,7 +624,7 @@ describe('Desktop stage-only package transactions', () => {
       await expect(f.backend.cancel(id)).rejects.toThrow('activation-owned')
       await expect(f.backend.status(id)).rejects.toThrow('activation is in progress')
       expect(await f.backend.listPending()).toEqual([])
-    } finally { release.resolve() }
+    } finally { release.resolve(undefined) }
     await operation
   })
 
@@ -630,7 +660,9 @@ describe('Desktop stage-only package transactions', () => {
     renameSync(f.profile, input!.rollbackDir)
     expect(() => createDesktopProfilePackageTransactions(f.options)).toThrow('explicit owned recovery')
     const recovery = createDesktopProfilePackageTransactions({ ...f.options, recoveryTransactionId: id })
-    expect(await recovery.readPreparedForRecovery(id)).toMatchObject({ rollbackDir: input!.rollbackDir, baseGraphFingerprint: input!.baseGraphFingerprint })
+    expect(await recovery.readPreparedForRecovery(id)).toMatchObject({
+      rollbackDir: input!.rollbackDir, baseGraphFingerprint: input!.baseGraphFingerprint,
+    })
     await expect(recovery.verifyActivationTree(id, 'rollback')).resolves.toMatchObject({ prepared: input!.prepared })
     await expect(recovery.verifyActivationTree(id, 'candidate')).resolves.toMatchObject({ prepared: input!.prepared })
     writeFileSync(join(input!.rollbackDir, 'node_modules', 'active-sentinel'), 'changed old graph')
@@ -659,7 +691,7 @@ describe('Desktop stage-only package transactions', () => {
     const bytes = readFileSync(archive)
     const evidence = receipt(pluginName, bytes)
     const fetcher: typeof fetch = async input => {
-      const url = String(input)
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
       if (url.endsWith('/releases/tags/v1.0.0')) return Response.json({ id: 10, draft: false, immutable: true, tag_name: 'v1.0.0', target_commitish: evidence.source.targetCommit,
         assets: [{ id: 11, name: 'plugin.tgz', state: 'uploaded', size: bytes.length, digest: `sha256:${evidence.source.sha256}` }] })
       if (url.endsWith('/git/ref/tags/v1.0.0')) return Response.json({ object: { type: 'commit', sha: evidence.source.targetCommit } })
@@ -697,13 +729,13 @@ describe('Desktop stage-only package transactions', () => {
     const before = f.active()
     const replacementId = randomUUID()
     await f.backend.stage(replacementId, f.mutation, new AbortController().signal)
-    const replaced = JSON.parse(readFileSync(join(f.transaction(replacementId), 'profile', 'package.json'), 'utf8'))
-    expect(replaced.dsh.profile.bundles).toEqual([])
+    const replaced = jsonObject(readFileSync(join(f.transaction(replacementId), 'profile', 'package.json'), 'utf8'))
+    expect(object(replaced, 'dsh', 'profile').bundles).toEqual([])
     const removeId = randomUUID()
     await f.backend.stage(removeId, { kind: 'remove', name: pluginName }, new AbortController().signal)
-    const removed = JSON.parse(readFileSync(join(f.transaction(removeId), 'profile', 'package.json'), 'utf8'))
+    const removed = jsonObject(readFileSync(join(f.transaction(removeId), 'profile', 'package.json'), 'utf8'))
     expect(removed.dependencies).toEqual({})
-    expect(removed.dsh.profile.bundles).toEqual([])
+    expect(object(removed, 'dsh', 'profile').bundles).toEqual([])
     expect(f.active()).toEqual(before)
   })
 
@@ -719,15 +751,15 @@ describe('Desktop stage-only package transactions', () => {
       packageName: '@example/registry-bundle', version: '1.2.3', integrity: `sha512-${Buffer.alloc(64, 1).toString('base64')}`, packageKey: '@example/registry-bundle@1.2.3' })
     expect(input.verifiedRelease).toBeUndefined()
     expect(input.provisioning).toBeUndefined()
-    expect(JSON.parse(readFileSync(join(input.candidateDir, 'desktop-plugin-package-locks.json'), 'utf8')).packages).toEqual({})
-    expect(JSON.parse(readFileSync(join(input.candidateDir, 'desktop-plugin-receipts.json'), 'utf8')).receipts).toEqual({})
-    expect(JSON.parse(readFileSync(join(input.candidateDir, 'package.json'), 'utf8')).dependencies['@example/registry-bundle']).toBe('1.2.3')
+    expect(jsonObject(readFileSync(join(input.candidateDir, 'desktop-plugin-package-locks.json'), 'utf8')).packages).toEqual({})
+    expect(jsonObject(readFileSync(join(input.candidateDir, 'desktop-plugin-receipts.json'), 'utf8')).receipts).toEqual({})
+    expect(object(jsonObject(readFileSync(join(input.candidateDir, 'package.json'), 'utf8')), 'dependencies')['@example/registry-bundle']).toBe('1.2.3')
     expect(runner.mock.calls[0]![0].args).toContain('--save-exact')
     expect(f.fetcher).not.toHaveBeenCalled()
     expect(f.packDirectory).not.toHaveBeenCalled()
     expect(inventoryDesktopRuntime(f.profile)).toEqual(before)
-    const prepared = JSON.parse(readFileSync(join(input.transactionDir, 'PREPARED.json'), 'utf8'))
-    prepared.registryTarget.integrity = `sha512-${Buffer.alloc(64, 2).toString('base64')}`
+    const prepared = jsonObject(readFileSync(join(input.transactionDir, 'PREPARED.json'), 'utf8'))
+    object(prepared, 'registryTarget').integrity = `sha512-${Buffer.alloc(64, 2).toString('base64')}`
     write(join(input.transactionDir, 'PREPARED.json'), prepared)
     await expect(backend.status(id)).rejects.toThrow('registry resolution changed')
   })
@@ -738,10 +770,10 @@ describe('Desktop stage-only package transactions', () => {
     const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: async request => {
       const result = await registryGraph(request, change === 'wrong-version' ? '2.0.0' : '1.2.3')
       if (change === 'extra-manifest') {
-        const path = join(request.cwd, 'package.json'); const value = JSON.parse(readFileSync(path, 'utf8')); value.userField = { overwritten: true }; write(path, value)
+        const path = join(request.cwd, 'package.json'); const value = jsonObject(readFileSync(path, 'utf8')); value.userField = { overwritten: true }; write(path, value)
       }
       if (change === 'unsafe-tarball') {
-        const path = join(request.cwd, 'pnpm-lock.yaml'); const value = JSON.parse(readFileSync(path, 'utf8')); value.packages[`${name}@1.2.3`].resolution.tarball = 'http://untrusted.invalid/package.tgz'; write(path, value)
+        const path = join(request.cwd, 'pnpm-lock.yaml'); const value = jsonObject(readFileSync(path, 'utf8')); object(value, 'packages', `${name}@1.2.3`, 'resolution').tarball = 'http://untrusted.invalid/package.tgz'; write(path, value)
       }
       if (change === 'plain-dependency') write(join(request.cwd, 'node_modules', name, 'package.json'), { name, version: '1.2.3' })
       return result
@@ -761,7 +793,7 @@ describe('Desktop stage-only package transactions', () => {
     const id = randomUUID()
     await f.backend.stage(id, { kind: 'remove', name }, new AbortController().signal)
     const input = (await f.backend.readPreparedForActivation(id))!
-    expect(JSON.parse(readFileSync(join(input.candidateDir, 'package.json'), 'utf8')).dependencies).toEqual({})
+    expect(jsonObject(readFileSync(join(input.candidateDir, 'package.json'), 'utf8')).dependencies).toEqual({})
     expect(readDesktopPluginUserIntents(input.candidateDir).removed[name]).toEqual({})
     expect(fs.lstatSync(join(f.profile, 'node_modules', name)).isSymbolicLink()).toBe(true)
     expect(input.registryTarget).toBeUndefined()
@@ -868,43 +900,50 @@ describe('Desktop stage-only package transactions', () => {
     const f = fixture()
     const name = '@example/retained'
     const { specifier } = await seedReceipt(f, name, { dependencies: { middle: '^1.0.0' }, optionalDependencies: { 'optional-leaf': '~2.0.0' }, peerDependencies: { '@deepseek-ai/cordis': version } })
-    const original = JSON.parse(readFileSync(join(f.profile, 'pnpm-lock.yaml'), 'utf8'))
+    const original = jsonObject(readFileSync(join(f.profile, 'pnpm-lock.yaml'), 'utf8'))
     const peer = `(@deepseek-ai/cordis@${version})`
     const key = `${name}@${specifier}${peer}`
     const middle = `middle@1.0.0${peer}`
-    original.importers['.'].dependencies[name].version += peer
-    delete original.snapshots[`${name}@${specifier}`]
+    const originalDependencies = object(original, 'importers', '.', 'dependencies')
+    const originalSnapshots = object(original, 'snapshots')
+    const originalPackages = object(original, 'packages')
+    const retainedEntry = object(originalDependencies, name)
+    retainedEntry.version = `${stringValue(retainedEntry.version)}${peer}`
+    Reflect.deleteProperty(originalSnapshots, `${name}@${specifier}`)
     const runtimeLink = `link:${join(f.runtimeDir, 'node_modules', '@deepseek-ai/cordis').replaceAll('\\', '/')}`
-    original.snapshots[key] = { dependencies: { middle: `1.0.0${peer}`, '@deepseek-ai/cordis': runtimeLink }, optionalDependencies: { 'optional-leaf': '2.0.0' } }
-    original.snapshots[middle] = { dependencies: { leaf: '3.0.0' }, transitivePeerDependencies: ['@deepseek-ai/cordis'] }
+    originalSnapshots[key] = { dependencies: { middle: `1.0.0${peer}`, '@deepseek-ai/cordis': runtimeLink }, optionalDependencies: { 'optional-leaf': '2.0.0' } }
+    originalSnapshots[middle] = { dependencies: { leaf: '3.0.0' }, transitivePeerDependencies: ['@deepseek-ai/cordis'] }
     for (const entry of ['middle@1.0.0', 'leaf@3.0.0', 'optional-leaf@2.0.0', 'plain-user@3.1.0']) {
-      original.packages[entry] = { resolution: { integrity: `sha512-${Buffer.alloc(64, 1).toString('base64')}` } }
-      if (entry !== 'middle@1.0.0') original.snapshots[entry] = {}
+      originalPackages[entry] = { resolution: { integrity: `sha512-${Buffer.alloc(64, 1).toString('base64')}` } }
+      if (entry !== 'middle@1.0.0') originalSnapshots[entry] = {}
     }
-    const manifest = JSON.parse(readFileSync(join(f.profile, 'package.json'), 'utf8'))
-    manifest.dependencies['plain-user'] = '^3.0.0'
-    original.importers['.'].dependencies['plain-user'] = { specifier: '^3.0.0', version: '3.1.0' }
+    const manifest = jsonObject(readFileSync(join(f.profile, 'package.json'), 'utf8'))
+    object(manifest, 'dependencies')['plain-user'] = '^3.0.0'
+    originalDependencies['plain-user'] = { specifier: '^3.0.0', version: '3.1.0' }
     write(join(f.profile, 'package.json'), manifest)
     write(join(f.profile, 'pnpm-lock.yaml'), original)
     const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: async request => {
       const manifestPath = join(request.cwd, 'package.json')
       const text = readFileSync(manifestPath, 'utf8')
-      const document = JSON.parse(text)
-      delete document.dependencies['plain-user']
+      const document = jsonObject(text)
+      delete object(document, 'dependencies')['plain-user']
       write(manifestPath, document)
       await graph(request)
       writeFileSync(manifestPath, text)
       write(join(request.cwd, 'node_modules', 'plain-user', 'package.json'), { name: 'plain-user', version: '3.1.0' })
-      const generated = JSON.parse(readFileSync(join(request.cwd, 'pnpm-lock.yaml'), 'utf8'))
-      generated.importers['.'].dependencies[name] = original.importers['.'].dependencies[name]
-      generated.importers['.'].dependencies['plain-user'] = original.importers['.'].dependencies['plain-user']
-      generated.packages = { ...generated.packages, ...original.packages }
-      generated.snapshots = { ...generated.snapshots, ...original.snapshots }
+      const generated = jsonObject(readFileSync(join(request.cwd, 'pnpm-lock.yaml'), 'utf8'))
+      const generatedDependencies = object(generated, 'importers', '.', 'dependencies')
+      generatedDependencies[name] = originalDependencies[name]
+      generatedDependencies['plain-user'] = originalDependencies['plain-user']
+      const generatedPackages = { ...object(generated, 'packages'), ...originalPackages }
+      const generatedSnapshots = { ...object(generated, 'snapshots'), ...originalSnapshots }
+      generated.packages = generatedPackages
+      generated.snapshots = generatedSnapshots
       if (request.args.includes('add')) {
-        if (change === 'transitive') generated.packages['leaf@3.0.0'] = { resolution: { integrity: `sha512-${Buffer.alloc(64, 2).toString('base64')}` } }
-        if (change === 'optional') generated.snapshots[key] = { ...generated.snapshots[key], optionalDependencies: {} }
-        if (change === 'peer') generated.snapshots[middle] = { ...generated.snapshots[middle], transitivePeerDependencies: ['other-peer'] }
-        if (change === 'foreign-link') generated.snapshots[key] = { ...generated.snapshots[key], dependencies: { ...generated.snapshots[key].dependencies, '@deepseek-ai/cordis': `link:${f.root.replaceAll('\\', '/')}` } }
+        if (change === 'transitive') generatedPackages['leaf@3.0.0'] = { resolution: { integrity: `sha512-${Buffer.alloc(64, 2).toString('base64')}` } }
+        if (change === 'optional') generatedSnapshots[key] = { ...object(generatedSnapshots, key), optionalDependencies: {} }
+        if (change === 'peer') generatedSnapshots[middle] = { ...object(generatedSnapshots, middle), transitivePeerDependencies: ['other-peer'] }
+        if (change === 'foreign-link') generatedSnapshots[key] = { ...object(generatedSnapshots, key), dependencies: { ...object(generatedSnapshots, key, 'dependencies'), '@deepseek-ai/cordis': `link:${f.root.replaceAll('\\', '/')}` } }
       }
       write(join(request.cwd, 'pnpm-lock.yaml'), generated)
       return { exitCode: 0 }
@@ -922,19 +961,19 @@ describe('Desktop stage-only package transactions', () => {
     const { evidence, specifier } = await seedReceipt(f, retained)
     const workspace = "# user policy stays byte-identical\npackages: ['.']\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  approved-native: true\n"
     writeFileSync(join(f.profile, 'pnpm-workspace.yaml'), workspace)
-    const originalLock = JSON.parse(readFileSync(join(f.profile, 'pnpm-lock.yaml'), 'utf8'))
+    const originalLock = jsonObject(readFileSync(join(f.profile, 'pnpm-lock.yaml'), 'utf8'))
     // Repair only the historically emitted importer separator spelling.
-    originalLock.importers['.'].dependencies[retained].specifier = specifier.replaceAll('/', '\\')
+    object(originalLock, 'importers', '.', 'dependencies', retained).specifier = specifier.replaceAll('/', '\\')
     write(join(f.profile, 'pnpm-lock.yaml'), originalLock)
     const before = inventoryDesktopRuntime(f.profile)
     const id = randomUUID()
     await f.backend.stage(id, f.mutation, new AbortController().signal)
     const candidate = join(f.transaction(id), 'profile')
-    const finalLock = load(readFileSync(join(candidate, 'pnpm-lock.yaml'), 'utf8')) as typeof originalLock
-    expect(finalLock.importers['.'].dependencies[retained]).toEqual({ specifier, version: specifier })
-    expect(finalLock.packages[`${retained}@${specifier}`]).toEqual(originalLock.packages[`${retained}@${specifier}`])
-    expect(finalLock.snapshots[`${retained}@${specifier}`]).toEqual(originalLock.snapshots[`${retained}@${specifier}`])
-    expect(JSON.parse(readFileSync(join(candidate, 'desktop-plugin-receipts.json'), 'utf8'))).toEqual({ schemaVersion: 1, receipts: { [retained]: evidence }, owners: { [retained]: 'release' } })
+    const finalLock = object(load(readFileSync(join(candidate, 'pnpm-lock.yaml'), 'utf8')))
+    expect(object(finalLock, 'importers', '.', 'dependencies')[retained]).toEqual({ specifier, version: specifier })
+    expect(object(finalLock, 'packages')[`${retained}@${specifier}`]).toEqual(object(originalLock, 'packages')[`${retained}@${specifier}`])
+    expect(object(finalLock, 'snapshots')[`${retained}@${specifier}`]).toEqual(object(originalLock, 'snapshots')[`${retained}@${specifier}`])
+    expect(jsonObject(readFileSync(join(candidate, 'desktop-plugin-receipts.json'), 'utf8'))).toEqual({ schemaVersion: 1, receipts: { [retained]: evidence }, owners: { [retained]: 'release' } })
     expect(readFileSync(join(candidate, 'pnpm-workspace.yaml'), 'utf8')).toBe(workspace)
     expect(inventoryDesktopRuntime(f.profile)).toEqual(before)
     expect(f.pnpmRunner.mock.calls.map(([request]) => request.args.includes('--frozen-lockfile'))).toEqual([true, false])
@@ -951,9 +990,9 @@ describe('Desktop stage-only package transactions', () => {
     const id = randomUUID()
     await f.backend.stage(id, { kind: 'remove', name: pluginName }, new AbortController().signal)
     const candidate = join(f.transaction(id), 'profile')
-    const store = JSON.parse(readFileSync(join(candidate, 'desktop-plugin-receipts.json'), 'utf8'))
+    const store = jsonObject(readFileSync(join(candidate, 'desktop-plugin-receipts.json'), 'utf8'))
     expect(store).toEqual({ schemaVersion: 1, receipts: { '@example/retained': kept.evidence }, owners: { '@example/retained': 'release' } })
-    expect(JSON.parse(readFileSync(join(candidate, 'package.json'), 'utf8')).dependencies).toEqual({ '@example/retained': kept.specifier })
+    expect(jsonObject(readFileSync(join(candidate, 'package.json'), 'utf8')).dependencies).toEqual({ '@example/retained': kept.specifier })
     expect(inventoryDesktopRuntime(f.profile)).toEqual(before)
   })
 
@@ -963,9 +1002,9 @@ describe('Desktop stage-only package transactions', () => {
     await seedReceipt(f, pluginName)
     const before = inventoryDesktopRuntime(f.profile)
     const runner = vi.fn(async (request: DesktopStagingPnpmRequest) => {
-      const store = JSON.parse(readFileSync(join(request.cwd, 'desktop-plugin-receipts.json'), 'utf8'))
-      expect(store.receipts[pluginName]).toBeUndefined(); expect(store.owners[pluginName]).toBeUndefined()
-      expect(store.receipts['@example/retained']).toEqual(kept.evidence)
+      const store = jsonObject(readFileSync(join(request.cwd, 'desktop-plugin-receipts.json'), 'utf8'))
+      expect(object(store, 'receipts')[pluginName]).toBeUndefined(); expect(object(store, 'owners')[pluginName]).toBeUndefined()
+      expect(object(store, 'receipts')['@example/retained']).toEqual(kept.evidence)
       return graph(request)
     })
     const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: runner })
@@ -980,8 +1019,8 @@ describe('Desktop stage-only package transactions', () => {
     const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: async request => {
       const output = await graph(request)
       if (request.args.includes('add')) {
-        const lock = JSON.parse(readFileSync(join(request.cwd, 'pnpm-lock.yaml'), 'utf8'))
-        lock.packages[`@example/retained@${retained.specifier}`].resolution.integrity = `sha512-${Buffer.alloc(64).toString('base64')}`
+        const lock = jsonObject(readFileSync(join(request.cwd, 'pnpm-lock.yaml'), 'utf8'))
+        object(lock, 'packages', `@example/retained@${retained.specifier}`, 'resolution').integrity = `sha512-${Buffer.alloc(64).toString('base64')}`
         write(join(request.cwd, 'pnpm-lock.yaml'), lock)
       }
       return output
@@ -994,7 +1033,7 @@ describe('Desktop stage-only package transactions', () => {
   it('rebuilds and mutates an offline real pnpm graph without changing retained identities or active bytes', { timeout: 180000 }, async () => {
     const f = fixture()
     const pnpm = process.env.DSH_TEST_DESKTOP_PNPM ?? join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs')
-    expect(JSON.parse(readFileSync(join(dirname(dirname(pnpm)), 'package.json'), 'utf8')).version).toBe('11.7.0')
+    expect(jsonObject(readFileSync(join(dirname(dirname(pnpm)), 'package.json'), 'utf8')).version).toBe('11.7.0')
     const runtime = { node: process.execPath, nodeBin: dirname(process.execPath), pnpm }
     const calls: DesktopStagingPnpmRequest[] = []
     const runner = async (request: DesktopStagingPnpmRequest) => {
@@ -1026,8 +1065,8 @@ describe('Desktop stage-only package transactions', () => {
     }
     await seed(join(f.transaction(first), 'profile'))
     // Simulate the deployed verified-Release inventory, not a source-lock-only installation.
-    const manifest = JSON.parse(readFileSync(join(f.profile, 'package.json'), 'utf8'))
-    const retainedSpec = manifest.dependencies[retained] as string
+    const manifest = jsonObject(readFileSync(join(f.profile, 'package.json'), 'utf8'))
+    const retainedSpec = stringValue(object(manifest, 'dependencies')[retained])
     const evidence = receipt(retained, readFileSync(join(f.profile, retainedSpec.slice(5))))
     write(join(f.profile, 'desktop-plugin-receipts.json'), { schemaVersion: 1, receipts: { [retained]: evidence }, owners: { [retained]: 'release' } })
     write(join(f.profile, 'desktop-plugin-package-locks.json'), { schemaVersion: 1, packages: {} })
@@ -1044,20 +1083,20 @@ describe('Desktop stage-only package transactions', () => {
     for (const [key, value] of Object.entries(beforeLock.packages)) expect(afterLock.packages[key]).toEqual(value)
     for (const [key, value] of Object.entries(beforeLock.snapshots)) expect(afterLock.snapshots[key]).toEqual(value)
     await seed(candidate)
-    const activeManifest = JSON.parse(readFileSync(join(f.profile, 'package.json'), 'utf8'))
-    rmSync(join(f.profile, (activeManifest.dependencies[pluginName] as string).slice(5)))
+    const activeManifest = jsonObject(readFileSync(join(f.profile, 'package.json'), 'utf8'))
+    rmSync(join(f.profile, stringValue(object(activeManifest, 'dependencies')[pluginName]).slice(5)))
     const beforeRemove = inventoryDesktopRuntime(f.profile)
     const removed = randomUUID()
     expect(await backend.stage(removed, { kind: 'remove', name: pluginName }, new AbortController().signal)).toMatchObject({ state: 'prepared' })
     expect(inventoryDesktopRuntime(f.profile)).toEqual(beforeRemove)
     expect(readFileSync(join(f.transaction(removed), 'profile', 'node_modules', retained, 'index.js'), 'utf8')).toBe(readFileSync(join(candidate, 'node_modules', retained, 'index.js'), 'utf8'))
-    expect(JSON.parse(readFileSync(join(f.transaction(removed), 'profile', 'desktop-plugin-receipts.json'), 'utf8')).owners).toEqual({ [retained]: 'release' })
+    expect(jsonObject(readFileSync(join(f.transaction(removed), 'profile', 'desktop-plugin-receipts.json'), 'utf8')).owners).toEqual({ [retained]: 'release' })
   })
 
   it('stages actual TLS registry exact/range/moving-tag updates and damaged removal without scripts or retained drift', { timeout: 180000 }, async () => {
     const f = fixture()
     const pnpm = process.env.DSH_TEST_DESKTOP_PNPM ?? join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs')
-    expect(JSON.parse(readFileSync(join(dirname(dirname(pnpm)), 'package.json'), 'utf8')).version).toBe('11.7.0')
+    expect(jsonObject(readFileSync(join(dirname(dirname(pnpm)), 'package.json'), 'utf8')).version).toBe('11.7.0')
     const runtime = { node: process.execPath, nodeBin: dirname(process.execPath), pnpm }
     const marker = join(f.root, 'registry-script-ran')
     const caFile = join(f.root, 'NONPRODUCTION-registry-ca.pem')
@@ -1089,7 +1128,8 @@ describe('Desktop stage-only package transactions', () => {
       const name = ['retained-bundle', 'registry-bundle', 'plain-dependency'].find(value => request.url === `/${value}`)
       if (request.method !== 'GET') { response.writeHead(405); response.end(); return }
       if (name !== undefined) {
-        const versions = Object.fromEntries([...packages.values()].filter(value => value.manifest.name === name).map(value => [String(value.manifest.version), {
+        const versions = Object.fromEntries([...packages.values()].filter(value => value.manifest.name === name)
+          .map(value => [String(value.manifest.version), {
           ...value.manifest, dist: { integrity: value.integrity, tarball: `${registry}/${name}/-/${name}-${value.manifest.version}.tgz` },
         }]))
         response.setHeader('content-type', 'application/json')
@@ -1115,8 +1155,8 @@ describe('Desktop stage-only package transactions', () => {
             args: request.args.some(argument => argument.startsWith('--cache-dir=')) ? request.args : [...request.args, `--cache-dir=${cache}`] })
           const add = request.args.indexOf('add')
           if (add !== -1 && request.args[add + 1]?.startsWith('registry-bundle@')) {
-            const written = JSON.parse(readFileSync(join(request.cwd, 'package.json'), 'utf8'))
-            console.info('registry selector evidence', JSON.stringify({ requested: request.args[add + 1], saved: written.dependencies['registry-bundle'] }))
+            const written = jsonObject(readFileSync(join(request.cwd, 'package.json'), 'utf8'))
+            console.info('registry selector evidence', JSON.stringify({ requested: request.args[add + 1], saved: object(written, 'dependencies')['registry-bundle'] }))
           }
           return result
         } })
@@ -1137,9 +1177,9 @@ describe('Desktop stage-only package transactions', () => {
       await backend.stage(ranged, { kind: 'install', source: { schemaVersion: 1, type: 'packageSpec', spec: 'registry-bundle@^1.0.0' }, enabled: false }, new AbortController().signal)
       const rangedInput = (await backend.readPreparedForActivation(ranged))!
       expect(rangedInput.registryTarget).toMatchObject({ requestedSpec: 'registry-bundle@^1.0.0', version: '1.1.0', packageKey: 'registry-bundle@1.1.0', registry: `${registry}/`, integrity: packages.get('registry-bundle@1.1.0')!.integrity })
-      expect(JSON.parse(readFileSync(join(rangedInput.candidateDir, 'package.json'), 'utf8')).dependencies['registry-bundle']).toBe('1.1.0')
+      expect(object(jsonObject(readFileSync(join(rangedInput.candidateDir, 'package.json'), 'utf8')), 'dependencies')['registry-bundle']).toBe('1.1.0')
       expect(rangedInput.verifiedRelease).toBeUndefined()
-      expect(JSON.parse(readFileSync(join(rangedInput.candidateDir, 'package.json'), 'utf8')).dsh.profile.bundles).toEqual(['retained-bundle'])
+      expect(object(jsonObject(readFileSync(join(rangedInput.candidateDir, 'package.json'), 'utf8')), 'dsh', 'profile').bundles).toEqual(['retained-bundle'])
       const afterLock = load(readFileSync(join(rangedInput.candidateDir, 'pnpm-lock.yaml'), 'utf8')) as typeof beforeLock
       expect(afterLock.packages['retained-bundle@1.0.0']).toEqual(beforeLock.packages['retained-bundle@1.0.0'])
       expect(afterLock.snapshots['retained-bundle@1.0.0']).toEqual(beforeLock.snapshots['retained-bundle@1.0.0'])
@@ -1160,7 +1200,7 @@ describe('Desktop stage-only package transactions', () => {
       expect(requests.filter(path => path === '/registry-bundle').length).toBeGreaterThan(metadataGets)
       const movedInput = (await backend.readPreparedForActivation(moved))!
       expect(movedInput.registryTarget?.version).toBe('1.1.0')
-      expect(JSON.parse(readFileSync(join(movedInput.candidateDir, 'package.json'), 'utf8')).dsh.profile.bundles).toEqual(['retained-bundle'])
+      expect(object(jsonObject(readFileSync(join(movedInput.candidateDir, 'package.json'), 'utf8')), 'dsh', 'profile').bundles).toEqual(['retained-bundle'])
       const stableActive = inventoryDesktopRuntime(f.profile)
       await expect(backend.stage(randomUUID(), { kind: 'install', source: { schemaVersion: 1, type: 'npmRegistry', spec: 'plain-dependency@1.0.0' } }, new AbortController().signal)).rejects.toThrow('bundle')
       expect(inventoryDesktopRuntime(f.profile)).toEqual(stableActive)
@@ -1169,13 +1209,18 @@ describe('Desktop stage-only package transactions', () => {
       const removal = randomUUID()
       await backend.stage(removal, { kind: 'remove', name: 'registry-bundle' }, new AbortController().signal)
       const removed = (await backend.readPreparedForActivation(removal))!
-      expect(JSON.parse(readFileSync(join(removed.candidateDir, 'package.json'), 'utf8')).dependencies).toEqual({ 'retained-bundle': '1.0.0' })
+      expect(jsonObject(readFileSync(join(removed.candidateDir, 'package.json'), 'utf8')).dependencies).toEqual({ 'retained-bundle': '1.0.0' })
       expect(readDesktopPluginUserIntents(removed.candidateDir).removed['registry-bundle']).toEqual({})
       expect(inventoryDesktopRuntime(f.profile)).toEqual(damaged)
       expect(existsSync(marker)).toBe(false)
       expect(requests).toContain('/registry-bundle')
       for (const call of calls) { expect(call.args[0]).toBe('pm'); expect(call.args).toContain('--ignore-scripts'); expect(call.args).toContain(`--registry=${registry}/`) }
-    } finally { await new Promise<void>((resolve, reject) => { server.close(error => { if (error) reject(error); else resolve() }); server.closeAllConnections() }) }
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => { if (error) reject(error); else resolve() })
+        server.closeAllConnections()
+      })
+    }
   })
 
   it.each(['ready', 'missing-cache', 'tampered-cache'] as const)('reconstructs a real offline transitive graph and checks relocation: %s', { timeout: 180000 }, async mode => {
@@ -1186,7 +1231,7 @@ describe('Desktop stage-only package transactions', () => {
     }
     const f = fixture()
     const pnpm = process.env.DSH_TEST_DESKTOP_PNPM ?? join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs')
-    expect(JSON.parse(readFileSync(join(dirname(dirname(pnpm)), 'package.json'), 'utf8')).version).toBe('11.7.0')
+    expect(jsonObject(readFileSync(join(dirname(dirname(pnpm)), 'package.json'), 'utf8')).version).toBe('11.7.0')
     const runtime = { node: process.execPath, nodeBin: dirname(process.execPath), pnpm }
     const home = join(f.root, 'graph-environment')
     mkdirSync(home)
@@ -1200,7 +1245,9 @@ describe('Desktop stage-only package transactions', () => {
       XDG_CONFIG_HOME: home, XDG_CACHE_HOME: home, XDG_STATE_HOME: home, CI: 'true', NO_UPDATE_NOTIFIER: '1', npm_config_update_notifier: 'false',
       NODE_EXTRA_CA_CERTS: caFile,
       NPM_CONFIG_USERCONFIG: join(home, 'user.npmrc'), NPM_CONFIG_GLOBALCONFIG: join(home, 'global.npmrc') }
-    for (const [key, value] of Object.entries(process.env)) if (/^(PATH|SYSTEMROOT|WINDIR|COMSPEC|PATHEXT|TEMP|TMP)$/iu.test(key)) env[key] = value
+    for (const [key, value] of Object.entries(process.env)) {
+      if (/^(PATH|SYSTEMROOT|WINDIR|COMSPEC|PATHEXT|TEMP|TMP)$/iu.test(key)) env[key] = value
+    }
     const workspace = "packages: ['.']\nnodeLinker: hoisted\nautoInstallPeers: false\n"
     writeFileSync(join(f.profile, 'pnpm-workspace.yaml'), workspace)
     const names = ['offline-root', 'offline-leaf', 'offline-optional']
@@ -1222,7 +1269,7 @@ describe('Desktop stage-only package transactions', () => {
       await step(`pack ${name}`, () => packDesktopSourceDirectory(runtime, source, archive, AbortSignal.timeout(60000)))
       const bytes = readFileSync(archive)
       archives[name] = bytes
-      manifests[name] = JSON.parse(readFileSync(join(source, 'package.json'), 'utf8')) as Record<string, unknown>
+      manifests[name] = jsonObject(readFileSync(join(source, 'package.json'), 'utf8'))
       const evidence = receipt(name, bytes)
       receipts[name] = evidence
       const specifier = `file:.desktop-plugin-artifacts/${evidence.artifactSha256}.tgz`
@@ -1362,7 +1409,8 @@ describe('Desktop stage-only package transactions', () => {
       const args = [...request.args, '--offline', '--config.verify-store-integrity=true', `--cache-dir=${cache}`]
       const modulesFile = join(request.cwd, 'node_modules', '.modules.yaml')
       const modules = existsSync(modulesFile) ? load(readFileSync(modulesFile, 'utf8')) as Record<string, unknown> : undefined
-      const facts = { policyMetadataServerListening: server.listening, archiveTransportEnabled: allowArchiveRequests, seedStore: storageFacts(seedStore), store: storageFacts(store), cache: storageFacts(cache),
+      const facts = { policyMetadataServerListening: server.listening, archiveTransportEnabled: allowArchiveRequests,
+        seedStore: storageFacts(seedStore), store: storageFacts(store), cache: storageFacts(cache),
         cwd: request.cwd, args, included: modules?.included, registries: modules?.registries, modulesStoreDir: modules?.storeDir }
       return step(phase, async () => {
         try {
@@ -1407,13 +1455,17 @@ describe('Desktop stage-only package transactions', () => {
     const output = execFileSync(process.execPath, ['--input-type=module', '-e',
       `const a = await import(${JSON.stringify(rootUrl)}); const b = await import(${JSON.stringify(freshUrl)}); console.log(JSON.stringify([a.value, b.fresh]));`],
     { env, encoding: 'utf8', timeout: 30000 })
-    expect(JSON.parse(output.trim())).toEqual([41, 42])
+    const observed: unknown = JSON.parse(output.trim())
+    expect(observed).toEqual([41, 42])
     const stageStore = calls[0]!.args.find(argument => argument.startsWith('--store-dir='))!
     await runOffline({ cwd: f.profile, env, signal: AbortSignal.timeout(60000), args: [...frozenArgs, stageStore] }, 'final-location frozen install')
     expect(load(readFileSync(join(f.profile, 'pnpm-lock.yaml'), 'utf8'))).toEqual(candidateLock)
     expect(postSeedMetadataRequests.length).toBeGreaterThan(0)
     } finally {
-      await new Promise<void>((resolve, reject) => { server.close(error => { if (error) reject(error); else resolve() }); server.closeAllConnections() })
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => { if (error) reject(error); else resolve() })
+        server.closeAllConnections()
+      })
       expect(postSeedArchiveRequests).toEqual([])
     }
   })
@@ -1457,16 +1509,16 @@ describe('Desktop stage-only package transactions', () => {
   })
 
   it('does not hide runner failure behind a cancellation acknowledgement', async () => {
-    const entered = deferred<void>()
-    const release = deferred<void>()
+    const entered = deferred<undefined>()
+    const release = deferred<undefined>()
     const failure = new Error('runner failed to quiesce cleanly')
-    const f = fixture({ pnpmRunner: async () => { entered.resolve(); await release.promise; throw failure } })
+    const f = fixture({ pnpmRunner: async () => { entered.resolve(undefined); await release.promise; throw failure } })
     const id = randomUUID()
-    const stage = f.backend.stage(id, f.mutation, new AbortController().signal).catch(error => error)
+    const stage = f.backend.stage(id, f.mutation, new AbortController().signal).catch((error: unknown) => error)
     await entered.promise
     const cancel = f.backend.cancel(id)
-    const observed = cancel.catch(error => error)
-    release.resolve()
+    const observed = cancel.catch((error: unknown) => error)
+    release.resolve(undefined)
     expect(await stage).toBe(failure)
     expect(await observed).toBe(failure)
   })
@@ -1484,11 +1536,11 @@ describe('Desktop stage-only package transactions', () => {
 
   it('does not acknowledge cancellation until the injected pnpm runner has quiesced', async () => {
     const entered = deferred<AbortSignal>()
-    const release = deferred<void>()
+    const release = deferred<undefined>()
     const f = fixture({ pnpmRunner: async request => { entered.resolve(request.signal); await release.promise; return { exitCode: 0 } } })
     const id = randomUUID()
     const stage = f.backend.stage(id, f.mutation, new AbortController().signal)
-    const observed = stage.catch(error => error as Error)
+    const observed = stage.catch((error: unknown) => error)
     const signal = await entered.promise
     let acknowledged = false
     const cancellation = f.backend.cancel(id).then(() => { acknowledged = true })
@@ -1496,7 +1548,7 @@ describe('Desktop stage-only package transactions', () => {
     expect(signal.aborted).toBe(true)
     expect(acknowledged).toBe(false)
     expect(existsSync(f.transaction(id))).toBe(true)
-    release.resolve()
+    release.resolve(undefined)
     expect(await observed).toBeInstanceOf(Error)
     await cancellation
     expect(existsSync(f.transaction(id))).toBe(false)
@@ -1505,14 +1557,16 @@ describe('Desktop stage-only package transactions', () => {
 
   it('cancels acquisition and does not enter pnpm after the packer stops', async () => {
     const entered = deferred<AbortSignal>()
-    const release = deferred<void>()
-    const f = fixture({ packDirectory: async (_directory, _archive, signal) => { entered.resolve(signal); await release.promise; signal.throwIfAborted() } })
+    const release = deferred<undefined>()
+    const f = fixture({ packDirectory: async (_directory, _archive, signal) => {
+      entered.resolve(signal); await release.promise; signal.throwIfAborted()
+    } })
     const abort = new AbortController()
     const id = randomUUID()
-    const stage = f.backend.stage(id, f.mutation, abort.signal).catch(error => error as Error)
+    const stage = f.backend.stage(id, f.mutation, abort.signal).catch((error: unknown) => error)
     await entered.promise
     abort.abort(new Error('acquisition cancelled'))
-    release.resolve()
+    release.resolve(undefined)
     expect(await stage).toBeInstanceOf(Error)
     expect(f.pnpmRunner).not.toHaveBeenCalled()
     expect(existsSync(f.transaction(id))).toBe(false)
@@ -1520,16 +1574,16 @@ describe('Desktop stage-only package transactions', () => {
 
   it('observes cancellation while waiting for the shared profile lease before writing staging files', async () => {
     const f = fixture()
-    const entered = deferred<void>()
-    const release = deferred<void>()
-    const lease = withProfilePackageLease(f.profile, async () => { entered.resolve(); await release.promise })
+    const entered = deferred<undefined>()
+    const release = deferred<undefined>()
+    const lease = withProfilePackageLease(f.profile, async () => { entered.resolve(undefined); await release.promise })
     await entered.promise
     const abort = new AbortController()
     const id = randomUUID()
-    const stage = f.backend.stage(id, f.mutation, abort.signal).catch(error => error as Error)
+    const stage = f.backend.stage(id, f.mutation, abort.signal).catch((error: unknown) => error)
     abort.abort(new Error('lease wait cancelled'))
     expect(existsSync(f.transaction(id))).toBe(false)
-    release.resolve()
+    release.resolve(undefined)
     await lease
     expect(await stage).toBeInstanceOf(Error)
     expect(f.packDirectory).not.toHaveBeenCalled()

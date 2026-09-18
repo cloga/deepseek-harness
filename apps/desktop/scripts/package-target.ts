@@ -279,7 +279,9 @@ function runPnpm(
 async function main(): Promise<void> {
   const invocation = parseDesktopPackageInvocation(process.argv.slice(2))
   const { target } = invocation
-  const environment = loadDesktopPackageEnvironment(target.platform, process.env, APP_ROOT, { unsigned: invocation.unsigned, arch: target.arch })
+  const environment = loadDesktopPackageEnvironment(target.platform, process.env, APP_ROOT, {
+    unsigned: invocation.unsigned, arch: target.arch,
+  })
   validateDesktopPackageEnvironment(environment, target, invocation)
   if (invocation.check) {
     process.stdout.write(`desktop package: ${target.name} local configuration valid; signing and notarization were not attempted\n`)

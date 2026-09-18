@@ -226,14 +226,14 @@ describe('DesktopManagedUpdateCoordinator', () => {
   it('rejects a manifest asset whose downloaded bytes disagree with GitHub', async () => {
     const fetch = sourceFetch()
     const original = sourceFetch()
-    fetch.mockImplementation(async input => {
-      const url = String(input)
+    fetch.mockImplementation(async (input) => {
+      const url = input instanceof Request ? input.url : input.toString()
       if (url.includes('/releases/download/')) return new Response(JSON.stringify(managedManifest({ sequence: 3 })))
       return original(input)
     })
     const f = fixture(fetch)
     await expect(f.coordinator.check(true)).resolves.toMatchObject({
-      phase: 'error', failedOperation: 'check', message: expect.stringMatching(/digest does not match/u),
+      phase: 'error', failedOperation: 'check', message: expect.stringMatching(/digest does not match/u) as unknown,
     })
     expect(f.launch).not.toHaveBeenCalled()
   })

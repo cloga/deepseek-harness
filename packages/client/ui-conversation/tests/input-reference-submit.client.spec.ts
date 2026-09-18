@@ -33,7 +33,7 @@ function chip(shell: SessionInputShell): void {
 }
 
 describe('reference submission', () => {
-  it.each(['text', 'attachment'] as const)('keeps detached %s admission in restart safety after visible input clears', async kind => {
+  it.each(['text', 'attachment'] as const)('keeps detached %s admission in restart safety after visible input clears', async (kind) => {
     const pending = Promise.withResolvers<SubmitOutcome>()
     const shell = new SessionInputShell({ actx: {} as Context, defaultSink: () => pending.promise, commandAttachments })
     const changed = vi.fn()
@@ -54,7 +54,7 @@ describe('reference submission', () => {
     } finally { pending.resolve({ kind: 'success' }); off(); shell.dispose() }
   })
 
-  it.each(['text', 'attachment'] as const)('restores rejected detached %s without publishing a safe gap', async kind => {
+  it.each(['text', 'attachment'] as const)('restores rejected detached %s without publishing a safe gap', async (kind) => {
     const pending = Promise.withResolvers<SubmitOutcome>()
     const shell = new SessionInputShell({ actx: {} as Context, defaultSink: () => pending.promise, commandAttachments })
     try {

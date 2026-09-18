@@ -52,7 +52,10 @@ function migrateProfileSettings(projectDir: string): void {
 export class DesktopProjectManager {
   private createdOnLastInitialization = false
 
-  /** True only when the last successful initialization exclusively created the profile directory; never inferred from empty dependencies. */
+  /**
+   * True only when the last successful initialization exclusively created the profile directory;
+   * never inferred from empty dependencies.
+   */
   get createdProfile(): boolean { return this.createdOnLastInitialization }
 
   /**

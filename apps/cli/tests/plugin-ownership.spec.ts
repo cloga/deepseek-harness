@@ -42,10 +42,11 @@ async function rejects(name: string, selectedHome = home, message = 'managed exc
 
 async function forwards(name: string, dir: string, selectedHome = home): Promise<void> {
   await expect(runPlugin(name, args, selectedHome)).resolves.toBe(0)
+  const anyFunction: unknown = expect.any(Function)
   expect(operation).toHaveBeenCalledExactlyOnceWith({
     profile: name, dir, installAnchor: INSTALL_ANCHOR, cwd: process.cwd(),
   }, args, {
-    execution: 'cli', outputBytes: 16384, lockWaitMs: 120000, onOutput: expect.any(Function),
+    execution: 'cli', outputBytes: 16384, lockWaitMs: 120000, onOutput: anyFunction,
   })
   expect(operation.mock.calls[0]![1]).toBe(args)
 }

@@ -58,14 +58,14 @@ function fixture() {
     if (fingerprint(path) !== expected) throw new Error('fixture tree fingerprint mismatch')
   }
   const backend: DesktopProfilePackageActivationOptions['backend'] = {
-    readPreparedForActivation: vi.fn<DesktopProfilePackageActivationOptions['backend']['readPreparedForActivation']>(async id => {
+    readPreparedForActivation: vi.fn<DesktopProfilePackageActivationOptions['backend']['readPreparedForActivation']>(async (id) => {
       expect(existsSync(`${profilePackageLeaseTarget(profile)}.lock`)).toBe(true)
       expect(id).toBe(transactionId)
       assertTree(profile, baseGraphFingerprint)
       assertTree(candidateDir, candidateFingerprint)
       return input
     }),
-    readPreparedForRecovery: vi.fn<DesktopProfilePackageActivationOptions['backend']['readPreparedForRecovery']>(async id => {
+    readPreparedForRecovery: vi.fn<DesktopProfilePackageActivationOptions['backend']['readPreparedForRecovery']>(async (id) => {
       expect(existsSync(`${profilePackageLeaseTarget(profile)}.lock`)).toBe(true)
       expect(id).toBe(transactionId)
       return input
@@ -215,7 +215,7 @@ describe('shell-only prepared package activation', () => {
     expect(f.release).toHaveBeenCalledOnce()
   })
 
-  it.each(['before-rename', 'old-moved', 'candidate-promoted'] as const)('recovers an interrupted %s layout idempotently without deleting either graph', async layout => {
+  it.each(['before-rename', 'old-moved', 'candidate-promoted'] as const)('recovers an interrupted %s layout idempotently without deleting either graph', async (layout) => {
     const f = fixture()
     await interruptedBeforeRename(f)
     if (layout !== 'before-rename') renameSync(f.profile, f.rollbackDir)
@@ -272,7 +272,7 @@ describe('shell-only prepared package activation', () => {
     expect(f.commitReceipt).toHaveBeenCalledOnce()
   })
 
-  it.each(['before-write', 'after-write'] as const)('reconciles a journal-bound %s receipt interruption only after fresh Host verification', async interruption => {
+  it.each(['before-write', 'after-write'] as const)('reconciles a journal-bound %s receipt interruption only after fresh Host verification', async (interruption) => {
     const f = fixture()
     const source: DesktopGithubReleasePluginSource = { schemaVersion: 1, type: 'githubRelease', owner: 'example', repo: 'addon',
       tag: 'v1.0.0', asset: 'addon.tgz', assetId: 2, packageName: 'addon', version: '1.0.0', size: 1,

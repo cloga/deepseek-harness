@@ -124,7 +124,9 @@ describe('Desktop runtime browser acceptance orchestration', () => {
     })
     const output = join(runtimeRoot, 'evidence')
     await smokeDesktopRuntime(runtimeRoot, process.execPath, runtime, undefined, output, 'workspace-linked')
-    const evidence = JSON.parse(readFileSync(join(output, 'neutral-fixture-evidence.json'), 'utf8'))
+    const evidence = JSON.parse(readFileSync(join(output, 'neutral-fixture-evidence.json'), 'utf8')) as {
+      runtimeDescriptorSha256: unknown
+    }
     expect(evidence).toMatchObject({ runtimeKind: 'workspace-linked', artifactIntegrityVerified: false,
       runtimeDescriptorSha256: createHash('sha256').update(bytes).digest('hex') })
     expect(evidence).not.toHaveProperty('runtimeId')

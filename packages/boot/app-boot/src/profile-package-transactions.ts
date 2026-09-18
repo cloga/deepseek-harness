@@ -116,7 +116,9 @@ export function profilePackageLeaseTarget(profile: string): string {
  * @param signal - Checked before waiting and before mutation; contention itself remains bounded by waitMs.
  * @returns Operation result after lease release.
  */
-export function withProfilePackageLease<T>(profile: string, operation: () => Promise<T>, waitMs = 120000, signal?: AbortSignal): Promise<T> {
+export function withProfilePackageLease<T>(
+  profile: string, operation: () => Promise<T>, waitMs = 120000, signal?: AbortSignal,
+): Promise<T> {
   signal?.throwIfAborted()
   return withFileLock(profilePackageLeaseTarget(profile), () => {
     signal?.throwIfAborted()

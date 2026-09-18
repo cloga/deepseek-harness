@@ -405,7 +405,7 @@ export class PluginManager extends TypertRemoteService {
       })
     }, { stage: 'install', target: spec, enabled: options?.enabled !== false }, 'install')
     /* v8 ignore next -- change() folds every failure into its result; only a lock or disposal error rejects */
-    void result.then(value => { control.outcome = value; settlement.resolve() }, error => {
+    void result.then((value) => { control.outcome = value; settlement.resolve() }, (error: unknown) => {
       control.failure = error instanceof Error ? error : new Error(messageOf(error)); settlement.resolve()
     })
     return result.finally(() => { if (requestId !== undefined) this.installs.delete(requestId) })
@@ -525,7 +525,7 @@ export class PluginManager extends TypertRemoteService {
       ...(options?.enabled === undefined ? {} : { enabled: options.enabled }),
       ...(options?.approvedBuilds === undefined ? {} : { approvedBuilds: options.approvedBuilds }),
     }, { stage: 'install', target }, control)
-    void result.then(value => { control.outcome = value; settlement.resolve() }, error => {
+    void result.then((value) => { control.outcome = value; settlement.resolve() }, (error: unknown) => {
       control.failure = error instanceof Error ? error : new Error(messageOf(error)); settlement.resolve()
     })
     return result.finally(() => { this.installs.delete(requestId) })
@@ -542,13 +542,15 @@ export class PluginManager extends TypertRemoteService {
     const task = (async (): Promise<ChangeResult> => {
       const result: ChangeResult = { ...request, changed: false, application: 'failed' }
       const signal = control === undefined ? this.abort.signal : AbortSignal.any([this.abort.signal, control.abort.signal])
+      // Cancellation can change while asynchronous validation is pending.
+      const cancelled = (): boolean => signal.aborted
       try {
-        if (signal.aborted) throw new ProfilePackageCancelledError()
+        if (cancelled()) throw new ProfilePackageCancelledError()
         const service = this.ownerContext.get('profilePackageTransactions')
         if (service?.protocolVersion !== 1) throw new Error('Launcher package staging is required but unavailable')
         parseProfileTransactionId(requestId)
         await validate?.()
-        if (signal.aborted) throw new ProfilePackageCancelledError()
+        if (cancelled()) throw new ProfilePackageCancelledError()
         const prepared = parseProfilePreparedChange(await service.stage(requestId, mutation, signal))
         if (prepared.transactionId !== requestId) throw new Error('Launcher returned another package transaction')
         if (control !== undefined) control.phase = 'applying'

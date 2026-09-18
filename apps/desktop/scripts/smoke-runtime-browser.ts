@@ -130,7 +130,7 @@ export async function smokeDesktopRuntimeBrowser(
       } finally { await session.detach() }
     }
     const failures: string[] = []
-    await browser.route('**/*', async route => {
+    await browser.route('**/*', async (route) => {
       if (new URL(route.request().url()).origin === origin) await route.continue()
       else {
         failures.push(`unexpected browser request origin: ${new URL(route.request().url()).origin}`)
@@ -138,7 +138,7 @@ export async function smokeDesktopRuntimeBrowser(
       }
     })
     const page = await browser.newPage()
-    page.on('pageerror', error => { failures.push(error.message) })
+    page.on('pageerror', (error) => { failures.push(error.message) })
     await page.goto(readyUrl, { waitUntil: 'load' })
     try {
       await assertNeutralProviderInBrowser(page, receipt, 30_000, evidenceDirectory)
@@ -150,7 +150,7 @@ export async function smokeDesktopRuntimeBrowser(
     }
     await page.close()
     const updatePage = await browser.newPage()
-    updatePage.on('pageerror', error => { failures.push(error.message) })
+    updatePage.on('pageerror', (error) => { failures.push(error.message) })
     try {
       await assertDesktopUpdateNoticeInBrowser(updatePage, origin, 30_000, evidenceDirectory)
     } finally { await updatePage.close() }

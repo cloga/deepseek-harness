@@ -32,7 +32,7 @@ describe('Desktop update task presence', () => {
     expect(await inspect('inspect')).toBe(false)
   })
 
-  it.each(['running', 'nextTurn', 'nextStep'] as const)('reports %s Agent work until it settles', async kind => {
+  it.each(['running', 'nextTurn', 'nextStep'] as const)('reports %s Agent work until it settles', async (kind) => {
     const agent = idleAgent()
     agents.push(agent)
     if (kind === 'running') agent.status = 'running'
@@ -44,7 +44,7 @@ describe('Desktop update task presence', () => {
     expect(await inspect('inspect')).toBe(false)
   })
 
-  it.each(['running', 'stopping'] as const)('reports global and Agent-owned %s jobs until terminal', async status => {
+  it.each(['running', 'stopping'] as const)('reports global and Agent-owned %s jobs until terminal', async (status) => {
     const agent = idleAgent()
     agents.push(agent)
     for (const owner of [undefined, agent]) {
