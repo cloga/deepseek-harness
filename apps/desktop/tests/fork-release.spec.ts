@@ -281,6 +281,18 @@ describe('Desktop fork release plan', () => {
     expect(evidence?.with?.path).not.toMatch(/home|userData|release-assets/u)
   })
 
+  it('binds baseline API and tag commits to independently pinned manifest bytes', () => {
+    const acquisition = readReleaseWorkflow().jobs.build!.steps
+      .find(step => step.name === 'Acquire the verified installer-upgrade baseline')?.run
+    if (acquisition === undefined) throw new Error('Baseline acquisition step is missing')
+    expect(acquisition).not.toContain('$baseline.sourceCommit')
+    const digestCheck = acquisition.indexOf('$manifestDigest -cne $baseline.manifest.sha256')
+    const commitCheck = acquisition.indexOf('$manifest.source.commit -cne $release.target_commitish')
+    expect(digestCheck).toBeGreaterThanOrEqual(0)
+    expect(commitCheck).toBeGreaterThan(digestCheck)
+    expect(acquisition).toContain('$manifest.source.commit -cne $tagSha')
+  })
+
   it('formats the source commit in release notes without an interpolated Markdown here-string', () => {
     const publish = readReleaseWorkflow().jobs.release!.steps.find(step => step.name === 'Publish reviewed release')
     expect(publish?.run).toContain("('- Source commit: `{0}`' -f $env:SOURCE_SHA)")

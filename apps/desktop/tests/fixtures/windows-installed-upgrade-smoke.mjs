@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
-import { assertUpgradeRunner, ownedUpgradePath, upgradeFileHash, verifyUpgradeRelease } from './windows-installed-upgrade-contract.mjs'
+import { assertUpgradeRunner, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeFileHash, verifyUpgradeRelease } from './windows-installed-upgrade-contract.mjs'
 import { retainPrimaryFailure } from './windows-packaged-package-acceptance.mjs'
 
 const baseline = JSON.parse(readFileSync(new URL('./windows-upgrade-baseline.json', import.meta.url), 'utf8'))
@@ -34,8 +34,10 @@ async function main() {
     assert.equal(values['expected-source'], process.env.GITHUB_SHA, 'Candidate must be the workflow checkout')
     assert.equal(plan.upstreamVersion, '0.1.6-alpha.2')
     assert.ok(plan.sequence > baseline.sequence)
-    const previous = verifyUpgradeRelease(resolve(values['baseline-directory']), {
-      manifestSha256: baseline.manifest.sha256, commit: baseline.sourceCommit,
+    const baselineDirectory = resolve(values['baseline-directory'])
+    const baselineCommit = pinnedUpgradeSourceCommit(baselineDirectory, baseline.manifest.sha256)
+    const previous = verifyUpgradeRelease(baselineDirectory, {
+      manifestSha256: baseline.manifest.sha256, commit: baselineCommit,
       version: baseline.version, upstreamVersion: baseline.upstreamVersion,
     }, managedUpdateJsonSha256)
     assert.equal(previous.manifest.sequence, baseline.sequence)

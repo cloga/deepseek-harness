@@ -7,7 +7,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { assertUpgradeRunner, ownedUpgradePath, upgradeAssetPath, upgradeFileHash, verifyUpgradeRelease } from './fixtures/windows-installed-upgrade-contract.mjs'
+import { assertUpgradeRunner, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeAssetPath, upgradeFileHash, verifyUpgradeRelease } from './fixtures/windows-installed-upgrade-contract.mjs'
 
 const hosted = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: 'C:\\runner-temp' }
 const digest = (bytes, algorithm = 'sha256', encoding = 'hex') => createHash(algorithm).update(bytes).digest(encoding)
@@ -90,6 +90,18 @@ test('exact finalized bytes and receipt bindings are accepted as inputs, not exe
   assert.throws(() => verifyUpgradeRelease(f.root, { ...f.expected, manifestSha256: '0'.repeat(64) }, jsonHash))
 })
 
+test('derives baseline source identity from raw pinned bytes and rejects substituted commits', t => {
+  const f = releaseFixture(t)
+  const rawDigest = upgradeFileHash(join(f.root, 'release.json'))
+  assert.equal(pinnedUpgradeSourceCommit(f.root, rawDigest), f.expected.commit)
+  assert.throws(() => pinnedUpgradeSourceCommit(f.root, '0'.repeat(64)))
+  const changed = JSON.parse(readFileSync(join(f.root, 'release.json'), 'utf8'))
+  changed.source.commit = 'f'.repeat(40)
+  changed.manifestSha256 = jsonHash(Object.fromEntries(Object.entries(changed).filter(([key]) => key !== 'manifestSha256')))
+  writeFileSync(join(f.root, 'release.json'), JSON.stringify(changed))
+  assert.throws(() => pinnedUpgradeSourceCommit(f.root, rawDigest), /reviewed digest/)
+})
+
 test('different source commit, product identity or silent mode is rejected', t => {
   const f = releaseFixture(t)
   assert.throws(() => verifyUpgradeRelease(f.root, { ...f.expected, commit: 'f'.repeat(40) }, jsonHash))
@@ -144,7 +156,7 @@ test('cleanup admission precedes Finish and rechecks actual registration before 
 test('reviewed baseline distinguishes raw manifest digest from internal self-hash', () => {
   const baseline = JSON.parse(readFileSync(new URL('./fixtures/windows-upgrade-baseline.json', import.meta.url), 'utf8'))
   assert.equal(baseline.tag, 'dsh-desktop-v0.1.6-alpha.1.cloga.2')
-  assert.equal(baseline.sourceCommit, '65a236bd65f2971f98b11a0efd020b8860144924')
+  assert.equal(Object.hasOwn(baseline, 'sourceCommit'), false)
   assert.equal(baseline.manifest.sha256, '724214036567ddea1d6fb79bbfd4daa6c87eada4c00022ef4b0fa9170d93ff59')
   assert.equal(baseline.installer.sha256, 'cf140d49b8df9096b52fba365066ef4eeee06eed57ca0f16c2fc319f1e5f0970')
   assert.equal(baseline.installer.bytes, 171301229)

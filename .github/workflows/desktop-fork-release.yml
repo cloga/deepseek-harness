@@ -200,13 +200,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Cannot read baseline release metadata' }
           $release = $raw | ConvertFrom-Json
           if ($release.id -ne $baseline.releaseId -or $release.tag_name -cne $baseline.tag `
-              -or $release.target_commitish -cne $baseline.sourceCommit `
+              -or $release.target_commitish -isnot [string] -or $release.target_commitish -cnotmatch '^[a-f0-9]{40}$' `
               -or $release.immutable -isnot [bool] -or $release.immutable -ne $true `
               -or $release.draft -isnot [bool] -or $release.draft -ne $false) {
             throw 'Baseline release does not match the reviewed immutable identity'
           }
           $tagSha = & gh api "repos/cloga/deepseek-harness/git/ref/tags/$($baseline.tag)" --jq .object.sha
-          if ($LASTEXITCODE -ne 0 -or $tagSha -cne $baseline.sourceCommit) { throw 'Baseline tag target differs' }
+          if ($LASTEXITCODE -ne 0 -or $tagSha -cne $release.target_commitish) { throw 'Baseline tag target differs' }
           foreach ($expected in @($baseline.manifest, $baseline.installer)) {
             $assets = @($release.assets | Where-Object { $_.name -ceq $expected.file })
             if ($assets.Count -ne 1 -or $assets[0].id -ne $expected.assetId `
@@ -228,7 +228,14 @@ jobs:
               throw 'Baseline downloaded bytes differ from the reviewed asset'
             }
           }
-          $manifest = Get-Content -LiteralPath (Join-Path $destination $baseline.manifest.file) -Raw | ConvertFrom-Json
+          $manifestBytes = [IO.File]::ReadAllBytes((Join-Path $destination $baseline.manifest.file))
+          $manifestDigest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($manifestBytes)).ToLowerInvariant()
+          if ($manifestDigest -cne $baseline.manifest.sha256) { throw 'Pinned baseline manifest changed' }
+          $manifest = [Text.Encoding]::UTF8.GetString($manifestBytes) | ConvertFrom-Json
+          if ($manifest.source.repository -cne $baseline.repository -or $manifest.source.tag -cne $baseline.tag `
+              -or $manifest.source.commit -cne $release.target_commitish -or $manifest.source.commit -cne $tagSha) {
+            throw 'Baseline source identity differs from the independently pinned manifest'
+          }
           if ($manifest.buildReceipt.file -cne 'build-receipt.json') { throw 'Unexpected baseline receipt filename' }
           $receiptHash = (Get-FileHash -LiteralPath (Join-Path $destination 'build-receipt.json') -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($receiptHash -cne $manifest.buildReceipt.sha256) { throw 'Baseline receipt bytes differ' }

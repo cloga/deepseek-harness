@@ -64,6 +64,24 @@ export function upgradeAssetPath(directory, name) {
   return join(directory, name)
 }
 
+/** Derive the baseline commit only after checking its independently pinned manifest bytes.
+ * @param {string} directory - Acquired baseline directory.
+ * @param {string} manifestSha256 - Reviewed raw manifest digest, never its self-reported hash.
+ * @returns {string} Exact source commit committed to by the pinned manifest.
+ */
+export function pinnedUpgradeSourceCommit(directory, manifestSha256) {
+  assert.match(manifestSha256, /^[a-f0-9]{64}$/)
+  const path = join(directory, 'release.json')
+  const stat = lstatSync(path)
+  assert.ok(stat.isFile() && !stat.isSymbolicLink(), 'Baseline manifest must be a regular file')
+  const bytes = readFileSync(path)
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), manifestSha256, 'Baseline manifest bytes differ from the reviewed digest')
+  const manifest = JSON.parse(bytes.toString('utf8'))
+  assert.equal(manifest.source.repository, 'cloga/deepseek-harness')
+  assert.match(manifest.source.commit, /^[a-f0-9]{40}$/)
+  return manifest.source.commit
+}
+
 /** Verify finalized installer and receipt bytes.
  * @param {string} directory - Acquired release directory.
  * @param {{commit: string, version: string, upstreamVersion: string, manifestSha256?: string}} expected - Reviewed identity.
