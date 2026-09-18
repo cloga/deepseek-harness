@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, expect, it } from 'vitest'
 import { desktopSmokeEnvironment } from '../scripts/smoke-environment.ts'
 import { createPluginProfile } from '../src/project-manager.ts'
@@ -18,6 +18,8 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 // Source tests use the official read-only generation through the declared ESM source launcher.
 // The separate argv test keeps packaged acceptance on actual runtime JavaScript without executing it here.
 const sourceLoader = pathToFileURL(createRequire(import.meta.url).resolve('tsx/esm')).href
+// The child cwd is the isolated profile, not the checkout that owns workspace source aliases.
+const sourceTsconfig = fileURLToPath(new URL('../../../tsconfig.json', import.meta.url))
 const sourceGraphCheck = `
 import { loadProfileDirectory, createProfileResolutionGeneration } from ${JSON.stringify(new URL('../../../packages/boot/app-boot/src/profile.ts', import.meta.url).href)}
 import { assertPackagedGraphInventory } from ${JSON.stringify(new URL('./fixtures/packaged-graph-inventory.mjs', import.meta.url).href)}
@@ -52,7 +54,7 @@ function fixture() {
   const environment = desktopSmokeEnvironment(home)
   const run = (env: NodeJS.ProcessEnv, plugin = 'plugin') => spawnSync(process.execPath,
     ['--import', sourceLoader, '--input-type=module', '--eval', sourceGraphCheck, profile, runtimeRoot, plugin],
-    { cwd: profile, env, encoding: 'utf8', timeout: 30_000 })
+    { cwd: profile, env: { ...env, TSX_TSCONFIG_PATH: sourceTsconfig }, encoding: 'utf8', timeout: 30_000 })
   return { profile, runtimeRoot, peer, runnerModules, environment, run }
 }
 
@@ -81,6 +83,7 @@ it('emits packaged generation inspection and carrier evidence without source-loa
   }
   expect(script).not.toContain('/src/')
   expect(script).not.toContain('tsx')
+  expect(script).not.toContain('TSX_TSCONFIG_PATH')
   expect(args).not.toContain('--import')
   expect(() => packagedGraphCheckArguments('relative-profile', runtimeRoot, ['plugin'])).toThrow('must be absolute')
   expect(() => packagedGraphCheckArguments(profile, runtimeRoot, [])).toThrow('Active plugin names are required')
