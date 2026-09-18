@@ -12,9 +12,17 @@ The [boot package group](../../packages/boot/README.md) owns launcher-provided p
 
 `BundleInfo` carries the package name, optional installed version, selected enablement, removal availability and optional resolution error.
 
-`InstallBundleOptions.enabled` defaults to true. False installs without selecting the bundle layer. `approvedBuilds` grants persistent script permission to the supplied pending package names before installation.
+`InstallBundleOptions.enabled` defaults to true. False installs without selecting the bundle layer. For ordinary in-place installation, `approvedBuilds` grants persistent script permission to the supplied pending package names before installation. Launcher-owned staging can reject unsupported script approvals; it never applies those permissions to the active profile before activation.
 
-`ChangeResult.changed` reports a disk edit independently of `application`: `applied`, `restart-required`, `overridden` or `failed`. Optional `error` carries a localizable code and external diagnostic. `packageResult` records the pnpm exit code, bounded output, truncation flag and complete diagnostic log path. `pendingBuilds` lists undecided packages across the profile; `approvedBuilds` records the names granted permission by this operation.
+`ChangeResult.changed` reports an active-profile edit independently of `application`: `applied`, `restart-required`, `prepared`, `overridden`, `failed` or `cancelled`. A `prepared` result leaves `changed` false and carries the pending transaction in `prepared`; activation requires separate shell confirmation. Optional `error` carries a localizable code and external diagnostic. `packageResult` records the pnpm exit code, bounded output, truncation flag and complete diagnostic log path. `pendingBuilds` lists undecided packages across the profile; `approvedBuilds` records the names granted permission by this operation.
+
+## Launcher-owned staging records
+
+`ProfileVerifiedReleaseSource` identifies an immutable GitHub Release asset by repository, tag, asset id, package name and version, size, SHA-256 and source commit. Optional integrity and checksum-manifest fields bind additional byte evidence. `dependencyRegistry` selects dependency resolution, not publisher trust. The shared source and prepared-result declarations are published through `@deepseek-ai/dsh-app-boot/types`.
+
+`ProfilePackageMutation` selects `install` or `remove`. Installation carries a structured source, optional bundle enablement and optional requested build approvals; removal names the package. The launcher owns source validation, supported operations and preparation, while Plugin Manager remains the user-facing entry point.
+
+`ProfilePreparedPackageChange` contains the transaction id, `prepared` state, package name, base fingerprint and preparation health. It is neither an active receipt nor evidence of a healthy running Host. Pending queries read the launcher's fixed profile; cancellation discards a stage without removing an active plugin.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 

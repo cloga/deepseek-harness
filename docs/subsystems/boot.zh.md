@@ -12,9 +12,17 @@
 
 `BundleInfo` 包含包名、可选的安装版本、组合层选择状态、删除可用性及可选的解析错误。
 
-`InstallBundleOptions.enabled` 默认为 true，false 表示安装但不选择组合包层。`approvedBuilds` 在安装前向指定的待审批包名授予持久脚本权限。
+`InstallBundleOptions.enabled` 默认为 true，false 表示安装但不选择组合包层。对于普通的原地安装，`approvedBuilds` 在安装前向指定的待审批包名授予持久脚本权限。由 launcher 持有的暂存可以拒绝不支持的脚本审批；在激活前绝不会将这些权限应用到当前启用的 profile。
 
-`ChangeResult.changed` 报告磁盘修改，独立于 `application`：`applied`、`restart-required`、`overridden` 或 `failed`。可选的 `error` 包含可本地化的错误码和外部诊断。`packageResult` 记录 pnpm 退出码、有界输出、截断标志及完整诊断日志路径。`pendingBuilds` 列出整个 profile 尚未决定的包；`approvedBuilds` 记录本次操作授予权限的包名。
+`ChangeResult.changed` 报告当前启用的 profile 的修改，独立于 `application`：`applied`、`restart-required`、`prepared`、`overridden`、`failed` 或 `cancelled`。`prepared` 结果保持 `changed` 为 false，并在 `prepared` 字段中携带待处理事务；激活需要 shell 单独确认。可选的 `error` 包含可本地化的错误码和外部诊断。`packageResult` 记录 pnpm 退出码、有界输出、截断标志及完整诊断日志路径。`pendingBuilds` 列出整个 profile 尚未决定的包；`approvedBuilds` 记录本次操作授予权限的包名。
+
+## Launcher 持有的暂存记录
+
+`ProfileVerifiedReleaseSource` 通过仓库、标签、产物 id、包名及版本、大小、SHA-256 和来源提交标识不可变的 GitHub Release 产物。可选的 integrity 及 checksum-manifest 字段绑定额外的字节证据。`dependencyRegistry` 选择依赖解析源，不代表对发布者的信任。共享的来源和暂存结果类型通过 `@deepseek-ai/dsh-app-boot/types` 发布。
+
+`ProfilePackageMutation` 选择 `install` 或 `remove`。安装携带结构化来源、可选的组合包启用状态以及可选的构建审批请求；移除则指定包名。Launcher 负责来源校验、支持的操作和暂存准备，Plugin Manager 仍是面向用户的入口。
+
+`ProfilePreparedPackageChange` 包含事务 id、`prepared` 状态、包名、基线指纹和准备阶段的健康状态。它既不是已激活收据，也不代表运行中的 Host 已健康就绪。待处理查询读取 launcher 的固定 profile；取消操作丢弃暂存变更，而不移除已激活的插件。
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
