@@ -98,16 +98,19 @@ export async function assertPackagedGraphInventory({ profile, runtimeRoot, runti
       profileFallback.set(entry.name, path)
     }
   }
+  // The descriptor owns both CLI and private Host packages; the CLI-rooted generation
+  // selects only its dependency closure. Descriptor ownership alone grants no fallback.
   for (const [name, entry] of shared) {
-    const path = installation.get(name)
-    assert(path !== undefined, `runtime generation is missing shared package ${name}`)
     assert(typeof entry.path === 'string' && !isAbsolute(entry.path) && !entry.path.includes('\\') && !entry.path.includes(':')
       && entry.path.split('/').every(part => part !== '' && part !== '.' && part !== '..'), 'Invalid shared provider path')
     const expected = realpathSync(join(installationRoot, ...entry.path.split('/')))
     assert(inside(installationRoot, expected), `shared provider ${name} escapes its runtime`)
-    assert.equal(path, expected, `runtime shared package ${name} differs from its descriptor provider`)
-    const manifest = metadata(path)
-    assert.equal(manifest.name, name)
+    const selected = installation.get(name)
+    if (selected !== undefined) {
+      assert.equal(selected, expected, `runtime shared package ${name} differs from its descriptor provider`)
+    }
+    const manifest = metadata(expected)
+    assert.equal(manifest.name, name, `runtime shared package ${name} differs from its descriptor identity`)
     assert.equal(manifest.version, entry.version, `runtime shared package ${name} differs from its descriptor`)
   }
   const queue = [...roots]

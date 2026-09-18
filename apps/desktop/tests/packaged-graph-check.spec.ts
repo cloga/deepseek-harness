@@ -6,8 +6,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, expect, it } from 'vitest'
+import { createProfileResolutionGeneration, loadProfileDirectory } from '@deepseek-ai/dsh-app-boot'
 import { desktopSmokeEnvironment } from '../scripts/smoke-environment.ts'
 import { createPluginProfile } from '../src/project-manager.ts'
+import { readDesktopRuntime, writeDesktopRuntime } from '../src/runtime-tree.ts'
 import { packagedGraphCheckArguments } from './fixtures/packaged-graph-check.ts'
 import { resolvePackagedAppBoot } from './fixtures/packaged-graph-inventory.mjs'
 import { runtimeFixture, writePackage } from './runtime-fixture.ts'
@@ -44,7 +46,18 @@ function fixture() {
   mkdirSync(home)
   const profile = join(home, 'profiles', 'desktop')
   const runtimeRoot = join(root, 'runtime')
-  runtimeFixture(runtimeRoot)
+  const runtime = runtimeFixture(runtimeRoot)
+  // The packaged Host depends on the CLI, not vice versa; both remain descriptor-owned.
+  const modules = join(runtimeRoot, 'node_modules')
+  writePackage(modules, '@deepseek-ai/dsh', {
+    dependencies: Object.fromEntries(runtime.sharedPackages
+      .filter(entry => entry.name !== '@deepseek-ai/dsh' && entry.name !== '@deepseek-ai/dsh-desktop-host')
+      .map(entry => [entry.name, entry.version])),
+  })
+  writePackage(modules, '@deepseek-ai/dsh-desktop-host', {
+    dependencies: { '@deepseek-ai/dsh': runtime.release.version },
+  })
+  writeDesktopRuntime(runtimeRoot, runtime.release, runtime.sharedPackages.map(entry => entry.name))
   createPluginProfile(profile)
   const peer = `optional-peer-${randomUUID()}`
   writePackage(join(profile, 'node_modules'), 'plugin', {
@@ -151,6 +164,70 @@ it('rejects a package manifest redirected outside its owned package directory', 
   expect(result.stdout).toContain('Package manifest must be a regular file')
 })
 
+it('validates the descriptor-owned Host without adding it to the CLI generation', async () => {
+  const { profile, runtimeRoot, environment, run } = fixture()
+  const installAnchor = join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
+  const generation = await createProfileResolutionGeneration({
+    installAnchor,
+    profile: loadProfileDirectory('graph fixture', profile, installAnchor),
+    home: dirname(dirname(profile)),
+  })
+  expect(readDesktopRuntime(runtimeRoot).sharedPackages.some(entry => entry.name === '@deepseek-ai/dsh-desktop-host')).toBe(true)
+  expect(generation.entries.some(entry => entry.name === '@deepseek-ai/dsh-desktop-host')).toBe(false)
+  expect(generation.entries.some(entry => entry.name === '@deepseek-ai/cordis' && entry.scope === 'installation')).toBe(true)
+  const result = run(environment)
+  exited(result, 0)
+  expect(JSON.parse(result.stdout)).toEqual({ valid: true })
+})
+
+it('rejects a missing descriptor-only Host package', () => {
+  const { runtimeRoot, environment, run } = fixture()
+  rmSync(join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-desktop-host'), { recursive: true })
+  const result = run(environment)
+  exited(result, 1)
+  expect(result.stdout).toContain('ENOENT')
+  expect(result.stdout).toContain('dsh-desktop-host')
+})
+
+it.each(['name', 'version'] as const)('rejects a descriptor-only Host with the wrong %s', (field) => {
+  const { runtimeRoot, environment, run } = fixture()
+  writePackage(join(runtimeRoot, 'node_modules'), '@deepseek-ai/dsh-desktop-host', {
+    [field]: field === 'name' ? 'wrong-host' : '2.0.0',
+  })
+  const result = run(environment)
+  exited(result, 1)
+  expect(result.stdout).toContain(field === 'name'
+    ? 'runtime shared package @deepseek-ai/dsh-desktop-host differs from its descriptor identity'
+    : 'runtime shared package @deepseek-ai/dsh-desktop-host differs from its descriptor')
+})
+
+it('rejects a descriptor-only Host provider that escapes the sealed runtime', () => {
+  const { runtimeRoot, runnerModules, environment, run } = fixture()
+  const host = '@deepseek-ai/dsh-desktop-host'
+  const provider = join(runtimeRoot, 'node_modules', host)
+  rmSync(provider, { recursive: true })
+  const outside = writePackage(runnerModules, host)
+  symlinkSync(outside, provider, process.platform === 'win32' ? 'junction' : 'dir')
+  const result = run(environment)
+  exited(result, 1)
+  expect(result.stdout).toContain(`shared provider ${host} escapes its runtime`)
+})
+
+it.each(['dependencies', 'peerDependencies'] as const)('does not supply a descriptor-only Host to plugin %s', (field) => {
+  const { profile, runtimeRoot, environment, run } = fixture()
+  const host = '@deepseek-ai/dsh-desktop-host'
+  writePackage(join(profile, 'node_modules'), 'plugin', { [field]: { [host]: '^1.0.0' } })
+  const absent = run(environment)
+  exited(absent, 1)
+  expect(absent.stdout).toContain(`plugin resolves ${host} outside its owned packages`)
+  const link = join(profile, 'node_modules', host)
+  mkdirSync(dirname(link), { recursive: true })
+  symlinkSync(join(runtimeRoot, 'node_modules', host), link, process.platform === 'win32' ? 'junction' : 'dir')
+  const unselected = run(environment)
+  exited(unselected, 1)
+  expect(unselected.stdout).toContain(`unselected runtime package ${host}`)
+})
+
 it('requires the exact shared provider path declared by the descriptor', () => {
   const { runtimeRoot, environment, run } = fixture()
   writePackage(join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh', 'node_modules'), '@deepseek-ai/cordis')
@@ -214,12 +291,13 @@ it('rejects an incompatible profile-owned optional peer instead of treating it a
   expect(result.stdout).toContain(`plugin requires ${peer}@^1.0.0, found 2.0.0`)
 })
 
-it('rejects a private duplicate of a runtime shared package even at the same version', () => {
+it.each(['@deepseek-ai/cordis', '@deepseek-ai/dsh-desktop-host'])('rejects a private duplicate of %s even at the same version', (name) => {
   const { profile, environment, run } = fixture()
-  writePackage(join(profile, 'node_modules'), '@deepseek-ai/cordis')
+  writePackage(join(profile, 'node_modules'), 'plugin', { peerDependencies: { [name]: '^1.0.0' } })
+  writePackage(join(profile, 'node_modules'), name)
   const result = run(environment)
   exited(result, 1)
-  expect(result.stdout).toContain('private duplicate of runtime shared package @deepseek-ai/cordis')
+  expect(result.stdout).toContain(`private duplicate of runtime shared package ${name}`)
 })
 
 it('rejects an active package link that leaves the profile', () => {

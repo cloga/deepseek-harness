@@ -2,6 +2,7 @@ import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import { DatabaseSync } from 'node:sqlite'
+import { writeSync } from 'node:fs'
 import { chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -35,16 +36,85 @@ import {
 } from '@deepseek-ai/dsh-session-query'
 
 const temporaryDirectories: string[] = []
+type TraceRoot = 'persisted' | 'stale' | 'augmented' | 'current-augmented' | 'foreign' | 'wildcard' | 'other-app'
+type TracePhase = 'temporary-path' | 'plugin-store' | 'plugin-projection' | 'plugin-persistence' | 'plugin-sqlite' | 'search'
+  | 'dispose-search' | 'dispose-persistence' | 'db-open' | 'db-query' | 'db-exec' | 'db-close' | 'rm'
+type OwnerState = 'opening' | 'open' | 'closing' | 'closed' | 'unknown'
+
+// Only these two disk cases opt in. Keep late events attached to their original case, never a global current-test label.
+class SqlitePhaseTrace {
+  private readonly started = process.hrtime.bigint()
+  private readonly owners = new Map<string, { root: TraceRoot; state: OwnerState }>()
+  private records = 0
+
+  constructor(private readonly label: 'persisted-reconcile' | 'schema-reset') {}
+
+  mark(root: TraceRoot, phase: TracePhase, event: 'start' | 'end' | 'error', owner?: string): void {
+    try {
+      if (this.records >= 256 || (owner !== undefined && owner.length > 32)) return
+      if (this.records === 255) {
+        this.records++
+        writeSync(process.stderr.fd, `SQLITE_PHASE ${JSON.stringify({ case: this.label, pid: process.pid, sequence: this.records, truncated: true })}\n`)
+        return
+      }
+      if (owner !== undefined) {
+        const key = `${root}:${owner}`
+        const opens = phase === 'plugin-sqlite' || phase === 'db-open'
+        const closes = phase === 'dispose-search' || phase === 'db-close'
+        if ((opens || closes) && (this.owners.has(key) || this.owners.size < 32)) {
+          this.owners.set(key, { root, state: event === 'error' ? 'unknown'
+            : opens ? (event === 'start' ? 'opening' : 'open') : (event === 'start' ? 'closing' : 'closed') })
+        }
+      }
+      // Logical test registrations only: these counts do not claim observation of OS handles.
+      const owners = { opening: 0, open: 0, closing: 0, closed: 0, unknown: 0 }
+      for (const entry of this.owners.values()) if (entry.root === root) owners[entry.state]++
+      const record = { case: this.label, root, phase, event, owner, pid: process.pid,
+        elapsedMs: Math.round(Number(process.hrtime.bigint() - this.started) / 1e6), sequence: ++this.records, owners }
+      const text = `SQLITE_PHASE ${JSON.stringify(record)}`
+      // Attempt the bounded write before native work, bypassing Vitest's microtask-buffered console.
+      // Existing stderr is best effort: this does not guarantee delivery or durability across a hard crash.
+      writeSync(process.stderr.fd, `${text.length < 512 ? text : `SQLITE_PHASE ${this.label} record-length-limit`}\n`)
+    } catch (_error) { /* Diagnostic bookkeeping and output must not replace a test failure. */ }
+  }
+
+  sync<T>(root: TraceRoot, phase: TracePhase, operation: () => T, owner?: string): T {
+    this.mark(root, phase, 'start', owner)
+    try {
+      const value = operation()
+      this.mark(root, phase, 'end', owner)
+      return value
+    } catch (error) {
+      this.mark(root, phase, 'error', owner)
+      throw error
+    }
+  }
+}
+
+interface TraceObservation { trace: SqlitePhaseTrace; root: TraceRoot; owner: string }
+const tracedDirectories = new Map<string, { trace: SqlitePhaseTrace; root: TraceRoot }>()
 
 afterEach(async () => {
   for (const directory of temporaryDirectories.splice(0)) {
-    await rm(directory, { recursive: true, force: true })
+    const observation = tracedDirectories.get(directory)
+    observation?.trace.mark(observation.root, 'rm', 'start')
+    try {
+      await rm(directory, { recursive: true, force: true })
+      observation?.trace.mark(observation.root, 'rm', 'end')
+      tracedDirectories.delete(directory)
+    } catch (error) {
+      observation?.trace.mark(observation.root, 'rm', 'error')
+      throw error
+    }
   }
 })
 
-async function temporaryPath(name = 'search.db'): Promise<string> {
+async function temporaryPath(name = 'search.db', observation?: Omit<TraceObservation, 'owner'>): Promise<string> {
+  observation?.trace.mark(observation.root, 'temporary-path', 'start')
   const directory = await mkdtemp(join(tmpdir(), 'dsh-session-search-'))
   temporaryDirectories.push(directory)
+  if (observation !== undefined && tracedDirectories.size < 32) tracedDirectories.set(directory, observation)
+  observation?.trace.mark(observation.root, 'temporary-path', 'end')
   return join(directory, name)
 }
 
@@ -196,11 +266,19 @@ class TestPersistence extends SessionPersistence {
   }
 }
 
-async function liveContext(config: ConstructorParameters<typeof SqliteSessionQueryEngine>[1] = { path: ':memory:' }): Promise<Context> {
+async function liveContext(
+  config: ConstructorParameters<typeof SqliteSessionQueryEngine>[1] = { path: ':memory:' }, observation?: TraceObservation,
+): Promise<Context> {
   const ctx = new Context()
+  observation?.trace.mark(observation.root, 'plugin-store', 'start')
   await ctx.plugin(SessionStore)
+  observation?.trace.mark(observation.root, 'plugin-store', 'end')
+  observation?.trace.mark(observation.root, 'plugin-projection', 'start')
   await ctx.plugin(SessionProjectionRegistry)
+  observation?.trace.mark(observation.root, 'plugin-projection', 'end')
+  observation?.trace.mark(observation.root, 'plugin-sqlite', 'start', observation.owner)
   await ctx.plugin(SqliteSessionQueryEngine, config)
+  observation?.trace.mark(observation.root, 'plugin-sqlite', 'end', observation.owner)
   return ctx
 }
 
@@ -1117,7 +1195,8 @@ describe('SQLite reconciliation and source lifecycle', () => {
   })
 
   it('preserves unchanged persisted generations while reconciling new, changed, and deleted rows', { timeout: 20_000 }, async () => {
-    const path = await temporaryPath()
+    const trace = new SqlitePhaseTrace('persisted-reconcile')
+    const path = await temporaryPath('search.db', { trace, root: 'persisted' })
     const unchanged = header('unchanged')
     const changed = header('changed')
     const deleted = header('deleted')
@@ -1127,20 +1206,37 @@ describe('SQLite reconciliation and source lifecycle', () => {
       { meta: deleted, events: messageEvents('deleted needle') },
     ])
     const first = new Context()
+    trace.mark('persisted', 'plugin-store', 'start')
     await first.plugin(SessionStore)
+    trace.mark('persisted', 'plugin-store', 'end')
+    trace.mark('persisted', 'plugin-projection', 'start')
     await first.plugin(SessionProjectionRegistry)
+    trace.mark('persisted', 'plugin-projection', 'end')
+    trace.mark('persisted', 'plugin-persistence', 'start')
     const firstPersistence = await first.plugin(TestPersistence)
+    trace.mark('persisted', 'plugin-persistence', 'end')
+    trace.mark('persisted', 'plugin-sqlite', 'start', 'first')
     const firstSearch = await first.plugin(SqliteSessionQueryEngine, { path })
+    trace.mark('persisted', 'plugin-sqlite', 'end', 'first')
+    trace.mark('persisted', 'search', 'start', 'first')
     await first.sessionQuery.searchSessions({ query: 'needle' })
+    trace.mark('persisted', 'search', 'end', 'first')
     expect(Object.fromEntries(TestPersistence.reads)).toEqual({ unchanged: 1, changed: 1, deleted: 1 })
+    trace.mark('persisted', 'search', 'start', 'first')
     await first.sessionQuery.searchSessions({ query: 'needle' })
+    trace.mark('persisted', 'search', 'end', 'first')
     expect(Object.fromEntries(TestPersistence.reads)).toEqual({ unchanged: 1, changed: 1, deleted: 1 })
+    trace.mark('persisted', 'dispose-search', 'start', 'first')
     await firstSearch.dispose()
+    trace.mark('persisted', 'dispose-search', 'end', 'first')
+    trace.mark('persisted', 'dispose-persistence', 'start')
     await firstPersistence.dispose()
+    trace.mark('persisted', 'dispose-persistence', 'end')
 
-    const beforeDb = new DatabaseSync(path)
-    const beforeRows = beforeDb.prepare('SELECT id, generation FROM persisted_sessions ORDER BY id').all() as Array<{ id: string; generation: number }>
-    beforeDb.close()
+    const beforeDb = trace.sync('persisted', 'db-open', () => new DatabaseSync(path), 'before-db')
+    const beforeRows = trace.sync('persisted', 'db-query',
+      () => beforeDb.prepare('SELECT id, generation FROM persisted_sessions ORDER BY id').all(), 'before-db') as Array<{ id: string; generation: number }>
+    trace.sync('persisted', 'db-close', () => { beforeDb.close() }, 'before-db')
     const before = new Map(beforeRows.map(row => [row.id, row.generation]))
 
     const added = header('added')
@@ -1148,11 +1244,21 @@ describe('SQLite reconciliation and source lifecycle', () => {
     TestPersistence.set({ meta: changed, events: messageEvents('changed needle') })
     TestPersistence.set({ meta: added, events: messageEvents('added needle') })
     const second = new Context()
+    trace.mark('persisted', 'plugin-store', 'start')
     await second.plugin(SessionStore)
+    trace.mark('persisted', 'plugin-store', 'end')
+    trace.mark('persisted', 'plugin-projection', 'start')
     await second.plugin(SessionProjectionRegistry)
+    trace.mark('persisted', 'plugin-projection', 'end')
+    trace.mark('persisted', 'plugin-persistence', 'start')
     const secondPersistence = await second.plugin(TestPersistence)
+    trace.mark('persisted', 'plugin-persistence', 'end')
+    trace.mark('persisted', 'plugin-sqlite', 'start', 'second')
     const secondSearch = await second.plugin(SqliteSessionQueryEngine, { path })
+    trace.mark('persisted', 'plugin-sqlite', 'end', 'second')
+    trace.mark('persisted', 'search', 'start', 'second')
     const result = await second.sessionQuery.searchSessions({ query: 'needle' })
+    trace.mark('persisted', 'search', 'end', 'second')
     expect(result.items.map(item => item.header.id).sort()).toEqual([added.id, changed.id, unchanged.id].sort())
     expect(Object.fromEntries(TestPersistence.reads)).toEqual({
       unchanged: 1,
@@ -1160,12 +1266,17 @@ describe('SQLite reconciliation and source lifecycle', () => {
       deleted: 1,
       added: 1,
     })
+    trace.mark('persisted', 'dispose-search', 'start', 'second')
     await secondSearch.dispose()
+    trace.mark('persisted', 'dispose-search', 'end', 'second')
+    trace.mark('persisted', 'dispose-persistence', 'start')
     await secondPersistence.dispose()
+    trace.mark('persisted', 'dispose-persistence', 'end')
 
-    const afterDb = new DatabaseSync(path)
-    const afterRows = afterDb.prepare('SELECT id, generation FROM persisted_sessions ORDER BY id').all() as Array<{ id: string; generation: number }>
-    afterDb.close()
+    const afterDb = trace.sync('persisted', 'db-open', () => new DatabaseSync(path), 'after-db')
+    const afterRows = trace.sync('persisted', 'db-query',
+      () => afterDb.prepare('SELECT id, generation FROM persisted_sessions ORDER BY id').all(), 'after-db') as Array<{ id: string; generation: number }>
+    trace.sync('persisted', 'db-close', () => { afterDb.close() }, 'after-db')
     const after = new Map(afterRows.map(row => [row.id, row.generation]))
     expect(after.get(unchanged.id)).toBe(before.get(unchanged.id))
     expect(after.get(changed.id)).toBeGreaterThan(before.get(changed.id)!)
@@ -1306,109 +1417,152 @@ describe('SQLite schema, cancellation, and real persistence integration', () => 
   })
 
   it('resets a recognized incompatible schema but refuses unknown or foreign tables', { timeout: 20_000 }, async () => {
-    const stalePath = await temporaryPath('stale.db')
-    const staleOwner = await liveContext({ path: stalePath })
+    const trace = new SqlitePhaseTrace('schema-reset')
+    const stalePath = await temporaryPath('stale.db', { trace, root: 'stale' })
+    const staleOwner = await liveContext({ path: stalePath }, { trace, root: 'stale', owner: 'initial' })
+    trace.mark('stale', 'db-close', 'start', 'initial')
     await (staleOwner.sessionQuery as SqliteSessionQueryEngine).close()
-    const stale = new DatabaseSync(stalePath)
-    stale.exec(`PRAGMA user_version = ${SESSION_QUERY_SQLITE_SCHEMA_VERSION - 1}`)
-    stale.close()
-    const staleCtx = await liveContext({ path: stalePath })
+    trace.mark('stale', 'db-close', 'end', 'initial')
+    const stale = trace.sync('stale', 'db-open', () => new DatabaseSync(stalePath), 'editor')
+    trace.sync('stale', 'db-exec', () => { stale.exec(`PRAGMA user_version = ${SESSION_QUERY_SQLITE_SCHEMA_VERSION - 1}`) }, 'editor')
+    trace.sync('stale', 'db-close', () => { stale.close() }, 'editor')
+    const staleCtx = await liveContext({ path: stalePath }, { trace, root: 'stale', owner: 'reopened' })
     staleCtx.sessions.create(SessionId('live'), { seed: messageEvents('needle') })
+    trace.mark('stale', 'search', 'start', 'reopened')
     await staleCtx.sessionQuery.searchSessions({ query: 'needle' })
+    trace.mark('stale', 'search', 'end', 'reopened')
+    trace.mark('stale', 'db-close', 'start', 'reopened')
     await (staleCtx.sessionQuery as SqliteSessionQueryEngine).close()
-    const rebuilt = new DatabaseSync(stalePath)
-    expect((rebuilt.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+    trace.mark('stale', 'db-close', 'end', 'reopened')
+    const rebuilt = trace.sync('stale', 'db-open', () => new DatabaseSync(stalePath), 'checker')
+    expect((trace.sync('stale', 'db-query', () => rebuilt.prepare('PRAGMA user_version').get(), 'checker') as { user_version: number }).user_version)
       .toBe(SESSION_QUERY_SQLITE_SCHEMA_VERSION)
-    rebuilt.close()
+    trace.sync('stale', 'db-close', () => { rebuilt.close() }, 'checker')
 
-    const augmentedPath = await temporaryPath('augmented.db')
-    const augmentedOwner = await liveContext({ path: augmentedPath })
+    const augmentedPath = await temporaryPath('augmented.db', { trace, root: 'augmented' })
+    const augmentedOwner = await liveContext({ path: augmentedPath }, { trace, root: 'augmented', owner: 'initial' })
+    trace.mark('augmented', 'db-close', 'start', 'initial')
     await (augmentedOwner.sessionQuery as SqliteSessionQueryEngine).close()
-    const augmented = new DatabaseSync(augmentedPath)
-    augmented.exec('CREATE TABLE unrelated(value TEXT)')
-    augmented.exec("INSERT INTO unrelated VALUES ('safe')")
-    augmented.exec('PRAGMA user_version = 999')
-    augmented.close()
+    trace.mark('augmented', 'db-close', 'end', 'initial')
+    const augmented = trace.sync('augmented', 'db-open', () => new DatabaseSync(augmentedPath), 'editor')
+    trace.sync('augmented', 'db-exec', () => { augmented.exec('CREATE TABLE unrelated(value TEXT)') }, 'editor')
+    trace.sync('augmented', 'db-exec', () => { augmented.exec("INSERT INTO unrelated VALUES ('safe')") }, 'editor')
+    trace.sync('augmented', 'db-exec', () => { augmented.exec('PRAGMA user_version = 999') }, 'editor')
+    trace.sync('augmented', 'db-close', () => { augmented.close() }, 'editor')
     const augmentedCtx = new Context()
+    trace.mark('augmented', 'plugin-store', 'start')
     await augmentedCtx.plugin(SessionStore)
+    trace.mark('augmented', 'plugin-store', 'end')
+    trace.mark('augmented', 'plugin-projection', 'start')
     await augmentedCtx.plugin(SessionProjectionRegistry)
+    trace.mark('augmented', 'plugin-projection', 'end')
+    trace.mark('augmented', 'plugin-sqlite', 'start', 'refused')
     await expect(augmentedCtx.plugin(SqliteSessionQueryEngine, { path: augmentedPath }))
       .rejects.toThrow(expectCode('SESSION_QUERY_INDEX_FAILED'))
+    trace.mark('augmented', 'plugin-sqlite', 'error', 'refused')
     expect(augmentedCtx.sessionQuery).toBeUndefined()
-    const stillAugmented = new DatabaseSync(augmentedPath)
-    expect(stillAugmented.prepare('SELECT value FROM unrelated').get()).toEqual({ value: 'safe' })
-    expect(stillAugmented.prepare('PRAGMA user_version').get()).toEqual({ user_version: 999 })
-    stillAugmented.close()
+    const stillAugmented = trace.sync('augmented', 'db-open', () => new DatabaseSync(augmentedPath), 'checker')
+    expect(trace.sync('augmented', 'db-query', () => stillAugmented.prepare('SELECT value FROM unrelated').get(), 'checker')).toEqual({ value: 'safe' })
+    expect(trace.sync('augmented', 'db-query', () => stillAugmented.prepare('PRAGMA user_version').get(), 'checker')).toEqual({ user_version: 999 })
+    trace.sync('augmented', 'db-close', () => { stillAugmented.close() }, 'checker')
 
-    const currentAugmentedPath = await temporaryPath('current-augmented.db')
-    const currentAugmentedOwner = await liveContext({ path: currentAugmentedPath })
+    const currentAugmentedPath = await temporaryPath('current-augmented.db', { trace, root: 'current-augmented' })
+    const currentAugmentedOwner = await liveContext({ path: currentAugmentedPath }, { trace, root: 'current-augmented', owner: 'initial' })
+    trace.mark('current-augmented', 'db-close', 'start', 'initial')
     await (currentAugmentedOwner.sessionQuery as SqliteSessionQueryEngine).close()
-    const currentAugmented = new DatabaseSync(currentAugmentedPath)
-    currentAugmented.exec('CREATE TABLE unrelated(value TEXT)')
-    currentAugmented.exec("INSERT INTO unrelated VALUES ('safe')")
-    currentAugmented.close()
+    trace.mark('current-augmented', 'db-close', 'end', 'initial')
+    const currentAugmented = trace.sync('current-augmented', 'db-open', () => new DatabaseSync(currentAugmentedPath), 'editor')
+    trace.sync('current-augmented', 'db-exec', () => { currentAugmented.exec('CREATE TABLE unrelated(value TEXT)') }, 'editor')
+    trace.sync('current-augmented', 'db-exec', () => { currentAugmented.exec("INSERT INTO unrelated VALUES ('safe')") }, 'editor')
+    trace.sync('current-augmented', 'db-close', () => { currentAugmented.close() }, 'editor')
     const currentAugmentedCtx = new Context()
+    trace.mark('current-augmented', 'plugin-store', 'start')
     await currentAugmentedCtx.plugin(SessionStore)
+    trace.mark('current-augmented', 'plugin-store', 'end')
+    trace.mark('current-augmented', 'plugin-projection', 'start')
     await currentAugmentedCtx.plugin(SessionProjectionRegistry)
+    trace.mark('current-augmented', 'plugin-projection', 'end')
+    trace.mark('current-augmented', 'plugin-sqlite', 'start', 'refused')
     await expect(currentAugmentedCtx.plugin(SqliteSessionQueryEngine, {
       path: currentAugmentedPath,
       journalMode: 'delete',
     })).rejects.toThrow(expectCode('SESSION_QUERY_INDEX_FAILED'))
+    trace.mark('current-augmented', 'plugin-sqlite', 'error', 'refused')
     expect(currentAugmentedCtx.sessionQuery).toBeUndefined()
-    const stillCurrentAugmented = new DatabaseSync(currentAugmentedPath)
-    expect(stillCurrentAugmented.prepare('SELECT value FROM unrelated').get()).toEqual({ value: 'safe' })
-    expect(stillCurrentAugmented.prepare('PRAGMA user_version').get())
+    const stillCurrentAugmented = trace.sync('current-augmented', 'db-open', () => new DatabaseSync(currentAugmentedPath), 'checker')
+    expect(trace.sync('current-augmented', 'db-query', () => stillCurrentAugmented.prepare('SELECT value FROM unrelated').get(), 'checker'))
+      .toEqual({ value: 'safe' })
+    expect(trace.sync('current-augmented', 'db-query', () => stillCurrentAugmented.prepare('PRAGMA user_version').get(), 'checker'))
       .toEqual({ user_version: SESSION_QUERY_SQLITE_SCHEMA_VERSION })
-    expect(stillCurrentAugmented.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
-    stillCurrentAugmented.close()
+    expect(trace.sync('current-augmented', 'db-query', () => stillCurrentAugmented.prepare('PRAGMA journal_mode').get(), 'checker'))
+      .toEqual({ journal_mode: 'wal' })
+    trace.sync('current-augmented', 'db-close', () => { stillCurrentAugmented.close() }, 'checker')
 
-    const foreignPath = await temporaryPath('foreign.db')
-    const foreign = new DatabaseSync(foreignPath)
-    foreign.exec('PRAGMA journal_mode = WAL')
-    foreign.exec('CREATE TABLE canonical(value TEXT)')
-    foreign.exec("INSERT INTO canonical VALUES ('safe')")
-    foreign.close()
+    const foreignPath = await temporaryPath('foreign.db', { trace, root: 'foreign' })
+    const foreign = trace.sync('foreign', 'db-open', () => new DatabaseSync(foreignPath), 'editor')
+    trace.sync('foreign', 'db-exec', () => { foreign.exec('PRAGMA journal_mode = WAL') }, 'editor')
+    trace.sync('foreign', 'db-exec', () => { foreign.exec('CREATE TABLE canonical(value TEXT)') }, 'editor')
+    trace.sync('foreign', 'db-exec', () => { foreign.exec("INSERT INTO canonical VALUES ('safe')") }, 'editor')
+    trace.sync('foreign', 'db-close', () => { foreign.close() }, 'editor')
     const foreignCtx = new Context()
+    trace.mark('foreign', 'plugin-store', 'start')
     await foreignCtx.plugin(SessionStore)
+    trace.mark('foreign', 'plugin-store', 'end')
+    trace.mark('foreign', 'plugin-projection', 'start')
     await foreignCtx.plugin(SessionProjectionRegistry)
+    trace.mark('foreign', 'plugin-projection', 'end')
+    trace.mark('foreign', 'plugin-sqlite', 'start', 'refused')
     await expect(foreignCtx.plugin(SqliteSessionQueryEngine, { path: foreignPath, journalMode: 'delete' }))
       .rejects.toThrow(expectCode('SESSION_QUERY_INDEX_FAILED'))
+    trace.mark('foreign', 'plugin-sqlite', 'error', 'refused')
     expect(foreignCtx.sessionQuery).toBeUndefined()
-    const stillForeign = new DatabaseSync(foreignPath)
-    expect(stillForeign.prepare('SELECT value FROM canonical').get()).toEqual({ value: 'safe' })
-    expect(stillForeign.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
-    stillForeign.close()
+    const stillForeign = trace.sync('foreign', 'db-open', () => new DatabaseSync(foreignPath), 'checker')
+    expect(trace.sync('foreign', 'db-query', () => stillForeign.prepare('SELECT value FROM canonical').get(), 'checker')).toEqual({ value: 'safe' })
+    expect(trace.sync('foreign', 'db-query', () => stillForeign.prepare('PRAGMA journal_mode').get(), 'checker')).toEqual({ journal_mode: 'wal' })
+    trace.sync('foreign', 'db-close', () => { stillForeign.close() }, 'checker')
 
-    const wildcardPath = await temporaryPath('sqlite-wildcard.db')
-    const wildcard = new DatabaseSync(wildcardPath)
-    wildcard.exec('PRAGMA journal_mode = WAL')
-    wildcard.exec('CREATE TABLE sqliteX(value TEXT)')
-    wildcard.exec("INSERT INTO sqliteX VALUES ('safe')")
-    wildcard.close()
+    const wildcardPath = await temporaryPath('sqlite-wildcard.db', { trace, root: 'wildcard' })
+    const wildcard = trace.sync('wildcard', 'db-open', () => new DatabaseSync(wildcardPath), 'editor')
+    trace.sync('wildcard', 'db-exec', () => { wildcard.exec('PRAGMA journal_mode = WAL') }, 'editor')
+    trace.sync('wildcard', 'db-exec', () => { wildcard.exec('CREATE TABLE sqliteX(value TEXT)') }, 'editor')
+    trace.sync('wildcard', 'db-exec', () => { wildcard.exec("INSERT INTO sqliteX VALUES ('safe')") }, 'editor')
+    trace.sync('wildcard', 'db-close', () => { wildcard.close() }, 'editor')
     const wildcardCtx = new Context()
+    trace.mark('wildcard', 'plugin-store', 'start')
     await wildcardCtx.plugin(SessionStore)
+    trace.mark('wildcard', 'plugin-store', 'end')
+    trace.mark('wildcard', 'plugin-projection', 'start')
     await wildcardCtx.plugin(SessionProjectionRegistry)
+    trace.mark('wildcard', 'plugin-projection', 'end')
+    trace.mark('wildcard', 'plugin-sqlite', 'start', 'refused')
     await expect(wildcardCtx.plugin(SqliteSessionQueryEngine, {
       path: wildcardPath,
       journalMode: 'delete',
     })).rejects.toThrow(expectCode('SESSION_QUERY_INDEX_FAILED'))
+    trace.mark('wildcard', 'plugin-sqlite', 'error', 'refused')
     expect(wildcardCtx.sessionQuery).toBeUndefined()
-    const stillWildcard = new DatabaseSync(wildcardPath)
-    expect(stillWildcard.prepare('SELECT value FROM sqliteX').get()).toEqual({ value: 'safe' })
-    expect(stillWildcard.prepare('PRAGMA application_id').get()).toEqual({ application_id: 0 })
-    expect(stillWildcard.prepare('PRAGMA user_version').get()).toEqual({ user_version: 0 })
-    expect(stillWildcard.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
-    stillWildcard.close()
+    const stillWildcard = trace.sync('wildcard', 'db-open', () => new DatabaseSync(wildcardPath), 'checker')
+    expect(trace.sync('wildcard', 'db-query', () => stillWildcard.prepare('SELECT value FROM sqliteX').get(), 'checker')).toEqual({ value: 'safe' })
+    expect(trace.sync('wildcard', 'db-query', () => stillWildcard.prepare('PRAGMA application_id').get(), 'checker')).toEqual({ application_id: 0 })
+    expect(trace.sync('wildcard', 'db-query', () => stillWildcard.prepare('PRAGMA user_version').get(), 'checker')).toEqual({ user_version: 0 })
+    expect(trace.sync('wildcard', 'db-query', () => stillWildcard.prepare('PRAGMA journal_mode').get(), 'checker')).toEqual({ journal_mode: 'wal' })
+    trace.sync('wildcard', 'db-close', () => { stillWildcard.close() }, 'checker')
 
-    const otherAppPath = await temporaryPath('other-app.db')
-    const otherApp = new DatabaseSync(otherAppPath)
-    otherApp.exec('PRAGMA application_id = 123')
-    otherApp.close()
+    const otherAppPath = await temporaryPath('other-app.db', { trace, root: 'other-app' })
+    const otherApp = trace.sync('other-app', 'db-open', () => new DatabaseSync(otherAppPath), 'editor')
+    trace.sync('other-app', 'db-exec', () => { otherApp.exec('PRAGMA application_id = 123') }, 'editor')
+    trace.sync('other-app', 'db-close', () => { otherApp.close() }, 'editor')
     const otherAppCtx = new Context()
+    trace.mark('other-app', 'plugin-store', 'start')
     await otherAppCtx.plugin(SessionStore)
+    trace.mark('other-app', 'plugin-store', 'end')
+    trace.mark('other-app', 'plugin-projection', 'start')
     await otherAppCtx.plugin(SessionProjectionRegistry)
+    trace.mark('other-app', 'plugin-projection', 'end')
+    trace.mark('other-app', 'plugin-sqlite', 'start', 'refused')
     await expect(otherAppCtx.plugin(SqliteSessionQueryEngine, { path: otherAppPath }))
       .rejects.toThrow(expectCode('SESSION_QUERY_INDEX_FAILED'))
+    trace.mark('other-app', 'plugin-sqlite', 'error', 'refused')
     expect(otherAppCtx.sessionQuery).toBeUndefined()
   })
 
