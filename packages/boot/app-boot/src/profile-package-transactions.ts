@@ -28,10 +28,31 @@ export interface ProfilePackageHealth {
 /** The launcher owns the stage lease and backend lifetime; no method stops its calling Host. */
 export interface ProfilePackageTransactions {
   readonly protocolVersion: 1
-  /** Request id is also the durable transaction id. A Host-facing provider acknowledges cancellation with ProfilePackageCancelledError only after cleanup; an aborted signal alone is not success. */
+  /**
+   * Prepare a durable graph without activating it. A Host-facing provider acknowledges cancellation
+   * with ProfilePackageCancelledError only after cleanup; an aborted signal alone is not success.
+   * @param requestId - Request identity, also used as the durable transaction id.
+   * @param request - Package mutation to prepare under the launcher's lease.
+   * @param signal - Cancellation request; cleanup must settle before cancellation is acknowledged.
+   * @returns Prepared graph identity, not an active receipt or runtime health observation.
+   */
   stage(requestId: string, request: ProfilePackageMutation, signal: AbortSignal): Promise<ProfilePreparedPackageChange>
+  /**
+   * Read a transaction's pending preparation state without inspecting active package health.
+   * @param transactionId - Durable transaction identity returned by staging.
+   * @returns Prepared record, or undefined when no pending stage remains.
+   */
   status(transactionId: string): Promise<ProfilePreparedPackageChange | undefined>
+  /**
+   * List pending preparations owned by the launcher's fixed profile.
+   * @returns Prepared records, without implying that any graph is active.
+   */
   listPending(): Promise<readonly ProfilePreparedPackageChange[]>
+  /**
+   * Cancel or discard a preparation through its owner without removing an active plugin.
+   * @param transactionId - Durable transaction identity to cancel.
+   * @returns Settles after the owner's cancellation cleanup has completed.
+   */
   cancel(transactionId: string): Promise<void>
 }
 
