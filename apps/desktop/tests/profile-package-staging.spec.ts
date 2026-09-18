@@ -23,7 +23,7 @@ import { createDesktopProfilePackageTransactions, type DesktopProfilePackageStag
 
 // Generated NONPRODUCTION loopback fixture material. The leaf key is INTENTIONALLY PUBLIC.
 // NEVER use these certificates/keys in production or add this CA to an OS/global trust store.
-const LOOPBACK_TEST_TLS = {"ca":"-----BEGIN CERTIFICATE-----\nMIIESTCCArGgAwIBAgIJAP7cYZ5gH1dOMA0GCSqGSIb3DQEBCwUAMEIxQDA+BgNV\nBAMTN0RTSCBOT05QUk9EVUNUSU9OIExPT1BCQUNLIFRFU1QgQ0EgLSBORVZFUiBH\nTE9CQUwgVFJVU1QwHhcNMjYwOTE3MDUxMjEwWhcNNDYwOTE3MDUxMjEwWjBCMUAw\nPgYDVQQDEzdEU0ggTk9OUFJPRFVDVElPTiBMT09QQkFDSyBURVNUIENBIC0gTkVW\nRVIgR0xPQkFMIFRSVVNUMIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA\nz+vtWbYPnVqxh361I2gKx/PiZyc4gl6qirPCJQA4+CeCPzLUSO/G+jFTfen0PV51\nJpEOaHMDjHOVeGJ39La+ycGxgA9O1zcnfxXYV4aTbYRmNw5uHQH5JYDYTte2sAS2\nIUS3JqV7bQVb3v7fbCcmLjQooMTOWYDc0ElFzenp/Na5vKp5MdB6oeeM+ose1ODE\ndTcIgK+JOtLFQt+IoR+NMX+tbdEYOXiVX8wcqjHeU4L2qYhMM04c+PsLmw4R+mzo\nzmhPBHl5TsDb/V6tTTg3vJ525UT5HLVfVkHG45PklccaUze8ADNnn+WpJdz39ZTv\nvpILO+AUg3hOYwnNSMNVgdiGU1mQvwEGHbqsxROqVOlEmII3SUO03kzV55FmOod+\neRZQNlrh3/l2tLhE7kXq75k+8VgNmcO5aKkQIWk90HICCR+Df08zdKWNFkbJiuO6\nun0LR3NeWK+K+AQUDHgnBv62YoY/k/vuM+E9OVNARk13ueuWQECKDT211tNuSppp\nAgMBAAGjQjBAMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMB0GA1Ud\nDgQWBBSS79yejlxJRcNtPFGA9OurtyNe1TANBgkqhkiG9w0BAQsFAAOCAYEAt8ub\ngHmcrwl0ezxylzg6OUb/dk99Bsj1T46HDAgzwORCLWCEVebMSaLSoorEYYLRyyZh\nemSd1a84v/AIB/uNrZcK0yKFB2j/YRI69jyJXv6FXqLrkrtZ0iAMWXZEwQufFQLG\npDDq0//UW1n8KZyMQXtYON9+0XrB4b/RCgGHMbipapO0uVpztfmcWIJd88HZRplK\n2nl/Hv2Ky0t8gqOQ0gKYtZbXtFjgh0+St7DbfjOjaY8oBjTss4QZlLf4pttorEZo\njtQRHVfr2oI3/jWxaD1J2ohLq/p6PzimvQ5OdFTae1PuZUN0pzl5rq/uAF3x6Izx\nA06AlKy1o1FkzxciLwtGVHsW28+JHOUq6UKDXTncsmHNVR0iIvXTG4UYSQovNhvi\nmyiIyw/ab98kELFXzF57K39v9dIIqH2vREBx1wobVELz3bJeTTt+rwdU6d5AKLVF\ndKMnzV/fw0KrOGWAyfIlCP7DMTZijNRzPcw8/h+KR1FCG/fbBz+CntMKCsal\n-----END CERTIFICATE-----\n","certificate":"-----BEGIN CERTIFICATE-----\nMIID3zCCAkegAwIBAgIQIcCeskfUl6WtUNYHwbJ16TANBgkqhkiG9w0BAQsFADBC\nMUAwPgYDVQQDEzdEU0ggTk9OUFJPRFVDVElPTiBMT09QQkFDSyBURVNUIENBIC0g\nTkVWRVIgR0xPQkFMIFRSVVNUMB4XDTI2MDkxNzA1MTIxMFoXDTM2MDkxNzA1MTIx\nMFowPzE9MDsGA1UEAxM0RFNIIE5PTlBST0RVQ1RJT04gTE9PUEJBQ0sgRklYVFVS\nRSAtIFBVQkxJQyBURVNUIEtFWTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoC\nggEBAMWQnLTwMa55I+aQKKZOkZA8WKx9nPj9sHeKIbEcnHr0bHtM3X0vwxig84kI\n4F6GeRxznX6i/fXCqZVdTVrxG+uMJQJ+A3dBgny09V19SKQnWozZSp6LQtfCjUp5\np7tjvdFKGojjxBrJxFgV9lepOzI+zIl9Sizsf1G5mZFuZqwcajknEARualFGL90n\nxKESwyDb0fuqsalB5URsfUj01UCV9IZdVktmWFOePSsUsV94kFQ+X8wlN6nMf130\n1QHig+/xQSvd2qE9zEHDbDD2Bgm2loLyBfqavjLq5Jo4z+Wq6YBTGlvN6aG8IbF7\nEkyb0bSkde5Z8ybcbtX5MyDVSpUCAwEAAaNUMFIwDAYDVR0TAQH/BAIwADAOBgNV\nHQ8BAf8EBAMCBaAwFgYDVR0lAQH/BAwwCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYcE\nfwAAAYIJbG9jYWxob3N0MA0GCSqGSIb3DQEBCwUAA4IBgQDKOUgPv+I1SzNUMCGs\nk9ljm9PVMa4f4XG30l1+0sW0Yu6Nd/Qa4MDduB7NiJxaOhPNRGib7HSwjUZcCLwU\nd5U7oqO4TnXYXm8ryBi/MrHzydjucyW+Umh8ldeVMV4nnrJUoLcFrAOhwIH3Moqm\niE5sn0h0cRItr1DielCpuG2Ju7qFdS+D1x93Xf4CQKN+2mf3TuCtzgBIvLWlmc8B\nJJRNBvmd7DGH15YFJlmk8B5M7rVY6CX7WHXM1KOlxH+dlxrgapha56kgP44vdMZ8\n6rZBE6pHvfsKxuApERWXd9w2MTnS61IBJ3V6x0xKvMQS2ITCu2cytuDFjZy9B3Ck\nP02U4+9xAl3RRD5HlQodtiYkY96oOflj4A/GWRIwqvivRqRuEVm+msn96hty7vKg\n9QmAmxhS4E69K3BiQTYPez4vGcId62mP9NisnHewiNfwRAG9vxsI1/aZYHfISDuF\nDQoV8P5/Rf8wapC+IVJ1xaGOBNGlG8YRHEI9jN1YPjplfYY=\n-----END CERTIFICATE-----\n","intentionallyPublicLeafKey":"-----BEGIN PRIVATE KEY-----\nMIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQDFkJy08DGueSPm\nkCimTpGQPFisfZz4/bB3iiGxHJx69Gx7TN19L8MYoPOJCOBehnkcc51+ov31wqmV\nXU1a8RvrjCUCfgN3QYJ8tPVdfUikJ1qM2Uqei0LXwo1Keae7Y73RShqI48QaycRY\nFfZXqTsyPsyJfUos7H9RuZmRbmasHGo5JxAEbmpRRi/dJ8ShEsMg29H7qrGpQeVE\nbH1I9NVAlfSGXVZLZlhTnj0rFLFfeJBUPl/MJTepzH9d9NUB4oPv8UEr3dqhPcxB\nw2ww9gYJtpaC8gX6mr4y6uSaOM/lqumAUxpbzemhvCGxexJMm9G0pHXuWfMm3G7V\n+TMg1UqVAgMBAAECggEBAI0Q7AP6Oc81ql+38X6GPUO7Aynu60WShw1j8RiwsD7P\nBiKoSMJZdzm/uwTO9L4p0JJzLzK8GRABNetz2ocj/+aZg9eauMjPWufGoihmC5dC\njlJh2PkJwOmkfhR+dzjDSEcHXZj+4QirpumqjOIc8Sq4Un2dm3gmSebF2pRQOzmK\nMcaB7bI/ebX+UU7tJVgPKwexzlw8TP6XI6te3aeVSN1ipWgzRNTYynwkeDz+qMsQ\nsicHMTubcK1r3jP5CmEgkHwgzrIO/5l643BJD25hw/vG0a07v7eJxfd0jue9Bt5q\nuYINZED+BJ4eU8gsmdSmN+AcyytNCUckugvoH1CNVaUCgYEAy7Wd6X4DrQ64u1KA\n45ybT7RidNrcnwhgPfYegVuG//kyjOjOA7TX+VjrqQ9D3U6nCMZL43A967wKsMb0\nyJqBoZ9zoXqm9hn7I4T+GsM74j+hrHmqAGL3uhnFpPzUXilJpgcUbH7g2apyMQ3G\nHP6ECBU0h2wtZw8TDCJu+unx79sCgYEA+Ec3vu0P68IS305Na80/kq2spqjAwukS\nWh4OTMVDgnMCNV+pNxHr+7msZmupJTJ+RStei+b7DLR4fyEVg3BwLTtAgaXnGtar\ngqvoTff/SX2CgtkjGb6lO/2lpKVBC7SXiHRax8JQsNz0DQ/1WRVOngOn/8BkDKtJ\nblbmD1sSsk8CgYEAiVNBxOniaIOIHR+dK9OjD7Q2uzffioYG+z4zili9RUokvcEj\nQHRlM/6xvyI/Sa2ABPZIqmY8F/KH8mvtEF64DNCFDtK0Qyt4lZVOB5SdhgQHZVIP\nPHt7LMW662JVd7S1pWsYZZuS0KmKmW8DowAg2aIR60kNwm/zEzcTQar8IgkCgYEA\nuGgFQr1HVv/GDrBVFt3S+zoeA4dR7TM6G085pdHay7hqioQr5ihck5KcN1J9xpAT\nc4K77cO48f3Vhe9n0EGiQCZDSkiUN738k8jleYvaxJYBavimdofAqKdD8d+ASZZv\n+r0ZdEeisUrbxhv1Sp5lzz29+VrHtRVALEFFDWDCqUcCgYAKpq9eBKYaAo7ju03s\nB0lVMD/H5tFIsPNIWei3aI85h4+nvlftHhwC8awGu0mt7RE8XXMbGki7ZZc8QZ+j\nlDdBc0dGEmmYOi3xflSWN0hI1J7ufH+nwhlABX+e7g9K3y+7gVL4ltjBO22m1qUx\nFBE65jxiF71uxA3tRWPnQ27AMQ==\n-----END PRIVATE KEY-----\n","metadata":{"schemaVersion":1,"purpose":"NONPRODUCTION loopback fixture ONLY; leaf key intentionally public; no OS/global trust","generatedAt":"2026-09-18T05:12:10.5619336+00:00","caSubject":"CN=DSH NONPRODUCTION LOOPBACK TEST CA - NEVER GLOBAL TRUST","caNotBefore":"2026-09-17T05:12:10.0000000Z","caNotAfter":"2046-09-17T05:12:10.0000000Z","leafSubject":"CN=DSH NONPRODUCTION LOOPBACK FIXTURE - PUBLIC TEST KEY","leafNotBefore":"2026-09-17T05:12:10.0000000Z","leafNotAfter":"2036-09-17T05:12:10.0000000Z","san":["IP:127.0.0.1","DNS:localhost"],"eku":"1.3.6.1.5.5.7.3.1 serverAuth","caCertificateSha256":"c2fa67e707a8159e69144c8b9ef2db3699119cff71d48d463b621ee07657a9ef","serverCertificateSha256":"2f5e9d202d1006967606ef3c61d399f5db09b9380920c4f314afed15b6dee4ce","intentionallyPublicLeafKeySha256":"25382e2595c1bb271f1cec85ec653e5d5151ac7feb734785da23c7f9a0553a84","generatorSha256":"7f603aa3a43e334bc56b0281dac577e6bd0fd57cc221b82ddcf7a01a0f27c905"}} as const
+const LOOPBACK_TEST_TLS = { 'ca':'-----BEGIN CERTIFICATE-----\nMIIESTCCArGgAwIBAgIJAP7cYZ5gH1dOMA0GCSqGSIb3DQEBCwUAMEIxQDA+BgNV\nBAMTN0RTSCBOT05QUk9EVUNUSU9OIExPT1BCQUNLIFRFU1QgQ0EgLSBORVZFUiBH\nTE9CQUwgVFJVU1QwHhcNMjYwOTE3MDUxMjEwWhcNNDYwOTE3MDUxMjEwWjBCMUAw\nPgYDVQQDEzdEU0ggTk9OUFJPRFVDVElPTiBMT09QQkFDSyBURVNUIENBIC0gTkVW\nRVIgR0xPQkFMIFRSVVNUMIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA\nz+vtWbYPnVqxh361I2gKx/PiZyc4gl6qirPCJQA4+CeCPzLUSO/G+jFTfen0PV51\nJpEOaHMDjHOVeGJ39La+ycGxgA9O1zcnfxXYV4aTbYRmNw5uHQH5JYDYTte2sAS2\nIUS3JqV7bQVb3v7fbCcmLjQooMTOWYDc0ElFzenp/Na5vKp5MdB6oeeM+ose1ODE\ndTcIgK+JOtLFQt+IoR+NMX+tbdEYOXiVX8wcqjHeU4L2qYhMM04c+PsLmw4R+mzo\nzmhPBHl5TsDb/V6tTTg3vJ525UT5HLVfVkHG45PklccaUze8ADNnn+WpJdz39ZTv\nvpILO+AUg3hOYwnNSMNVgdiGU1mQvwEGHbqsxROqVOlEmII3SUO03kzV55FmOod+\neRZQNlrh3/l2tLhE7kXq75k+8VgNmcO5aKkQIWk90HICCR+Df08zdKWNFkbJiuO6\nun0LR3NeWK+K+AQUDHgnBv62YoY/k/vuM+E9OVNARk13ueuWQECKDT211tNuSppp\nAgMBAAGjQjBAMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMB0GA1Ud\nDgQWBBSS79yejlxJRcNtPFGA9OurtyNe1TANBgkqhkiG9w0BAQsFAAOCAYEAt8ub\ngHmcrwl0ezxylzg6OUb/dk99Bsj1T46HDAgzwORCLWCEVebMSaLSoorEYYLRyyZh\nemSd1a84v/AIB/uNrZcK0yKFB2j/YRI69jyJXv6FXqLrkrtZ0iAMWXZEwQufFQLG\npDDq0//UW1n8KZyMQXtYON9+0XrB4b/RCgGHMbipapO0uVpztfmcWIJd88HZRplK\n2nl/Hv2Ky0t8gqOQ0gKYtZbXtFjgh0+St7DbfjOjaY8oBjTss4QZlLf4pttorEZo\njtQRHVfr2oI3/jWxaD1J2ohLq/p6PzimvQ5OdFTae1PuZUN0pzl5rq/uAF3x6Izx\nA06AlKy1o1FkzxciLwtGVHsW28+JHOUq6UKDXTncsmHNVR0iIvXTG4UYSQovNhvi\nmyiIyw/ab98kELFXzF57K39v9dIIqH2vREBx1wobVELz3bJeTTt+rwdU6d5AKLVF\ndKMnzV/fw0KrOGWAyfIlCP7DMTZijNRzPcw8/h+KR1FCG/fbBz+CntMKCsal\n-----END CERTIFICATE-----\n','certificate':'-----BEGIN CERTIFICATE-----\nMIID3zCCAkegAwIBAgIQIcCeskfUl6WtUNYHwbJ16TANBgkqhkiG9w0BAQsFADBC\nMUAwPgYDVQQDEzdEU0ggTk9OUFJPRFVDVElPTiBMT09QQkFDSyBURVNUIENBIC0g\nTkVWRVIgR0xPQkFMIFRSVVNUMB4XDTI2MDkxNzA1MTIxMFoXDTM2MDkxNzA1MTIx\nMFowPzE9MDsGA1UEAxM0RFNIIE5PTlBST0RVQ1RJT04gTE9PUEJBQ0sgRklYVFVS\nRSAtIFBVQkxJQyBURVNUIEtFWTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoC\nggEBAMWQnLTwMa55I+aQKKZOkZA8WKx9nPj9sHeKIbEcnHr0bHtM3X0vwxig84kI\n4F6GeRxznX6i/fXCqZVdTVrxG+uMJQJ+A3dBgny09V19SKQnWozZSp6LQtfCjUp5\np7tjvdFKGojjxBrJxFgV9lepOzI+zIl9Sizsf1G5mZFuZqwcajknEARualFGL90n\nxKESwyDb0fuqsalB5URsfUj01UCV9IZdVktmWFOePSsUsV94kFQ+X8wlN6nMf130\n1QHig+/xQSvd2qE9zEHDbDD2Bgm2loLyBfqavjLq5Jo4z+Wq6YBTGlvN6aG8IbF7\nEkyb0bSkde5Z8ybcbtX5MyDVSpUCAwEAAaNUMFIwDAYDVR0TAQH/BAIwADAOBgNV\nHQ8BAf8EBAMCBaAwFgYDVR0lAQH/BAwwCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYcE\nfwAAAYIJbG9jYWxob3N0MA0GCSqGSIb3DQEBCwUAA4IBgQDKOUgPv+I1SzNUMCGs\nk9ljm9PVMa4f4XG30l1+0sW0Yu6Nd/Qa4MDduB7NiJxaOhPNRGib7HSwjUZcCLwU\nd5U7oqO4TnXYXm8ryBi/MrHzydjucyW+Umh8ldeVMV4nnrJUoLcFrAOhwIH3Moqm\niE5sn0h0cRItr1DielCpuG2Ju7qFdS+D1x93Xf4CQKN+2mf3TuCtzgBIvLWlmc8B\nJJRNBvmd7DGH15YFJlmk8B5M7rVY6CX7WHXM1KOlxH+dlxrgapha56kgP44vdMZ8\n6rZBE6pHvfsKxuApERWXd9w2MTnS61IBJ3V6x0xKvMQS2ITCu2cytuDFjZy9B3Ck\nP02U4+9xAl3RRD5HlQodtiYkY96oOflj4A/GWRIwqvivRqRuEVm+msn96hty7vKg\n9QmAmxhS4E69K3BiQTYPez4vGcId62mP9NisnHewiNfwRAG9vxsI1/aZYHfISDuF\nDQoV8P5/Rf8wapC+IVJ1xaGOBNGlG8YRHEI9jN1YPjplfYY=\n-----END CERTIFICATE-----\n','intentionallyPublicLeafKey':'-----BEGIN PRIVATE KEY-----\nMIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQDFkJy08DGueSPm\nkCimTpGQPFisfZz4/bB3iiGxHJx69Gx7TN19L8MYoPOJCOBehnkcc51+ov31wqmV\nXU1a8RvrjCUCfgN3QYJ8tPVdfUikJ1qM2Uqei0LXwo1Keae7Y73RShqI48QaycRY\nFfZXqTsyPsyJfUos7H9RuZmRbmasHGo5JxAEbmpRRi/dJ8ShEsMg29H7qrGpQeVE\nbH1I9NVAlfSGXVZLZlhTnj0rFLFfeJBUPl/MJTepzH9d9NUB4oPv8UEr3dqhPcxB\nw2ww9gYJtpaC8gX6mr4y6uSaOM/lqumAUxpbzemhvCGxexJMm9G0pHXuWfMm3G7V\n+TMg1UqVAgMBAAECggEBAI0Q7AP6Oc81ql+38X6GPUO7Aynu60WShw1j8RiwsD7P\nBiKoSMJZdzm/uwTO9L4p0JJzLzK8GRABNetz2ocj/+aZg9eauMjPWufGoihmC5dC\njlJh2PkJwOmkfhR+dzjDSEcHXZj+4QirpumqjOIc8Sq4Un2dm3gmSebF2pRQOzmK\nMcaB7bI/ebX+UU7tJVgPKwexzlw8TP6XI6te3aeVSN1ipWgzRNTYynwkeDz+qMsQ\nsicHMTubcK1r3jP5CmEgkHwgzrIO/5l643BJD25hw/vG0a07v7eJxfd0jue9Bt5q\nuYINZED+BJ4eU8gsmdSmN+AcyytNCUckugvoH1CNVaUCgYEAy7Wd6X4DrQ64u1KA\n45ybT7RidNrcnwhgPfYegVuG//kyjOjOA7TX+VjrqQ9D3U6nCMZL43A967wKsMb0\nyJqBoZ9zoXqm9hn7I4T+GsM74j+hrHmqAGL3uhnFpPzUXilJpgcUbH7g2apyMQ3G\nHP6ECBU0h2wtZw8TDCJu+unx79sCgYEA+Ec3vu0P68IS305Na80/kq2spqjAwukS\nWh4OTMVDgnMCNV+pNxHr+7msZmupJTJ+RStei+b7DLR4fyEVg3BwLTtAgaXnGtar\ngqvoTff/SX2CgtkjGb6lO/2lpKVBC7SXiHRax8JQsNz0DQ/1WRVOngOn/8BkDKtJ\nblbmD1sSsk8CgYEAiVNBxOniaIOIHR+dK9OjD7Q2uzffioYG+z4zili9RUokvcEj\nQHRlM/6xvyI/Sa2ABPZIqmY8F/KH8mvtEF64DNCFDtK0Qyt4lZVOB5SdhgQHZVIP\nPHt7LMW662JVd7S1pWsYZZuS0KmKmW8DowAg2aIR60kNwm/zEzcTQar8IgkCgYEA\nuGgFQr1HVv/GDrBVFt3S+zoeA4dR7TM6G085pdHay7hqioQr5ihck5KcN1J9xpAT\nc4K77cO48f3Vhe9n0EGiQCZDSkiUN738k8jleYvaxJYBavimdofAqKdD8d+ASZZv\n+r0ZdEeisUrbxhv1Sp5lzz29+VrHtRVALEFFDWDCqUcCgYAKpq9eBKYaAo7ju03s\nB0lVMD/H5tFIsPNIWei3aI85h4+nvlftHhwC8awGu0mt7RE8XXMbGki7ZZc8QZ+j\nlDdBc0dGEmmYOi3xflSWN0hI1J7ufH+nwhlABX+e7g9K3y+7gVL4ltjBO22m1qUx\nFBE65jxiF71uxA3tRWPnQ27AMQ==\n-----END PRIVATE KEY-----\n','metadata':{ 'schemaVersion':1,'purpose':'NONPRODUCTION loopback fixture ONLY; leaf key intentionally public; no OS/global trust','generatedAt':'2026-09-18T05:12:10.5619336+00:00','caSubject':'CN=DSH NONPRODUCTION LOOPBACK TEST CA - NEVER GLOBAL TRUST','caNotBefore':'2026-09-17T05:12:10.0000000Z','caNotAfter':'2046-09-17T05:12:10.0000000Z','leafSubject':'CN=DSH NONPRODUCTION LOOPBACK FIXTURE - PUBLIC TEST KEY','leafNotBefore':'2026-09-17T05:12:10.0000000Z','leafNotAfter':'2036-09-17T05:12:10.0000000Z','san':['IP:127.0.0.1','DNS:localhost'],'eku':'1.3.6.1.5.5.7.3.1 serverAuth','caCertificateSha256':'c2fa67e707a8159e69144c8b9ef2db3699119cff71d48d463b621ee07657a9ef','serverCertificateSha256':'2f5e9d202d1006967606ef3c61d399f5db09b9380920c4f314afed15b6dee4ce','intentionallyPublicLeafKeySha256':'25382e2595c1bb271f1cec85ec653e5d5151ac7feb734785da23c7f9a0553a84','generatorSha256':'7f603aa3a43e334bc56b0281dac577e6bd0fd57cc221b82ddcf7a01a0f27c905' } } as const
 
 const roots: string[] = []
 const pluginName = '@example/staged-plugin'
@@ -180,7 +180,7 @@ async function provisioningFixture() {
   const plan = parseDesktopPluginProvisioningPlan({ schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source }] })
   const planFile = join(f.root, 'packaged-plan.json')
   write(planFile, plan)
-  const fetcher = vi.fn<typeof fetch>(async input => {
+  const fetcher = vi.fn<typeof fetch>(async (input) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     if (url.endsWith('/releases/tags/v1.0.0')) return Response.json({ id: 10, draft: false, immutable: true, tag_name: 'v1.0.0', target_commitish: source.targetCommit,
       assets: [{ id: 11, name: 'plugin.tgz', state: 'uploaded', size: bytes.length, digest: `sha256:${source.sha256}` },
@@ -241,7 +241,7 @@ describe('Desktop stage-only package transactions', () => {
     expect(f.fetcher).not.toHaveBeenCalled()
   })
 
-  it.each(['metadata', 'graph', 'selection', 'owner', 'resource', 'payload'] as const)('refuses a stale post-health qualification binding after %s changes', async change => {
+  it.each(['metadata', 'graph', 'selection', 'owner', 'resource', 'payload'] as const)('refuses a stale post-health qualification binding after %s changes', async (change) => {
     const f = await provisioningFixture()
     await seedExactPlanned(f)
     const assessment = await f.backend.assessProvisioning()
@@ -282,7 +282,7 @@ describe('Desktop stage-only package transactions', () => {
     expect(readdirSync(f.profile).some(name => name.startsWith('.provisioning-state-'))).toBe(false)
   })
 
-  it.each(['installed-override', 'disabled', 'ambiguous-legacy', 'invalid-evidence'] as const)('assesses %s without automatically reinstalling or changing user state', async reason => {
+  it.each(['installed-override', 'disabled', 'ambiguous-legacy', 'invalid-evidence'] as const)('assesses %s without automatically reinstalling or changing user state', async (reason) => {
     const f = await provisioningFixture()
     await seedExactPlanned(f)
     if (reason === 'installed-override') {
@@ -420,7 +420,7 @@ describe('Desktop stage-only package transactions', () => {
     expect(f.fetcher).not.toHaveBeenCalled()
   })
 
-  it.each(['user-owned', 'disabled', 'extra-release'] as const)('does not restage exact user ownership, disabled state or extra managed inventory: %s', async conflict => {
+  it.each(['user-owned', 'disabled', 'extra-release'] as const)('does not restage exact user ownership, disabled state or extra managed inventory: %s', async (conflict) => {
     const f = await provisioningFixture()
     if (conflict === 'extra-release') await seedReceipt(f, '@example/stale-release')
     else if (conflict === 'user-owned') await seedExactPlanned(f)
@@ -589,7 +589,7 @@ describe('Desktop stage-only package transactions', () => {
     expect(existsSync(join(f.transaction(id), 'profile'))).toBe(false)
   })
 
-  it.each(['committed', 'rolled-back'] as const)('hides %s activation history before looking for a candidate and refuses discard', async phase => {
+  it.each(['committed', 'rolled-back'] as const)('hides %s activation history before looking for a candidate and refuses discard', async (phase) => {
     const f = fixture()
     const id = randomUUID()
     await f.backend.stage(id, f.mutation, new AbortController().signal)
@@ -690,7 +690,7 @@ describe('Desktop stage-only package transactions', () => {
     await f.packDirectory(f.source, archive, new AbortController().signal)
     const bytes = readFileSync(archive)
     const evidence = receipt(pluginName, bytes)
-    const fetcher: typeof fetch = async input => {
+    const fetcher: typeof fetch = async (input) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
       if (url.endsWith('/releases/tags/v1.0.0')) return Response.json({ id: 10, draft: false, immutable: true, tag_name: 'v1.0.0', target_commitish: evidence.source.targetCommit,
         assets: [{ id: 11, name: 'plugin.tgz', state: 'uploaded', size: bytes.length, digest: `sha256:${evidence.source.sha256}` }] })
@@ -739,7 +739,7 @@ describe('Desktop stage-only package transactions', () => {
     expect(f.active()).toEqual(before)
   })
 
-  it.each(['npmRegistry', 'packageSpec'] as const)('stages a registry bundle through %s with exact distinct resolution evidence', async type => {
+  it.each(['npmRegistry', 'packageSpec'] as const)('stages a registry bundle through %s with exact distinct resolution evidence', async (type) => {
     const f = fixture()
     const runner = vi.fn((request: DesktopStagingPnpmRequest) => registryGraph(request))
     const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: runner })
@@ -764,10 +764,10 @@ describe('Desktop stage-only package transactions', () => {
     await expect(backend.status(id)).rejects.toThrow('registry resolution changed')
   })
 
-  it.each(['extra-manifest', 'wrong-version', 'unsafe-tarball', 'plain-dependency'] as const)('rejects a registry install violating bundle/manifest/resolution rules: %s', async change => {
+  it.each(['extra-manifest', 'wrong-version', 'unsafe-tarball', 'plain-dependency'] as const)('rejects a registry install violating bundle/manifest/resolution rules: %s', async (change) => {
     const f = fixture()
     const name = 'registry-bundle'
-    const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: async request => {
+    const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: async (request) => {
       const result = await registryGraph(request, change === 'wrong-version' ? '2.0.0' : '1.2.3')
       if (change === 'extra-manifest') {
         const path = join(request.cwd, 'package.json'); const value = jsonObject(readFileSync(path, 'utf8')); value.userField = { overwritten: true }; write(path, value)
@@ -835,7 +835,7 @@ describe('Desktop stage-only package transactions', () => {
     expect(planned.fetcher).not.toHaveBeenCalled()
   })
 
-  it.each(['', 'http://registry.invalid/', 'https://user:secret@registry.invalid/', 'https://registry.invalid/?token=secret', 'https://registry.invalid/#fragment', 'https://registry.invalid/\n'])('refuses unsafe or absent explicit registry policy %j', registry => {
+  it.each(['', 'http://registry.invalid/', 'https://user:secret@registry.invalid/', 'https://registry.invalid/?token=secret', 'https://registry.invalid/#fragment', 'https://registry.invalid/\n'])('refuses unsafe or absent explicit registry policy %j', (registry) => {
     expect(() => fixture({ dependencyRegistry: registry })).toThrow()
   })
 
@@ -856,7 +856,7 @@ describe('Desktop stage-only package transactions', () => {
     const id = randomUUID()
     const sync = fs.fsyncSync
     let injected = false
-    const fault = vi.spyOn(fs, 'fsyncSync').mockImplementation(fd => {
+    const fault = vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
       if (existsSync(join(f.transaction(id), 'owner.json.tmp'))) { injected = true; throw new Error('owner flush failure') }
       sync(fd)
     })
@@ -871,7 +871,7 @@ describe('Desktop stage-only package transactions', () => {
 
   it('rejects a newly built absolute internal junction before sealing PREPARED', async () => {
     const f = fixture()
-    const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: async request => {
+    const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: async (request) => {
       const result = await graph(request)
       symlinkSync(join(request.cwd, 'node_modules', pluginName), join(request.cwd, 'node_modules', 'absolute-alias'), 'junction')
       return result
@@ -896,7 +896,7 @@ describe('Desktop stage-only package transactions', () => {
     expect(await f.backend.readPreparedForActivation(id)).toBeDefined()
   })
 
-  it.each(['unchanged', 'transitive', 'optional', 'peer', 'foreign-link'] as const)('binds retained transitive, optional, peer and runtime-link closure: %s', async change => {
+  it.each(['unchanged', 'transitive', 'optional', 'peer', 'foreign-link'] as const)('binds retained transitive, optional, peer and runtime-link closure: %s', async (change) => {
     const f = fixture()
     const name = '@example/retained'
     const { specifier } = await seedReceipt(f, name, { dependencies: { middle: '^1.0.0' }, optionalDependencies: { 'optional-leaf': '~2.0.0' }, peerDependencies: { '@deepseek-ai/cordis': version } })
@@ -922,7 +922,7 @@ describe('Desktop stage-only package transactions', () => {
     originalDependencies['plain-user'] = { specifier: '^3.0.0', version: '3.1.0' }
     write(join(f.profile, 'package.json'), manifest)
     write(join(f.profile, 'pnpm-lock.yaml'), original)
-    const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: async request => {
+    const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: async (request) => {
       const manifestPath = join(request.cwd, 'package.json')
       const text = readFileSync(manifestPath, 'utf8')
       const document = jsonObject(text)
@@ -979,7 +979,7 @@ describe('Desktop stage-only package transactions', () => {
     expect(f.pnpmRunner.mock.calls.map(([request]) => request.args.includes('--frozen-lockfile'))).toEqual([true, false])
   })
 
-  it.each(['missing', 'corrupt'] as const)('removes a %s target artifact before verifying only the retained graph', async damage => {
+  it.each(['missing', 'corrupt'] as const)('removes a %s target artifact before verifying only the retained graph', async (damage) => {
     const f = fixture()
     const kept = await seedReceipt(f, '@example/retained')
     const target = await seedReceipt(f, pluginName)
@@ -1016,7 +1016,7 @@ describe('Desktop stage-only package transactions', () => {
   it('refuses an incremental mutation that changes a retained locked integrity', async () => {
     const f = fixture()
     const retained = await seedReceipt(f, '@example/retained')
-    const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: async request => {
+    const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: async (request) => {
       const output = await graph(request)
       if (request.args.includes('add')) {
         const lock = jsonObject(readFileSync(join(request.cwd, 'pnpm-lock.yaml'), 'utf8'))
@@ -1130,8 +1130,8 @@ describe('Desktop stage-only package transactions', () => {
       if (name !== undefined) {
         const versions = Object.fromEntries([...packages.values()].filter(value => value.manifest.name === name)
           .map(value => [String(value.manifest.version), {
-          ...value.manifest, dist: { integrity: value.integrity, tarball: `${registry}/${name}/-/${name}-${value.manifest.version}.tgz` },
-        }]))
+            ...value.manifest, dist: { integrity: value.integrity, tarball: `${registry}/${name}/-/${name}-${value.manifest.version}.tgz` },
+          }]))
         response.setHeader('content-type', 'application/json')
         response.end(JSON.stringify({ name, 'dist-tags': { latest: name === 'registry-bundle' ? '1.1.0' : '1.0.0', stable: name === 'registry-bundle' ? stableTag : '1.0.0' }, versions,
           time: { created: '2020-01-01T00:00:00.000Z', modified: '2020-01-01T00:00:00.000Z', '1.0.0': '2020-01-01T00:00:00.000Z', '1.1.0': '2020-01-02T00:00:00.000Z' } }))
@@ -1141,7 +1141,7 @@ describe('Desktop stage-only package transactions', () => {
       if (archive === undefined) { response.writeHead(404); response.end(); return }
       response.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': archive.bytes.length }); response.end(archive.bytes)
     })
-    await new Promise<void>(resolve => { server.listen(0, '127.0.0.1', resolve) })
+    await new Promise<void>((resolve) => { server.listen(0, '127.0.0.1', resolve) })
     const address = server.address()
     if (address === null || typeof address === 'string') throw new Error('registry fixture has no port')
     registry = `https://127.0.0.1:${address.port}`
@@ -1149,7 +1149,7 @@ describe('Desktop stage-only package transactions', () => {
       writeFileSync(join(f.profile, 'pnpm-workspace.yaml'), "packages: ['.']\nnodeLinker: hoisted\nautoInstallPeers: false\n")
       const calls: DesktopStagingPnpmRequest[] = []
       const backend = createDesktopProfilePackageTransactions({ ...f.options, dependencyRegistry: `${registry}/`, operationTimeoutMs: 60000,
-        pnpmRunner: async request => {
+        pnpmRunner: async (request) => {
           calls.push(request)
           const result = await runDesktopPackagePnpm(runtime, { ...request, env: { ...request.env, NODE_EXTRA_CA_CERTS: caFile },
             args: request.args.some(argument => argument.startsWith('--cache-dir=')) ? request.args : [...request.args, `--cache-dir=${cache}`] })
@@ -1223,7 +1223,7 @@ describe('Desktop stage-only package transactions', () => {
     }
   })
 
-  it.each(['ready', 'missing-cache', 'tampered-cache'] as const)('reconstructs a real offline transitive graph and checks relocation: %s', { timeout: 180000 }, async mode => {
+  it.each(['ready', 'missing-cache', 'tampered-cache'] as const)('reconstructs a real offline transitive graph and checks relocation: %s', { timeout: 180000 }, async (mode) => {
     const step = async <T>(phase: string, operation: () => Promise<T>): Promise<T> => {
       try { return await operation() } catch (error) {
         throw new Error(`offline transitive fixture [${phase}]: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
@@ -1307,160 +1307,160 @@ describe('Desktop stage-only package transactions', () => {
       response.writeHead(200, { 'content-type': tarball ? 'application/octet-stream' : 'application/json', 'content-length': body.length })
       response.end(request.method === 'HEAD' ? undefined : body)
     })
-    await new Promise<void>(resolve => { server.listen(0, '127.0.0.1', resolve) })
+    await new Promise<void>((resolve) => { server.listen(0, '127.0.0.1', resolve) })
     const address = server.address()
     if (address === null || typeof address === 'string') throw new Error('fixture registry has no loopback port')
     loopback = `https://127.0.0.1:${address.port}`
     try {
-    const probeTls = async (trusted: boolean) => {
-      const probeEnv = { ...env }
-      if (!trusted) delete probeEnv.NODE_EXTRA_CA_CERTS
-      const script = `try { const response = await fetch(${JSON.stringify(`${loopback}/tls-check`)}, { signal: AbortSignal.timeout(10000) }); await response.text(); console.log(response.status); } catch (error) { console.error(error.cause?.code ?? error.name); process.exitCode = 7; }`
-      return new Promise<{ code: number | string | null; stdout: string; stderr: string }>(resolve => {
-        execFile(process.execPath, ['--input-type=module', '-e', script], { env: probeEnv, encoding: 'utf8', timeout: 15000 },
-          (error, stdout, stderr) => { resolve({ code: error === null ? 0 : error.code ?? 'unknown-process-failure', stdout, stderr }) })
-      })
-    }
-    const withoutCa = await probeTls(false)
-    expect(withoutCa.code).toBe(7)
-    expect(withoutCa.stderr).toMatch(/UNABLE_TO_VERIFY_LEAF_SIGNATURE|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_GET_ISSUER_CERT_LOCALLY/u)
-    const withCa = await probeTls(true)
-    expect(withCa).toMatchObject({ code: 0, stdout: '200\n' })
-    const registry = loopback
-    for (const name of names) receipts[name] = parseDesktopPluginProvisionReceipt({ ...receipts[name], source: { ...receipts[name]!.source, dependencyRegistry: `${registry}/` } })
-    write(join(f.profile, 'desktop-plugin-receipts.json'), { schemaVersion: 1, receipts: { 'offline-root': receipts['offline-root'] }, owners: { 'offline-root': 'release' } })
-    const seedStore = join(f.root, 'seed-store')
-    const seedCache = join(f.root, 'seed-cache')
-    const common = ['--prod', '--ignore-scripts', '--ignore-pnpmfile', '--pm-on-fail=ignore', '--config.auto-install-peers=false', '--config.verify-store-integrity=true']
-    const prefix = ['pm', `--config.userconfig=${join(home, 'user.npmrc')}`, `--config.globalconfig=${join(home, 'global.npmrc')}`]
-    await step('actual HTTPS loopback registry seed', () => runDesktopPackagePnpm(runtime, { cwd: f.profile, env, signal: AbortSignal.timeout(60000), args: [
-      ...prefix, 'install', '--no-frozen-lockfile', ...common, `--registry=${registry}/`, `--store-dir=${seedStore}`, `--cache-dir=${seedCache}`,
-    ] }))
-    allowArchiveRequests = false
-    expect(requested).toContain('/offline-leaf')
-    expect(requested).toContain(tarPath('offline-leaf'))
-    // Actual pnpm generated these registry IDs, lockfile and SQLite/CAFS bytes under this same HTTPS origin.
-    // No verdict cache is forged, no TLS policy is disabled, and no URI/source projection is used.
-    // --offline constrains package bytes; pnpm11 policy metadata GETs remain permitted only to this owned loopback server.
-    const prepareCache = (cache: string): void => {
-      for (const flavor of ['metadata', 'metadata-full', 'metadata-full-filtered']) for (const name of ['offline-leaf', 'offline-optional']) {
-        const file = join(cache, 'v11', flavor, new URL(registry).host.replace(':', '+'), `${name}.jsonl`)
-        mkdirSync(dirname(file), { recursive: true })
-        writeFileSync(file, `${JSON.stringify({ modified: publicationTime })}\n${JSON.stringify(metadata(name, registry))}`)
+      const probeTls = async (trusted: boolean) => {
+        const probeEnv = { ...env }
+        if (!trusted) delete probeEnv.NODE_EXTRA_CA_CERTS
+        const script = `try { const response = await fetch(${JSON.stringify(`${loopback}/tls-check`)}, { signal: AbortSignal.timeout(10000) }); await response.text(); console.log(response.status); } catch (error) { console.error(error.cause?.code ?? error.name); process.exitCode = 7; }`
+        return new Promise<{ code: number | string | null; stdout: string; stderr: string }>((resolve) => {
+          execFile(process.execPath, ['--input-type=module', '-e', script], { env: probeEnv, encoding: 'utf8', timeout: 15000 },
+            (error, stdout, stderr) => { resolve({ code: error === null ? 0 : error.code ?? 'unknown-process-failure', stdout, stderr }) })
+        })
       }
-    }
-    const populated = new Set<string>([seedStore])
-    const storageFacts = (directory: string) => {
-      let files = 0
-      let bytes = 0
-      const indexes: Array<{ path: string; bytes: number; keys?: string[]; error?: string }> = []
-      const visit = (path: string): void => {
-        if (!existsSync(path)) return
-        for (const entry of readdirSync(path, { withFileTypes: true })) {
-          const child = join(path, entry.name)
-          if (entry.isSymbolicLink()) continue
-          if (entry.isDirectory()) visit(child)
-          else if (entry.isFile()) {
-            const size = fs.statSync(child).size
-            files++; bytes += size
-            if (entry.name === 'index.db') {
-              const index: typeof indexes[number] = { path: child.slice(directory.length), bytes: size }
-              let database: DatabaseSync | undefined
-              try {
-                database = new DatabaseSync(child, { readOnly: true })
-                index.keys = database.prepare('SELECT key FROM package_index ORDER BY key LIMIT 12').all().map(row => String(row.key))
-              } catch (error) { index.error = (error instanceof Error ? error.message : String(error)).slice(0, 256) }
-              finally { database?.close() }
-              indexes.push(index)
-            }
-          }
+      const withoutCa = await probeTls(false)
+      expect(withoutCa.code).toBe(7)
+      expect(withoutCa.stderr).toMatch(/UNABLE_TO_VERIFY_LEAF_SIGNATURE|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_GET_ISSUER_CERT_LOCALLY/u)
+      const withCa = await probeTls(true)
+      expect(withCa).toMatchObject({ code: 0, stdout: '200\n' })
+      const registry = loopback
+      for (const name of names) receipts[name] = parseDesktopPluginProvisionReceipt({ ...receipts[name], source: { ...receipts[name]!.source, dependencyRegistry: `${registry}/` } })
+      write(join(f.profile, 'desktop-plugin-receipts.json'), { schemaVersion: 1, receipts: { 'offline-root': receipts['offline-root'] }, owners: { 'offline-root': 'release' } })
+      const seedStore = join(f.root, 'seed-store')
+      const seedCache = join(f.root, 'seed-cache')
+      const common = ['--prod', '--ignore-scripts', '--ignore-pnpmfile', '--pm-on-fail=ignore', '--config.auto-install-peers=false', '--config.verify-store-integrity=true']
+      const prefix = ['pm', `--config.userconfig=${join(home, 'user.npmrc')}`, `--config.globalconfig=${join(home, 'global.npmrc')}`]
+      await step('actual HTTPS loopback registry seed', () => runDesktopPackagePnpm(runtime, { cwd: f.profile, env, signal: AbortSignal.timeout(60000), args: [
+        ...prefix, 'install', '--no-frozen-lockfile', ...common, `--registry=${registry}/`, `--store-dir=${seedStore}`, `--cache-dir=${seedCache}`,
+      ] }))
+      allowArchiveRequests = false
+      expect(requested).toContain('/offline-leaf')
+      expect(requested).toContain(tarPath('offline-leaf'))
+      // Actual pnpm generated these registry IDs, lockfile and SQLite/CAFS bytes under this same HTTPS origin.
+      // No verdict cache is forged, no TLS policy is disabled, and no URI/source projection is used.
+      // --offline constrains package bytes; pnpm11 policy metadata GETs remain permitted only to this owned loopback server.
+      const prepareCache = (cache: string): void => {
+        for (const flavor of ['metadata', 'metadata-full', 'metadata-full-filtered']) for (const name of ['offline-leaf', 'offline-optional']) {
+          const file = join(cache, 'v11', flavor, new URL(registry).host.replace(':', '+'), `${name}.jsonl`)
+          mkdirSync(dirname(file), { recursive: true })
+          writeFileSync(file, `${JSON.stringify({ modified: publicationTime })}\n${JSON.stringify(metadata(name, registry))}`)
         }
       }
-      visit(directory)
-      return { files, bytes, indexes }
-    }
-    const runOffline = async (request: DesktopStagingPnpmRequest, phase: string, damage = false) => {
-      const store = request.args.find(argument => argument.startsWith('--store-dir='))?.slice('--store-dir='.length)
-      if (store === undefined || !store.startsWith(f.root)) throw new Error('fixture store escapes owned temporary directory')
-      if (!populated.has(store)) {
-        // Copy the entire quiescent private store, including SQLite sidecars and CAFS; never copy a live database or only its index.
-        if (damage && mode === 'missing-cache') mkdirSync(store, { recursive: true })
-        else cpSync(seedStore, store, { recursive: true })
-        populated.add(store)
-        if (damage && mode === 'tampered-cache') {
-          let changed = false
-          const visit = (directory: string): void => {
-            for (const entry of readdirSync(directory, { withFileTypes: true })) {
-              const path = join(directory, entry.name)
-              if (entry.isSymbolicLink()) continue
-              if (entry.isDirectory()) visit(path)
-              else if (entry.isFile() && readFileSync(path).equals(Buffer.from('export const value = 41;\n'))) {
-                writeFileSync(path, 'tampered cached fixture bytes\n'); changed = true
+      const populated = new Set<string>([seedStore])
+      const storageFacts = (directory: string) => {
+        let files = 0
+        let bytes = 0
+        const indexes: Array<{ path: string; bytes: number; keys?: string[]; error?: string }> = []
+        const visit = (path: string): void => {
+          if (!existsSync(path)) return
+          for (const entry of readdirSync(path, { withFileTypes: true })) {
+            const child = join(path, entry.name)
+            if (entry.isSymbolicLink()) continue
+            if (entry.isDirectory()) visit(child)
+            else if (entry.isFile()) {
+              const size = fs.statSync(child).size
+              files++; bytes += size
+              if (entry.name === 'index.db') {
+                const index: typeof indexes[number] = { path: child.slice(directory.length), bytes: size }
+                let database: DatabaseSync | undefined
+                try {
+                  database = new DatabaseSync(child, { readOnly: true })
+                  index.keys = database.prepare('SELECT key FROM package_index ORDER BY key LIMIT 12').all().map(row => String(row.key))
+                } catch (error) { index.error = (error instanceof Error ? error.message : String(error)).slice(0, 256) }
+                finally { database?.close() }
+                indexes.push(index)
               }
             }
           }
-          visit(store)
-          expect(changed).toBe(true)
         }
+        visit(directory)
+        return { files, bytes, indexes }
       }
-      const cache = join(String(request.env.HOME), 'offline-registry-cache')
-      if (!cache.startsWith(f.root)) throw new Error('fixture metadata cache escapes its owned directory')
-      prepareCache(cache)
-      const args = [...request.args, '--offline', '--config.verify-store-integrity=true', `--cache-dir=${cache}`]
-      const modulesFile = join(request.cwd, 'node_modules', '.modules.yaml')
-      const modules = existsSync(modulesFile) ? load(readFileSync(modulesFile, 'utf8')) as Record<string, unknown> : undefined
-      const facts = { policyMetadataServerListening: server.listening, archiveTransportEnabled: allowArchiveRequests,
-        seedStore: storageFacts(seedStore), store: storageFacts(store), cache: storageFacts(cache),
-        cwd: request.cwd, args, included: modules?.included, registries: modules?.registries, modulesStoreDir: modules?.storeDir }
-      return step(phase, async () => {
-        try {
-          return await runDesktopPackagePnpm(runtime, { ...request, env: { ...request.env, CI: 'true', NO_UPDATE_NOTIFIER: '1', npm_config_update_notifier: 'false', NODE_EXTRA_CA_CERTS: caFile }, args })
-        } catch (error) {
-          throw new Error(`${error instanceof Error ? error.message : String(error)}\nOwned fixture facts: ${JSON.stringify(facts)}`, { cause: error })
+      const runOffline = async (request: DesktopStagingPnpmRequest, phase: string, damage = false) => {
+        const store = request.args.find(argument => argument.startsWith('--store-dir='))?.slice('--store-dir='.length)
+        if (store === undefined || !store.startsWith(f.root)) throw new Error('fixture store escapes owned temporary directory')
+        if (!populated.has(store)) {
+        // Copy the entire quiescent private store, including SQLite sidecars and CAFS; never copy a live database or only its index.
+          if (damage && mode === 'missing-cache') mkdirSync(store, { recursive: true })
+          else cpSync(seedStore, store, { recursive: true })
+          populated.add(store)
+          if (damage && mode === 'tampered-cache') {
+            let changed = false
+            const visit = (directory: string): void => {
+              for (const entry of readdirSync(directory, { withFileTypes: true })) {
+                const path = join(directory, entry.name)
+                if (entry.isSymbolicLink()) continue
+                if (entry.isDirectory()) visit(path)
+                else if (entry.isFile() && readFileSync(path).equals(Buffer.from('export const value = 41;\n'))) {
+                  writeFileSync(path, 'tampered cached fixture bytes\n'); changed = true
+                }
+              }
+            }
+            visit(store)
+            expect(changed).toBe(true)
+          }
         }
-      })
-    }
-    const frozenArgs = [...prefix, 'install', '--frozen-lockfile', ...common, `--registry=${registry}/`]
-    await runOffline({ cwd: f.profile, env, signal: AbortSignal.timeout(60000), args: [...frozenArgs, `--store-dir=${seedStore}`] }, 'initial offline frozen reconstruction')
-    const initial = load(readFileSync(join(f.profile, 'pnpm-lock.yaml'), 'utf8')) as { packages: Record<string, unknown>; snapshots: Record<string, unknown> }
-    const before = inventoryDesktopRuntime(f.profile)
-    write(join(f.source, 'package.json'), { name: pluginName, version: '1.0.0', type: 'module', main: './index.js', files: ['index.js', 'cordis.patch.yml'], dsh: { bundle: { patch: './cordis.patch.yml' } } })
-    writeFileSync(join(f.source, 'index.js'), 'export const fresh = 42;\n')
-    const calls: DesktopStagingPnpmRequest[] = []
-    const backend = createDesktopProfilePackageTransactions({ ...f.options, dependencyRegistry: `${registry}/`, operationTimeoutMs: 60000,
-      pnpmRunner: request => {
-        calls.push(request)
-        return runOffline(request, request.args.includes('add') ? 'staged incremental add' : 'staged frozen reconstruction', true)
-      },
-      packDirectory: (directory, archive, signal) => step('new source pack', () => packDesktopSourceDirectory(runtime, directory, archive, signal)) })
-    const id = randomUUID()
-    const staged = backend.stage(id, f.mutation, new AbortController().signal)
-    if (mode !== 'ready') {
-      await expect(staged).rejects.toThrow(/staged frozen reconstruction[\s\S]*(?:offline|integrity|store)/iu)
+        const cache = join(String(request.env.HOME), 'offline-registry-cache')
+        if (!cache.startsWith(f.root)) throw new Error('fixture metadata cache escapes its owned directory')
+        prepareCache(cache)
+        const args = [...request.args, '--offline', '--config.verify-store-integrity=true', `--cache-dir=${cache}`]
+        const modulesFile = join(request.cwd, 'node_modules', '.modules.yaml')
+        const modules = existsSync(modulesFile) ? load(readFileSync(modulesFile, 'utf8')) as Record<string, unknown> : undefined
+        const facts = { policyMetadataServerListening: server.listening, archiveTransportEnabled: allowArchiveRequests,
+          seedStore: storageFacts(seedStore), store: storageFacts(store), cache: storageFacts(cache),
+          cwd: request.cwd, args, included: modules?.included, registries: modules?.registries, modulesStoreDir: modules?.storeDir }
+        return step(phase, async () => {
+          try {
+            return await runDesktopPackagePnpm(runtime, { ...request, env: { ...request.env, CI: 'true', NO_UPDATE_NOTIFIER: '1', npm_config_update_notifier: 'false', NODE_EXTRA_CA_CERTS: caFile }, args })
+          } catch (error) {
+            throw new Error(`${error instanceof Error ? error.message : String(error)}\nOwned fixture facts: ${JSON.stringify(facts)}`, { cause: error })
+          }
+        })
+      }
+      const frozenArgs = [...prefix, 'install', '--frozen-lockfile', ...common, `--registry=${registry}/`]
+      await runOffline({ cwd: f.profile, env, signal: AbortSignal.timeout(60000), args: [...frozenArgs, `--store-dir=${seedStore}`] }, 'initial offline frozen reconstruction')
+      const initial = load(readFileSync(join(f.profile, 'pnpm-lock.yaml'), 'utf8')) as { packages: Record<string, unknown>; snapshots: Record<string, unknown> }
+      const before = inventoryDesktopRuntime(f.profile)
+      write(join(f.source, 'package.json'), { name: pluginName, version: '1.0.0', type: 'module', main: './index.js', files: ['index.js', 'cordis.patch.yml'], dsh: { bundle: { patch: './cordis.patch.yml' } } })
+      writeFileSync(join(f.source, 'index.js'), 'export const fresh = 42;\n')
+      const calls: DesktopStagingPnpmRequest[] = []
+      const backend = createDesktopProfilePackageTransactions({ ...f.options, dependencyRegistry: `${registry}/`, operationTimeoutMs: 60000,
+        pnpmRunner: (request) => {
+          calls.push(request)
+          return runOffline(request, request.args.includes('add') ? 'staged incremental add' : 'staged frozen reconstruction', true)
+        },
+        packDirectory: (directory, archive, signal) => step('new source pack', () => packDesktopSourceDirectory(runtime, directory, archive, signal)) })
+      const id = randomUUID()
+      const staged = backend.stage(id, f.mutation, new AbortController().signal)
+      if (mode !== 'ready') {
+        await expect(staged).rejects.toThrow(/staged frozen reconstruction[\s\S]*(?:offline|integrity|store)/iu)
+        expect(inventoryDesktopRuntime(f.profile)).toEqual(before)
+        expect(await backend.status(id)).toBeUndefined()
+        return
+      }
+      expect(await staged).toMatchObject({ state: 'prepared', health: 'pending' })
       expect(inventoryDesktopRuntime(f.profile)).toEqual(before)
-      expect(await backend.status(id)).toBeUndefined()
-      return
-    }
-    expect(await staged).toMatchObject({ state: 'prepared', health: 'pending' })
-    expect(inventoryDesktopRuntime(f.profile)).toEqual(before)
-    const input = (await backend.readPreparedForActivation(id))!
-    const candidateLock = load(readFileSync(join(input.candidateDir, 'pnpm-lock.yaml'), 'utf8')) as typeof initial
-    for (const [key, value] of Object.entries(initial.packages)) expect(candidateLock.packages[key]).toEqual(value)
-    for (const [key, value] of Object.entries(initial.snapshots)) expect(candidateLock.snapshots[key]).toEqual(value)
-    // Move only the disposable test profile. Neither the staging engine nor this test touches any running application.
-    renameSync(f.profile, input.rollbackDir); renameSync(input.candidateDir, f.profile)
-    expect(await backend.verifyActivationTree(id, 'active')).toMatchObject({ prepared: input.prepared })
-    const rootUrl = pathToFileURL(join(f.profile, 'node_modules', 'offline-root', 'index.js')).href
-    const freshUrl = pathToFileURL(join(f.profile, 'node_modules', pluginName, 'index.js')).href
-    const output = execFileSync(process.execPath, ['--input-type=module', '-e',
-      `const a = await import(${JSON.stringify(rootUrl)}); const b = await import(${JSON.stringify(freshUrl)}); console.log(JSON.stringify([a.value, b.fresh]));`],
-    { env, encoding: 'utf8', timeout: 30000 })
-    const observed: unknown = JSON.parse(output.trim())
-    expect(observed).toEqual([41, 42])
-    const stageStore = calls[0]!.args.find(argument => argument.startsWith('--store-dir='))!
-    await runOffline({ cwd: f.profile, env, signal: AbortSignal.timeout(60000), args: [...frozenArgs, stageStore] }, 'final-location frozen install')
-    expect(load(readFileSync(join(f.profile, 'pnpm-lock.yaml'), 'utf8'))).toEqual(candidateLock)
-    expect(postSeedMetadataRequests.length).toBeGreaterThan(0)
+      const input = (await backend.readPreparedForActivation(id))!
+      const candidateLock = load(readFileSync(join(input.candidateDir, 'pnpm-lock.yaml'), 'utf8')) as typeof initial
+      for (const [key, value] of Object.entries(initial.packages)) expect(candidateLock.packages[key]).toEqual(value)
+      for (const [key, value] of Object.entries(initial.snapshots)) expect(candidateLock.snapshots[key]).toEqual(value)
+      // Move only the disposable test profile. Neither the staging engine nor this test touches any running application.
+      renameSync(f.profile, input.rollbackDir); renameSync(input.candidateDir, f.profile)
+      expect(await backend.verifyActivationTree(id, 'active')).toMatchObject({ prepared: input.prepared })
+      const rootUrl = pathToFileURL(join(f.profile, 'node_modules', 'offline-root', 'index.js')).href
+      const freshUrl = pathToFileURL(join(f.profile, 'node_modules', pluginName, 'index.js')).href
+      const output = execFileSync(process.execPath, ['--input-type=module', '-e',
+        `const a = await import(${JSON.stringify(rootUrl)}); const b = await import(${JSON.stringify(freshUrl)}); console.log(JSON.stringify([a.value, b.fresh]));`],
+      { env, encoding: 'utf8', timeout: 30000 })
+      const observed: unknown = JSON.parse(output.trim())
+      expect(observed).toEqual([41, 42])
+      const stageStore = calls[0]!.args.find(argument => argument.startsWith('--store-dir='))!
+      await runOffline({ cwd: f.profile, env, signal: AbortSignal.timeout(60000), args: [...frozenArgs, stageStore] }, 'final-location frozen install')
+      expect(load(readFileSync(join(f.profile, 'pnpm-lock.yaml'), 'utf8'))).toEqual(candidateLock)
+      expect(postSeedMetadataRequests.length).toBeGreaterThan(0)
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => { if (error) reject(error); else resolve() })
@@ -1537,7 +1537,7 @@ describe('Desktop stage-only package transactions', () => {
   it('does not acknowledge cancellation until the injected pnpm runner has quiesced', async () => {
     const entered = deferred<AbortSignal>()
     const release = deferred<undefined>()
-    const f = fixture({ pnpmRunner: async request => { entered.resolve(request.signal); await release.promise; return { exitCode: 0 } } })
+    const f = fixture({ pnpmRunner: async (request) => { entered.resolve(request.signal); await release.promise; return { exitCode: 0 } } })
     const id = randomUUID()
     const stage = f.backend.stage(id, f.mutation, new AbortController().signal)
     const observed = stage.catch((error: unknown) => error)
@@ -1592,7 +1592,7 @@ describe('Desktop stage-only package transactions', () => {
   it('refuses PREPARED if live approvals changed before commit', async () => {
     const f = fixture()
     const runner = f.options.pnpmRunner
-    const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: async request => {
+    const backend = createDesktopProfilePackageTransactions({ ...f.options, pnpmRunner: async (request) => {
       const output = await runner(request)
       writeFileSync(join(f.profile, 'pnpm-workspace.yaml'), 'allowBuilds: {}\n')
       return output
