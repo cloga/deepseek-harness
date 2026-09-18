@@ -1,0 +1,131 @@
+# TEMPORARY: remove with its auditor after accepting the two regenerated header sidecars.
+# Match the existing Ubuntu PR snapshot consumer: these goldens intentionally own POSIX shell schemas.
+name: Temporary Core alpha2 official snapshot refresh
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-alpha2-snapshot-refresh-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    if: >-
+      github.repository == 'cloga/deepseek-harness'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.head.ref == 'cloga-official-first-016a2'
+      && github.event.pull_request.draft == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    env:
+      EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      DSH_TELEMETRY_DISABLED: '1'
+      DSH_BUILD_CLIENT_PROFILE: official
+      DSH_EXAMPLE_MODE: lib
+      DSH_SNAPSHOT_MAX_CONCURRENCY: '1'
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.7.0'
+          run_install: false
+          dest: ${{ runner.temp }}/snapshot-pnpm-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Bind every tracked input before normal installation
+        run: |
+          evidence="$RUNNER_TEMP/core-alpha2-snapshot-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [[ -e "$evidence" || -L "$evidence" ]]; then echo 'Evidence directory must be new'; exit 1; fi
+          mkdir "$evidence"
+          export SNAPSHOT_EVIDENCE="$evidence"
+          printf 'SNAPSHOT_EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
+          printf 'NODE_COMPILE_CACHE=%s\nTMPDIR=%s\n' "$RUNNER_TEMP/snapshot-node-cache" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          pnpm_version=$(pnpm --version)
+          if [[ "$pnpm_version" != '11.7.0' ]]; then echo 'Unexpected pnpm version'; exit 1; fi
+          node .github/scripts/core-alpha2-snapshot-audit.mjs before
+
+      - name: Install exact dependencies and prepare the ordinary Linux sandbox
+        run: |
+          pnpm install --frozen-lockfile
+          bash scripts/prepare-ci-bubblewrap.sh
+
+      - name: Build normal Host and Client contracts
+        run: pnpm run build
+
+      - name: Refresh only the two recorded-model scenarios with the official writer
+        id: refresh
+        env:
+          DSH_SNAPSHOT: refresh
+        run: |
+          status=0
+          pnpm exec vitest run --config vitest.snapshot.config.ts snapshots/session/headless.snapshot.ts \
+            -t 'plugin-manager(-mcp)? through dsh --profile headless$' \
+            --reporter=json --outputFile="$SNAPSHOT_EVIDENCE/private-refresh.json" \
+            > "$SNAPSHOT_EVIDENCE/private-refresh.stdout" 2> "$SNAPSHOT_EVIDENCE/private-refresh.stderr" || status=$?
+          if (( status != 0 )); then echo 'Selected snapshot refresh failed'; exit "$status"; fi
+          echo 'Selected snapshot refresh completed; exact passed-case validation follows in the audit'
+
+      - name: Replay the same two scenarios without updating expected data
+        id: replay
+        env:
+          DSH_SNAPSHOT: replay
+        run: |
+          status=0
+          pnpm exec vitest run --config vitest.snapshot.config.ts snapshots/session/headless.snapshot.ts \
+            -t 'plugin-manager(-mcp)? through dsh --profile headless$' \
+            --reporter=json --outputFile="$SNAPSHOT_EVIDENCE/private-replay.json" \
+            > "$SNAPSHOT_EVIDENCE/private-replay.stdout" 2> "$SNAPSHOT_EVIDENCE/private-replay.stderr" || status=$?
+          if (( status != 0 )); then echo 'Selected snapshot replay failed'; exit "$status"; fi
+          echo 'Selected snapshot replay completed; this is not the full snapshot suite'
+
+      - name: Check the recorded-session corpus without rewriting it
+        id: corpus
+        env:
+          DSH_SNAPSHOT: replay
+        run: |
+          status=0
+          pnpm exec vitest run --config vitest.snapshot.config.ts scripts/session-snapshot-corpus.corpus.ts \
+            --reporter=json --outputFile="$SNAPSHOT_EVIDENCE/private-corpus.json" \
+            > "$SNAPSHOT_EVIDENCE/private-corpus.stdout" 2> "$SNAPSHOT_EVIDENCE/private-corpus.stderr" || status=$?
+          if (( status != 0 )); then echo 'Snapshot corpus check failed'; exit "$status"; fi
+          status=0
+          git diff --check > /dev/null 2>&1 || status=$?
+          if (( status != 0 )); then echo 'Snapshot whitespace check failed'; exit "$status"; fi
+
+      - name: Audit all six writer targets and allow only two schema payloads
+        if: always() && env.SNAPSHOT_EVIDENCE != ''
+        env:
+          REFRESH_OUTCOME: ${{ steps.refresh.outcome }}
+          REPLAY_OUTCOME: ${{ steps.replay.outcome }}
+          CORPUS_OUTCOME: ${{ steps.corpus.outcome }}
+        run: node .github/scripts/core-alpha2-snapshot-audit.mjs after
+
+      - uses: actions/upload-artifact@v4
+        if: always() && env.SNAPSHOT_EVIDENCE != ''
+        with:
+          name: core-alpha2-snapshot-refresh-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.SNAPSHOT_EVIDENCE }}/upload/inputs.json
+            ${{ env.SNAPSHOT_EVIDENCE }}/upload/outputs.json
+            ${{ env.SNAPSHOT_EVIDENCE }}/upload/generated.diff
+            ${{ env.SNAPSHOT_EVIDENCE }}/upload/generated/**
+          if-no-files-found: error
+          retention-days: 7
