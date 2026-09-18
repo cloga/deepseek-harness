@@ -10,9 +10,23 @@ A prebuilt plugin can be available as a public GitHub repository or a local pack
 
 ## Decision
 
-Desktop provides a general `packageSpec` source alongside registry-only `npmRegistry` and attested `githubRelease` sources. The [Desktop README](../../../../apps/desktop/README.md) owns the accepted input matrix and user recovery. This decision complements the [verified Release transaction decision](../architecture/2026-09-15-desktop-verified-release-plugin-transactions.md): source snapshots reuse its profile transaction, but never claim its immutable Release or publisher evidence. The [bundled-runtime decision](../architecture/2026-09-08-desktop-bundled-runtime-and-external-plugins.md) continues to own application packages and shared-module identity. Neither decision is superseded.
+The retained Desktop acquisition backend provides a general `packageSpec` source alongside registry-only `npmRegistry` and attested `githubRelease` sources. This decision owns its restricted inputs and recovery requirements, not exposure through the shared Web PluginManager. The [official-first migration proposal](../../proposed/architecture/2026-09-18-official-first-desktop-safety.md) partially supersedes the old plugin-window integration; the typed app-boot preparation and separately authorized shell activation remain WIP and unqualified. Source snapshots reuse the [verified Release transaction](../architecture/2026-09-15-desktop-verified-release-plugin-transactions.md) mechanisms without claiming immutable Release or publisher evidence. The [bundled-runtime decision](../architecture/2026-09-08-desktop-bundled-runtime-and-external-plugins.md) retains application-package and shared-module rationale.
 
 The [input parser](../../../../apps/desktop/src/plugin-install-spec.ts) accepts a deliberately narrow grammar rather than forwarding pnpm's complete transport syntax. GitHub acquisition uses credential-free public API requests to resolve one ref to a full commit, then downloads that commit's archive. It does not invoke Git, use private GitHub credentials, or accept SSH and arbitrary Git hosts. A missing GitHub ref selects the repository's default HEAD only during explicit acquisition.
+
+### Restricted source inputs
+
+The retained parser distinguishes registry selectors, public GitHub refs, explicit local paths, and credential-free HTTPS archives. Ambiguous bare names are registry packages; repository names do not determine package identity. GitHub refs can name branches, tags, or commits, including slash-containing branches, but not revision expressions or `semver:` selectors.
+
+| Source | Accepted input | Stored identity |
+|---|---|---|
+| Registry | A package name, optionally scoped and followed by a version, tag, or semver range | Exact resolved version |
+| Public GitHub | `github:owner/repo[#ref]`, `owner/repo[#ref]`, or `https://github.com/owner/repo[.git][#ref]`, optionally prefixed by `git+` | Full commit and profile-owned snapshot |
+| Local directory | Absolute Windows/POSIX path, explicit `./` or `../` path, `file:<path>`, or `link:<path>` | Packed snapshot, never a live link |
+| Local archive | Explicit path or `file:<path>` ending in `.tgz` or `.tar.gz` | Copied snapshot |
+| HTTPS archive | Credential-free HTTPS URL ending in `.tgz` or `.tar.gz`, without query, fragment, or custom port | Downloaded snapshot |
+
+Source reinstallation is explicit and can select new bytes at the same version; selecting a local source again requires an explicit path. Registry updates retain version selection, while verified Release updates retain their verified channel. No current shared-manager UI action is implied by this parser inventory.
 
 ### Source preparation and output
 
@@ -54,4 +68,4 @@ Source packages that compile during installation, depend on private or generic G
 
 [Lock normalization tests](../../../../apps/desktop/tests/plugin-lock-normalization.spec.ts) preserve unrelated parsed data and byte-identical no-ops, reject unsafe or damaged inputs, and require all candidates to validate before writing. [Real pnpm normalization regressions](../../../../apps/desktop/tests/plugin-lock-normalization-pnpm.spec.ts) seed an existing receipt-backed separator mismatch before ordinary add, toggle, and remove operations; the captured input to the first frozen pnpm call must contain only the authorized specifier correction, with the manifest and selected resolutions unchanged.
 
-[Transaction tests](../../../../apps/desktop/tests/project-manager.spec.ts) require frozen relocation, retained-source reconstruction, same-version byte replacement, displaced source-lock and receipt cleanup, failed optional replacement, damaged-snapshot removal, and pre-stop failure for retained corruption. [Plugin-window tests](../../../../apps/desktop/tests/plugin-manager.spec.ts) cover source reinstallation and verified-channel preservation. Target-platform Desktop acceptance additionally requires the actual plugin window, final-location Host startup, and rollback behavior; source tests do not qualify a specific external plugin's runtime or authenticated model use.
+[Transaction tests](../../../../apps/desktop/tests/project-manager.spec.ts) require frozen relocation, retained-source reconstruction, same-version byte replacement, displaced source-lock and receipt cleanup, failed optional replacement, damaged-snapshot removal, and pre-stop failure for retained corruption. The former plugin-window coverage does not qualify the shared Web PluginManager. Source reinstallation, verified-channel preservation, separately authorized final-location Host startup, and rollback remain integrated acceptance requirements; source tests do not qualify a specific external plugin's runtime or authenticated model use.

@@ -29,11 +29,7 @@ The root slot composes the sidebar, main content, and right column. The sidebar 
 
 Global panels occupy the root-scoped `main` keyed slot; `conversation` is the reserved key for the Conversation. `ctx.layout.selectPanel(id)` selects a registered panel, and `null` selects the Conversation without changing the current Session. No global panel is registered by the shipped composition.
 
-### Desktop update notice
-
-When the Desktop preload provides update status, subscription and review methods, the frame displays a compact notice above the main panel. It remains mounted across Session/panel changes, reserves no space when idle, and never steals focus. **Review update** opens Desktop's existing confirmation; no update check, download or installation is initiated by rendering. The `layout` locale namespace owns this copy. Plain Web and older Desktop bridges remain unchanged. See the [Desktop update notice decision](../../../.agents/notes/implemented/feature/2026-09-17-persistent-desktop-update-notice.md).
-
-The layout fiber owns the preload subscription and a stable observable bound through the root registration's inject `hooks`. AppFrame reads the framework hook and passes plain notice props; React remounts retain the current status and pending review. Fiber disposal unsubscribes and ignores late IPC completion.
+Windows Electron's `data-windows-titlebar` marker reserves the caption height above all columns and removes the collapsed sidebar rail. Only the content area's top-left corner has a 16px radius; the other corners and the internal divider remain square. The frame publishes `--dsh-windows-content-radius` and `--dsh-windows-sidebar-width` for ui-sidebar-right's fullscreen corner and sidebar clearance. Ordinary Web documents do not receive the marker; macOS retains its separate layout.
 
 ### Theme presentation
 

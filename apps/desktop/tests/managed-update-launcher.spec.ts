@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { spawn } from 'node:child_process'
@@ -21,6 +22,22 @@ const roots: string[] = []
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true })))
+})
+
+it('refuses to execute a copied Node whose bytes differ from the sealed runtime hash', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-managed-node-drift-'))
+  roots.push(root)
+  const node = join(root, 'node.exe')
+  const helper = join(root, 'helper.mjs')
+  await writeFile(node, 'changed executable')
+  await writeFile(helper, 'helper')
+  const spawn = vi.fn() as unknown as typeof import('node:child_process').spawn
+  await expect(launchDesktopManagedUpdate({
+    operationsRoot: join(root, 'operations'), nodeExecutable: node, nodeSha256: 'a'.repeat(64), helperBundle: helper,
+    capability: managedCapability(), selection, installedSequence: 1, waitPids: [12],
+  }, { spawn, platform: 'win32', now: () => 0, sleep: async () => {}, waitForExit: async () => true }))
+    .rejects.toThrow('copied standalone Node failed release verification')
+  expect(spawn).not.toHaveBeenCalled()
 })
 
 it('returns only after the detached helper acknowledges the one-time handoff', async () => {
@@ -49,7 +66,7 @@ it('returns only after the detached helper acknowledges the one-time handoff', a
   let now = 0
   const result = await launchDesktopManagedUpdate({
     operationsRoot: join(root, 'operations'),
-    nodeExecutable: node,
+    nodeExecutable: node, nodeSha256: createHash('sha256').update(await readFile(node)).digest('hex'),
     helperBundle: helper,
     capability: managedCapability(),
     selection,
@@ -135,7 +152,7 @@ it('rejects an acknowledgement for a different manifest', async () => {
 
   await expect(launchDesktopManagedUpdate({
     operationsRoot: join(root, 'operations'),
-    nodeExecutable: node,
+    nodeExecutable: node, nodeSha256: createHash('sha256').update(await readFile(node)).digest('hex'),
     helperBundle: helper,
     capability: managedCapability(),
     selection,
@@ -184,7 +201,7 @@ it('cancels the exact helper when acknowledgement times out', async () => {
 
   await expect(launchDesktopManagedUpdate({
     operationsRoot: join(root, 'operations'),
-    nodeExecutable: node,
+    nodeExecutable: node, nodeSha256: createHash('sha256').update(await readFile(node)).digest('hex'),
     helperBundle: helper,
     capability: managedCapability(),
     selection,
@@ -240,7 +257,7 @@ it('persists bounded redacted bootstrap stderr without recording the handoff tok
   const child = { pid: 456, exitCode: null as number | null, stderr, on: vi.fn(), unref: vi.fn(), kill: vi.fn() }
   let handoffPath = ''
   await expect(launchDesktopManagedUpdate({
-    operationsRoot: join(root, 'operations'), nodeExecutable: node, helperBundle: helper,
+    operationsRoot: join(root, 'operations'), nodeExecutable: node, nodeSha256: createHash('sha256').update(await readFile(node)).digest('hex'), helperBundle: helper,
     capability: managedCapability(), selection, installedSequence: 1, waitPids: [12],
   }, {
     spawn: vi.fn((_node, args: string[]) => {
@@ -282,7 +299,7 @@ it('records a spawn failure without waiting for or killing an unstarted process'
   const child = { pid: undefined, exitCode: null, stderr: new PassThrough(), on: vi.fn(), unref: vi.fn(), kill: vi.fn() }
   const waitForExit = vi.fn()
   await expect(launchDesktopManagedUpdate({
-    operationsRoot: join(root, 'operations'), nodeExecutable: node, helperBundle: helper,
+    operationsRoot: join(root, 'operations'), nodeExecutable: node, nodeSha256: createHash('sha256').update(await readFile(node)).digest('hex'), helperBundle: helper,
     capability: managedCapability(), selection, installedSequence: 1, waitPids: [12],
   }, {
     spawn: vi.fn(() => child) as unknown as typeof spawn,

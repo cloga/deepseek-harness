@@ -12,7 +12,7 @@ import {
   desktopPluginProvisioningPlanSha256,
   parseDesktopPluginProvisioningPlan,
 } from './plugin-provisioning.ts'
-import { assertDesktopProvisioningInventory } from './project-manager.ts'
+import { assertDesktopProvisioningInventory } from './plugin-receipts.ts'
 
 const RECOVERY_COMMAND = 'pwsh -NoProfile -File .\\Install-DshOfficialDesktop.ps1 -Action Complete'
 
@@ -21,6 +21,7 @@ export type DesktopManagedUpdateCompletion =
   | { readonly status: 'none' }
   | { readonly status: 'complete'; readonly sequence: number; readonly version: string }
   | { readonly status: 'recovery-required'; readonly message: string; readonly command: string }
+  | { readonly status: 'baseline-not-qualified'; readonly disposition: 'preserved-user-choice' | 'pending'; readonly sequence: number; readonly version: string }
 
 async function sha256File(path: string): Promise<string> {
   const digest = createHash('sha256')
@@ -70,6 +71,7 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[], labe
  * @param runtimeDescriptor - Installed Desktop runtime descriptor.
  * @param provisioningPlan - Installed release-owned Desktop plugin plan.
  * @param activeProfile - Final-location profile, after its Host has reached readiness.
+ * @param baselineDisposition - Explicit trusted assessment only; it cannot bypass executable/runtime/manifest checks or certify completion.
  */
 export async function completeDesktopManagedUpdate(
   operationsRoot: string,
@@ -80,6 +82,7 @@ export async function completeDesktopManagedUpdate(
   runtimeDescriptor: string,
   provisioningPlan: string,
   activeProfile: string,
+  baselineDisposition?: 'preserved-user-choice' | 'pending',
 ): Promise<DesktopManagedUpdateCompletion> {
   let operationNames: string[]
   try {
@@ -221,6 +224,14 @@ export async function completeDesktopManagedUpdate(
     if (desktopPluginProvisioningPlanSha256(installedPlan)
       !== capability.provisioning.planSha256) {
       throw new Error('desktop managed update: installed plugin provisioning plan does not match the release')
+    }
+    if (baselineDisposition !== undefined) {
+      const outcome = { status: 'baseline-not-qualified' as const, disposition: baselineDisposition,
+        sequence: manifest.sequence, version: manifest.version }
+      await writeJsonAtomic(join(candidate.root, 'baseline-outcome.json'), {
+        schemaVersion: 1, ...outcome, manifestSha256: manifest.manifestSha256,
+      })
+      return outcome
     }
     assertDesktopProvisioningInventory(activeProfile, installedPlan)
     await writeJsonAtomic(completionPath, {

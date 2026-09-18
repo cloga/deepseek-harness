@@ -15,12 +15,9 @@ import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
 import type { HostObservable, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PanelInfo } from './service.ts'
 import { AppFrame } from './AppFrame.tsx'
-import { DesktopUpdateAdapter, desktopUpdateBridge } from './desktop-update-adapter.ts'
-import type { DesktopUpdateInject } from './desktop-update-adapter.ts'
 import { createLayoutStore } from './stores.ts'
 import { LayoutController } from './service.ts'
 import { ThemePresenter } from './theme-presenter.ts'
-import { en, zh, type LayoutKey } from './locales.ts'
 
 // Contract exports only (export-convergence rule: cross-package consumers
 // keep a symbol exported; test-only/package-internal symbols live off /src).
@@ -41,11 +38,6 @@ declare module '@deepseek-ai/cordis' {
 }
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
-  interface LocaleNamespaceMap {
-    /** Layout-owned Desktop update notice. */
-    layout: LayoutKey
-  }
-
   interface GlobalStandardProps {
     /** Subscribe to the selected main panel independently of parent renders. */
     usePanelInfo: UsePanelInfo
@@ -102,8 +94,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 // OwnerShare contracts — the render-side share the slot owner supplies at
 // renderSlot. Registrants IMPORT these and compose their full component props
-// through the four-share intersection (PropsRuntime & PropsRenderSlots &
-// PropsStore & I). Conversation business state and actions arrive through
+// from the framework-derived shares. Conversation business state and actions arrive through
 // framework-standard hooks and each registrant's inject face, not owner props.
 
 /** Sidebar owner share: live column state from the frame's concession solve. */
@@ -137,9 +128,6 @@ export const inject = ['slots', 'theme', 'locale']
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.locale.register('layout', { zh, en }), 'ui-layout: dictionaries')
-  const desktopUpdates = new DesktopUpdateAdapter(desktopUpdateBridge(window))
-  ctx.effect(() => desktopUpdates.connect(), 'ui-layout: Desktop update subscription')
   ctx.effect(() => {
     const handle = createLayoutStore()
     const instance = handle.create()
@@ -158,7 +146,7 @@ export function apply(ctx: ClientContext): void {
     const disposeService = ctx.reflect.provide('layout', layout)
     const disposeRegistration = ctx.slots.register({
       name: 'root',
-      locale: 'layout',
+      locale: 'common',
       children: {
         'sidebar': { kind: 'single', scope: 'root' },
         'main': { kind: 'keyed', scope: 'root' },
@@ -166,10 +154,6 @@ export function apply(ctx: ClientContext): void {
         'shell.overlay': { kind: 'list', scope: 'root' },
       },
       store,
-      inject: (): DesktopUpdateInject => ({
-        hooks: { desktopUpdate: desktopUpdates },
-        reviewDesktopUpdate: desktopUpdates.review,
-      }),
     }, AppFrame)
     const disposePanels = ctx.slots.subscribe('main', retainMainPanels)
     retainMainPanels()

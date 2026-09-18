@@ -1,0 +1,149 @@
+# TEMPORARY: delete with the reviewed pnpm-generated lockfile before final CI approval.
+# This job repairs no source and makes no build, installation, or release qualification claim.
+name: Temporary Core alpha2 lock bootstrap
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    paths:
+      - '.github/workflows/core-alpha2-lock-bootstrap.yml'
+      - '**/package.json'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
+      - 'patches/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-alpha2-lock-bootstrap-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  generate-lock:
+    if: >-
+      github.repository == 'cloga/deepseek-harness'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.head.ref == 'cloga-official-first-016a2'
+      && github.event.pull_request.draft == true
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DSH_TELEMETRY_DISABLED: '1'
+      EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      EXPECTED_SEED_LOCK_SHA256: '78ded9094a8f51be418ed327a0eb7e2fa78334327dc242bb29741de1a74bb198'
+      NODE_COMPILE_CACHE: ${{ runner.temp }}/core-alpha2-node-cache
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.7.0'
+          run_install: false
+          dest: ${{ runner.temp }}/core-alpha2-pnpm-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Bind generation to the checked-out manifests and trusted merge lock
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $head = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -ne $env:EXPECTED_HEAD_SHA) { throw 'Checkout does not match the PR head SHA' }
+          $dirty = @(& git status --porcelain)
+          if ($LASTEXITCODE -ne 0 -or $dirty.Count -ne 0) { throw 'Bootstrap requires an unchanged checkout' }
+          $lockHash = (Get-FileHash -Algorithm SHA256 pnpm-lock.yaml).Hash.ToLowerInvariant()
+          if ($lockHash -ne $env:EXPECTED_SEED_LOCK_SHA256) { throw 'Lockfile is not the reviewed merge/index seed' }
+          $desktop = Get-Content -Raw apps/desktop/package.json | ConvertFrom-Json
+          $hostManifest = Get-Content -Raw apps/desktop-host/package.json | ConvertFrom-Json
+          if ($desktop.devDependencies.'@deepseek-ai/dsh-plugin-manager' -ne 'workspace:^') { throw 'Desktop test dependency is missing' }
+          if ($hostManifest.dependencies.'@deepseek-ai/dsh-plugin-manager' -ne 'workspace:^') { throw 'Desktop Host runtime dependency is missing' }
+          $nodeVersion = (& node --version).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot identify Node' }
+          $pnpmVersion = (& pnpm --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $pnpmVersion -ne '11.7.0') { throw 'Unexpected pnpm version' }
+          $paths = @(& git ls-files -- package.json '**/package.json' pnpm-workspace.yaml 'patches/**')
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot enumerate generation inputs' }
+          $inputs = @($paths | Sort-Object -Unique | ForEach-Object {
+            [ordered]@{ path = $_; sha256 = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant() }
+          })
+          $evidence = Join-Path $env:RUNNER_TEMP ('core-alpha2-lock-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT)
+          New-Item -ItemType Directory -Path $evidence -ErrorAction Stop | Out-Null
+          Copy-Item -LiteralPath pnpm-lock.yaml -Destination (Join-Path $evidence 'pnpm-lock.before.yaml')
+          [ordered]@{
+            schemaVersion = 1; headSha = $head; seedLockSha256 = $lockHash
+            nodeVersion = $nodeVersion; pnpmVersion = $pnpmVersion; inputs = $inputs
+            command = 'pnpm install --lockfile-only --no-frozen-lockfile --ignore-scripts'
+            qualification = 'lock-generation-only; normal frozen install and repository allowBuilds validation remain required'
+          } | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8NoBOM (Join-Path $evidence 'inputs.json')
+          "LOCK_EVIDENCE=$evidence" >> $env:GITHUB_ENV
+
+      # No immutable install precedes this step: the initial PR intentionally has two missing importers.
+      # --ignore-scripts is defense in depth, not proof of install/build compatibility.
+      # Repository supply-chain, overrides, patch, and build policies remain unchanged.
+      - name: Generate the lockfile through normal pnpm resolution
+        id: generate
+        run: |
+          pnpm install --lockfile-only --no-frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { throw "pnpm lock generation failed with exit code $LASTEXITCODE" }
+
+      - name: Record exact output and reject non-lock source changes
+        if: always() && env.LOCK_EVIDENCE != ''
+        env:
+          GENERATION_OUTCOME: ${{ steps.generate.outcome }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $inputRecord = Get-Content -Raw (Join-Path $env:LOCK_EVIDENCE 'inputs.json') | ConvertFrom-Json
+          $changed = @(& git diff --name-only)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect generated changes' }
+          $patch = @(& git diff --no-ext-diff -- pnpm-lock.yaml)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot record lock diff' }
+          [System.IO.File]::WriteAllText((Join-Path $env:LOCK_EVIDENCE 'pnpm-lock.diff'), ($patch -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
+          Copy-Item -LiteralPath pnpm-lock.yaml -Destination (Join-Path $env:LOCK_EVIDENCE 'pnpm-lock.yaml')
+          $inputDrift = @($inputRecord.inputs | Where-Object {
+            -not (Test-Path -LiteralPath $_.path -PathType Leaf) -or (Get-FileHash -LiteralPath $_.path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $_.sha256
+          } | ForEach-Object { $_.path })
+          $afterHash = (Get-FileHash -Algorithm SHA256 pnpm-lock.yaml).Hash.ToLowerInvariant()
+          $unexpected = @($changed | Where-Object { $_ -ne 'pnpm-lock.yaml' })
+          $staged = @(& git diff --cached --name-only)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect index' }
+          $status = @(& git status --porcelain --untracked-files=all)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect working tree status' }
+          $untracked = @(& git ls-files --others --exclude-standard)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect untracked paths' }
+          $unexpectedUntracked = @($untracked | Where-Object { $_ -notmatch '(^|/)node_modules(/|$)' })
+          [ordered]@{
+            schemaVersion = 1; headSha = $env:EXPECTED_HEAD_SHA
+            generationOutcome = $env:GENERATION_OUTCOME
+            beforeSha256 = $inputRecord.seedLockSha256; afterSha256 = $afterHash
+            changedTrackedPaths = $changed; unexpectedTrackedPaths = $unexpected
+            changedInputPaths = $inputDrift; stagedPaths = $staged
+            workingTreeStatus = $status; untrackedPaths = $untracked; unexpectedUntrackedPaths = $unexpectedUntracked
+            requiredReview = 'Only apps/desktop and apps/desktop-host importer additions, plus explicitly reviewed necessary lock metadata; reject all unexplained graph drift'
+            publishOrCommitPerformed = $false
+          } | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8NoBOM (Join-Path $env:LOCK_EVIDENCE 'diff.json')
+          if ($unexpected.Count -ne 0 -or $inputDrift.Count -ne 0 -or $staged.Count -ne 0) { throw 'pnpm changed inputs or source outside the lockfile' }
+          if ($env:GENERATION_OUTCOME -ne 'success') { throw 'No successful generated lockfile is certified by this artifact' }
+
+      - name: Upload lockfile and review evidence only
+        if: always() && env.LOCK_EVIDENCE != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-alpha2-lock-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.LOCK_EVIDENCE }}/pnpm-lock.before.yaml
+            ${{ env.LOCK_EVIDENCE }}/pnpm-lock.yaml
+            ${{ env.LOCK_EVIDENCE }}/pnpm-lock.diff
+            ${{ env.LOCK_EVIDENCE }}/inputs.json
+            ${{ env.LOCK_EVIDENCE }}/diff.json
+          if-no-files-found: error
+          retention-days: 7

@@ -33,6 +33,50 @@ function chip(shell: SessionInputShell): void {
 }
 
 describe('reference submission', () => {
+  it.each(['text', 'attachment'] as const)('keeps detached %s admission in restart safety after visible input clears', async kind => {
+    const pending = Promise.withResolvers<SubmitOutcome>()
+    const shell = new SessionInputShell({ actx: {} as Context, defaultSink: () => pending.promise, commandAttachments })
+    const changed = vi.fn()
+    const off = shell.restartSafety.subscribe(changed)
+    try {
+      if (kind === 'text') shell.setDraft('retain until admission')
+      else shell.addAttachments(['attachment' as DraftAttachmentId])
+      shell.submit()
+      expect(shell.snapshot.phase).toBe('plain')
+      expect(shell.snapshot.draft).toBe('')
+      expect(shell.snapshot.attachmentIds).toEqual([])
+      expect(shell.restartSafety.getSnapshot().submitting).toBe(true)
+      changed.mockClear()
+      pending.resolve({ kind: 'success' })
+      await pending.promise
+      expect(shell.restartSafety.getSnapshot()).toEqual({ hasDraft: false, attachmentCount: 0, submitting: false })
+      expect(changed).toHaveBeenCalledOnce()
+    } finally { pending.resolve({ kind: 'success' }); off(); shell.dispose() }
+  })
+
+  it.each(['text', 'attachment'] as const)('restores rejected detached %s without publishing a safe gap', async kind => {
+    const pending = Promise.withResolvers<SubmitOutcome>()
+    const shell = new SessionInputShell({ actx: {} as Context, defaultSink: () => pending.promise, commandAttachments })
+    try {
+      if (kind === 'text') shell.setDraft('must survive rejection')
+      else shell.addAttachments(['attachment' as DraftAttachmentId])
+      shell.submit()
+      const observations: boolean[] = []
+      const off = shell.restartSafety.subscribe(() => {
+        const state = shell.restartSafety.getSnapshot()
+        observations.push(state.hasDraft || state.attachmentCount > 0 || state.submitting)
+      })
+      try {
+        pending.resolve({ kind: 'error', text: 'refused' })
+        await pending.promise
+        const state = shell.restartSafety.getSnapshot()
+        expect(state.hasDraft || state.attachmentCount > 0).toBe(true)
+        expect(observations.length).toBeGreaterThan(0)
+        expect(observations.every(Boolean)).toBe(true)
+      } finally { off() }
+    } finally { pending.resolve({ kind: 'success' }); shell.dispose() }
+  })
+
   it('mirrors canonical reference text so a persisted draft remains resolvable after remount', async () => {
     const mirror = vi.fn()
     const first = new SessionInputShell({

@@ -9,6 +9,7 @@
  * listeners onto it.
  */
 import type { Context } from '@deepseek-ai/cordis'
+import type { InboxState } from '@deepseek-ai/dsh-agent/types'
 import {
   createSnapshotStore, type ObservableSnapshot, type SnapshotStore,
 } from '@deepseek-ai/dsh-client-store'
@@ -16,7 +17,7 @@ import type { LexicalEditor } from 'lexical'
 import type {
   CommandClaim, ConsumeTokenRequest, DraftAttachmentId,
   InputActions, InputEffect, InputNotice, InputState, InputTriggerController, PickOutcome,
-  QueuedMessage, SessionInput, SubmitAttempt, SubmitAttachment, SubmitOutcome,
+  SessionInput, SubmitAttempt, SubmitAttachment, SubmitOutcome,
 } from '../contract/input.ts'
 import type {
   ArbitrateKey, ArbitrateOutcome, ComposerKeyboard, Occurrence, ReferenceInsert, TokenSpan,
@@ -25,6 +26,13 @@ import type { InputSubmitMode } from '../contract/composer-submission.ts'
 import { SubmitMachine } from './machine.ts'
 import { DraftEditorRuntime } from './editor/runtime.ts'
 import type { EditorProjection } from './editor/projection.ts'
+
+/** Package-private restart blockers, including sends detached from the visible composer state. */
+export interface InputRestartSafety {
+  readonly hasDraft: boolean
+  readonly attachmentCount: number
+  readonly submitting: boolean
+}
 
 /** Popup face the shell needs (dismissal only; typed structurally to avoid a value import). */
 export interface PopupDismissFace {
@@ -44,8 +52,8 @@ export interface SessionInputDeps {
   inputTriggers?: (() => InputTriggerController | undefined) | undefined
   /** PopupSelect shell face resolver (dismissal on submit lock / escape). */
   popup?: (() => PopupDismissFace | undefined) | undefined
-  /** Queue read face; overlaid onto InputState.queue (absent = empty). */
-  queue?: ObservableSnapshot<readonly QueuedMessage[]> | undefined
+  /** Agent Inbox projection; its next-turn list is overlaid onto InputState.queue. */
+  inbox?: ObservableSnapshot<InboxState | undefined> | undefined
   /**
    * Steer every still-pending queued message into the running turn, in FIFO
    * order (the empty-draft accelerated-Enter gesture); absent = unsupported.
@@ -88,7 +96,7 @@ function projectionContentChanged(prev: EditorProjection, next: EditorProjection
   })
 }
 
-const EMPTY_QUEUE: readonly QueuedMessage[] = []
+const EMPTY_QUEUE: InboxState['next-turn'] = []
 
 /** No-pipeline lexicon: zero text-ref decorations. */
 const EMPTY_LEXICON: ReadonlyMap<'/' | '@', readonly string[]> = new Map()
@@ -108,6 +116,8 @@ interface DetachedDraft {
 export class SessionInputShell implements SessionInput {
   /** Published editor projection + submit-plane state + queue overlay (the InputZone currency source). */
   readonly state: SnapshotStore<InputState>
+  /** Safety owner outlives React mounts and observes detached admission promises. */
+  readonly restartSafety = createSnapshotStore<InputRestartSafety>({ hasDraft: false, attachmentCount: 0, submitting: false })
   /** Latest surfaced notice (null after clear); the bar renders errors as banners and information inline. */
   readonly notices: SnapshotStore<InputNotice | null> = createSnapshotStore<InputNotice | null>(null)
   /** The shell-owned editor (text + chip truth); the composer binds its contenteditable to it. */
@@ -152,6 +162,8 @@ export class SessionInputShell implements SessionInput {
     readonly attachmentIds: readonly DraftAttachmentId[]
   }>()
 
+  private readonly unsubscribeInbox: (() => void) | undefined
+
   constructor(private readonly deps: SessionInputDeps) {
     this.draftEditor = new DraftEditorRuntime({
       onUpdate: () => { this.onEditorUpdate() },
@@ -163,7 +175,7 @@ export class SessionInputShell implements SessionInput {
     })
     this.unregister = this.draftEditor.register()
     this.state = createSnapshotStore<InputState>(this.compose())
-    deps.queue?.subscribe(() => { this.publish() })
+    this.unsubscribeInbox = deps.inbox?.subscribe(() => { this.publish() })
   }
 
   // ---- editor plumbing ----
@@ -278,7 +290,7 @@ export class SessionInputShell implements SessionInput {
         this.commitSend(attachmentIds)
         void this.deps.defaultSink('', attachmentIds, mode, controller.signal).then((outcome) => {
           if (this.disposed || !this.attachmentFlights.delete(flight)) return
-          if (outcome.kind === 'success') return
+          if (outcome.kind === 'success') { this.publish(); return }
           this.restoreAttachments(attachmentIds)
           if (outcome.text !== undefined) this.notify('error', outcome.text)
         }, (error: unknown) => {
@@ -449,6 +461,16 @@ export class SessionInputShell implements SessionInput {
     this.notices.set({ level, text, seq: this.noticeSeq })
   }
 
+  /**
+   * Return the keyboard to the composer with the caret it last held. Lexical's
+   * own focus restores its stored selection; a bare DOM focus on the
+   * contenteditable would land the caret at the start instead.
+   */
+  focus(): void {
+    this.editor.getRootElement()?.focus({ preventScroll: true })
+    this.editor.focus()
+  }
+
   // ---- wiring-layer extras (not on the frozen SessionInput face) ----
 
   /**
@@ -468,6 +490,7 @@ export class SessionInputShell implements SessionInput {
     }
     this.disposed = true
     this.dispatchRun(({ type: 'release' }))
+    this.unsubscribeInbox?.()
     this.unregister()
     this.detachedDrafts.clear()
     this.failedDetached.clear()
@@ -670,8 +693,8 @@ export class SessionInputShell implements SessionInput {
     const record = this.detachedDrafts.get(attempt.seq)
     if (record === undefined) return
     this.detachedDrafts.delete(attempt.seq)
-    this.restoreAttachments(record.attachmentIds)
     this.failedDetached.set(attempt.seq, record)
+    this.restoreAttachments(record.attachmentIds)
     if (this.projection.clipboardText === '' || this.failedRestoreRev === this.rev) {
       this.restoreFailedDrafts()
     }
@@ -790,12 +813,22 @@ export class SessionInputShell implements SessionInput {
       phase: core.phase,
       ...(core.claim !== undefined ? { claim: core.claim } : {}),
       occurrences: this.projection.occurrences,
-      queue: this.deps.queue?.getSnapshot() ?? EMPTY_QUEUE,
+      queue: this.deps.inbox?.getSnapshot()?.['next-turn'] ?? EMPTY_QUEUE,
     }
   }
 
   private publish(): void {
     const next = this.compose()
+    if (!this.disposed) {
+      const safety: InputRestartSafety = {
+        hasDraft: next.draft.length > 0 || this.failedDetached.size > 0,
+        attachmentCount: next.attachmentIds.length,
+        submitting: next.phase !== 'plain' || this.detachedDrafts.size > 0 || this.attachmentFlights.size > 0,
+      }
+      const previous = this.restartSafety.getSnapshot()
+      if (previous.hasDraft !== safety.hasDraft || previous.attachmentCount !== safety.attachmentCount
+        || previous.submitting !== safety.submitting) this.restartSafety.set(safety)
+    }
     this.state.set(next)
     if (next.draft !== this.lastMirroredDraft) {
       this.lastMirroredDraft = next.draft

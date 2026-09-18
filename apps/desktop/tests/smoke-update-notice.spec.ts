@@ -1,18 +1,18 @@
 import { runInNewContext } from 'node:vm'
 import { describe, expect, it, vi } from 'vitest'
-import type { DesktopUpdateState, DshDesktopApplicationApi } from '../src/ipc.ts'
+import type { DesktopUpdatePresentation, DshDesktopProductApi } from '../src/ipc.ts'
 import { installDesktopUpdateNoticeFixture } from '../scripts/smoke-update-notice.ts'
 
 const fixtureVersion = '0.1.5-rc.3.cloga.7'
 
 function mountFixture(storage = new Map<string, string>()) {
   const fixtureWindow = {} as {
-    dshDesktop: DshDesktopApplicationApi
+    dshDesktop: DshDesktopProductApi
     __dshDesktopUpdateNoticeFixture: {
       readonly reviewCalls: number
       readonly snapshotReads: number
       readonly subscriberCount: number
-      publish(state: DesktopUpdateState): void
+      publish(state: DesktopUpdatePresentation): void
     }
   }
   // Playwright serializes this function into the page before navigation; no module closure survives.
@@ -29,11 +29,10 @@ function mountFixture(storage = new Map<string, string>()) {
 describe('Desktop update notice external-boundary fixture', () => {
   it('serializes standalone and exposes only the application notification API', async () => {
     const { bridge, fixture } = mountFixture()
-    expect(bridge.protocolVersion).toBe(2)
+    expect(bridge.protocolVersion).toBe(1)
     expect(Object.keys(bridge).sort()).toEqual(['protocolVersion', 'updates'])
-    expect(Object.keys(bridge.updates).sort()).toEqual(['reportImpact', 'review', 'status', 'subscribe'])
+    expect(Object.keys(bridge.updates).sort()).toEqual(['open', 'status', 'subscribe'])
     expect(await bridge.updates.status()).toEqual({ phase: 'idle' })
-    bridge.updates.reportImpact({ hasDraft: true, attachmentCount: 1, submitting: false })
     expect(fixture.snapshotReads).toBe(1)
     expect(fixture.reviewCalls).toBe(0)
   })
@@ -47,7 +46,7 @@ describe('Desktop update notice external-boundary fixture', () => {
     const available = { phase: 'available', version: fixtureVersion } as const
     fixture.publish(available)
     expect(listener).toHaveBeenCalledExactlyOnceWith(available)
-    await bridge.updates.review()
+    await bridge.updates.open()
     expect(fixture.reviewCalls).toBe(1)
     expect(await bridge.updates.status()).toEqual(available)
     expect(listener).toHaveBeenCalledOnce()
@@ -62,7 +61,7 @@ describe('Desktop update notice external-boundary fixture', () => {
   it('restores available through the reload snapshot without synthesizing a subscription event', async () => {
     const first = mountFixture()
     first.fixture.publish({ phase: 'available', version: fixtureVersion })
-    await first.bridge.updates.review()
+    await first.bridge.updates.open()
     const reloaded = mountFixture(first.storage)
     const listener = vi.fn()
     reloaded.bridge.updates.subscribe(listener)

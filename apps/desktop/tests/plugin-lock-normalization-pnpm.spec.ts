@@ -1,13 +1,17 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { basename, dirname, join } from 'node:path'
 import { dump, JSON_SCHEMA, load } from 'js-yaml'
 import { c } from 'tar'
 import { expect, it } from 'vitest'
-import { DesktopProjectManager, type DesktopProjectMutation } from '../src/project-manager.ts'
-import type { DesktopGithubReleasePluginSource } from '../src/plugin-source.ts'
+import { boot, readProfilePatches, type ProfileContext } from '@deepseek-ai/dsh-app-boot'
+import PluginManager from '@deepseek-ai/dsh-plugin-manager'
+import { DesktopProjectManager } from '../src/project-manager.ts'
+import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, type DesktopGithubReleasePluginSource } from '../src/plugin-source.ts'
+import { createDesktopProfilePackageTransactions } from '../src/profile-package-staging.ts'
+import { packDesktopSourceDirectory, runDesktopPackagePnpm } from '../src/profile-package-pnpm.ts'
+import { inventoryDesktopRuntime } from '../src/runtime-tree.ts'
 import { resolveDesktopPaths } from '../src/paths.ts'
 import { runtimeFixture, writePackage } from './runtime-fixture.ts'
 
@@ -16,17 +20,18 @@ interface FixtureLock {
   packages?: Record<string, unknown>
   snapshots?: Record<string, unknown>
 }
-
 function readLock(path: string): FixtureLock {
   return load(readFileSync(path, 'utf8'), { schema: JSON_SCHEMA }) as FixtureLock
 }
+function candidate(profile: string, id: string): string {
+  return join(dirname(profile), `.${basename(profile)}.package-stage-${id}`, 'profile')
+}
 
-const hooks = { beforeChange: async () => {}, healthCheck: async () => {}, afterChange: async () => {} }
-
-// Each offline case includes a real verified install and a separate ordinary mutation of the legacy profile.
-it.each(['add', 'toggle', 'remove'] as const)('repairs an existing receipt-bound separator mismatch before ordinary %s frozen install', async (action) => {
+// Real acquisition/pnpm preparation supplies test input graphs, not Host health.
+// The receipt below is explicitly fixture data for normalization/ownership checks.
+// Official selection-only toggles do not invoke pnpm or repair its lockfile.
+it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy separators through the current %s owner', async action => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'desktop-legacy-lock-pnpm-')))
-  const originalFetch = globalThis.fetch
   try {
     const name = 'legacy-verified-plugin'
     const packageDir = writePackage(root, 'source', { name, dsh: { bundle: { patch: 'bundle.yml' } } })
@@ -39,7 +44,9 @@ it.each(['add', 'toggle', 'remove'] as const)('repairs an existing receipt-bound
       asset: 'plugin.tgz', assetId: 1, packageName: name, version: '1.0.0', size: bytes.byteLength,
       sha256: createHash('sha256').update(bytes).digest('hex'), targetCommit: 'a'.repeat(40),
     }
-    globalThis.fetch = async (input) => {
+    let acquisitionAllowed = true
+    const fetcher: typeof fetch = async input => {
+      if (!acquisitionAllowed) throw new Error('legacy normalization must not request a new release')
       const url = new URL(input instanceof Request ? input.url : input)
       if (url.pathname.endsWith('/releases/tags/v1.0.0')) return Response.json({
         id: 2, immutable: true, draft: false, tag_name: source.tag, target_commitish: source.targetCommit,
@@ -51,62 +58,112 @@ it.each(['add', 'toggle', 'remove'] as const)('repairs an existing receipt-bound
     }
     const dsh = join(root, 'dsh')
     runtimeFixture(dsh)
+    const pnpm = process.env.DSH_TEST_DESKTOP_PNPM ?? join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs')
+    expect(JSON.parse(readFileSync(join(dirname(dirname(pnpm)), 'package.json'), 'utf8')).version).toBe('11.7.0')
+    const runtime = { node: process.execPath, nodeBin: dirname(process.execPath), pnpm }
     const capture = join(root, 'before-first-frozen.yaml')
     const captureManifest = join(root, 'before-first-frozen-package.json')
-    const pnpm = join(root, 'offline-pnpm.mjs')
-    const realPnpm = pathToFileURL(join(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs')).href
-    writeFileSync(pnpm, `import {existsSync,readFileSync,writeFileSync} from 'node:fs'
-import {join} from 'node:path'
-if (process.argv.includes('--frozen-lockfile') && !existsSync(${JSON.stringify(capture)})) {
-  writeFileSync(${JSON.stringify(capture)}, readFileSync(join(process.cwd(),'pnpm-lock.yaml')), {flag:'wx'})
-  writeFileSync(${JSON.stringify(captureManifest)}, readFileSync(join(process.cwd(),'package.json')), {flag:'wx'})
-}
-process.argv.push('--config.offline=true')
-await import(${JSON.stringify(realPnpm)})
-`)
-    const manager = new DesktopProjectManager(resolveDesktopPaths(join(root, '.dsh')), { node: process.execPath, pnpm, dsh })
-    await manager.applyRelease()
-    await manager.mutate({ type: 'plugin-install', source }, hooks)
-    expect(existsSync(capture)).toBe(false)
-    const manifestPath = join(manager.paths.profile, 'package.json')
-    const originalManifest = readFileSync(manifestPath, 'utf8')
-    const lockPath = join(manager.paths.profile, 'pnpm-lock.yaml')
+    let capturing = false
+    let invocations = 0
+    const backend = (profile: string) => createDesktopProfilePackageTransactions({
+      profile, runtimeDir: dsh, installAnchor: join(dsh, 'node_modules/@deepseek-ai/dsh/package.json'),
+      dependencyRegistry: 'https://registry.example.test/', configPaths: [], fetcher,
+      operationTimeoutMs: 60000, leaseWaitMs: 0,
+      packDirectory: (directory, output, signal) => packDesktopSourceDirectory(runtime, directory, output, signal),
+      pnpmRunner: async request => {
+        invocations++
+        if (capturing && request.args.includes('--frozen-lockfile') && !existsSync(capture)) {
+          writeFileSync(capture, readFileSync(join(request.cwd, 'pnpm-lock.yaml')), { flag: 'wx' })
+          writeFileSync(captureManifest, readFileSync(join(request.cwd, 'package.json')), { flag: 'wx' })
+        }
+        return runDesktopPackagePnpm(runtime, { ...request, args: [...request.args, '--offline'] })
+      },
+    })
+    const initializer = new DesktopProjectManager(resolveDesktopPaths(join(root, '.dsh')), { dsh })
+    await initializer.applyRelease()
+    const originalProfile = initializer.paths.profile
+    const originalBytes = inventoryDesktopRuntime(originalProfile)
+    const seed = randomUUID()
+    await backend(originalProfile).stage(seed, { kind: 'install', source }, new AbortController().signal)
+    const first = candidate(originalProfile, seed)
+    // Fixture-only committed-receipt shape: real source bytes were acquired above,
+    // but this test neither starts a Host nor claims production activation health.
+    writeFileSync(join(first, 'desktop-plugin-receipts.json'), JSON.stringify({ schemaVersion: 1,
+      receipts: { [name]: { schemaVersion: 1, capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY,
+        source, releaseId: 2, assetId: 1, packageName: name, version: '1.0.0', artifactSha256: source.sha256,
+        states: { staged: true, health: 'passed', activated: true, rolledBack: false, verified: true } } }, owners: { [name]: 'user' } }))
+    writeFileSync(join(first, 'desktop-plugin-package-locks.json'), JSON.stringify({ schemaVersion: 1, packages: {} }))
+    const removable = writePackage(root, 'removable-source', { name: 'removable-source-plugin', dsh: { bundle: { patch: 'bundle.yml' } } })
+    writeFileSync(join(removable, 'bundle.yml'), '[]\n')
+    const secondId = randomUUID()
+    await backend(first).stage(secondId, { kind: 'install', source: { schemaVersion: 1, type: 'packageSpec', spec: removable } }, new AbortController().signal)
+    const profile = candidate(first, secondId)
+    const manifestPath = join(profile, 'package.json')
+    const originalManifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    const lockPath = join(profile, 'pnpm-lock.yaml')
     const expected = readLock(lockPath)
     const legacy = readLock(lockPath)
-    const importer = Object.values(legacy.importers)[0]
-    const entry = importer?.dependencies?.[name]
+    const entry = legacy.importers['.']?.dependencies?.[name]
     if (entry === undefined) throw new Error('fixture has no root dependency')
     const canonical = `file:.desktop-plugin-artifacts/${source.sha256}.tgz`
     expect(entry.specifier).toBe(canonical)
     entry.specifier = canonical.replaceAll('/', '\\')
     writeFileSync(lockPath, dump(legacy, { schema: JSON_SCHEMA, lineWidth: -1, noRefs: true }))
-    const seeded = readFileSync(lockPath, 'utf8')
-    expect(seeded).toContain(entry.specifier)
-    expect(readFileSync(manifestPath, 'utf8')).toBe(originalManifest)
-    globalThis.fetch = async () => { throw new Error('legacy normalization must not request a new release') }
-    const added = writePackage(root, 'addon', { name: 'new-source-plugin', dsh: { bundle: { patch: 'bundle.yml' } } })
-    writeFileSync(join(added, 'bundle.yml'), '[]\n')
-    const addedArchive = join(root, 'addon.tgz')
-    await c({ file: addedArchive, cwd: added, prefix: 'package', gzip: true }, ['package.json', 'index.js', 'bundle.yml'])
-    const mutation: DesktopProjectMutation = action === 'add'
-      ? { type: 'plugin-add', spec: addedArchive }
-      : action === 'toggle'
-        ? { type: 'plugin-toggle', name, enabled: false }
-        : { type: 'plugin-remove', name }
-    await manager.mutate(mutation, hooks)
-    expect(existsSync(capture)).toBe(true)
-    // This is the input seen by the actual pnpm process, not the final lock it later rewrites.
-    expect(readLock(capture)).toEqual(expected)
-    expect(readFileSync(captureManifest, 'utf8')).toBe(originalManifest)
-    if (action === 'remove') expect(manager.listPlugins()).toEqual([])
-    else {
-      const retained = manager.listPlugins().find(plugin => plugin.name === name)
-      expect(retained?.version).toBe('1.0.0')
-      expect(retained?.enabled).toBe(action !== 'toggle')
-      expect(retained?.source).toEqual(source)
+    const seededLock = readFileSync(lockPath, 'utf8')
+    const receiptBytes = readFileSync(join(profile, 'desktop-plugin-receipts.json'), 'utf8')
+    const sourceLockBytes = readFileSync(join(profile, 'desktop-plugin-package-locks.json'), 'utf8')
+    const before = inventoryDesktopRuntime(profile)
+    acquisitionAllowed = false
+    capturing = true
+    if (action === 'toggle') {
+      const profileContext: ProfileContext = {
+        name: 'dsh', dir: profile, patchPath: join(profile, 'cordis.patch.yml'),
+        installAnchor: join(dsh, 'node_modules/@deepseek-ai/dsh/package.json'),
+        cwd: root, home: root, startedBundles: originalManifest.dsh.profile.bundles,
+        stagedPackageTransactions: true, overlays: [], telemetryDisabledEnv: undefined,
+      }
+      const ctx = await boot('dsh', join(profile, 'cordis.yml'), readProfilePatches('dsh', profileContext), ctx => {
+        ctx.provide('profileContext', profileContext)
+        ctx.provide('appReady', { onReady: (listener: () => void) => { listener(); return () => {} } })
+      })
+      try {
+        // Await the ordinary public plugin startup barrier before any disposal.
+        await ctx.plugin(PluginManager)
+        const count = invocations
+        expect(await ctx.pluginManager.setBundleEnabled(name, false)).toMatchObject({ changed: true })
+        expect((await ctx.pluginManager.listBundles()).find(item => item.name === name)?.enabled).toBe(false)
+        expect(await ctx.pluginManager.setBundleEnabled(name, true)).toMatchObject({ changed: true })
+        expect((await ctx.pluginManager.listBundles()).find(item => item.name === name)?.enabled).toBe(true)
+        expect(invocations).toBe(count)
+        expect(existsSync(capture)).toBe(false)
+        expect(readFileSync(lockPath, 'utf8')).toBe(seededLock)
+        expect(readFileSync(join(profile, 'desktop-plugin-receipts.json'), 'utf8')).toBe(receiptBytes)
+        expect(readFileSync(join(profile, 'desktop-plugin-package-locks.json'), 'utf8')).toBe(sourceLockBytes)
+        expect(JSON.parse(readFileSync(manifestPath, 'utf8')).dependencies).toEqual(originalManifest.dependencies)
+      } finally { await ctx.fiber.dispose() }
+    } else {
+      const added = writePackage(root, 'addon', { name: 'new-source-plugin', dsh: { bundle: { patch: 'bundle.yml' } } })
+      writeFileSync(join(added, 'bundle.yml'), '[]\n')
+      const id = randomUUID()
+      expect(await backend(profile).stage(id, action === 'add'
+        ? { kind: 'install', source: { schemaVersion: 1, type: 'packageSpec', spec: added } }
+        : { kind: 'remove', name: 'removable-source-plugin' }, new AbortController().signal))
+        .toMatchObject({ state: 'prepared', health: 'pending' })
+      // These are the actual inputs immediately before the real frozen pnpm call,
+      // not a final lockfile that pnpm may subsequently have normalized itself.
+      expect(readLock(capture).importers['.']?.dependencies?.[name]).toEqual(expected.importers['.']?.dependencies?.[name])
+      const capturedDependencies = JSON.parse(readFileSync(captureManifest, 'utf8')).dependencies
+      expect(capturedDependencies[name]).toBe(canonical)
+      expect(Object.keys(capturedDependencies).sort()).toEqual(action === 'add' ? [name, 'removable-source-plugin'].sort() : [name])
+      const staged = candidate(profile, id)
+      expect(readFileSync(join(staged, 'desktop-plugin-receipts.json'), 'utf8')).toBe(receiptBytes)
+      const stagedManifest = JSON.parse(readFileSync(join(staged, 'package.json'), 'utf8'))
+      expect(stagedManifest.dependencies[name]).toBe(canonical)
+      expect(stagedManifest.dependencies['removable-source-plugin'] !== undefined).toBe(action !== 'remove')
+      expect(stagedManifest.dependencies['new-source-plugin'] !== undefined).toBe(action === 'add')
+      expect(inventoryDesktopRuntime(profile)).toEqual(before)
+      expect(readFileSync(lockPath, 'utf8')).toBe(seededLock)
     }
-  } finally {
-    globalThis.fetch = originalFetch
-    rmSync(root, { recursive: true, force: true })
-  }
-}, 90_000)
+    expect(inventoryDesktopRuntime(originalProfile)).toEqual(originalBytes)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+}, 120000)

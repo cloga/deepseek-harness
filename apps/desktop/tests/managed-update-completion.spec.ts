@@ -29,6 +29,8 @@ afterEach(async () => {
 const inventories = [
   'valid', 'missing-state', 'required-valid', 'required-artifact-drift',
   'required-receipt-drift', 'required-first-install', 'required-already-higher',
+  'required-preserved', 'required-pending', 'required-preserved-executable-drift',
+  'required-pending-runtime-drift', 'required-preserved-manifest-drift', 'required-pending-plan-drift',
 ] as const
 it.each(inventories)('requires active inventory before completion: %s', async (inventory) => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-managed-completion-'))
@@ -167,6 +169,19 @@ it.each(inventories)('requires active inventory before completion: %s', async (i
   if (configuration === undefined) throw new Error('Fixture must select managed updates')
   expect(configuration.installedSequence).toBe(Math.max(sequence, previousSequence))
   expect(configuration.completedSequence).toBe(previousSequence)
+  const disposition = inventory.includes('preserved') ? 'preserved-user-choice' as const
+    : inventory.includes('pending') ? 'pending' as const : undefined
+  const previousCompletion = await readFile(completionPath, 'utf8').catch(() => undefined)
+  const pendingPath = join(operation, 'pending-completion.json')
+  const pendingBytes = await readFile(pendingPath, 'utf8')
+  if (disposition !== undefined) {
+    // Explicitly unqualified inventory must never mint completion, even with a healthy executable.
+    await rm(join(profile, 'desktop-plugin-provisioning-state.json'))
+    if (inventory.endsWith('executable-drift')) await writeFile(executablePath, 'wrong executable')
+    if (inventory.endsWith('runtime-drift')) await writeFile(runtimePath, 'wrong runtime')
+    if (inventory.endsWith('manifest-drift')) await writeFile(join(operation, 'release.json'), JSON.stringify({ ...manifest, sequence: 99 }))
+    if (inventory.endsWith('plan-drift')) await writeFile(provisioningPath, JSON.stringify({ schemaVersion: 1, mode: 'exact', plugins: [] }))
+  }
   const result = await completeDesktopManagedUpdate(
     configuration.operationsRoot,
     completionPath,
@@ -176,8 +191,19 @@ it.each(inventories)('requires active inventory before completion: %s', async (i
     runtimePath,
     provisioningPath,
     profile,
+    disposition,
   )
-  if (inventory === 'valid' || inventory === 'required-valid' || inventory === 'required-first-install') {
+  if (inventory === 'required-preserved' || inventory === 'required-pending') {
+    expect(result).toEqual({ status: 'baseline-not-qualified', disposition, sequence, version })
+    expect(await readFile(completionPath, 'utf8')).toBe(previousCompletion)
+    expect(await readFile(pendingPath, 'utf8')).toBe(pendingBytes)
+    expect(JSON.parse(await readFile(join(operation, 'baseline-outcome.json'), 'utf8'))).toEqual({
+      schemaVersion: 1, status: 'baseline-not-qualified', disposition, sequence, version,
+      manifestSha256: manifest.manifestSha256,
+    })
+    const restarted = await loadDesktopManagedUpdateConfiguration(resources, userData, 'win32')
+    expect(restarted?.completedSequence).toBe(previousSequence)
+  } else if (inventory === 'valid' || inventory === 'required-valid' || inventory === 'required-first-install') {
     expect(result).toEqual({ status: 'complete', sequence, version })
     expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({ status: 'complete', sequence })
     const completedBytes = await readFile(completionPath, 'utf8')
@@ -194,6 +220,11 @@ it.each(inventories)('requires active inventory before completion: %s', async (i
     expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({ status: 'complete', sequence: 4 })
   } else {
     expect(result.status).toBe('recovery-required')
+    if (disposition !== undefined) {
+      expect(await readFile(completionPath, 'utf8')).toBe(previousCompletion)
+      expect(await readFile(pendingPath, 'utf8')).toBe(pendingBytes)
+      await expect(readFile(join(operation, 'baseline-outcome.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
     expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({
       status: 'complete', sequence: previousSequence,
     })

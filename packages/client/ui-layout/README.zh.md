@@ -29,11 +29,7 @@ kind: "package-reference"
 
 全局面板占据 root 作用域的 `main` keyed slot；`conversation` 是为会话界面保留的 key。`ctx.layout.selectPanel(id)` 选中已注册面板，`null` 则选中会话界面，但不改变当前会话。默认组合不注册任何全局面板。
 
-### Desktop 更新提示
-
-当 Desktop preload 提供更新状态、订阅和查看接口时，框架在主面板上方显示窄提示栏。切换会话或面板时保持挂载，空闲时不占空间，也不抢焦点。“查看更新”打开 Desktop 现有的确认流程；渲染本身不触发检查、下载或安装。文案归 `layout` locale namespace 所有。普通 Web 和旧 Desktop 桥接保持不变。详见 [Desktop 更新提示决策](../../../.agents/notes/implemented/feature/2026-09-17-persistent-desktop-update-notice.zh.md)。
-
-布局 fiber 持有 preload 订阅，以及通过 root 注册的 inject `hooks` 绑定的引用稳定的可观察源。AppFrame 读取框架 hook 并传递普通提示属性；React 重新挂载时保留当前状态及尚未完成的查看请求。fiber 释放时取消订阅并忽略迟到的 IPC 完成结果。
+Windows Electron 的 `data-windows-titlebar` 标记在所有列上方预留顶栏高度，并移除收起后的侧栏轨道。内容区仅左上角保留 16px 圆角，其余角和内部交界处保持直角。框架发布 `--dsh-windows-content-radius` 和 `--dsh-windows-sidebar-width`，供 ui-sidebar-right 的全屏圆角及侧栏避让使用。普通 Web 文档不会获得该标记；macOS 保留其独立布局。
 
 ### 主题呈现
 

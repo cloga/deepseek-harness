@@ -10,22 +10,22 @@ A startup-only check misses releases published while Desktop remains open. A men
 
 ## Decision
 
-Electron owns release discovery and its process-local notification snapshot. It checks ten seconds after successful startup and every six hours, coalesces overlapping checks, skips confirmation/installation/quit, and clears scheduled work on quit. Background checks never prompt, download, install, or restart. A previously verified available version remains visible during a transient refresh failure.
+The [official-first migration proposal](../../proposed/architecture/2026-09-18-official-first-desktop-safety.md) partially supersedes this decision. The fork's protocol-2 strip, layout adapter, and separate notification polling are retired in favor of the official settings `DesktopUpdateIndicator` and collapsed badge. This note retains the noninterrupting-discovery and shell-authority rationale; it does not qualify the WIP safety migration or present the old strip as supported UI.
 
-The application preload exposes only update status, removable subscriptions, an explicit review request, and the existing unsaved-input impact report. Review enters the existing native confirmation and repeated active-work check. Renderers cannot choose update URLs, paths, versions, or installer arguments. Plugin management remains shell-only.
+Electron owns update discovery and installation. The official protocol-1 bridge exposes `status`, `open`, and removable subscriptions. Renderers cannot select update URLs, paths, versions, or installer arguments, and opening update UI does not authorize installation. Plugin management belongs to the shared Web PluginManager, not update IPC. The [Desktop README](../../../../apps/desktop/README.md) owns the official presentation, polling, and confirmation behavior.
 
-The layout plugin renders a non-modal strip above the main panel, not an overlay. It survives Session and panel navigation and occupies no space when no update is available. An apply-owned adapter subscribes before obtaining the initial snapshot; an event received in the meantime wins over the delayed snapshot. Its stable observable enters the root registration's inject `hooks` compartment, and the framework-bound hook supplies plain notice props alongside an explicit review callback. The layout fiber owns subscription cleanup and suppresses late snapshot, event, and review completion after disposal; component remounts neither resubscribe nor reset an outstanding review. Plain Web and older report-only Desktop bridges render no strip.
+The retained optional `reportImpact` safety extension reports only `hasDraft`, `attachmentCount`, and `submitting`. It carries no draft text, attachment content, executable selection, or installation authority. Its consumer migration must cover every mounted Conversation seat and detached send; declaration of the extension alone does not establish end-to-end protection.
 
 ## Alternatives considered
 
-**Menu-only discovery** keeps the UI smaller but makes availability difficult to discover during long-running sessions.
+**Menu-only discovery** keeps the UI smaller but makes availability difficult to discover during long-running sessions. The official account-row indicator and collapsed badge now provide that visibility without a second strip.
 
-**Automatic installation dialogs** are conspicuous but interrupt the user's current task. Automatic checks therefore publish status; only a deliberate review action opens confirmation.
+**Automatic installation dialogs** are conspicuous but interrupt the user's current task. Background discovery must not authorize download, installation, or restart; official user-initiated preparation and confirmation retain their own sequencing.
 
 **Renderer-owned polling or downloads** duplicate the trusted updater and would expose network/package operations to application content. Electron remains the sole updater owner.
 
 ## Consequences
 
-The strip uses a small part of the center panel and can reflow content when it appears. It does not steal focus or cover the composer. Availability is process-local; after restarting, Desktop checks again rather than treating persisted notification data as a verified release. Background network errors do not produce modal dialogs.
+The retired strip occupied center-panel height and could reflow content; the official presentation removes that duplicate layout cost. Availability remains update state, not evidence that installation completed. Keeping the scalar safety extension preserves an input-loss concern without retaining the old presentation protocol.
 
-Focused tests cover bridge restrictions, timer disposal, non-overlap, explicit consent, stale snapshots, and listener cleanup. The Desktop smoke also runs the real compiled client composition with only the Electron bridge simulated, checking notice geometry, focus, Later retention, and reload recovery. This fixture does not prove a real release download or authorize a restart of installed Desktop.
+The old adapter subscribed before reading its initial snapshot, preferred newer events, and disposed listeners while suppressing late completions; its compiled-client smoke covered focus, geometry, Later retention, and reload. Those observations belong to the retired implementation, not qualification of the official replacement. The migration requires current indicator/badge, subscription-disposal, stale-report, mounted-input, and detached-send coverage plus separate packaged update acceptance. No prior fixture proves a real release download or authorizes restarting installed Desktop.

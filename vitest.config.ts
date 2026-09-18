@@ -148,6 +148,7 @@ const coveragePartitionMode = coveragePartitionRaw === '1'
 // that worker threads cannot isolate reliably under aggregate gate contention.
 // Keep the narrow exception in forks while the rest of the inventory avoids per-file processes.
 const processBoundTests = [
+  'apps/desktop/tests/profile-package-pnpm.spec.ts',
   'packages/session/session-persistence-jsonl/tests/jsonl.spec.ts',
   'packages/subagent/subagent-acp/tests/subagent-acp.spec.ts',
   'packages/subprocess/subprocess-local/tests/process-exit.spec.ts',
@@ -254,9 +255,7 @@ export default defineConfig({
         'packages/client/ui-primitives/src/DisclosureRow.tsx',
         'packages/client/ui-tool/src/*',
         'packages/client/ui-slots/src/*',
-        // The Desktop update bridge adapter is covered independently of the remaining layout GUI debt.
-        'packages/client/ui-layout/src/index.ts',
-        'packages/client/ui-layout/src/client/!(desktop-update-adapter).{ts,tsx}',
+        'packages/client/ui-layout/src/*',
         'packages/client/web/src/*',
         'packages/host/webserver/src/*',
         // The browser-worker runtime and its image packer: the executing
@@ -287,8 +286,6 @@ export default defineConfig({
         'packages/experimental/inspector/src/shared/bridge/messages/runtime/{command-codec,console-frames,frames,value-codec}.ts',
         'packages/experimental/inspector/src/shared/bridge/messages/sources/{codec,frames}.ts',
         'packages/experimental/inspector/src/worker/inspection/{cordis-store,query-router,realm-store}.ts',
-        'packages/client/modules/src/client/system.ts',
-        'packages/client/hmr/src/client/index.ts',
         // Web config-tree boot round: the new host-side web-transport halves
         // whose remaining branches need real-composition/process harnesses.
         // TODO(gui): cover and remove with the client test lane above.

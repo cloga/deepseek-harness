@@ -14,6 +14,7 @@ import {
   resolveDesktopGithubTagCommit,
 } from './github-release.ts'
 import type { DesktopUpdateState } from './ipc.ts'
+import { DesktopUpdatePreparationError } from './update-error.ts'
 
 const REDIRECTS = new Set([301, 302, 303, 307, 308])
 const MAX_MANIFEST_BYTES = 1024 * 1024
@@ -200,91 +201,179 @@ async function selectMigration(
   }
 }
 
-/** Managed check/install state owner; install delegates only a validated immutable selection. */
+/** Version-bound managed selection; the detached helper owns installer acquisition and verification. */
 export class DesktopManagedUpdateCoordinator {
+  private current: DesktopUpdateState = { phase: 'idle', mode: 'github-release-managed' }
   private selection: DesktopManagedUpdateSelection | undefined
+  private prepared = false
+  private handedOff = false
+  private disposed = false
   private checkOperation: Promise<DesktopUpdateState> | undefined
+  private downloadOperation: Promise<DesktopUpdateState> | undefined
   private installOperation: Promise<DesktopUpdateState> | undefined
 
+  /**
+   * @param capability - Build-carried immutable source and migration policy.
+   * @param installedSequence - Sequence completed by the installed application.
+   * @param publish - Publishes and returns the actual observable state.
+   * @param launch - Main-owned admission and helper handoff; acknowledge before stopping Host, return false on deferral.
+   * @param operations - Network operations replaceable by tests.
+   */
   constructor(
     private readonly capability: DesktopManagedUpdateCapability,
     private readonly installedSequence: () => number,
     private readonly publish: (state: DesktopUpdateState) => DesktopUpdateState,
-    private readonly launch: (selection: DesktopManagedUpdateSelection) => Promise<void>,
+    private readonly launch: (selection: DesktopManagedUpdateSelection) => Promise<boolean>,
     private readonly operations: ManagedUpdateOperations = defaultOperations,
   ) {}
 
-  /** Check immutable source releases, using the legacy migration only before the source channel exists. */
-  check(): Promise<DesktopUpdateState> {
-    if (this.installOperation !== undefined) return this.installOperation
-    if (this.checkOperation !== undefined) return this.checkOperation
-    this.checkOperation = this.doCheck().finally(() => { this.checkOperation = undefined })
-    return this.checkOperation
+  /** Latest published state; immutable source identity remains main-process-owned. */
+  get state(): DesktopUpdateState { return this.current }
+
+  /**
+   * Check immutable releases without acquiring an installer or replacing a prepared selection.
+   * @param manual - Whether a failed check is published rather than returned silently.
+   * @returns The joined check result, or the retained preparation state.
+   */
+  async check(manual = false): Promise<DesktopUpdateState> {
+    this.assertLive()
+    if (this.downloadOperation !== undefined || this.installOperation !== undefined || this.prepared) return this.current
+    if (!manual && this.current.phase === 'error' && this.current.failedOperation === 'download') return this.current
+    this.checkOperation ??= Promise.resolve().then(() => this.doCheck())
+      .finally(() => { this.checkOperation = undefined })
+    const result = await this.checkOperation
+    return manual && result.phase === 'error' ? this.setState(result) : result
   }
 
-  /** Launch one detached helper for the retained selection; repeated clicks share one operation. */
-  install(): Promise<DesktopUpdateState> {
-    if (this.installOperation !== undefined) return this.installOperation
-    this.installOperation = (async () => {
+  /**
+   * Pin the confirmed verified selection without launching a helper or claiming downloaded installer bytes.
+   * @param version - Exact version shown in the main-owned confirmation.
+   * @returns Readiness for managed handoff; installer acquisition remains helper-owned.
+   */
+  async download(version: string): Promise<DesktopUpdateState> {
+    this.assertLive()
+    if (this.prepared) {
+      this.assertVersion(version)
+      return this.current
+    }
+    if (this.downloadOperation !== undefined) {
+      const operation = this.downloadOperation
       await this.checkOperation
-      const selection = this.selection
-      if (selection === undefined) throw new Error('desktop managed update: no verified update is available')
-      const version = selection.manifest.owner === DESKTOP_MANAGED_UPDATE_SOURCE_REPOSITORY
-        ? selection.manifest.version
-        : selection.manifest.channelVersion
-      this.publish({
-        phase: 'installing',
-        version,
-        mode: 'github-release-managed',
-        interactiveInstaller: true,
-      })
+      this.assertLive()
+      this.assertVersion(version)
+      return operation
+    }
+    this.downloadOperation = Promise.resolve().then(async () => {
+      await this.checkOperation
+      this.assertLive()
+      this.assertVersion(version)
       try {
-        await this.launch(selection)
-        this.selection = undefined
-        return this.publish({
-          phase: 'installing',
-          version,
-          mode: 'github-release-managed',
-          interactiveInstaller: true,
-        })
+        this.assertSequence()
+        this.prepared = true
+        return this.setState({ phase: 'ready', version })
       } catch (error) {
-        return this.publish({
-          phase: 'error',
-          mode: 'github-release-managed',
-          message: error instanceof Error ? error.message : String(error),
-        })
+        return this.setState(this.failure(error, 'download'))
       }
-    })().finally(() => { this.installOperation = undefined })
+    }).finally(() => { this.downloadOperation = undefined })
+    return this.downloadOperation
+  }
+
+  /**
+   * Launch one acknowledged helper after separate main-owned installation authorization.
+   * @param version - Exact prepared version, never a renderer-selected source or URL.
+   * @returns Actual published handoff, deferral, or classified preparation failure.
+   */
+  install(version: string): Promise<DesktopUpdateState> {
+    try {
+      this.assertLive()
+      if (!this.prepared || this.downloadOperation !== undefined || version !== this.version()) {
+        throw new Error('desktop managed update: confirmed target is not ready')
+      }
+    } catch (error) {
+      return Promise.reject(error)
+    }
+    if (this.handedOff) return Promise.resolve(this.current)
+    this.installOperation ??= Promise.resolve().then(async () => {
+      try {
+        this.assertLive()
+        this.assertSequence()
+        const selection = this.selection
+        if (selection === undefined) throw new Error('desktop managed update: no verified update is available')
+        this.setState({ phase: 'installing', version })
+        if (!await this.launch(selection)) return this.setState({ phase: 'ready', version })
+        this.handedOff = true
+        return this.current
+      } catch (error) {
+        return this.setState(this.failure(error, 'install'))
+      }
+    }).finally(() => { this.installOperation = undefined })
     return this.installOperation
   }
 
+  /** Prevent new operations and late publication; an already launched handoff remains main-owned. */
+  dispose(): void {
+    this.disposed = true
+  }
+
+  private assertLive(): void {
+    if (this.disposed) throw new Error('desktop managed update: coordinator is disposed')
+  }
+
+  private version(): string | undefined {
+    const manifest = this.selection?.manifest
+    return manifest?.owner === DESKTOP_MANAGED_UPDATE_SOURCE_REPOSITORY ? manifest.version : manifest?.channelVersion
+  }
+
+  private assertVersion(version: string): void {
+    if (this.selection === undefined) throw new Error('desktop managed update: no verified update is available')
+    if (version !== this.version()) throw new Error('desktop managed update: download confirmation is stale')
+  }
+
+  private assertSequence(): void {
+    if (this.selection === undefined || this.selection.manifest.sequence <= this.installedSequence()) {
+      throw new Error('desktop managed update: selected sequence is no longer newer than the installed application')
+    }
+  }
+
+  private setState(state: DesktopUpdateState): DesktopUpdateState {
+    if (!this.disposed) this.current = this.publish({ ...state, mode: 'github-release-managed' })
+    return this.current
+  }
+
+  private failure(error: unknown, failedOperation: 'check' | 'download' | 'install'): DesktopUpdateState {
+    const version = this.version()
+    return {
+      phase: 'error',
+      mode: 'github-release-managed',
+      ...(version === undefined ? {} : { version }),
+      failedOperation,
+      message: error instanceof Error ? error.message : String(error),
+      ...(error instanceof DesktopUpdatePreparationError ? {
+        preparationFailure: error.kind,
+        ...(error.technicalDetails === undefined ? {} : { technicalDetails: error.technicalDetails }),
+      } : {}),
+    }
+  }
+
   private async doCheck(): Promise<DesktopUpdateState> {
-    this.publish({ phase: 'checking', mode: 'github-release-managed' })
     try {
+      this.assertLive()
       const installedSequence = this.installedSequence()
       const source = await discoverDesktopManagedSourceRelease(this.capability, installedSequence, this.operations)
       const selection = source ?? await selectMigration(this.capability, installedSequence, this.operations)
-      if (selection === undefined || selection.manifest.sequence === installedSequence) {
+      this.assertLive()
+      if (selection === undefined || selection.manifest.sequence <= this.installedSequence()) {
         this.selection = undefined
-        return this.publish({ phase: 'idle', mode: 'github-release-managed' })
+        return this.setState({ phase: 'idle' })
       }
       this.selection = selection
       const version = selection.manifest.owner === DESKTOP_MANAGED_UPDATE_SOURCE_REPOSITORY
         ? selection.manifest.version
         : selection.manifest.channelVersion
-      return this.publish({
-        phase: 'available',
-        version,
-        mode: 'github-release-managed',
-        interactiveInstaller: true,
-      })
+      return this.setState({ phase: 'available', version })
     } catch (error) {
       this.selection = undefined
-      return this.publish({
-        phase: 'error',
-        mode: 'github-release-managed',
-        message: error instanceof Error ? error.message : String(error),
-      })
+      return this.failure(error, 'check')
     }
   }
 }

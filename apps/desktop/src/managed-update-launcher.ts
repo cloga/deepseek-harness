@@ -1,6 +1,6 @@
 /** Electron-side creation and acknowledgement of one detached updater helper. */
 
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -12,6 +12,8 @@ import type { DesktopManagedUpdateCapability, DesktopManagedUpdateHandoff } from
 export interface DesktopManagedUpdateLaunch {
   readonly operationsRoot: string
   readonly nodeExecutable: string
+  /** Expected standalone Node bytes bound by the installed Desktop runtime inventory. */
+  readonly nodeSha256: string
   readonly helperBundle: string
   readonly capability: DesktopManagedUpdateCapability
   readonly selection: {
@@ -143,6 +145,10 @@ export async function launchDesktopManagedUpdate(
     copyFile(launch.nodeExecutable, node),
     copyFile(launch.helperBundle, helper),
   ])
+  if (!/^[a-f0-9]{64}$/u.test(launch.nodeSha256)
+    || createHash('sha256').update(await readFile(node)).digest('hex') !== launch.nodeSha256) {
+    throw new Error('desktop managed update: copied standalone Node failed release verification')
+  }
   const handoff: DesktopManagedUpdateHandoff = {
     schemaVersion: 1,
     token,

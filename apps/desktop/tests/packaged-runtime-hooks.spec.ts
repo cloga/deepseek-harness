@@ -8,10 +8,16 @@ vi.mock('../scripts/packaged-runtime.mjs', async importOriginal => ({
   verifyPackagedDesktopRuntime: checks.runtime,
 }))
 vi.mock('../scripts/verify-macos-signature.mjs', () => ({ verifyMacOSSignatureAfterSign: checks.signature }))
+vi.mock('../lib/types/runtime-tree.js', () => ({ verifyDesktopRuntime: vi.fn(async () => ({})), writeDesktopRuntime: vi.fn() }))
+vi.mock('../scripts/macos-app-update-config.mjs', async importOriginal => ({
+  ...await importOriginal<typeof import('../scripts/macos-app-update-config.mjs')>(),
+  writeMacOSAppUpdateConfig: vi.fn(async () => {}), verifyMacOSAppUpdateConfig: vi.fn(async () => {}),
+}))
 
 const version = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
 const macEnvironment = {
   DSH_DESKTOP_APP_ID: 'com.example.desktop',
+  DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN: 'https://policy.example.com',
   DSH_DESKTOP_TARGET_PLATFORM: 'darwin',
   DSH_DESKTOP_TARGET_ARCH: 'arm64',
   DSH_DESKTOP_MACOS_SIGNING_IDENTITY: 'Example Company (TEAMID1234)',
@@ -24,6 +30,7 @@ const macEnvironment = {
 
 beforeEach(() => {
   vi.stubEnv('DSH_DESKTOP_APP_ID', 'com.example.desktop')
+  vi.stubEnv('DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN', 'https://policy.example.com')
   vi.stubEnv('DSH_DESKTOP_TARGET_PLATFORM', 'win32')
   vi.stubEnv('DSH_DESKTOP_UNSIGNED', '1')
   checks.runtime.mockReset().mockResolvedValue(undefined)
@@ -36,6 +43,7 @@ describe('packaged runtime hooks', () => {
     const { createElectronBuilderConfig } = await import('../electron-builder.config.mjs')
     const config = createElectronBuilderConfig(platform === 'darwin' ? macEnvironment : {
       DSH_DESKTOP_APP_ID: 'io.github.cloga.deepseek-harness.desktop',
+      DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN: 'https://policy.example.com',
       DSH_DESKTOP_TARGET_PLATFORM: 'win32', DSH_DESKTOP_TARGET_ARCH: 'x64', DSH_DESKTOP_UNSIGNED: '1',
     }, platform, platform === 'darwin' ? 'arm64' : 'x64')
     const appOutDir = join('output', platform)
@@ -43,7 +51,7 @@ describe('packaged runtime hooks', () => {
     const bundle = join(appOutDir, `${productFilename}.app`, 'Contents')
     const resources = platform === 'win32' ? join(appOutDir, 'resources') : join(bundle, 'Resources')
     const context = { appOutDir, electronPlatformName: platform,
-      packager: { appInfo: { productFilename }, getResourcesDir: () => resources } }
+      packager: { appInfo: { productFilename, updaterCacheDirName: 'fixture' }, config: { publish: config.publish }, getResourcesDir: () => resources } }
     await config.afterPack(context)
     expect(checks.runtime).toHaveBeenCalledWith(
       platform === 'win32' ? join(appOutDir, `${productFilename}.exe`) : join(bundle, 'MacOS', productFilename),
@@ -58,7 +66,7 @@ describe('packaged runtime hooks', () => {
     const { createElectronBuilderConfig } = await import('../electron-builder.config.mjs')
     const config = createElectronBuilderConfig(macEnvironment, 'darwin', 'arm64')
     const context = { appOutDir: 'output', electronPlatformName: 'darwin',
-      packager: { appInfo: { productFilename: 'DeepSeek Harness' } } }
+      packager: { appInfo: { productFilename: 'DeepSeek Harness', updaterCacheDirName: 'fixture' }, config: { publish: config.publish } } }
     const contents = join('output', 'DeepSeek Harness.app', 'Contents')
     await config.afterSign(context)
     expect(checks.runtime).toHaveBeenCalledWith(join(contents, 'MacOS', 'DeepSeek Harness'),
