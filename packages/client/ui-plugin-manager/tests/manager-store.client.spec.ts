@@ -168,8 +168,9 @@ it('settles preparation as done but not installed, enabled, or restart-qualified
     expect(b.state().install).toMatchObject({
       open: true, installed: null, prepared: PREPARED, restartRequired: false, enabling: false,
     })
+    const anyRequestId: unknown = expect.any(String)
     expect(b.plugins.installBundle).toHaveBeenCalledWith(PREPARED.packageName, {
-      enabled: false, requestId: expect.any(String),
+      enabled: false, requestId: anyRequestId,
     })
     expect(b.state().packages.some(pkg => pkg.name === PREPARED.packageName)).toBe(false)
     b.face.closeInstall()

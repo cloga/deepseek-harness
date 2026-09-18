@@ -62,7 +62,9 @@ type SlotBodies = Record<string, (view: 'summary' | 'page') => ReactNode>
 
 const NO_CONFIG: ConfigLedger = { items: [], bundles: new Set(), rows: new Set() }
 
-function renderTab(state: Partial<PluginManagerState> = {}, config: Partial<ConfigLedger> = {}, bodies: SlotBodies = {}, canDiscardPrepared = false) {
+function renderTab(
+  state: Partial<PluginManagerState> = {}, config: Partial<ConfigLedger> = {}, bodies: SlotBodies = {}, canDiscardPrepared = false,
+) {
   const store = createSnapshotStore<PluginManagerState>({ ...READY, ...state })
   const ledger = createSnapshotStore<ConfigLedger>({ ...NO_CONFIG, ...config })
   const actions = {
