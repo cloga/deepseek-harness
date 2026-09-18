@@ -7,6 +7,10 @@ on:
         description: Exact reviewed version from apps/desktop/release/cloga-windows-x64.json
         required: true
         type: string
+      expected_source_sha:
+        description: Exact reviewed source commit (40 lowercase hexadecimal characters)
+        required: true
+        type: string
       rehearsal:
         description: Build and retain reviewed branch artifacts without publishing a release
         required: false
@@ -61,11 +65,18 @@ jobs:
         shell: pwsh
         env:
           CONFIRM_VERSION: ${{ inputs.confirm_version }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
           REHEARSAL: ${{ inputs.rehearsal }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($env:EXPECTED_SOURCE_SHA -cnotmatch '\A[0-9a-f]{40}\z') {
+            throw 'Expected source SHA must be exactly 40 lowercase hexadecimal characters'
+          }
           $head = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the checked-out source commit' }
+          if ($head -cne $env:EXPECTED_SOURCE_SHA) {
+            throw "Checkout does not match reviewed source: HEAD=$head expected=$($env:EXPECTED_SOURCE_SHA)"
+          }
           if ($env:REHEARSAL -eq 'true') {
             if ($env:GITHUB_REF_TYPE -ne 'branch') { throw 'Rehearsal must run from a branch' }
             $selectedRef = 'refs/remotes/rehearsal/selected'
