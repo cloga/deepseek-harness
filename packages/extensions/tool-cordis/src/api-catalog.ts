@@ -1541,7 +1541,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'Persisted and runtime outcomes.',
       },
       {
-        signature: '@Remote installBundle(spec: string, options?: InstallBundleOptions): Promise<ChangeResult>',
+        signature: '@Remote installBundle(spec: string | ProfileVerifiedReleaseSource, options?: InstallBundleOptions): Promise<ChangeResult>',
         description: 'Install a package using the same pnpm implementation as dsh plugin. A run that fails, is cancelled, or adds a package without a bundle patch restores `package.json` and `pnpm-lock.yaml` as they were; downloaded files can stay.',
         parameters: [{ name: 'spec', description: 'One package spec, including local paths relative to the invocation directory.' }, { name: 'options', description: 'Whether to activate the installed bundle (defaults to true), the request id a cancellation names, and the pending build scripts to allow for this profile before pnpm runs.' }],
         returns: 'Package-manager diagnostics and observed activation outcome.',
@@ -1558,6 +1558,23 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'name', description: 'Installed dependency name.' }],
         returns: 'Removal diagnostics and the remaining profile state.',
       },
+      {
+        signature: '@Remote async pendingPackageChange(transactionId: string): Promise<ProfilePreparedPackageChange | undefined>',
+        description: 'Read the launcher\'s authoritative pending record without claiming active package state.',
+        parameters: [{ name: 'transactionId', description: 'Identifier returned by a prepared result.' }],
+        returns: 'Pending record, or undefined after cancellation or activation.',
+      },
+      {
+        signature: '@Remote async cancelPendingPackageChange(transactionId: string): Promise<void>',
+        description: 'Cancel a prepared graph through its owner, never by deleting a caller-supplied path.',
+        parameters: [{ name: 'transactionId', description: 'Identifier returned by a prepared result.' }],
+      },
+      {
+        signature: '@Remote async listPendingPackageChanges(): Promise<readonly ProfilePreparedPackageChange[]>',
+        description: 'List prepared changes without claiming activation or runtime health.',
+        parameters: [],
+        returns: 'Pending package changes, or an empty list when the profile does not require staging.',
+      },
     ],
   },
   {
@@ -1568,6 +1585,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       {
         signature: 'readonly packageManager?: ProfilePnpmInvocation',
         description: 'Packaged applications supply their bundled runtime instead of a PATH executable.',
+        parameters: [],
+      },
+      {
+        signature: 'readonly stagedPackageTransactions?: boolean',
+        description: 'Refuse stock live package mutation when the launcher-owned stage service is unavailable.',
         parameters: [],
       },
       {
@@ -1584,6 +1606,37 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: 'readonly telemetryDisabledEnv: string | undefined',
         description: 'Launch-time DSH_TELEMETRY_DISABLED value; any non-empty value opts out.',
         parameters: [],
+      },
+    ],
+  },
+  {
+    key: 'profilePackageTransactions',
+    summary: 'The launcher owns the stage lease and backend lifetime; no method stops its calling Host.',
+    description: 'The launcher owns the stage lease and backend lifetime; no method stops its calling Host.',
+    methods: [
+      {
+        signature: 'stage(requestId: string, request: ProfilePackageMutation, signal: AbortSignal): Promise<ProfilePreparedPackageChange>',
+        description: 'Prepare a durable graph without activating it. A Host-facing provider acknowledges cancellation with ProfilePackageCancelledError only after cleanup; an aborted signal alone is not success.',
+        parameters: [{ name: 'requestId', description: 'Request identity, also used as the durable transaction id.' }, { name: 'request', description: 'Package mutation to prepare under the launcher\'s lease.' }, { name: 'signal', description: 'Cancellation request; cleanup must settle before cancellation is acknowledged.' }],
+        returns: 'Prepared graph identity, not an active receipt or runtime health observation.',
+      },
+      {
+        signature: 'status(transactionId: string): Promise<ProfilePreparedPackageChange | undefined>',
+        description: 'Read a transaction\'s pending preparation state without inspecting active package health.',
+        parameters: [{ name: 'transactionId', description: 'Durable transaction identity returned by staging.' }],
+        returns: 'Prepared record, or undefined when no pending stage remains.',
+      },
+      {
+        signature: 'listPending(): Promise<readonly ProfilePreparedPackageChange[]>',
+        description: 'List pending preparations owned by the launcher\'s fixed profile.',
+        parameters: [],
+        returns: 'Prepared records, without implying that any graph is active.',
+      },
+      {
+        signature: 'cancel(transactionId: string): Promise<void>',
+        description: 'Cancel or discard a preparation through its owner without removing an active plugin.',
+        parameters: [{ name: 'transactionId', description: 'Durable transaction identity to cancel.' }],
+        returns: 'Settles after the owner\'s cancellation cleanup has completed.',
       },
     ],
   },
@@ -4246,7 +4299,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ChangeResult',
-    declaration: 'export interface ChangeResult {\n    changed: boolean;\n    application: \'applied\' | \'restart-required\' | \'overridden\' | \'failed\' | \'cancelled\';\n    stage: \'install\' | \'enable\' | \'remove\';\n    target: string;\n    enabled?: boolean;\n    error?: ManagementError;\n    warnings?: string[];\n    packageResult?: PackageResult;\n    bundle?: string;\n    pendingBuilds?: string[];\n    approvedBuilds?: string[];\n}',
+    declaration: 'export interface ChangeResult {\n    changed: boolean;\n    application: \'applied\' | \'restart-required\' | \'prepared\' | \'overridden\' | \'failed\' | \'cancelled\';\n    prepared?: ProfilePreparedPackageChange;\n    stage: \'install\' | \'enable\' | \'remove\';\n    target: string;\n    enabled?: boolean;\n    error?: ManagementError;\n    warnings?: string[];\n    packageResult?: PackageResult;\n    bundle?: string;\n    pendingBuilds?: string[];\n    approvedBuilds?: string[];\n}',
   },
   {
     name: 'ClientArtifactBaseline',
@@ -5369,8 +5422,24 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type PreToolDecision = {\n    kind: \'allow\';\n} | {\n    kind: \'deny\';\n    reason: string;\n    info?: ToolErrorInfo;\n} | {\n    kind: \'cancel\';\n} | {\n    kind: \'ask\';\n    reason?: string;\n};',
   },
   {
+    name: 'ProfilePackageMutation',
+    declaration: 'export type ProfilePackageMutation = {\n    readonly kind: \'install\';\n    readonly source: ProfilePackageSource;\n    readonly enabled?: boolean;\n    readonly approvedBuilds?: readonly string[];\n} | {\n    readonly kind: \'remove\';\n    readonly name: string;\n};',
+  },
+  {
+    name: 'ProfilePackageSource',
+    declaration: 'export type ProfilePackageSource = ProfileVerifiedReleaseSource | {\n    readonly schemaVersion: 1;\n    readonly type: \'npmRegistry\';\n    readonly spec: string;\n} | {\n    readonly schemaVersion: 1;\n    readonly type: \'packageSpec\';\n    readonly spec: string;\n};',
+  },
+  {
     name: 'ProfilePnpmInvocation',
     declaration: 'export interface ProfilePnpmInvocation {\n    readonly command: string;\n    readonly args: readonly string[];\n    readonly env: Readonly<Record<string, string>>;\n}',
+  },
+  {
+    name: 'ProfilePreparedPackageChange',
+    declaration: 'export interface ProfilePreparedPackageChange {\n    readonly transactionId: string;\n    readonly state: \'prepared\';\n    readonly packageName: string;\n    readonly baseFingerprint: string;\n    readonly health: \'pending\' | \'passed\';\n}',
+  },
+  {
+    name: 'ProfileVerifiedReleaseSource',
+    declaration: 'export interface ProfileVerifiedReleaseSource {\n    readonly schemaVersion: 1;\n    readonly type: \'githubRelease\';\n    readonly owner: string;\n    readonly repo: string;\n    readonly tag: string;\n    readonly asset: string;\n    readonly assetId: number;\n    readonly packageName: string;\n    readonly version: string;\n    readonly size: number;\n    readonly sha256: string;\n    readonly integrity?: string;\n    readonly targetCommit: string;\n    readonly dependencyRegistry?: string;\n    readonly checksumManifest?: {\n        readonly format: \'sha256sums\';\n        readonly asset: string;\n        readonly assetId: number;\n        readonly url: string;\n        readonly size: number;\n        readonly sha256: string;\n        readonly integrity?: string;\n    };\n}',
   },
   {
     name: 'ProjectionChangeListener',

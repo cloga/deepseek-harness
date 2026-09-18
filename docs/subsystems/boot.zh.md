@@ -110,7 +110,7 @@ Manage profile files and apply their declared reload lifecycle.
  * the pending build scripts to allow for this profile before pnpm runs.
  * @returns Package-manager diagnostics and observed activation outcome.
  */
-@Remote installBundle(spec: string, options?: InstallBundleOptions): Promise<ChangeResult>
+@Remote installBundle(spec: string | ProfileVerifiedReleaseSource, options?: InstallBundleOptions): Promise<ChangeResult>
 
 /** Stop an installation this manager owns and wait until its files are back.
  * @param requestId The id the installation was started with.
@@ -124,6 +124,25 @@ Manage profile files and apply their declared reload lifecycle.
  * @returns Removal diagnostics and the remaining profile state.
  */
 @Remote removeBundle(name: string): Promise<ChangeResult>
+
+/**
+ * Read the launcher's authoritative pending record without claiming active package state.
+ * @param transactionId - Identifier returned by a prepared result.
+ * @returns Pending record, or undefined after cancellation or activation.
+ */
+@Remote async pendingPackageChange(transactionId: string): Promise<ProfilePreparedPackageChange | undefined>
+
+/**
+ * Cancel a prepared graph through its owner, never by deleting a caller-supplied path.
+ * @param transactionId - Identifier returned by a prepared result.
+ */
+@Remote async cancelPendingPackageChange(transactionId: string): Promise<void>
+
+/**
+ * List prepared changes without claiming activation or runtime health.
+ * @returns Pending package changes, or an empty list when the profile does not require staging.
+ */
+@Remote async listPendingPackageChanges(): Promise<readonly ProfilePreparedPackageChange[]>
 ```
 
 Source: [`packages/boot/plugin-manager/src/index.ts`](../../packages/boot/plugin-manager/src/index.ts)
@@ -135,6 +154,46 @@ Source: [`packages/boot/plugin-manager/src/index.ts`](../../packages/boot/plugin
 Current profile facts; scheduling and mutation belong to their callers.
 
 Source: [`packages/boot/app-boot/src/profile-context.ts`](../../packages/boot/app-boot/src/profile-context.ts)
+
+<a id="ctxprofilepackagetransactions--profilepackagetransactions"></a>
+
+### `ctx.profilePackageTransactions` — `ProfilePackageTransactions`
+
+The launcher owns the stage lease and backend lifetime; no method stops its calling Host.
+
+```ts cordis-catalog
+/**
+ * Prepare a durable graph without activating it. A Host-facing provider acknowledges cancellation
+ * with ProfilePackageCancelledError only after cleanup; an aborted signal alone is not success.
+ * @param requestId - Request identity, also used as the durable transaction id.
+ * @param request - Package mutation to prepare under the launcher's lease.
+ * @param signal - Cancellation request; cleanup must settle before cancellation is acknowledged.
+ * @returns Prepared graph identity, not an active receipt or runtime health observation.
+ */
+stage(requestId: string, request: ProfilePackageMutation, signal: AbortSignal): Promise<ProfilePreparedPackageChange>
+
+/**
+ * Read a transaction's pending preparation state without inspecting active package health.
+ * @param transactionId - Durable transaction identity returned by staging.
+ * @returns Prepared record, or undefined when no pending stage remains.
+ */
+status(transactionId: string): Promise<ProfilePreparedPackageChange | undefined>
+
+/**
+ * List pending preparations owned by the launcher's fixed profile.
+ * @returns Prepared records, without implying that any graph is active.
+ */
+listPending(): Promise<readonly ProfilePreparedPackageChange[]>
+
+/**
+ * Cancel or discard a preparation through its owner without removing an active plugin.
+ * @param transactionId - Durable transaction identity to cancel.
+ * @returns Settles after the owner's cancellation cleanup has completed.
+ */
+cancel(transactionId: string): Promise<void>
+```
+
+Source: [`packages/boot/app-boot/src/profile-package-transactions.ts`](../../packages/boot/app-boot/src/profile-package-transactions.ts)
 
 <a id="hmr-events"></a>
 
