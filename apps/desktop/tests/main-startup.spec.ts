@@ -29,7 +29,10 @@ const baseline = vi.hoisted(() => ({
 const packageReview = vi.hoisted(() => ({
   input: undefined as DesktopPreparedPackageActivation | undefined,
   confirmed: undefined as ((accepted: boolean) => void) | undefined,
-  run: undefined as ((options: DesktopProfilePackageActivationOptions, input: DesktopPreparedPackageActivation) => Promise<void>) | undefined,
+  run: undefined as ((
+    options: DesktopProfilePackageActivationOptions,
+    input: DesktopPreparedPackageActivation,
+  ) => Promise<void>) | undefined,
   beforeConfirm: undefined as (() => Promise<void>) | undefined,
   cleanup: undefined as (() => void | Promise<void>) | undefined,
 }))
@@ -1331,7 +1334,7 @@ describe('desktop main startup', () => {
       intervalMs: 10_000, jitter: 0,
     } })
     manifestRead.read = () => { entered.resolve(undefined); return loaded.promise }
-    packageReview.cleanup = () => loaded.resolve(manifest)
+    packageReview.cleanup = () => { loaded.resolve(manifest) }
     const request = vi.fn(() => { throw new Error('manifest continuation must not make policy requests') })
     vi.stubGlobal('fetch', request)
     await import('../src/main.ts')
@@ -1370,7 +1373,7 @@ describe('desktop main startup', () => {
     if (phase === 'staging') packageReview.beforeConfirm = () => { entered.resolve(undefined); return proceed.promise }
     harness.dialog.showMessageBox.mockImplementation((options: MessageBoxOptions) => {
       entered.resolve(undefined)
-      options.signal?.addEventListener('abort', () => answer.resolve({ response: 1, checkboxChecked: false }), { once: true })
+      options.signal?.addEventListener('abort', () => { answer.resolve({ response: 1, checkboxChecked: false }) }, { once: true })
       return answer.promise
     })
     const urls = [...harness.windows[0]!.urls]
@@ -1394,7 +1397,7 @@ describe('desktop main startup', () => {
     const admitted = Promise.withResolvers<undefined>()
     const proceed = Promise.withResolvers<undefined>()
     const finished = Promise.withResolvers<undefined>()
-    packageReview.cleanup = () => proceed.resolve(undefined)
+    packageReview.cleanup = () => { proceed.resolve(undefined) }
     packageReview.run = async (options, input) => {
       const release = await options.acquireAdmission(input)
       admitted.resolve(undefined)
@@ -1454,8 +1457,8 @@ describe('desktop main startup', () => {
     const f = await readyForPackageLifecycle()
     const entered = Promise.withResolvers<undefined>()
     const locked = Promise.withResolvers<boolean>()
-    packageReview.cleanup = () => locked.resolve(false)
-    f.host.updateTasks.mockImplementation(action => {
+    packageReview.cleanup = () => { locked.resolve(false) }
+    f.host.updateTasks.mockImplementation((action) => {
       if (action !== 'lock') return Promise.resolve(false)
       entered.resolve(undefined)
       return locked.promise
@@ -1488,7 +1491,7 @@ describe('desktop main startup', () => {
     harness.dialog.showMessageBox.mockImplementation((options: MessageBoxOptions) => {
       if (options.title === en.startupFailed) return recoveryAnswer.promise
       consentShown.resolve(undefined)
-      options.signal?.addEventListener('abort', () => consent.resolve({ response: 1, checkboxChecked: false }), { once: true })
+      options.signal?.addEventListener('abort', () => { consent.resolve({ response: 1, checkboxChecked: false }) }, { once: true })
       return consent.promise
     })
     f.review()
@@ -1620,15 +1623,16 @@ describe('desktop main startup', () => {
     const abandon = vi.fn(async () => { throw new Error('fixture helper is still alive') })
     // This is a deliberately non-quiescent fake shell. Retire its event listeners only after proving the veto;
     // production must not infer helper exit from a rejected cancellation Promise.
-    let handoff: Promise<boolean> | undefined
+    const operation: { handoff: Promise<boolean> | undefined } = { handoff: undefined }
     packageReview.cleanup = async () => {
       acknowledged.resolve({ operationRoot: 'owned-operation', helperPid: 789, token: 'fixture', abandon })
-      await handoff?.catch(() => undefined)
+      await operation.handoff?.catch(() => undefined)
       harness.app.removeAllListeners('before-quit')
     }
     const host = await readyForUpdate()
     harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
-    handoff = managed.launch!(selected)
+    const handoff = managed.launch!(selected)
+    operation.handoff = handoff
     const rejected = expect(handoff).rejects.toThrow('helper cancellation failed')
     await entered.promise
     harness.app.quit()

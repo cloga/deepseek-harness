@@ -496,7 +496,9 @@ async function main(): Promise<void> {
     if (state.phase === 'error' && state.failedOperation !== 'check') {
       const restoreHost = state.failedOperation === 'install' && updateStoppedHost && !managedHelperMayRun && !lifecycleUnavailable()
       shellInstallerOwnsQuit = false
-      if (!managedHelperMayRun && !lifecycleUnavailable() && mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.setEnabled(true)
+      if (!managedHelperMayRun && !lifecycleUnavailable() && mainWindow !== undefined && !mainWindow.isDestroyed()) {
+        mainWindow.setEnabled(true)
+      }
       updateStoppedHost = false
       if (restoreHost) {
         // Only confirmed process exit permits replacement before another installation confirmation.
@@ -640,13 +642,16 @@ async function main(): Promise<void> {
     return startup
   }
 
+  // Read current ownership at every await boundary; other lifecycle callbacks can change these values.
+  const helperOwnsRestartAdmission = (): boolean => managedHelperMayRun
+  const packageOwnsRestartAdmission = (): boolean => packageOperation !== undefined || packageAdmissionId !== undefined
   const prepareRestart = async (beforeStop?: (hostPid: number | undefined) => Promise<void>): Promise<boolean> => {
     if (lifecycleUnavailable()) throw new Error('Desktop shutdown or recovery already owns restart admission')
-    if (managedHelperMayRun) throw new Error('A managed helper already owns restart admission')
-    if (packageOperation !== undefined || packageAdmissionId !== undefined) throw new Error('A package activation already owns restart admission')
+    if (helperOwnsRestartAdmission()) throw new Error('A managed helper already owns restart admission')
+    if (packageOwnsRestartAdmission()) throw new Error('A package activation already owns restart admission')
     await workspaceRecovery
     await startup?.catch(() => undefined)
-    if (lifecycleUnavailable() || packageOperation !== undefined || packageAdmissionId !== undefined) {
+    if (lifecycleUnavailable() || packageOwnsRestartAdmission()) {
       throw new Error('Desktop lifecycle changed before restart admission')
     }
     const host = backend.host
@@ -696,11 +701,16 @@ async function main(): Promise<void> {
       updateJournal?.action('install-confirmed')
       shellInstallerOwnsQuit = true
     } catch (error) {
-      if (!updateStoppedHost && !managedHelperMayRun && !lifecycleUnavailable()) await host.updateTasks('unlock').catch((unlockError: unknown) => { console.error(unlockError) })
+      if (!updateStoppedHost && !helperOwnsRestartAdmission() && !lifecycleUnavailable()) {
+        await host.updateTasks('unlock').catch((unlockError: unknown) => { console.error(unlockError) })
+      }
       throw error
     } finally {
       requireCleanStop = false
-      if (!shellInstallerOwnsQuit && !managedHelperMayRun && !lifecycleUnavailable() && inputWindow !== undefined && !inputWindow.isDestroyed()) inputWindow.setEnabled(true)
+      if (!shellInstallerOwnsQuit && !helperOwnsRestartAdmission() && !lifecycleUnavailable()
+        && inputWindow !== undefined && !inputWindow.isDestroyed()) {
+        inputWindow.setEnabled(true)
+      }
     }
     return true
   }
