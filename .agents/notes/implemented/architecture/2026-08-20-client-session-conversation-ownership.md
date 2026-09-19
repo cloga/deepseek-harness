@@ -235,14 +235,14 @@ These combined facts do not enter `WorkspaceSnapshot`:
 - whether the Workspace and Session baselines are both ready;
 - the most recent Workspace derived from Session update times;
 - whether the current Session is cleared because it was archived;
-- which blank Session New Session should reuse;
+- which blank Session ordinary Workspace selection can reuse;
 - which Session initial startup should select.
 
 ### UI Workspace composition responsibilities
 
 `client/ui-workspace` registers the Workspace list source as the root standard source `workspaces`, from which the renderer provides `useWorkspaces`.
 
-Initial selection, blank-Session reuse, new-session navigation, concurrent-create coalescing, and navigation after archival are UI navigation policy. That policy may read both `ctx.workspaces` and `ctx.sessions` at decision time, but it issues only Controller commands and selection actions and does not publish a combined snapshot.
+Initial selection, blank-Session reuse, new-session navigation, concurrent-create coalescing, and navigation after archival are UI navigation policy. That policy may read both `ctx.workspaces` and `ctx.sessions` at decision time, but it issues only Controller commands and selection actions and does not publish a combined snapshot. [Explicit New Session creates a fresh identity](../bug-fix/2026-09-19-explicit-new-session-fresh-identity.md); ordinary Workspace selection retains reuse, without changing these ownership layers.
 
 Directory pickers, directory browsing, and `openPath` are separate directory capabilities and do not enter the Workspace Controller.
 

@@ -11,7 +11,7 @@ import { globSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { act, cleanup } from '@testing-library/react'
+import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, vi } from 'vitest'
 import { bootInjections, orderByModuleGraph } from '@deepseek-ai/dsh-client-modules'
 import type { ClientModuleLoaderTarget, WebBootEntry, WebBootGraph } from '@deepseek-ai/dsh-client-modules/client'
@@ -305,6 +305,42 @@ export function mountAssembledApp(options: AssembledBootOptions = {}): Assembled
     unmount = () => entry.dispose()
   })
   return remote
+}
+
+/**
+ * Start a fresh fixture Session and wait for its editable composer, not the
+ * still-mounted composer from the preceding selection.
+ * @returns the new Session's connected input surface.
+ */
+export async function openFreshFixtureComposer(): Promise<HTMLElement> {
+  const currentSessionId = (): string | undefined => {
+    const stored = localStorage.getItem('dsh.sessions.current')
+    return stored === null ? undefined : (JSON.parse(stored) as { sessionId?: string }).sessionId
+  }
+  const composer = (): HTMLElement | null => document.querySelector<HTMLElement>(
+    '[data-composer-input][data-placeholder="Describe what you want to build, / commands, @ files or sessions"]',
+  )
+  const tree = await screen.findByRole('tree', { name: 'Sessions' }, { timeout: 10_000 })
+  const previous = await waitFor(() => {
+    const sessionId = currentSessionId()
+    const surface = composer()
+    if (sessionId === undefined || surface?.getAttribute('contenteditable') !== 'true') {
+      throw new Error('initial selected composer not ready')
+    }
+    return { sessionId, surface }
+  }, { timeout: 10_000 })
+  const start = tree.querySelector<HTMLButtonElement>('button[aria-label="New session in fixture"]')
+  if (start === null) throw new Error('fixture Workspace new-session action missing')
+  fireEvent.click(start)
+  return waitFor(() => {
+    const sessionId = currentSessionId()
+    if (sessionId === undefined || sessionId === previous.sessionId || previous.surface.isConnected) {
+      throw new Error('fresh Session has not replaced the previous composer')
+    }
+    const surface = composer()
+    if (surface?.getAttribute('contenteditable') !== 'true') throw new Error('fresh composer not editable')
+    return surface
+  }, { timeout: 10_000 })
 }
 
 /**

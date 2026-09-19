@@ -146,8 +146,8 @@ export function apply(ctx: ClientContext): void {
       rosterReaders.add(readRoster)
       // Stage WITHOUT applying — the still-current running session would
       // refuse the swap and drop the stage — then start the session it lands
-      // on: the chip's list-change applier composes the blank session the
-      // workspace connect produces or reuses.
+      // on: the chip's list-change applier composes the fresh blank session
+      // created by the New Session flow.
       creatorDraft = () => {
         if (!section.store.getSnapshot().showPicker) return
         // The introduce cue makes the chip announce the pick the user never

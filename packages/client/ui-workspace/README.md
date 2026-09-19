@@ -37,6 +37,8 @@ Collapsed search is one header action beside the view and add actions: activatin
 
 ### Managing sessions
 
+**New Session** creates a fresh Session identity even when the Workspace already has a blank Session. Concurrent clicks for the same Workspace share only the pending creation; another click after it settles starts a new creation. The global action uses the current Session's Workspace, otherwise the most recent Workspace; a Workspace-local action uses that Workspace. With no Workspace available, it shows the no-session view. Initial selection and composer Workspace switching still reuse an eligible blank Session.
+
 The Session row's Rename action opens a dialog prefilled with the row's display title; confirming an unchanged title is deliberately allowed — it pins the current automatic title against regeneration. Archive commits without a confirmation dialog and the row disappears from every grouping surface when the archive-set echo lands. Fork forks at the source's last completed turn, increments the inherited persisted title on the client, and then opens the child. Workspace Delete opens a confirmation that states the retention boundary; success removes the group while its Sessions remain under Ungrouped.
 
 ### Pending interactions
@@ -51,7 +53,7 @@ The value is intentionally best effort for cold Sessions. An identity-matching u
 
 -----
 
-`ctx.uiWorkspace.openSession(id)` selects the Session and returns the main area to the Conversation as one UI navigation action, including when that Session was already current. `openWorkspace(id, beforeOpen?)` and `forkSession(id)` open their result only if no later navigation has superseded the request; New Session uses `openWorkspace`. The optional synchronous preparation callback runs only for a current Workspace request, so superseded requests do not move composer drafts. Navigation or owner disposal suppresses the late UI commit, not the underlying Session creation. Selection failure leaves a global panel visible. Session rows read `usePanelInfo` to suppress their selected appearance while a global panel is active; search and directory-picker focus alone do not leave that panel.
+`ctx.uiWorkspace.openSession(id)` selects the Session and returns the main area to the Conversation as one UI navigation action, including when that Session was already current. `startSession(workspaceId?)`, `openWorkspace(id, beforeOpen?)`, and `forkSession(id)` open their result only if no later navigation has superseded the request. New Session uses `startSession`; ordinary Workspace selection uses `openWorkspace` and its blank-reusing `connectWorkspace` path. The optional synchronous preparation callback runs only for a current Workspace request, so superseded requests do not move composer drafts. Navigation or owner disposal suppresses the late UI commit, not the underlying Session creation. Selection failure leaves a global panel visible. Session rows read `usePanelInfo` to suppress their selected appearance while a global panel is active; search and directory-picker focus alone do not leave that panel.
 
 <a id="understand-the-implementation"></a>
 ## Understand the implementation
