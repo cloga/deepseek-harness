@@ -38,6 +38,7 @@ import { DesktopManagedUpdateCoordinator } from './managed-update-coordinator.ts
 import { completeDesktopManagedUpdateHandoff, launchDesktopManagedUpdate } from './managed-update-launcher.ts'
 import { loadDesktopManagedUpdateConfiguration } from './managed-update-state.ts'
 import { completeDesktopManagedUpdate } from './managed-update-completion.ts'
+import { MANAGED_UPDATE_RECOVERY_ARGUMENT } from './managed-update-recovery.ts'
 import { desktopErrorState } from './startup-error.ts'
 import { startupFailureDocument } from './startup-document.ts'
 import { confirmDesktopPluginMutation } from './plugin-mutation-confirmation.ts'
@@ -46,6 +47,8 @@ import { requestDesktopRendererImpact } from './renderer-impact.ts'
 const SCHEME = 'dsh-app'
 class DesktopOperationBusy extends Error {}
 let focusPrimaryWindow = (): void => {}
+let managedRecoveryRequested = process.argv.includes(MANAGED_UPDATE_RECOVERY_ARGUMENT)
+let requestManagedRecovery = (): void => { managedRecoveryRequested = true }
 type RecoveryAction = 'restart' | 'plugins' | 'reset'
 let profileRecoveryAvailable = (): boolean => false
 const emergencyPages = new WeakMap<BrowserWindow, { url: string; message: string; busy: boolean }>()
@@ -356,6 +359,29 @@ async function main(): Promise<void> {
     }
     publishBackend(backendState())
   }
+  const checkManagedCompletion = async (): Promise<void> => {
+    if (managedUpdate === undefined || managedCompletionChecked) return
+    if (resources.provisioning === undefined) {
+      throw new Error('desktop managed update: packaged plugin provisioning plan is missing')
+    }
+    const completion = await completeDesktopManagedUpdate(
+      managedUpdate.operationsRoot,
+      managedUpdate.completionPath,
+      managedUpdate.capability,
+      managedUpdate.completedSequence,
+      process.execPath,
+      join(resources.dsh, 'desktop-runtime.json'),
+      resources.provisioning,
+      manager.paths.profile,
+    )
+    if (completion.status === 'recovery-required') {
+      throw new Error(`${completion.message}\n\nRecovery: ${completion.command}`)
+    }
+    if (completion.status === 'complete') {
+      managedInstalledSequence = Math.max(managedInstalledSequence, completion.sequence)
+    }
+    managedCompletionChecked = true
+  }
   const reconcileBackend = (): Promise<void> => {
     startup ??= (async () => {
       pageError = undefined
@@ -365,28 +391,7 @@ async function main(): Promise<void> {
       }
       if (quitting) return
       await backend.start(async () => {})
-      if (development === undefined) {
-        if (managedUpdate !== undefined && !managedCompletionChecked) {
-          if (resources.provisioning === undefined) {
-            throw new Error('desktop managed update: packaged plugin provisioning plan is missing')
-          }
-          const completion = await completeDesktopManagedUpdate(
-            managedUpdate.operationsRoot,
-            managedUpdate.completionPath,
-            managedUpdate.capability,
-            managedUpdate.completedSequence,
-            process.execPath,
-            join(resources.dsh, 'desktop-runtime.json'),
-            resources.provisioning,
-            manager.paths.profile,
-          )
-          if (completion.status === 'recovery-required') {
-            throw new Error(`${completion.message}\n\nRecovery: ${completion.command}`)
-          }
-          if (completion.status === 'complete') managedInstalledSequence = completion.sequence
-          managedCompletionChecked = true
-        }
-      }
+      if (development === undefined) await checkManagedCompletion()
       if (backend.host !== undefined) await navigateMain(applicationUrl)
     })().catch(async (error: unknown) => {
       await showStartupError(error)
@@ -745,6 +750,34 @@ async function main(): Promise<void> {
     }
   }
 
+  const recoverManagedUpdate = async (): Promise<void> => {
+    if (managedUpdate === undefined) return
+    await startup?.catch(() => undefined)
+    try {
+      await runRecovery(async () => {
+        // Completion needs the existing ready Host's inventory; never restart it for a recheck.
+        if (backend.state.phase !== 'ready') throw new Error(messages.startupReinstallAdvice)
+        await checkManagedCompletion()
+        pageError = undefined
+        emergencyDocument = false
+        await navigateMain(applicationUrl)
+      })
+    } catch (error) {
+      if (error instanceof DesktopOperationBusy) return
+      await showStartupError(error)
+      const result = await dialog.showMessageBox({
+        type: 'warning', title: messages.updateFailedTitle,
+        message: desktopErrorState(error).message,
+        buttons: [messages.checkUpdatesMenu, messages.later], defaultId: 1, cancelId: 1,
+      })
+      // The normal update path reads active-work impact and obtains consent before stopping Host.
+      if (result.response === 0) await checkAndPrompt()
+    }
+  }
+  requestManagedRecovery = () => {
+    void recoverManagedUpdate().catch((error: unknown) => { console.error('desktop managed recovery failed', error) })
+  }
+
   const openPluginWindow = (): void => {
     if (pluginWindow !== undefined && !pluginWindow.isDestroyed()) {
       pluginWindow.focus()
@@ -842,6 +875,10 @@ async function main(): Promise<void> {
   // Window lifecycle callbacks run while backend startup is pending.
   const startupWasCancelled = (): boolean => quitting
   if (startupWasCancelled()) return
+  if (managedRecoveryRequested) {
+    managedRecoveryRequested = false
+    requestManagedRecovery()
+  }
   const startupWindow = (): BrowserWindow | undefined => mainWindow
   const window = startupWindow()
   if (window !== undefined && development !== undefined && process.env.DSH_DESKTOP_OPEN_DEVTOOLS !== '0') {
@@ -856,6 +893,9 @@ async function main(): Promise<void> {
 }
 
 const ownsDesktopInstance = claimDesktopSingleInstance(app, () => { focusPrimaryWindow() })
+if (ownsDesktopInstance) app.on('second-instance', (_event, argv) => {
+  if (argv.includes(MANAGED_UPDATE_RECOVERY_ARGUMENT)) requestManagedRecovery()
+})
 
 if (ownsDesktopInstance) void app.whenReady().then(main).catch(async (error: unknown) => {
   const message = error instanceof Error ? error.message : String(error)

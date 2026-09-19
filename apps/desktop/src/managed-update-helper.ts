@@ -4,11 +4,11 @@ import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
-import { Transform } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
 import { spawn } from 'node:child_process'
 import {
-  assertManagedUpdateRedirect,
   managedUpdateAssetUrl,
   parseDesktopManagedUpdateHandoff,
   parseDesktopManagedUpdateManifest,
@@ -16,10 +16,25 @@ import {
   type DesktopManagedUpdateHandoff,
 } from './managed-update-protocol.ts'
 
+import {
+  ManagedUpdateTransferError,
+  readManagedUpdateMetadata,
+  withManagedUpdateResponse,
+} from './managed-update-network.ts'
+
 const MAX_MANIFEST_BYTES = 1024 * 1024
 const MAX_RECEIPT_BYTES = 16 * 1024 * 1024
-const REQUEST_TIMEOUT_MS = 30_000
-const REDIRECTS = new Set([301, 302, 303, 307, 308])
+
+/** Persisted helper progress; only installer launch permits installed-state reconciliation. */
+export type DesktopManagedUpdateHelperPhase =
+  | 'manifest-download' | 'manifest-validation' | 'acknowledgement' | 'process-wait'
+  | 'receipt-download' | 'receipt-validation' | 'installer-download' | 'stage-promotion'
+  | 'installer-verification' | 'installer-launch' | 'result-persistence'
+
+/** Closed diagnostic categories; never persist raw transport or operating-system messages. */
+export type DesktopManagedUpdateHelperErrorType =
+  | 'timeout' | 'network-reset' | 'http' | 'redirect' | 'integrity'
+  | 'cancelled' | 'process-wait' | 'installer-launch' | 'installer-exit' | 'io' | 'unknown'
 const SENSITIVE_ENVIRONMENT_NAME = /(?:AUTH|KEY|SECRET|TOKEN|PASSWORD)|^(?:ALL|HTTP|HTTPS|NO)_PROXY$/iu
 
 /** Result persisted for the newly installed Desktop to validate and complete. */
@@ -38,16 +53,21 @@ export type DesktopManagedUpdateHelperResult =
     readonly manifestSha256: string
     readonly sequence: number
     readonly reason: string
+    readonly phase: DesktopManagedUpdateHelperPhase
+    readonly asset?: string
+    readonly errorType: DesktopManagedUpdateHelperErrorType
+    readonly installationState: 'not-started' | 'may-have-started'
     readonly installerExitCode?: number
   }
 
 /** Injectable operating-system and network operations used by helper tests. */
 export interface DesktopManagedUpdateHelperOperations {
-  fetch(url: string, init: RequestInit): Promise<Response>
+  fetch(this: void, url: string, init: RequestInit): Promise<Response>
   processRunning(pid: number): boolean
   sleep(milliseconds: number): Promise<void>
   now(): number
   verifyAndStartInstaller(
+    this: void,
     path: string,
     expected: { readonly bytes: number; readonly sha256: string; readonly sha512: string; readonly signature: 'NotSigned' },
   ): Promise<number>
@@ -162,49 +182,13 @@ const defaultOperations: DesktopManagedUpdateHelperOperations = {
   verifyAndStartInstaller: verifyAndStartManagedInstaller,
 }
 
-async function fetchResponse(
-  url: string,
-  operations: DesktopManagedUpdateHelperOperations,
-): Promise<{ response: Response; finalUrl: string }> {
-  let current = url
-  for (let redirects = 0; redirects <= 5; redirects++) {
-    const response = await operations.fetch(current, {
-      method: 'GET',
-      redirect: 'manual',
-      credentials: 'omit',
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    })
-    if (!REDIRECTS.has(response.status)) return { response, finalUrl: current }
-    const location = response.headers.get('location')
-    if (location === null) {
-      await response.body?.cancel()
-      throw new Error('desktop managed update: redirect omitted Location')
-    }
-    assertManagedUpdateRedirect(current, location)
-    await response.body?.cancel()
-    current = new URL(location, current).href
-  }
-  throw new Error('desktop managed update: redirect limit exceeded')
-}
-
 async function fetchBytes(
   url: string,
   maximum: number,
   operations: DesktopManagedUpdateHelperOperations,
 ): Promise<Buffer> {
-  const { response } = await fetchResponse(url, operations)
-  if (!response.ok) {
-    await response.body?.cancel()
-    throw new Error(`desktop managed update: ${url} returned HTTP ${String(response.status)}`)
-  }
-  const declared = response.headers.get('content-length')
-  if (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) > maximum)) {
-    await response.body?.cancel()
-    throw new Error(`desktop managed update: ${url} exceeds the allowed size`)
-  }
-  const body = Buffer.from(await response.arrayBuffer())
-  if (body.byteLength > maximum) throw new Error(`desktop managed update: ${url} exceeds the allowed size`)
-  return body
+  return withManagedUpdateResponse(url, 'metadata', operations,
+    (response, transfer) => readManagedUpdateMetadata(response, maximum, transfer))
 }
 
 function sha256(body: Uint8Array): string {
@@ -282,29 +266,37 @@ async function downloadInstaller(
   expected: { bytes: number; sha256: string; sha512: string },
   operations: DesktopManagedUpdateHelperOperations,
 ): Promise<void> {
-  const { response } = await fetchResponse(url, operations)
-  if (!response.ok || response.body === null) {
-    throw new Error(`desktop managed update: installer returned HTTP ${String(response.status)}`)
-  }
-  const declared = response.headers.get('content-length')
-  if (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) !== expected.bytes)) {
-    throw new Error('desktop managed update: installer Content-Length does not match the manifest')
-  }
-  let streamedBytes = 0
-  const enforceSize = new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      streamedBytes += chunk.length
-      if (streamedBytes > expected.bytes) {
-        callback(new Error('desktop managed update: installer stream exceeds the manifest size'))
-      } else {
-        callback(undefined, chunk)
-      }
-    },
+  await withManagedUpdateResponse(url, 'installer', operations, async (response, transfer) => {
+    if (response.body === null) throw new ManagedUpdateTransferError('integrity')
+    const declared = response.headers.get('content-length')
+    if (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) !== expected.bytes)) {
+      throw new ManagedUpdateTransferError('integrity')
+    }
+    let streamedBytes = 0
+    const enforceSize = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        transfer.progress()
+        streamedBytes += chunk.length
+        if (streamedBytes > expected.bytes) callback(new ManagedUpdateTransferError('integrity'))
+        else callback(undefined, chunk)
+      },
+    })
+    // The Node adapter cancels a stalled Web reader on abort; a bare Web async iterator can hang.
+    // pipeline settles and closes its writable before a retry can remove the partial file.
+    try {
+      // Node fetch supplies this Web stream at runtime; DOM and Node declarations differ for BYOB readers.
+      const source = Readable.fromWeb(response.body as NodeReadableStream<Uint8Array>)
+      await pipeline(source, enforceSize, createWriteStream(path, { flags: 'wx', mode: 0o600 }), {
+        signal: transfer.signal,
+      })
+    } catch (error) {
+      await rm(path, { force: true })
+      throw error
+    }
   })
-  await pipeline(response.body, enforceSize, createWriteStream(path, { flags: 'wx', mode: 0o600 }))
   const actual = await hashFile(path)
   if (actual.bytes !== expected.bytes || actual.sha256 !== expected.sha256 || actual.sha512 !== expected.sha512) {
-    throw new Error('desktop managed update: installer hash or size does not match the manifest')
+    throw new ManagedUpdateTransferError('integrity')
   }
 }
 
@@ -326,9 +318,21 @@ export async function waitForDesktopProcesses(
   }
 }
 
+function helperErrorType(error: unknown, phase: DesktopManagedUpdateHelperPhase): DesktopManagedUpdateHelperErrorType {
+  if (error instanceof ManagedUpdateTransferError) return error.errorType
+  if (error instanceof Error && error.message === 'desktop managed update: operation was cancelled') return 'cancelled'
+  if (phase === 'installer-launch') return 'installer-launch'
+  if (phase === 'manifest-validation' || phase === 'receipt-validation' || phase === 'installer-verification') return 'integrity'
+  if (phase === 'process-wait') return 'process-wait'
+  if (phase === 'acknowledgement' || phase === 'stage-promotion' || phase === 'result-persistence') return 'io'
+  return 'unknown'
+}
+
 /**
- * Validate and acknowledge one handoff, wait for its target processes, stage verified artifacts,
- * and run the installer without silent arguments.
+ * Validate and persist metadata before acknowledgement, then stage and launch the installer.
+ * @param handoffValue - Untrusted handoff JSON; invalid handoffs are rejected without writing files.
+ * @param operations - Network and operating-system operations.
+ * @returns A persisted result; blocked results contain only closed diagnostic categories.
  */
 export async function runDesktopManagedUpdateHelper(
   handoffValue: unknown,
@@ -336,55 +340,64 @@ export async function runDesktopManagedUpdateHelper(
 ): Promise<DesktopManagedUpdateHelperResult> {
   const handoff = parseDesktopManagedUpdateHandoff(handoffValue)
   const manifestUrl = handoff.selection.manifestUrl
-  await mkdir(dirname(handoff.stageRoot), { recursive: true })
-  const manifestBody = await fetchBytes(manifestUrl, MAX_MANIFEST_BYTES, operations)
-  if (sha256(manifestBody) !== handoff.selection.assetSha256) {
-    throw new Error('desktop managed update: selected manifest hash does not match')
-  }
-  let manifestValue: unknown
-  try {
-    manifestValue = JSON.parse(manifestBody.toString('utf8'))
-  } catch {
-    throw new Error('desktop managed update: manifest is not JSON')
-  }
-  const manifest = parseDesktopManagedUpdateManifest(manifestValue, handoff.capability, handoff.installedSequence)
-  if (manifest.manifestSha256 !== handoff.selection.manifestSha256) {
-    throw new Error('desktop managed update: selected manifest self-hash does not match')
-  }
-  if ((handoff.selection.kind === 'source') !== (manifest.owner === 'cloga/deepseek-harness')) {
-    throw new Error('desktop managed update: selected manifest kind does not match its owner')
-  }
   const operationRoot = dirname(handoff.stageRoot)
+  await mkdir(operationRoot, { recursive: true })
+  let manifest: DesktopAcceptedManagedUpdateManifest | undefined
+  let phase: DesktopManagedUpdateHelperPhase = 'manifest-download'
+  let asset: string | undefined = 'release.json'
+  let installationState: 'not-started' | 'may-have-started' = 'not-started'
   const cancellationPath = join(operationRoot, 'cancelled.json')
   const cancelled = async () => stat(cancellationPath).then(() => true, (error: unknown) => {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
     throw error
   })
-  if (await cancelled()) throw new Error('desktop managed update: operation was cancelled')
-  await writeJsonAtomic(join(operationRoot, 'ack.json'), {
-    schemaVersion: 1,
-    token: handoff.token,
-    manifestSha256: manifest.manifestSha256,
-    helperPid: process.pid,
-  })
   const temporary = `${handoff.stageRoot}.tmp-${handoff.token}`
   try {
+    const manifestBody = await fetchBytes(manifestUrl, MAX_MANIFEST_BYTES, operations)
+    phase = 'manifest-validation'
+    if (sha256(manifestBody) !== handoff.selection.assetSha256) {
+      throw new ManagedUpdateTransferError('integrity')
+    }
+    const manifestValue: unknown = JSON.parse(manifestBody.toString('utf8'))
+    const parsedManifest = parseDesktopManagedUpdateManifest(manifestValue, handoff.capability, handoff.installedSequence)
+    if (parsedManifest.manifestSha256 !== handoff.selection.manifestSha256
+      || (handoff.selection.kind === 'source') !== (parsedManifest.owner === 'cloga/deepseek-harness')) {
+      throw new ManagedUpdateTransferError('integrity')
+    }
+    manifest = parsedManifest
+    phase = 'acknowledgement'
+    if (await cancelled()) throw new Error('desktop managed update: operation was cancelled')
+    // Completion can independently validate installed evidence even when staging never finishes.
+    await writeFile(join(operationRoot, 'release.json'), manifestBody, { flag: 'wx', mode: 0o600 })
+    await writeJsonAtomic(join(operationRoot, 'ack.json'), {
+      schemaVersion: 1,
+      token: handoff.token,
+      manifestSha256: manifest.manifestSha256,
+      helperPid: process.pid,
+    })
+    phase = 'process-wait'
+    asset = undefined
     await waitForDesktopProcesses(handoff.waitPids, handoff.waitTimeoutMs, operations, cancelled)
     if (await cancelled()) throw new Error('desktop managed update: operation was cancelled')
     await rm(temporary, { recursive: true, force: true })
     await mkdir(temporary, { recursive: true })
     const buildReceipt = manifest.buildReceipt
+    phase = 'receipt-download'
+    asset = buildReceipt.file
     const receiptBody = await fetchBytes(
       managedUpdateAssetUrl(manifestUrl, buildReceipt.file),
       MAX_RECEIPT_BYTES,
       operations,
     )
+    phase = 'receipt-validation'
     if (sha256(receiptBody) !== buildReceipt.sha256) {
       throw new Error('desktop managed update: build receipt file hash does not match the manifest')
     }
     verifyBuildReceipt(receiptBody, manifest, handoff)
     await writeFile(join(temporary, buildReceipt.file), receiptBody, { flag: 'wx', mode: 0o600 })
 
+    phase = 'installer-download'
+    asset = manifest.installer.file
     const installer = manifest.installer
     const installerPath = join(temporary, installer.file)
     await downloadInstaller(
@@ -397,6 +410,8 @@ export async function runDesktopManagedUpdateHelper(
       },
       operations,
     )
+    phase = 'stage-promotion'
+    asset = undefined
     await writeFile(join(temporary, 'release.json'), manifestBody, { flag: 'wx', mode: 0o600 })
     await writeJsonAtomic(join(temporary, 'pending-completion.json'), {
       schemaVersion: 1,
@@ -409,6 +424,8 @@ export async function runDesktopManagedUpdateHelper(
     }
     await rename(temporary, handoff.stageRoot)
 
+    phase = 'installer-verification'
+    asset = manifest.installer.file
     const stagedInstaller = join(handoff.stageRoot, installer.file)
     const beforeLaunch = await hashFile(stagedInstaller)
     const expectedBytes = 'bytes' in installer ? installer.bytes : installer.size
@@ -417,6 +434,15 @@ export async function runDesktopManagedUpdateHelper(
       throw new Error('desktop managed update: staged installer changed before launch')
     }
     if (await cancelled()) throw new Error('desktop managed update: operation was cancelled')
+    await writeJsonAtomic(join(operationRoot, 'install-started.json'), {
+      schemaVersion: 1,
+      token: handoff.token,
+      manifestSha256: manifest.manifestSha256,
+      sequence: manifest.sequence,
+    })
+    phase = 'installer-launch'
+    // A throw or process interruption after this call cannot establish that the installer never ran.
+    installationState = 'may-have-started'
     const installerExitCode = await operations.verifyAndStartInstaller(stagedInstaller, {
       bytes: expectedBytes,
       sha256: installer.sha256,
@@ -438,8 +464,14 @@ export async function runDesktopManagedUpdateHelper(
         manifestSha256: manifest.manifestSha256,
         sequence: manifest.sequence,
         reason: `installer-exit-${String(installerExitCode)}`,
+        phase,
+        asset,
+        errorType: 'installer-exit',
+        installationState,
         installerExitCode,
       }
+    phase = 'result-persistence'
+    asset = undefined
     await writeJsonAtomic(join(handoff.stageRoot, 'helper-result.json'), result)
     return result
   } catch (error) {
@@ -447,9 +479,13 @@ export async function runDesktopManagedUpdateHelper(
     const result: DesktopManagedUpdateHelperResult = {
       schemaVersion: 1,
       status: 'blocked',
-      manifestSha256: manifest.manifestSha256,
-      sequence: manifest.sequence,
-      reason: error instanceof Error ? error.message : String(error),
+      manifestSha256: handoff.selection.manifestSha256,
+      sequence: manifest?.sequence ?? handoff.installedSequence,
+      phase,
+      ...(asset === undefined ? {} : { asset }),
+      errorType: helperErrorType(error, phase),
+      installationState,
+      reason: `desktop managed update: ${phase}: ${helperErrorType(error, phase)}`,
     }
     await writeJsonAtomic(join(operationRoot, 'helper-result.json'), result)
     return result
@@ -475,8 +511,9 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
-  main().catch((error: unknown) => {
-    process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`)
+  main().catch((_error: unknown) => {
+    // Handoff/parser/filesystem errors may contain operation tokens or credential-bearing paths.
+    process.stderr.write('desktop managed update: helper failed before a result could be persisted\n')
     process.exitCode = 1
   })
 }
