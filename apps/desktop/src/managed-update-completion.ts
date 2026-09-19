@@ -8,6 +8,7 @@ import {
   parseDesktopManagedUpdateHandoff,
   parseDesktopManagedUpdateManifest,
   type DesktopManagedUpdateCapability,
+  type DesktopManagedUpdateHandoff,
   type DesktopManagedUpdateManifest,
 } from './managed-update-protocol.ts'
 import { managedUpdateRecoveryCommand } from './managed-update-recovery.ts'
@@ -86,6 +87,47 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[], labe
   }
 }
 
+/** Validate retained identity without making an old capability eligible to launch an updater. */
+function retainedHandoffIdentity(
+  value: Record<string, unknown>,
+  currentCapability: DesktopManagedUpdateCapability,
+): Pick<DesktopManagedUpdateHandoff, 'token' | 'stageRoot' | 'selection' | 'installedSequence'> {
+  let normalized = value
+  const capability = value.capability
+  if (typeof capability === 'object' && capability !== null && !Array.isArray(capability)
+    && 'schemaVersion' in capability && capability.schemaVersion === 2) {
+    const historical = capability as Record<string, unknown>
+    exactKeys(historical, ['schemaVersion', 'mode', 'owner', 'tagPrefix', 'manifestAsset', 'currentSequence',
+      'minimumSequence', ...(historical.migration === undefined ? [] : ['migration'])], 'historical capability')
+    let migration = historical.migration
+    if (migration !== undefined) {
+      if (typeof migration !== 'object' || migration === null || Array.isArray(migration)) {
+        throw new Error('desktop managed update: historical migration must be an object')
+      }
+      const legacy = migration as Record<string, unknown>
+      const source = legacy.expectedSource
+      if (typeof source !== 'object' || source === null || Array.isArray(source)) {
+        throw new Error('desktop managed update: historical migration source must be an object')
+      }
+      const expectedSource = source as Record<string, unknown>
+      exactKeys(expectedSource, ['version', 'commit'], 'historical migration source')
+      if (typeof expectedSource.commit !== 'string' || !/^[a-f0-9]{40}$/u.test(expectedSource.commit)) {
+        throw new Error('desktop managed update: historical migration source commit is invalid')
+      }
+      migration = { ...legacy, expectedSource: {
+        version: expectedSource.version, tag: `dsh-v${String(expectedSource.version)}`,
+      } }
+    }
+    // Supply only parser metadata missing from schema 2; never return this synthetic capability.
+    normalized = { ...value, capability: {
+      ...historical, schemaVersion: 3, provisioning: currentCapability.provisioning,
+      ...(migration === undefined ? {} : { migration }),
+    } }
+  }
+  const parsed = parseDesktopManagedUpdateHandoff(normalized)
+  return { token: parsed.token, stageRoot: parsed.stageRoot, selection: parsed.selection, installedSequence: parsed.installedSequence }
+}
+
 function identity(value: Record<string, unknown>, label: string, minimumSequence = 1): { manifestSha256: string; sequence: number } {
   if (value.schemaVersion !== 1 || typeof value.manifestSha256 !== 'string'
     || !/^[a-f0-9]{64}$/u.test(value.manifestSha256)
@@ -143,7 +185,7 @@ async function classifyOperation(
     readJsonIfExists(join(operationRoot, 'install-started.json')),
     readJsonIfExists(join(operationRoot, 'handoff.json')),
   ])
-  const handoff = handoffValue === undefined ? undefined : parseDesktopManagedUpdateHandoff(handoffValue)
+  const handoff = handoffValue === undefined ? undefined : retainedHandoffIdentity(handoffValue, capability)
   if (handoff !== undefined && (handoff.token !== token || resolve(handoff.stageRoot) !== resolve(stage))) {
     throw new Error('desktop managed update: handoff does not match its operation')
   }

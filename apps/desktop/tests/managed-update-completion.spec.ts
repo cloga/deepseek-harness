@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { completeDesktopManagedUpdate } from '../src/managed-update-completion.ts'
+import { parseDesktopManagedUpdateHandoff } from '../src/managed-update-protocol.ts'
 import { loadDesktopManagedUpdateConfiguration } from '../src/managed-update-state.ts'
 import { createPluginProfile } from '../src/project-manager.ts'
 import {
@@ -108,6 +109,106 @@ async function patchRecord(path: string, fields: Record<string, unknown>): Promi
   const value = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
   await writeFile(path, JSON.stringify({ ...value, ...fields }))
 }
+
+function historicalCapability(current: ReturnType<typeof managedCapability>, migration = false): Record<string, unknown> {
+  const value: Record<string, unknown> = { ...current, schemaVersion: 2 }
+  delete value.provisioning
+  if (migration) value.migration = {
+    owner: 'cloga/dsh-windows-ops',
+    manifestUrl: 'https://github.com/cloga/dsh-windows-ops/releases/download/dsh-v1.2.3/release.json',
+    manifestSha256: 'c'.repeat(64), assetSha256: 'd'.repeat(64), maximumSequence: 1,
+    expectedSource: { version: '1.2.3', commit: MANAGED_COMMIT },
+  }
+  return value
+}
+
+it.each([false, true])('reads a cancelled historical schema2 handoff without launch eligibility (migration %s)', async (migration) => {
+  const fixture = await completionFixture()
+  const operation = await fixture.operation('a', 'legacy-pre-install')
+  await patchRecord(join(operation, 'handoff.json'), { capability: historicalCapability(fixture.capability, migration) })
+  await writeFile(join(operation, 'cancelled.json'), JSON.stringify({ schemaVersion: 1, token: 'a'.repeat(64) }))
+  const bytes = await readFile(join(operation, 'handoff.json'), 'utf8')
+  expect(() => parseDesktopManagedUpdateHandoff(JSON.parse(bytes))).toThrow(/capability/u)
+  await expect(fixture.complete()).resolves.toEqual({ status: 'none' })
+  expect(await readFile(join(operation, 'handoff.json'), 'utf8')).toBe(bytes)
+  await expect(readFile(fixture.completionPath)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it.each([false, true])('retains verified completed schema2 history without rewriting completion (migration %s)', async (migration) => {
+  const fixture = await completionFixture()
+  const operation = await fixture.operation('a', 'success')
+  await expect(fixture.complete()).resolves.toMatchObject({ status: 'complete', sequence: 2 })
+  const receipt = await readFile(fixture.completionPath, 'utf8')
+  await patchRecord(join(operation, 'handoff.json'), { capability: historicalCapability(fixture.capability, migration) })
+  await expect(fixture.complete(2)).resolves.toEqual({ status: 'none' })
+  expect(await readFile(fixture.completionPath, 'utf8')).toBe(receipt)
+})
+
+it('recognizes two old-schema pre-install failures without promoting the installed sequence', async () => {
+  const fixture = await completionFixture()
+  for (const token of ['a', 'b']) {
+    const operation = await fixture.operation(token, 'legacy-pre-install')
+    await patchRecord(join(operation, 'handoff.json'), { capability: historicalCapability(fixture.capability) })
+  }
+  await expect(fixture.complete()).resolves.toEqual({ status: 'none' })
+  await expect(readFile(fixture.completionPath)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it.each(['interrupted', 'blocked', 'cancelled-stage', 'invalid-cancellation', 'ack-hash', 'raw-manifest-hash'] as const)(
+  'retained schema2 handoffs still require recovery for %s', async (kind) => {
+    const fixture = await completionFixture()
+    const state = kind === 'blocked' ? 'blocked' : kind === 'invalid-cancellation' ? 'legacy-pre-install' : 'interrupted'
+    const operation = await fixture.operation('a', state)
+    await patchRecord(join(operation, 'handoff.json'), { capability: historicalCapability(fixture.capability) })
+    if (kind === 'cancelled-stage' || kind === 'invalid-cancellation') {
+      await writeFile(join(operation, 'cancelled.json'), JSON.stringify({
+        schemaVersion: 1, token: (kind === 'invalid-cancellation' ? 'b' : 'a').repeat(64),
+      }))
+    }
+    if (kind === 'ack-hash') await patchRecord(join(operation, 'ack.json'), { manifestSha256: 'b'.repeat(64) })
+    if (kind === 'raw-manifest-hash') await writeFile(join(operation, 'stage', 'release.json'), `${JSON.stringify(fixture.manifest)}\n`)
+    await expect(fixture.complete()).resolves.toMatchObject({ status: 'recovery-required' })
+    await expect(readFile(fixture.completionPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  },
+)
+
+it.each(['missing', 'unknown-version', 'old-unknown-version', 'current-missing-provisioning', 'old-extra-provisioning',
+  'old-owner', 'old-floor', 'old-migration-commit', 'old-migration-extra-source', 'wait-pids', 'timeout', 'installed-sequence',
+  'selection-url', 'selection-digest', 'handoff-schema'] as const)(
+  'does not use historical compatibility to bypass invalid handoff fields: %s', async (kind) => {
+    const fixture = await completionFixture()
+    const operation = await fixture.operation('a', 'legacy-pre-install')
+    const capability = historicalCapability(fixture.capability, kind.startsWith('old-migration'))
+    const fields: Record<string, unknown> = { capability }
+    if (kind === 'missing') fields.capability = undefined
+    if (kind === 'unknown-version') capability.schemaVersion = 4
+    if (kind === 'old-unknown-version') capability.schemaVersion = 1
+    if (kind === 'current-missing-provisioning') capability.schemaVersion = 3
+    if (kind === 'old-extra-provisioning') capability.provisioning = fixture.capability.provisioning
+    if (kind === 'old-owner') capability.owner = 'untrusted/repository'
+    if (kind === 'old-floor') capability.minimumSequence = -1
+    if (kind === 'old-migration-commit' || kind === 'old-migration-extra-source') {
+      const migration = capability.migration as Record<string, unknown>
+      const expectedSource = migration.expectedSource as Record<string, unknown>
+      if (kind === 'old-migration-commit') expectedSource.commit = 'invalid'
+      else expectedSource.tag = 'dsh-v1.2.3'
+    }
+    if (kind === 'wait-pids') fields.waitPids = [0]
+    if (kind === 'timeout') fields.waitTimeoutMs = -1
+    if (kind === 'installed-sequence') fields.installedSequence = -1
+    if (kind === 'handoff-schema') fields.schemaVersion = 2
+    if (kind === 'selection-url' || kind === 'selection-digest') fields.selection = {
+      kind: 'source',
+      manifestUrl: kind === 'selection-url' ? 'https://untrusted.example/release.json'
+        : `https://github.com/cloga/deepseek-harness/releases/download/${fixture.manifest.source.tag}/release.json`,
+      manifestSha256: fixture.manifest.manifestSha256,
+      assetSha256: kind === 'selection-digest' ? 'invalid' : sha256(Buffer.from(JSON.stringify(fixture.manifest))),
+    }
+    await patchRecord(join(operation, 'handoff.json'), fields)
+    await writeFile(join(operation, 'cancelled.json'), JSON.stringify({ schemaVersion: 1, token: 'a'.repeat(64) }))
+    await expect(fixture.complete()).resolves.toMatchObject({ status: 'recovery-required' })
+  },
+)
 
 const inventories = [
   'valid', 'missing-state', 'required-valid', 'required-artifact-drift',
