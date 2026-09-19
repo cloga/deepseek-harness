@@ -711,12 +711,12 @@ async function main(): Promise<void> {
         if (managedHandoffOperation !== undefined) return managedHandoffOperation
         const operation = (async () => {
           let acknowledgement: DesktopManagedUpdateAcknowledgement | undefined
-          let handoffHost: typeof backend.host = undefined
+          const handoff: { host: typeof backend.host } = { host: undefined }
           try {
             const approved = await prepareRestart(async (hostPid) => {
               if (hostPid === undefined || !Number.isSafeInteger(hostPid) || hostPid <= 0) throw new Error('Managed update Host identity is unavailable')
               const node = resolveDesktopManagedNode(resources.dsh, join(process.resourcesPath, 'runtime', 'primary-runtime'))
-              handoffHost = backend.host
+              handoff.host = backend.host
               managedHelperMayRun = true
               acknowledgement = await launchDesktopManagedUpdate({
                 operationsRoot: managedUpdate.operationsRoot,
@@ -746,6 +746,7 @@ async function main(): Promise<void> {
               }
             } else if (isDesktopManagedUpdateHelperQuiescent(error)) managedHelperMayRun = false
             // Rejection alone cannot clear ownership; only the launcher can attest no child or confirmed exit.
+            const handoffHost = handoff.host
             if (!managedHelperMayRun && handoffHost !== undefined && !lifecycleUnavailable()) {
               try {
                 if (!updateStoppedHost && backend.host === handoffHost) await handoffHost.updateTasks('unlock')
