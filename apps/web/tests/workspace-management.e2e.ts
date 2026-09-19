@@ -678,6 +678,7 @@ describe('web e2e: workspace management (create / rename / grouping / hover affo
     expect([...childWorkspace.sessionIds]).toEqual(childSessionIds)
     const parentWorkspace = (await scaffold.ctx.workspaceRegistry.resolveByPath(parentPath))!
     expect(parentWorkspace.sessionIds).toHaveLength(1)
+    const parentSessionIds = [...parentWorkspace.sessionIds]
     const parent = page.getByRole('treeitem').filter({ has: page.getByText('folder-group', { exact: true }) })
     const section = parent.locator('xpath=ancestor::*[contains(@class, "groupSection")][1]')
     await page.getByRole('tree', { name: 'Sessions', exact: true }).getByText('project-one', { exact: true }).waitFor()
@@ -747,7 +748,9 @@ describe('web e2e: workspace management (create / rename / grouping / hover affo
     await expect.poll(() => section.locator('[aria-selected="true"]').evaluate(row =>
       row.closest('[class*="groupSection"]')?.querySelector('[role="treeitem"]')?.textContent,
     ), { timeout: 10_000 }).toBe('folder-group')
-    expect(parentWorkspace.sessionIds).toHaveLength(1)
+    expect(parentWorkspace.sessionIds).toHaveLength(2)
+    expect(new Set(parentWorkspace.sessionIds).size).toBe(2)
+    for (const sessionId of parentSessionIds) expect(parentWorkspace.sessionIds).toContain(sessionId)
     expect([...childWorkspace.sessionIds]).toEqual(childSessionIds)
     expect(tripwire.pageErrors).toEqual([])
   })
