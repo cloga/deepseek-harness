@@ -205,7 +205,9 @@ describe('optional pnpm direct-child observations', () => {
   it('keeps the native deadline reason as the close-time wrapper cause without an observer timer', async () => {
     const captured = collector()
     const signal = AbortSignal.timeout(1)
-    const aborted = new Promise<void>(resolve => signal.addEventListener('abort', () => { resolve() }, { once: true }))
+    const aborted = new Promise<void>((resolve) => {
+      signal.addEventListener('abort', () => { resolve() }, { once: true })
+    })
     const child = Object.assign(new EventEmitter(), {
       pid: 2468, stdout: new EventEmitter(), stderr: new EventEmitter(), kill: vi.fn(() => true),
     })
