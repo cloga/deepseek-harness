@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { c, x } from 'tar'
 import { load } from 'js-yaml'
-import { packDesktopSourceDirectory, runDesktopPackagePnpm } from '../src/profile-package-pnpm.ts'
+import { packDesktopSourceDirectory, runDesktopPackagePnpm, type DesktopPnpmChildObservation } from '../src/profile-package-pnpm.ts'
 import { parseDesktopPluginInstallSpec } from '../src/plugin-install-spec.ts'
 import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, parseDesktopPluginProvisionReceipt } from '../src/plugin-source.ts'
 import { desktopPackageReceiptPosition, desktopReceiptFileTransitions, prepareDesktopPackageReceipt } from '../src/profile-package-receipt.ts'
@@ -96,6 +96,90 @@ async function registryGraph(request: DesktopStagingPnpmRequest, version = '1.2.
   }
   return graph(request)
 }
+function createStagedFrozenObservation(mode: 'missing-cache' | 'tampered-cache') {
+  const events: DesktopPnpmChildObservation[] = []
+  let dropped = 0
+  const report = (): string => `${JSON.stringify({ schemaVersion: 1, kind: 'pnpm-direct-child',
+    case: mode, phase: 'staged-frozen', invocation: 1, events, dropped })}\n`
+  const drop = (): void => { dropped = Math.min(Number.MAX_SAFE_INTEGER, dropped + 1) }
+  const observe = (event: Readonly<DesktopPnpmChildObservation>): undefined => {
+    if (events.length >= 12) { drop(); return undefined }
+    events.push(event)
+    // Reserve space for the bounded dropped counter to grow without truncating JSON.
+    if (Buffer.byteLength(report()) > 4096 - 32) { events.pop(); drop() }
+    return undefined
+  }
+  const emitFailure = (sink: (bytes: Uint8Array) => number): 'written' | 'short-write' | 'failed' => {
+    try {
+      const bytes = Buffer.from(report())
+      if (bytes.byteLength > 4096) return 'failed'
+      return sink(bytes) === bytes.byteLength ? 'written' : 'short-write'
+    } catch (_error) {
+      // Best-effort test telemetry must not replace the captured staging/cleanup failure.
+      return 'failed'
+    }
+  }
+  return { observe, report, emitFailure }
+}
+
+describe('staged-frozen direct-child observation reporting', () => {
+  it('caps request-local events and encoded bytes without changing the captured facts', () => {
+    const capture = createStagedFrozenObservation('missing-cache')
+    for (let ordinal = 1; ordinal <= 100; ordinal++) capture.observe({
+      event: 'spawn', childPid: 123, parentPid: 456, ordinal, observedElapsedMs: ordinal,
+    })
+    const text = capture.report()
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(4096)
+    const report = jsonObject(text)
+    expect(report.case).toBe('missing-cache')
+    expect(report.phase).toBe('staged-frozen')
+    expect(report.invocation).toBe(1)
+    expect(report.events).toHaveLength(12)
+    expect(report.dropped).toBe(88)
+    expect(createStagedFrozenObservation('tampered-cache').report()).not.toBe(text)
+  })
+
+  it('collects in memory and performs one explicit failure-only write without attaching the failure', async () => {
+    const capture = createStagedFrozenObservation('missing-cache')
+    const sink = vi.fn((bytes: Uint8Array): number => bytes.byteLength)
+    capture.observe({ event: 'close', parentPid: 456, ordinal: 1, observedElapsedMs: 0, exitCode: 1, signal: null })
+    expect(sink).not.toHaveBeenCalled()
+    const primary = new Error('PRIVATE_PRIMARY_ERROR')
+    const observed = await Promise.reject(primary).catch((error: unknown) => {
+      expect(capture.emitFailure(sink)).toBe('written')
+      return error
+    })
+    expect(observed).toBe(primary)
+    expect(sink).toHaveBeenCalledOnce()
+    expect(Buffer.from(sink.mock.calls[0]![0]).toString('utf8')).not.toContain('PRIVATE_PRIMARY_ERROR')
+  })
+
+  it.each(['failure', 'short-write'] as const)('does not replace primary or cleanup identities after sink %s', async (mode) => {
+    const capture = createStagedFrozenObservation('tampered-cache')
+    capture.observe({ event: 'close', parentPid: 456, ordinal: 1, observedElapsedMs: 0, exitCode: 1, signal: null })
+    const sink = vi.fn((bytes: Uint8Array): number => {
+      if (mode === 'failure') throw new Error('sink unavailable')
+      return bytes.byteLength - 1
+    })
+    for (const primary of [new Error('primary'), 'primary', undefined]) {
+      const cleanup = Object.assign(new Error('cleanup'), { code: 'EPERM' })
+      const failure = new AggregateError([primary, cleanup], 'cleanup is incomplete', { cause: primary })
+      const observed = await Promise.reject(failure).catch((error: unknown) => {
+        expect(capture.emitFailure(sink)).toBe(mode === 'failure' ? 'failed' : 'short-write')
+        return error
+      })
+      expect(observed).toBe(failure)
+      expect(failure.cause).toBe(primary)
+      const failures: unknown = failure.errors
+      if (!isArray(failures)) throw new Error('expected an owned error list')
+      expect(failures[0]).toBe(primary)
+      expect(failures[1]).toBe(cleanup)
+    }
+    expect(sink).toHaveBeenCalledTimes(3)
+    for (const [bytes] of sink.mock.calls) expect(bytes.byteLength).toBeLessThanOrEqual(4096)
+  })
+})
+
 function fixture(overrides: Partial<DesktopProfilePackageStagingOptions> = {}) {
   const root = mkdtempSync(join(tmpdir(), 'desktop-package-staging-'))
   roots.push(root)
@@ -1383,6 +1467,8 @@ describe('Desktop stage-only package transactions', () => {
         visit(directory)
         return { files, bytes, indexes }
       }
+      const childObservation = mode === 'ready' ? undefined : createStagedFrozenObservation(mode)
+      let observedFrozen = false
       const runOffline = async (request: DesktopStagingPnpmRequest, phase: string, damage = false) => {
         const store = request.args.find(argument => argument.startsWith('--store-dir='))?.slice('--store-dir='.length)
         if (store === undefined || !store.startsWith(f.root)) throw new Error('fixture store escapes owned temporary directory')
@@ -1418,7 +1504,9 @@ describe('Desktop stage-only package transactions', () => {
           cwd: request.cwd, args, included: modules?.included, registries: modules?.registries, modulesStoreDir: modules?.storeDir }
         return step(phase, async () => {
           try {
-            return await runDesktopPackagePnpm(runtime, { ...request, env: { ...request.env, CI: 'true', NO_UPDATE_NOTIFIER: '1', npm_config_update_notifier: 'false', NODE_EXTRA_CA_CERTS: caFile }, args })
+            const observe = !observedFrozen && phase === 'staged frozen reconstruction' ? childObservation?.observe : undefined
+            if (observe !== undefined) observedFrozen = true
+            return await runDesktopPackagePnpm(runtime, { ...request, env: { ...request.env, CI: 'true', NO_UPDATE_NOTIFIER: '1', npm_config_update_notifier: 'false', NODE_EXTRA_CA_CERTS: caFile }, args }, observe)
           } catch (error) {
             throw new Error(`${error instanceof Error ? error.message : String(error)}\nOwned fixture facts: ${JSON.stringify(facts)}`, { cause: error })
           }
@@ -1445,6 +1533,9 @@ describe('Desktop stage-only package transactions', () => {
         expect(settled.rejected).toBe(true)
         if (!settled.rejected) throw new Error('negative cache fixture unexpectedly prepared successfully')
         const failure = settled.error
+        // One failure-only write after settlement, not a wall-clock guarantee or a sanitized whole-log claim.
+        // This observes neither descendants nor an afterEach-only cleanup failure.
+        if (observedFrozen) childObservation?.emitFailure(bytes => fs.writeSync(2, bytes))
         const redact = (text: string): string => text.replace(/(https?:\/\/)[^/\s@]+:[^/\s@]+@/giu, '$1[redacted]@')
           .replace(/(https?:\/\/[^?\s"'<>]+)\?[^\s"'<>]*/gu, '$1?[redacted]')
           .replace(/((?:authorization|token|password|secret|api[_-]?key)\s*[:=]\s*)(?:bearer\s+)?[^\s"',;]+/giu, '$1[redacted]')
@@ -1573,6 +1664,7 @@ describe('Desktop stage-only package transactions', () => {
       const observed: unknown = await f.backend.stage(id, f.mutation, new AbortController().signal).catch((error: unknown) => error)
       expect(observed).toBeInstanceOf(AggregateError)
       if (!(observed instanceof AggregateError)) throw new Error('expected a combined staging and cleanup failure')
+      expect(createStagedFrozenObservation('missing-cache').emitFailure(() => { throw new Error('sink unavailable') })).toBe('failed')
       expect(observed.message).toContain('cleanup is incomplete')
       expect(observed.cause).toBe(primary)
       const failures: unknown = observed.errors
@@ -1611,6 +1703,7 @@ describe('Desktop stage-only package transactions', () => {
       const [stageFailure, cancelFailure] = await Promise.all([staged, cancelled])
       expect(stageFailure).toBeInstanceOf(AggregateError)
       if (!(stageFailure instanceof AggregateError)) throw new Error('expected incomplete cancellation cleanup')
+      expect(createStagedFrozenObservation('missing-cache').emitFailure(bytes => bytes.byteLength - 1)).toBe('short-write')
       expect(cancelFailure).toBe(stageFailure)
       expect(stageFailure.cause).toBe(signal.reason)
       const failures: unknown = stageFailure.errors

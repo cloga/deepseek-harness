@@ -11,6 +11,43 @@ export interface DesktopPackagePnpmRuntime {
   readonly nodeBin: string
 }
 
+const OBSERVED_ERROR_CODES = ['EPERM', 'EACCES', 'ENOENT', 'ESRCH', 'EPIPE', 'ECONNRESET', 'EINVAL', 'ENOMEM', 'ENOSYS', 'ETIMEDOUT', 'EIO', 'ENOTDIR'] as const
+const OBSERVED_SIGNALS = ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGSEGV', 'SIGHUP', 'SIGBREAK'] as const
+
+/** JavaScript observations of the direct child only, not OS creation time or descendant quiescence. */
+export interface DesktopPnpmChildObservation {
+  readonly event: 'spawn' | 'error' | 'exit' | 'stdout-close' | 'stderr-close' | 'close' | 'abort-request'
+  readonly childPid?: number
+  readonly parentPid: number
+  readonly ordinal: number
+  readonly observedElapsedMs: number
+  readonly exitCode?: number | null
+  readonly signal?: typeof OBSERVED_SIGNALS[number] | 'OTHER' | null
+  readonly errorCode?: typeof OBSERVED_ERROR_CODES[number] | 'OTHER'
+}
+
+/**
+ * Trusted, bounded synchronous memory collection only; no I/O, timers, promises, or asynchronous work.
+ * @param event - Owned closed facts without errors, command lines, environment or paths.
+ * @returns Undefined; observer faults cannot replace the operation outcome.
+ */
+export type DesktopPnpmChildObserver = (event: Readonly<DesktopPnpmChildObservation>) => undefined
+
+function observedErrorCode(error: unknown): NonNullable<DesktopPnpmChildObservation['errorCode']> {
+  let code: unknown
+  try {
+    code = typeof error === 'object' && error !== null ? Reflect.get(error, 'code') : undefined
+  } catch (_error) {
+    // A diagnostic accessor failure must not replace the original child error.
+    return 'OTHER'
+  }
+  return OBSERVED_ERROR_CODES.find(allowed => allowed === code) ?? 'OTHER'
+}
+
+function observedSignal(signal: unknown): NonNullable<DesktopPnpmChildObservation['signal']> | null {
+  return signal === null ? null : OBSERVED_SIGNALS.find(allowed => allowed === signal) ?? 'OTHER'
+}
+
 /** One bounded-lifetime operation on a caller-owned private working tree. */
 export interface DesktopPackagePnpmRequest {
   readonly cwd: string
@@ -23,10 +60,11 @@ export interface DesktopPackagePnpmRequest {
  * Run only the supplied bundled package manager and await exit even when aborted.
  * @param runtime - Fixed application-owned executables.
  * @param request - Validated staging or source-pack operation.
+ * @param observe - Optional trusted synchronous observer; bounded work does not guarantee a wall-clock deadline.
  * @returns Exit outcome after all owned stdio closes.
  */
 export function runDesktopPackagePnpm(
-  runtime: DesktopPackagePnpmRuntime, request: DesktopPackagePnpmRequest,
+  runtime: DesktopPackagePnpmRuntime, request: DesktopPackagePnpmRequest, observe?: DesktopPnpmChildObserver,
 ): Promise<{ exitCode: number }> {
   return new Promise((resolve, reject) => {
     request.signal.throwIfAborted()
@@ -41,11 +79,45 @@ export function runDesktopPackagePnpm(
     const args = request.args[0] === 'pm'
       ? ['pm', '--config.update-notifier=false', ...request.args.slice(1)]
       : ['--config.update-notifier=false', ...request.args]
+    const observationStart = observe === undefined ? 0 : performance.now()
     const child = spawn(runtime.node, ['--expose-internals', runtime.pnpm, ...args], {
       cwd: request.cwd,
       env: desktopNodeEnvironment(runtime.node, runtime.nodeBin, { ...environment, ELECTRON_RUN_AS_NODE: '1', COREPACK_ENABLE_PROJECT_SPEC: '0', CI: 'true', NO_UPDATE_NOTIFIER: '1' }),
       stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
     })
+    let observationClosed = false
+    let ordinal = 0
+    let observedElapsedMs = 0
+    const record = (event: DesktopPnpmChildObservation['event'], code?: number | null, signal?: unknown, error?: unknown): void => {
+      if (observe === undefined || observationClosed) return
+      if (event === 'close') observationClosed = true
+      try {
+        const elapsed = performance.now() - observationStart
+        if (Number.isFinite(elapsed)) observedElapsedMs = Math.max(observedElapsedMs, elapsed)
+        const childPid = child.pid
+        observe({ event, parentPid: process.pid, ordinal: ++ordinal, observedElapsedMs,
+          ...(childPid !== undefined && Number.isSafeInteger(childPid) && childPid > 0 ? { childPid } : {}),
+          ...(event === 'exit' || event === 'close' ? {
+            exitCode: code !== undefined && code !== null && Number.isSafeInteger(code) ? code : null,
+            signal: observedSignal(signal),
+          } : {}),
+          ...(event === 'abort-request' ? { signal: 'SIGTERM' as const } : {}),
+          ...(event === 'error' ? { errorCode: observedErrorCode(error) } : {}),
+        })
+      } catch (_error) {
+        // Observations are best-effort and cannot change error identity or child settlement.
+      }
+    }
+    const onSpawn = (): void => { record('spawn') }
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => { record('exit', code, signal) }
+    const onStdoutClose = (): void => { record('stdout-close') }
+    const onStderrClose = (): void => { record('stderr-close') }
+    if (observe !== undefined) {
+      child.once('spawn', onSpawn)
+      child.once('exit', onExit)
+      child.stdout.once('close', onStdoutClose)
+      child.stderr.once('close', onStderrClose)
+    }
     let diagnostics = Buffer.alloc(0)
     let truncated = false
     const append = (chunk: Buffer): void => {
@@ -65,11 +137,18 @@ export function runDesktopPackagePnpm(
       while (Buffer.byteLength(bounded) > 8192) bounded = bounded.slice(0, -1)
       return bounded
     }
-    const abort = (): void => { child.kill('SIGTERM') }
+    const abort = (): void => { record('abort-request'); child.kill('SIGTERM') }
     request.signal.addEventListener('abort', abort, { once: true })
     let failure: Error | undefined
-    child.once('error', (error) => { failure = error })
-    child.once('close', (code) => {
+    child.once('error', (error) => { failure = error; record('error', undefined, undefined, error) })
+    child.once('close', (code, signal) => {
+      if (observe !== undefined) {
+        child.removeListener('spawn', onSpawn)
+        child.removeListener('exit', onExit)
+        child.stdout.removeListener('close', onStdoutClose)
+        child.stderr.removeListener('close', onStderrClose)
+      }
+      record('close', code, signal)
       request.signal.removeEventListener('abort', abort)
       if (request.signal.aborted) {
         const reason: unknown = request.signal.reason
