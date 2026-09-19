@@ -7,6 +7,7 @@ import { MockAdapter } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import SubagentRuntime, { type Config, type ResolvedSubagentStartRequest, type SubagentProvider } from '../src/index.ts'
+import { assertSubagentModelRules } from '../src/model-rules.ts'
 
 const rule = { parent: { provider: 'parent-provider', model: 'parent-model' }, child: { provider: 'child-provider', model: 'child-model' } }
 
@@ -16,7 +17,10 @@ class MemorySettings extends SettingsProvider {
   protected persist(_ns: SettingsNamespace, _section: Record<string, unknown>): Promise<void> { return Promise.resolve() }
 }
 
-async function setup(config: Config = {}) {
+async function setup(
+  config: Config = {},
+  parentOptions: AgentOptions = { ...rule.parent, reasoningEffort: ReasoningEffortId('parent-effort'), maxTokens: 200 },
+) {
   const ctx = new Context()
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(MemorySettings)
@@ -25,7 +29,7 @@ async function setup(config: Config = {}) {
     id: SessionId('parent'),
     ctx,
     session: Session.create(SessionId('parent')),
-    options: { ...rule.parent, reasoningEffort: ReasoningEffortId('parent-effort'), maxTokens: 200 },
+    options: parentOptions,
   } as unknown as Agent
   const start = vi.fn(async (_request: ResolvedSubagentStartRequest) => ({
     id: SessionId('child'), localAgent: undefined,
@@ -52,6 +56,33 @@ function mountPreflight(ctx: Context) {
 }
 
 describe('creation-time subagent model rules', () => {
+  it('accepts omitted raw configuration before schema defaulting', () => {
+    expect(() => { assertSubagentModelRules(undefined) }).not.toThrow()
+  })
+
+  it.each([null, {}, 'not-an-array'])('rejects a non-array raw modelRules setting: %j', (candidate) => {
+    expect(() => { assertSubagentModelRules(candidate) }).toThrow('modelRules must be an array')
+  })
+
+  it('preserves inherited effort when a rule selects the same exact route', async () => {
+    const { ctx, start, request } = await setup({ modelRules: [{ parent: rule.parent, child: rule.parent }] })
+    const preflight = mountPreflight(ctx)
+    const input = request()
+    await ctx.subagents.start('spawn', input)
+    const expected = { ...rule.parent, reasoningEffort: ReasoningEffortId('parent-effort'), maxTokens: 200 }
+    expect(preflight).toHaveBeenCalledExactlyOnceWith(expected, input.signal)
+    expect(start.mock.calls[0]![0].resolvedAgentOptions).toEqual(expected)
+  })
+
+  it('leaves an unspecified output-token budget absent during rule preflight', async () => {
+    const { ctx, start, request } = await setup({ modelRules: [rule] }, rule.parent)
+    const preflight = mountPreflight(ctx)
+    const input = request()
+    await ctx.subagents.start('spawn', input)
+    expect(preflight).toHaveBeenCalledExactlyOnceWith(rule.child, input.signal)
+    expect(start.mock.calls[0]![0].resolvedAgentOptions).toEqual(rule.child)
+  })
+
   it('preserves omitted settings defaults and makes no LLM read without a rule', async () => {
     const { ctx, start, request } = await setup({ maxDepth: 3, maxActiveSubagents: 2 })
     const get = vi.spyOn(ctx, 'get')
@@ -112,7 +143,7 @@ describe('creation-time subagent model rules', () => {
     { provider: rule.parent.provider, model: 'different-model' },
   ])('does not match partial route %j', async (parentRoute) => {
     const { ctx, parent, start, request } = await setup({ modelRules: [rule] })
-    vi.spyOn(parent.session, 'requestHeader').mockReturnValue({ config: parentRoute } as never)
+    vi.spyOn(parent.session, 'requestHeader').mockReturnValue({ config: parentRoute })
     await ctx.subagents.start('spawn', request())
     expect(start.mock.calls[0]![0]).not.toHaveProperty('resolvedAgentOptions')
   })
@@ -120,7 +151,7 @@ describe('creation-time subagent model rules', () => {
   it('uses the direct parent request route rather than its creation route', async () => {
     const selected = { provider: 'selected-provider', model: 'selected-model' }
     const { ctx, parent, start, request } = await setup({ modelRules: [{ parent: selected, child: rule.child }] })
-    vi.spyOn(parent.session, 'requestHeader').mockReturnValue({ config: selected } as never)
+    vi.spyOn(parent.session, 'requestHeader').mockReturnValue({ config: selected })
     mountPreflight(ctx)
     await ctx.subagents.start('spawn', request())
     expect(start.mock.calls[0]![0].resolvedAgentOptions).toMatchObject(rule.child)
@@ -161,14 +192,14 @@ describe('creation-time subagent model rules', () => {
     const pending = ctx.subagents.start('spawn', request())
     vi.spyOn(parent.session, 'requestHeader').mockReturnValue({
       config: { ...rule.child, reasoningEffort: ReasoningEffortId('later-parent-effort') },
-    } as never)
+    })
     await ctx.settings.update('subagent', { modelRules: [] })
     gate.resolve(rule.child)
     await pending
     expect(start.mock.calls[0]![0].resolvedAgentOptions).toEqual({ ...rule.child, maxTokens: 200 })
   })
 
-  it('rejects replacement of the real LLM service during preflight', async () => {
+  it.each(['removal', 'replacement'])('rejects %s of the real LLM service during preflight', async (change) => {
     const { ctx, start, request } = await setup({ modelRules: [rule] })
     const llmFiber = await ctx.plugin(LlmRuntime)
     const entered = Promise.withResolvers<undefined>()
@@ -179,7 +210,7 @@ describe('creation-time subagent model rules', () => {
     const pending = ctx.subagents.start('spawn', request())
     await entered.promise
     await llmFiber.dispose()
-    await ctx.plugin(LlmRuntime)
+    if (change === 'replacement') await ctx.plugin(LlmRuntime)
     gate.resolve({ provider: rule.child.provider, id: rule.child.model, name: 'Child' })
     await expect(pending).rejects.toThrow('catalog/provider changed')
     expect(start).not.toHaveBeenCalled()

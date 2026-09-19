@@ -92,7 +92,10 @@ export class SubagentLimitsCardController {
       this.publish()
     })
   }
-  /** @returns Renderer-bound namespace draft and staged actions. */
+  /**
+   * Expose the shared namespace draft and its staged edit actions to the renderer.
+   * @returns Renderer-bound namespace draft and staged actions.
+   */
   inject(): SubagentLimitsCardFace {
     return {
       hooks: { subagentLimitsCard: this.store },
@@ -117,7 +120,10 @@ export class SubagentLimitsCardController {
       retryRulesCatalog: () => { void this.loadCatalog() },
     }
   }
-  /** @param supported - Whether the Host schema declares modelRules. */
+  /**
+   * Enable rule editing only when advertised by the Host and load its model catalog.
+   * @param supported - Whether the Host schema declares modelRules.
+   */
   setRulesSupported(supported: boolean): void {
     if (this.disposed || this.supported === supported) return
     this.supported = supported

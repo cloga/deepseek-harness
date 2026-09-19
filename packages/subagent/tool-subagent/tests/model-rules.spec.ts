@@ -39,7 +39,7 @@ async function fixture(options: { allow?: boolean; configured?: AgentOptions; ru
   ctx.llm.registerAdapter(['alpha'], new MockAdapter([], reasoning))
   const parent = options.allow
     ? modelSelectionSetupAgent(ctx)
-    : Object.assign(fakeAgent(), { options: parentOptions })
+    : Object.assign(fakeAgent(), { ctx, options: parentOptions })
   return { ctx, parent, requests, call: (args: unknown = task) => callSubagent(ctx, args, { agent: parent }) }
 }
 
@@ -56,7 +56,7 @@ describe('native subagent tool with model rules', () => {
 
     const result = await f.call()
 
-    expect(result.isError).toBe(false)
+    expect(result.isError, text(result)).toBe(false)
     expect(f.requests).toHaveLength(1)
     expect(f.requests[0]?.agentOptions).toMatchObject({ ...childRoute, maxTokens: 512 })
     expect(f.requests[0]?.agentOptions?.reasoningEffort).toBeUndefined()

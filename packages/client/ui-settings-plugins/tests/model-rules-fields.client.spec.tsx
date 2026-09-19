@@ -13,15 +13,19 @@ import { en } from '../src/client/locales.ts'
 const t = (key: keyof typeof en) => en[key]
 afterEach(cleanup)
 function bench(rows: SubagentLimitsSettings['modelRules'] = []) {
-  const host = stubSettingsScope<SubagentLimitsSettings>()
+  const source = stubSettingsScope<SubagentLimitsSettings>()
+  const mutate = vi.fn<typeof source.scope.mutate>(() => Promise.resolve())
+  const host = { ...source, scope: { ...source.scope, mutate }, mutate }
   host.publish({ status: 'ready', writable: true, revision: 1,
     value: { maxDepth: 3, maxActiveSubagents: 8, modelRules: rows }, user: {} })
   const permission = stubSettingsScope<SubagentModelSelectionSettings>()
   permission.publish({ status: 'ready', writable: true, revision: 2, value: { enabled: false, allowedModels: [] } })
-  const catalog = vi.fn(async () => ({ ok: true as const, value: { groups: [
-    { id: 'alpha', name: 'Alpha', models: [{ id: 'large', name: 'Large' }] },
-    { id: 'beta', name: 'Beta', models: [{ id: 'small', name: 'Small' }] },
-  ], failures: [] } }))
+  const catalog = vi.fn<NonNullable<ConstructorParameters<typeof SubagentLimitsCardController>[1]>>(
+    () => Promise.resolve({ ok: true, value: { groups: [
+      { id: 'alpha', name: 'Alpha', models: [{ id: 'large', name: 'Large' }] },
+      { id: 'beta', name: 'Beta', models: [{ id: 'small', name: 'Small' }] },
+    ], failures: [] } }),
+  )
   const limits = new SubagentLimitsCardController(host.scope, catalog)
   limits.setRulesSupported(true)
   const models = new SubagentModelSelectionCardController(permission.scope,
@@ -34,9 +38,60 @@ function bench(rows: SubagentLimitsSettings['modelRules'] = []) {
     useSubagentModelSelectionCard: bindSnapshotSelector(hooks.subagentModelSelectionCard),
   } as unknown as SubagentCardProps
   render(<SubagentCard {...props} />)
-  return { host, permission, limits, face }
+  return { host, permission, limits, face, catalog }
 }
 describe('Native Subagent rule fields', () => {
+  it('shows a rule conflict without enabling permission or discarding the pending removal', async () => {
+    const row = { parent: { provider: 'alpha', model: 'large' }, child: { provider: 'beta', model: 'small' } }
+    const { host, permission } = bench([row])
+    await act(async () => { await Promise.resolve() })
+    fireEvent.click(screen.getByRole('button', { name: en.subagentRulesRemove }))
+    act(() => { host.publish({ revision: 7 }) })
+    expect(screen.getByText(en.subagentModelSelectionConflict)).toBeTruthy()
+    expect(screen.getByText(en.subagentRulesUnsaved)).toBeTruthy()
+    expect(screen.getByText(en.subagentRulesEmpty)).toBeTruthy()
+    expect(screen.getByRole('button', { name: en.save })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('switch', { name: en.subagentModelSelectionToggle }).getAttribute('aria-checked')).toBe('false')
+    expect(host.mutate).not.toHaveBeenCalled()
+    expect(permission.mutate).not.toHaveBeenCalled()
+  })
+  it('retries a failed rule catalog without replacing the pending exact routes', async () => {
+    const row = { parent: { provider: 'alpha', model: 'large' }, child: { provider: 'beta', model: 'small' } }
+    const { catalog, limits, host } = bench([row])
+    await act(async () => { await Promise.resolve() })
+    const parent = within(screen.getByRole('group', { name: en.subagentRulesParent }))
+    fireEvent.change(parent.getByLabelText(en.subagentRulesProvider), { target: { value: 'beta' } })
+    fireEvent.change(parent.getByLabelText(en.subagentRulesModel), { target: { value: 'small' } })
+    catalog.mockResolvedValueOnce({ ok: false })
+    await act(async () => { limits.refreshCatalog(); await Promise.resolve() })
+    expect(screen.getByText(en.subagentModelSelectionLoadFailed)).toBeTruthy()
+    expect(screen.getByText(en.subagentRulesUnsaved)).toBeTruthy()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: en.subagentModelSelectionRetry })) })
+    expect(catalog).toHaveBeenCalledTimes(3)
+    expect(screen.queryByText(en.subagentModelSelectionLoadFailed)).toBeNull()
+    expect(parent.getByLabelText(en.subagentRulesProvider)).toHaveProperty('value', 'beta')
+    expect(parent.getByLabelText(en.subagentRulesModel)).toHaveProperty('value', 'small')
+    expect(host.mutate).not.toHaveBeenCalled()
+  })
+  it('shows partial and empty catalogs while keeping saved routes removable', async () => {
+    const row = { parent: { provider: 'alpha', model: 'large' }, child: { provider: 'beta', model: 'small' } }
+    const { catalog, limits, host } = bench([row])
+    await act(async () => { await Promise.resolve() })
+    catalog.mockResolvedValueOnce({ ok: true, value: {
+      groups: [{ id: 'alpha', name: 'Alpha', models: [{ id: 'large', name: 'Large' }] }],
+      failures: [{ id: 'beta', name: 'Beta', message: 'offline' }],
+    } })
+    await act(async () => { limits.refreshCatalog(); await Promise.resolve() })
+    expect(screen.getByText(en.subagentModelSelectionPartial)).toBeTruthy()
+    expect(screen.getByRole('option', { name: `small — ${en.subagentModelSelectionUnavailable}` })).toBeTruthy()
+    catalog.mockResolvedValueOnce({ ok: true, value: { groups: [], failures: [] } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: en.subagentModelSelectionRetry })) })
+    expect(screen.getByText(en.subagentModelSelectionEmpty)).toBeTruthy()
+    expect(screen.queryByText(en.subagentModelSelectionPartial)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: en.subagentRulesRemove }))
+    expect(screen.getByText(en.subagentRulesEmpty)).toBeTruthy()
+    expect(host.mutate).not.toHaveBeenCalled()
+  })
   it('explains inheritance and permission independently within one card', async () => {
     bench()
     await act(async () => { await Promise.resolve() })

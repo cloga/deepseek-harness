@@ -272,6 +272,50 @@ describe('native model rule creation and continuation', () => {
     expect(adapter.requests).toEqual([])
   })
 
+  it('rejects an unregistered continuable provider without resolving a matching model rule', async () => {
+    const { ctx, adapter, request } = await setup()
+    const resolveModel = vi.spyOn(adapter, 'resolveModel')
+    const created = vi.fn()
+    ctx.on('agent/created', created)
+    await expect(ctx.subagents.startContinuable({
+      provider: 'unregistered', label: 'child', request, signal: new AbortController().signal,
+    })).rejects.toMatchObject({ code: 'NO_PROVIDER' })
+    expect(resolveModel).not.toHaveBeenCalled()
+    expect(created).not.toHaveBeenCalled()
+  })
+
+  it('rejects a continuable provider replaced during model preflight before preparing or publishing the child', async () => {
+    const { ctx, adapter, request } = await setup()
+    const prepare = vi.fn(async () => ({}))
+    const provider = {
+      name: 'replaceable', inheritsParentContext: false,
+      capabilities: { agentOptions: false, depthLimit: false, outputSchema: false, toolFilter: false, persona: false },
+      async start() { throw new Error('one-shot startup must not run') },
+      prepareContinuable: prepare,
+    }
+    const remove = ctx.subagents.registerProvider(provider)
+    const gate = Promise.withResolvers<undefined>()
+    adapter.gate = gate.promise
+    const created = vi.fn()
+    ctx.on('agent/created', created)
+    const spec = { provider: provider.name, label: 'child', request, signal: new AbortController().signal }
+    const pending = ctx.subagents.startContinuable(spec)
+    await adapter.entered.promise
+    remove()
+    ctx.subagents.registerProvider({ ...provider })
+    gate.resolve(undefined)
+    await expect(pending).rejects.toThrow('subagent provider changed during model rule preflight')
+    expect(prepare).not.toHaveBeenCalled()
+    expect(created).not.toHaveBeenCalled()
+    expect(adapter.requests).toEqual([])
+
+    const retried = await ctx.subagents.startContinuable(spec)
+    await settled(ctx, retried.childId)
+    expect(prepare).toHaveBeenCalledTimes(1)
+    expect(adapter.requests).toHaveLength(1)
+    expect(adapter.requests[0]).toMatchObject(target)
+  })
+
   it('rejects an adapter replacement during preflight and permits a later explicit retry', async () => {
     const { ctx, adapter, registration, request } = await setup()
     const gate = Promise.withResolvers<undefined>()

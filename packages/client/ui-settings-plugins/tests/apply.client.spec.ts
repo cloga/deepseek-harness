@@ -127,7 +127,7 @@ describe('ui-settings-plugins apply', () => {
     onTestFinished(() => ctx.fiber.dispose())
     declareRoot(slots)
     await ctx.plugin({ inject: [...inject], apply }).await()
-    await vi.waitFor(() => expect(slots.entries('plugins.item')).toHaveLength(1))
+    await vi.waitFor(() => { expect(slots.entries('plugins.item')).toHaveLength(1) })
     const face = (slots.entries('plugins.item')[0]!.inject as unknown as () => SubagentCardFace)()
     expect(face.hooks.subagentLimitsCard.getSnapshot().rules.supported).toBe(false)
     describeSettings.mockResolvedValue({ ok: true, value: {
@@ -137,7 +137,7 @@ describe('ui-settings-plugins apply', () => {
       }, value: {}, applies: 'live', secrets: [], revision: 1 }],
     } })
     remote.emit('settings/document-updated', ['subagent', 1])
-    await vi.waitFor(() => expect(face.hooks.subagentLimitsCard.getSnapshot().rules.supported).toBe(true))
+    await vi.waitFor(() => { expect(face.hooks.subagentLimitsCard.getSnapshot().rules.supported).toBe(true) })
     expect(face.hooks.subagentLimitsCard.getSnapshot().rules.rows).toEqual([])
   })
 

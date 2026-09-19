@@ -43,7 +43,9 @@ export function assertSubagentModelRules(rules: unknown): void {
   if (!Array.isArray(rules)) throw new Error('subagent modelRules must be an array')
   const parents = new Map<string, Set<string>>()
   for (const candidate of rules as unknown[]) {
-    const rule: SubagentModelRule = z.resolve(candidate, SubagentModelRuleSchema, {})[0]
+    const validated: unknown = z.resolve(candidate, SubagentModelRuleSchema, {})[0]
+    // Schemastery's resolver validates this schema but does not type its output.
+    const rule = validated as SubagentModelRule
     const models = parents.get(rule.parent.provider) ?? new Set<string>()
     if (models.has(rule.parent.model)) {
       throw new Error(`subagent modelRules repeats parent route "${rule.parent.provider}/${rule.parent.model}"`)
@@ -97,8 +99,8 @@ export function captureSubagentModelRule(
       if (llm === undefined) throw new Error('subagent modelRules require the llm service for a matched target')
       // Cordis returns a fresh traced receiver on each service read.
       const identity: unknown = Reflect.get(llm, symbols.original) ?? llm
-      let adaptersChanged = false
-      const dispose = ctx.on('llm/adapters-updated', () => { adaptersChanged = true })
+      const topology = { changed: false }
+      const dispose = ctx.on('llm/adapters-updated', () => { topology.changed = true })
       try {
         await llm.resolveCallConfig({
           provider,
@@ -109,7 +111,7 @@ export function captureSubagentModelRule(
         signal.throwIfAborted()
         const current = ctx.get('llm')
         const currentIdentity: unknown = current === undefined ? undefined : Reflect.get(current, symbols.original) ?? current
-        if (adaptersChanged || currentIdentity !== identity) {
+        if (topology.changed || currentIdentity !== identity) {
           throw new Error('LLM catalog/provider changed during subagent model rule preflight; retry delegation')
         }
       } finally {

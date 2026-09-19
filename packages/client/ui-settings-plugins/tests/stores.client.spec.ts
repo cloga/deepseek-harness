@@ -1097,7 +1097,7 @@ describe('shared Subagent card actions', () => {
     face.editRule(0, 'child', 'provider', 'beta')
     face.editRule(0, 'child', 'model', 'small')
     face.save()
-    await vi.waitFor(() => expect(state()).toMatchObject({ saving: false, dirty: false, failed: false }))
+    await vi.waitFor(() => { expect(state()).toMatchObject({ saving: false, dirty: false, failed: false }) })
     expect(limits.mutate).toHaveBeenCalledWith([{ op: 'set', path: ['modelRules'], value: [{
       parent: { provider: 'alpha', model: 'large' }, child: { provider: 'beta', model: 'small' },
     }] }], 2)
