@@ -127,9 +127,9 @@ export interface InstallState {
   /** The package spec or Release descriptor as typed. */
   readonly spec: string
   /** The field holds an unchanged JSON Release descriptor rather than a package spec. */
-  readonly verifiedRelease?: true
-  /** Local syntax/type refusal; complete descriptor validation remains with the Host. */
-  readonly descriptorError?: 'json' | 'type'
+  readonly verifiedRelease?: true | undefined
+  /** Local refusal; undefined clears it on edit. Complete validation remains with the Host. */
+  readonly descriptorError?: 'json' | 'type' | undefined
   readonly phase: 'idle' | 'checking' | 'starting' | 'running' | 'cancelling' | 'applying' | 'done' | 'failed'
   /** Identifies this dialog's installation, including log and cancellation messages. */
   readonly requestId?: PluginInstallRequestId
