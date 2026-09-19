@@ -173,6 +173,18 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
         throw new Error(`Packaged Desktop startup failed: ${safeDiagnostic(await page.locator('#error').innerText())}`)
       }
       record(`${phase}:application`)
+      const configureLater = page.getByRole('button', { name: 'Configure later', exact: true })
+      let providerPromptVisible = false
+      try {
+        await configureLater.waitFor({ state: 'visible', timeout: 5_000 })
+        providerPromptVisible = true
+      } catch (error: unknown) {
+        if (!(error instanceof Error) || error.name !== 'TimeoutError') throw error
+      }
+      if (providerPromptVisible) {
+        await configureLater.click()
+        record(`${phase}:provider-deferred`)
+      }
       await page.getByRole('button', { name: 'Settings', exact: true }).click()
       const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
       await settings.getByRole('button', { name: 'Models', exact: true }).click()
