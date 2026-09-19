@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { completeDesktopManagedUpdate } from '../src/managed-update-completion.ts'
 import {
   managedUpdateChildEnvironment,
   runDesktopManagedUpdateHelper,
@@ -31,8 +32,205 @@ function response(body: Uint8Array, status = 200, headers: Record<string, string
 const temporaryRoots: string[] = []
 const execFileAsync = promisify(execFile)
 
+async function transferFixture() {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-managed-transfer-'))
+  temporaryRoots.push(root)
+  const installer = Buffer.from('complete installer')
+  const receipt = Buffer.from(JSON.stringify({
+    source: { repository: 'cloga/deepseek-harness', tag: MANAGED_TAG, version: '1.2.3', commit: MANAGED_COMMIT, tree: MANAGED_TREE },
+    receiptSha256: '1'.repeat(64),
+  }))
+  const manifestValue = managedManifest({
+    installer: {
+      file: 'installer.exe', bytes: installer.byteLength, sha256: sha256(installer),
+      sha512: createHash('sha512').update(installer).digest('base64'), signature: 'NotSigned',
+    },
+    buildReceipt: { file: 'build-receipt.json', sha256: sha256(receipt), receiptSha256: '1'.repeat(64) },
+  })
+  const manifest = Buffer.from(JSON.stringify(manifestValue))
+  const handoff = {
+    schemaVersion: 1, token: 'e'.repeat(64), capability: managedCapability(),
+    selection: {
+      kind: 'source', manifestUrl: `https://github.com/cloga/deepseek-harness/releases/download/${MANAGED_TAG}/release.json`,
+      manifestSha256: manifestValue.manifestSha256, assetSha256: sha256(manifest),
+    },
+    stageRoot: join(root, 'stage'), waitPids: [12], waitTimeoutMs: 1000, installedSequence: 1,
+  }
+  const operations: DesktopManagedUpdateHelperOperations = {
+    fetch: vi.fn(async (url: string) => response(url.endsWith('release.json') ? manifest
+      : url.endsWith('build-receipt.json') ? receipt : installer)),
+    processRunning: () => false, sleep: vi.fn(async () => {}), now: () => 0,
+    verifyAndStartInstaller: vi.fn(async () => 0),
+  }
+  return { root, installer, receipt, manifest, manifestValue, handoff, operations }
+}
+
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map(path => rm(path, { recursive: true, force: true })))
+})
+
+describe('Desktop managed update helper recovery diagnostics', () => {
+  it('replays a real helper download-timeout record on cold startup without a fake completion receipt', async () => {
+    const fixture = await transferFixture()
+    const operationsRoot = join(fixture.root, 'operations')
+    fixture.handoff.stageRoot = join(operationsRoot, fixture.handoff.token, 'stage')
+    fixture.operations.fetch = vi.fn(async (url: string) => {
+      if (url.endsWith('release.json')) return response(fixture.manifest)
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+    })
+    const result = await runDesktopManagedUpdateHelper(fixture.handoff, fixture.operations)
+    if (result.status !== 'blocked') throw new Error('Fixture must fail before installation')
+    expect({ phase: result.phase, asset: result.asset, errorType: result.errorType,
+      installationState: result.installationState, reason: result.reason }).toMatchInlineSnapshot(`
+      {
+        "asset": "build-receipt.json",
+        "errorType": "timeout",
+        "installationState": "not-started",
+        "phase": "receipt-download",
+        "reason": "desktop managed update: receipt-download: timeout",
+      }
+    `)
+    const resultPath = join(operationsRoot, fixture.handoff.token, 'helper-result.json')
+    const original = await readFile(resultPath, 'utf8')
+    const completionPath = join(fixture.root, 'completion.json')
+    for (let startup = 0; startup < 2; startup++) {
+      await expect(completeDesktopManagedUpdate(operationsRoot, completionPath, managedCapability(), 0,
+        join(fixture.root, 'existing.exe'), join(fixture.root, 'runtime.json'),
+        join(fixture.root, 'plan.json'), join(fixture.root, 'profile'))).resolves.toEqual({ status: 'none' })
+    }
+    expect(await readFile(resultPath, 'utf8')).toBe(original)
+    await expect(readFile(completionPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(fixture.operations.verifyAndStartInstaller).not.toHaveBeenCalled()
+  })
+
+  it.each(['TimeoutError', 'ECONNRESET'])('restarts a partial installer after a body %s without appending bytes', async (kind) => {
+    const fixture = await transferFixture()
+    let installerAttempts = 0
+    fixture.operations.fetch = vi.fn(async (url: string) => {
+      if (url.endsWith('release.json')) return response(fixture.manifest)
+      if (url.endsWith('build-receipt.json')) return response(fixture.receipt)
+      installerAttempts++
+      if (installerAttempts > 1) return response(fixture.installer)
+      let pulls = 0
+      return new Response(new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (pulls++ === 0) controller.enqueue(Buffer.from('partial'))
+          else controller.error(kind === 'TimeoutError' ? new DOMException('signed query secret', 'TimeoutError')
+            : Object.assign(new Error('reset with credentials'), { code: kind }))
+        },
+      }))
+    })
+    const result = await runDesktopManagedUpdateHelper(fixture.handoff, fixture.operations)
+    expect(result.status).toBe('installer-exited')
+    expect(installerAttempts).toBe(2)
+    expect(await readFile(join(fixture.handoff.stageRoot, 'installer.exe'))).toEqual(fixture.installer)
+    expect(fixture.operations.verifyAndStartInstaller).toHaveBeenCalledOnce()
+  })
+
+  it('aborts a stalled installer body, closes the partial file, and retries successfully', async () => {
+    const fixture = await transferFixture()
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    let reachedStall!: () => void
+    const stalled = new Promise<void>((resolve) => { reachedStall = resolve })
+    const cancelled = vi.fn()
+    let installerAttempts = 0
+    fixture.operations.fetch = vi.fn(async (url: string) => {
+      if (url.endsWith('release.json')) return response(fixture.manifest)
+      if (url.endsWith('build-receipt.json')) return response(fixture.receipt)
+      installerAttempts++
+      if (installerAttempts > 1) return response(fixture.installer)
+      let pulls = 0
+      return new Response(new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (pulls++ === 0) controller.enqueue(Buffer.from('partial'))
+          else reachedStall()
+        },
+        cancel: cancelled,
+      }))
+    })
+    try {
+      const pending = runDesktopManagedUpdateHelper(fixture.handoff, fixture.operations)
+      await stalled
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(await pending).toMatchObject({ status: 'installer-exited' })
+      expect(cancelled).toHaveBeenCalledOnce()
+      expect(installerAttempts).toBe(2)
+      expect(await readFile(join(fixture.handoff.stageRoot, 'installer.exe'))).toEqual(fixture.installer)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(['manifest', 'receipt', 'installer'])('persists sanitized %s network failure diagnostics and limits retries', async (asset) => {
+    const fixture = await transferFixture()
+    const target = asset === 'manifest' ? 'release.json' : asset === 'receipt' ? 'build-receipt.json' : 'installer.exe'
+    fixture.operations.fetch = vi.fn(async (url: string) => {
+      if (url.endsWith(target)) {
+        throw new TypeError(`https://user:password@release-assets.githubusercontent.com/file?sig=private ${fixture.handoff.token}`, {
+          cause: { code: 'ECONNRESET' },
+        })
+      }
+      return response(url.endsWith('release.json') ? fixture.manifest : fixture.receipt)
+    })
+    const result = await runDesktopManagedUpdateHelper(fixture.handoff, fixture.operations)
+    expect(result).toMatchObject({
+      status: 'blocked', phase: `${asset}-download`, asset: target, errorType: 'network-reset', installationState: 'not-started',
+    })
+    const persisted = await readFile(join(fixture.root, 'helper-result.json'), 'utf8')
+    for (const secret of ['user', 'password', 'private', fixture.handoff.token, 'https://']) expect(persisted).not.toContain(secret)
+    expect(JSON.parse(persisted)).toEqual(result)
+    expect(fixture.operations.fetch).toHaveBeenCalledTimes(asset === 'manifest' ? 3 : asset === 'receipt' ? 4 : 5)
+    expect(fixture.operations.verifyAndStartInstaller).not.toHaveBeenCalled()
+    await expect(readFile(join(fixture.root, 'install-started.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    if (asset === 'manifest') await expect(readFile(join(fixture.root, 'ack.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    else expect(await readFile(join(fixture.root, 'release.json'))).toEqual(fixture.manifest)
+  })
+
+  it('persists manifest integrity failures before acknowledgement without retrying', async () => {
+    const fixture = await transferFixture()
+    fixture.operations.fetch = vi.fn(async () => response(Buffer.from('invalid manifest with secret')))
+    const result = await runDesktopManagedUpdateHelper(fixture.handoff, fixture.operations)
+    expect(result).toMatchObject({ status: 'blocked', phase: 'manifest-validation', asset: 'release.json', errorType: 'integrity', installationState: 'not-started' })
+    expect(fixture.operations.fetch).toHaveBeenCalledOnce()
+    await expect(readFile(join(fixture.root, 'ack.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(JSON.parse(await readFile(join(fixture.root, 'helper-result.json'), 'utf8'))).toEqual(result)
+  })
+
+  it('retains the installed sequence floor when a parsed manifest differs from the selection', async () => {
+    const fixture = await transferFixture()
+    fixture.handoff.selection.manifestSha256 = 'f'.repeat(64)
+    const result = await runDesktopManagedUpdateHelper(fixture.handoff, fixture.operations)
+    expect(result).toMatchObject({
+      status: 'blocked', phase: 'manifest-validation', errorType: 'integrity', installationState: 'not-started',
+      sequence: fixture.handoff.installedSequence, manifestSha256: fixture.handoff.selection.manifestSha256,
+    })
+    expect(fixture.operations.fetch).toHaveBeenCalledOnce()
+    expect(fixture.operations.verifyAndStartInstaller).not.toHaveBeenCalled()
+    await expect(readFile(join(fixture.root, 'ack.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(fixture.root, 'release.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(JSON.parse(await readFile(join(fixture.root, 'helper-result.json'), 'utf8'))).toEqual(result)
+  })
+
+  it.each(['throw', 'nonzero'])('records interrupted installer %s as potentially started with durable evidence', async (mode) => {
+    const fixture = await transferFixture()
+    fixture.operations.verifyAndStartInstaller = vi.fn(async () => {
+      expect(JSON.parse(await readFile(join(fixture.root, 'install-started.json'), 'utf8'))).toEqual({
+        schemaVersion: 1, token: fixture.handoff.token, manifestSha256: fixture.manifestValue.manifestSha256,
+        sequence: fixture.manifestValue.sequence,
+      })
+      expect(await readFile(join(fixture.handoff.stageRoot, 'release.json'))).toEqual(fixture.manifest)
+      if (mode === 'throw') throw new Error(`launch uncertain ${fixture.handoff.token} https://user:password@example.test?sig=secret`)
+      return 7
+    })
+    const result = await runDesktopManagedUpdateHelper(fixture.handoff, fixture.operations)
+    expect(result).toMatchObject({ status: 'blocked', phase: 'installer-launch', asset: 'installer.exe', installationState: 'may-have-started',
+      errorType: mode === 'throw' ? 'installer-launch' : 'installer-exit' })
+    const persisted = await readFile(join(mode === 'throw' ? fixture.root : fixture.handoff.stageRoot, 'helper-result.json'), 'utf8')
+    expect(persisted).not.toContain(fixture.handoff.token)
+    expect(persisted).not.toContain('secret')
+    expect(JSON.parse(persisted)).toEqual(result)
+  })
 })
 
 describe('Desktop managed update helper', () => {
@@ -151,6 +349,13 @@ describe('Desktop managed update helper', () => {
     ) => {
       expect(acknowledged).toBe(true)
       expect(await readFile(path)).toEqual(installer)
+      expect(await readFile(join(root, 'release.json'))).toEqual(manifest)
+      expect(JSON.parse(await readFile(join(root, 'install-started.json'), 'utf8'))).toEqual({
+        schemaVersion: 1,
+        token: 'e'.repeat(64),
+        manifestSha256: manifestValue.manifestSha256,
+        sequence: manifestValue.sequence,
+      })
       expect(expected).toEqual({
         bytes: installer.byteLength,
         sha256: sha256(installer),
@@ -202,13 +407,13 @@ describe('Desktop managed update helper', () => {
       name: 'hash does not match',
       servedInstaller: Buffer.from('installer'),
       expectedSha256: 'f'.repeat(64),
-      reason: /hash or size/u,
+      reason: /integrity/u,
     },
     {
       name: 'lengthless response exceeds the declared size',
       servedInstaller: Buffer.from('installer-extra'),
       expectedSha256: sha256(Buffer.from('installer')),
-      reason: /stream exceeds/u,
+      reason: /integrity/u,
     },
   ])('does not start an installer when its $name', async ({ servedInstaller, expectedSha256, reason }) => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-managed-update-hash-'))
@@ -266,5 +471,8 @@ describe('Desktop managed update helper', () => {
     const persisted: unknown = JSON.parse(await readFile(join(root, 'helper-result.json'), 'utf8'))
     expect(persisted).toEqual(expect.objectContaining({ status: 'blocked' }))
     expect(verifyAndStartInstaller).not.toHaveBeenCalled()
+    expect(operations.fetch).toHaveBeenCalledTimes(3)
+    expect(result).toMatchObject({ phase: 'installer-download', asset: 'installer.exe', errorType: 'integrity', installationState: 'not-started' })
+    await expect(readFile(join(root, 'install-started.json'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })

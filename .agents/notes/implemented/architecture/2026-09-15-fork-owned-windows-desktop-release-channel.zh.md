@@ -44,6 +44,16 @@ Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须�
 
 不可变 `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest 仅在源码 repository 没有匹配 release 时作为精确 sequence-zero migration 保留。Migration record 固定 manifest 与 installer hash，并固定 build receipt 的 `dsh-v0.1.5-rc.2` source tag；由 manifest 固定的 receipt 仍保留 source commit 与 tree。任何格式错误、可变、冲突或不可达的 source release 都会 fail closed，不会 fallback。一旦 source release 存在，Windows Ops 不能充当第二通道。
 
+## 失败事务与恢复
+
+最终 stage 提升前的 helper 失败不可能已经启动 installer：旧版和当前 helper 都先提升 stage。Completion 验证 operation 身份、acknowledgement、cancellation 与结果证据，然后才将此类失败归为终态，不推进已完成 sequence。当前 helper 在 acknowledgement 前保留已验证 manifest，并在调用 launcher 前标记安装可能开始。Cancellation 绝不覆盖最终 stage 或 installer 证据。保留的记录仍可用于诊断。
+
+已经暂存的失败保持未解决状态，除非独立候选核验了同一或更高版本的实际安装。已确认但尚未记录终态的 helper 若仍存活，则不允许取代该事务；存活检查不会结束它。Completion 将保留的 manifest 字节绑定到 handoff asset hash，检查 executable/runtime hash，要求当前打包 sequence 与插件清单匹配，并拒绝更高序号或同序号冲突的已暂存事务。补充的安装前 manifest 只能标识当前打包 release；未开始安装的未来下载不能阻止有效的当前安装完成。验证已完成历史时，不会追溯应用后来提高的 discovery 下限。
+
+传输时限涵盖响应头、重定向及响应体读取，元数据与 installer 使用不同预算。有界重试仅适用于已分类的临时传输/HTTP 失败，不适用于身份或完整性校验。Installer 取消会先关闭由 Node 包装的 Web stream 与输出，再删除其私有部分文件。持久诊断保留阶段、已验证资产文件名、错误类别及安装是否可能开始，不保留远程消息、凭据、签名 URL 参数或 operation token。
+
+已安装 executable 提供 `--recover-managed-update`。后续启动将恢复请求转交单实例持有者；重新核验证据不停止 Host 或重置 profile。结果仍阻塞时，提供保留活动工作确认的现有更新流程。此入口无法修复不能启动的 Host，也不能凭空生成缺失的独立完成候选；此时仍需要经过验证的流程外安装。[Desktop README](../../../../apps/desktop/README.zh.md) 说明恢复用法与传输限制。
+
 ## 发布
 
 手动 Windows workflow 通过必填的 `confirm_version` 和 `expected_source_sha` 输入要求经过评审的 plan version 与源码 commit。在安装依赖或打包之前，步骤局部的 `EXPECTED_SOURCE_SHA` 必须恰好包含 40 个小写十六进制字符，并与检出的 `HEAD` 完全一致。即使 plan 相同，较新的 commit 也会被拒绝，而不是悄然改变经过评审的源码。Rehearsal 仍要求 checkout 等于所选远端分支的当前 head，使用 build job 与干净 checkout、固定 Node 和 pnpm、冻结 lockfile、focused Desktop tests 及未签名 packaging，然后完成 finalization，并上传保留七天且经过 checksum 验证的 asset set。只有元数据准备步骤获得只读 GitHub 凭据；打包与验收进程仍不带凭据。它绝不运行 release 或 remote-check job。
@@ -51,6 +61,10 @@ Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须�
 Publication run 必须使用当前 `master`。受保护 release job 是唯一具有 `contents: write` 的 job。它下载 build artifact，交叉检查完整 asset set，以精确 source commit tag 创建 draft，上传每个 asset，并只在 asset set 完整后发布。随后它要求 GitHub 报告 release immutable，tag 与 release target 解析到 build commit，并且每个 remote asset digest 匹配本地 bytes。最后一个只读 job 通过仅用于构建的元数据适配器针对 GitHub 运行已发布 discovery，并要求它选择经过评审的 version、sequence、commit 与 tree。
 
 ## 考虑过的替代方案
+
+**忽略所有 blocked 结果或删除 operation 历史。** 两者都会丢失安装中断保护与诊断证据。只有经过验证、未开始安装的失败不阻塞启动；已经暂存的失败需要独立核验的替代证据。
+
+**根据已安装版本推进 completion，或重试所有错误。** 版本不能证明文件 hash 或插件激活，重试完整性失败也不会修复字节，只会削弱诊断。Completion 使用已验证证据；重试排除校验与 installer 执行。
 
 **只确认版本与当前分支。** 从控制器评审到 workflow dispatch 之间，分支可能推进到未经评审的 commit，而 plan version 未变。在 workflow 内锁定预期源码 commit 可消除这一缺口，同时保留当前分支与版本检查。
 
