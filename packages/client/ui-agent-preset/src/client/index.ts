@@ -140,15 +140,16 @@ export function apply(ctx: ClientContext): void {
     scope.effect(() => {
       let active = true
       let generation = 0
+      const isActive = (): boolean => active
       creatorDraft = async () => {
-        if (!active || !section.store.getSnapshot().showPicker) return false
+        if (!isActive() || !section.store.getSnapshot().showPicker) return false
         const request = ++generation
         unboundSeat.discardStage()
         try {
           const sessionId = await scope.uiWorkspace.startSession(undefined, { agentPreset: 'cordis' })
-          if (!active || request !== generation || sessionId === undefined || !section.store.getSnapshot().showPicker) return false
+          if (!isActive() || request !== generation || sessionId === undefined || !section.store.getSnapshot().showPicker) return false
           const binding = scope.sessions.binding(sessionId)
-          const isCurrent = (): boolean => active && request === generation && binding !== undefined
+          const isCurrent = (): boolean => isActive() && request === generation && binding !== undefined
             && scope.sessions.binding(sessionId) === binding
             && (scope.sessions.retainInfo(sessionId).getSnapshot().retainedBy.mainView ?? 0) > 0
             && scope.sessions.list.getSnapshot().byId[sessionId]?.projectionValues?.agentPreset === 'cordis'
@@ -156,7 +157,7 @@ export function apply(ctx: ClientContext): void {
           seatFor(scope, binding).introduce()
           return isCurrent()
         } catch (reason: unknown) {
-          if (active && request === generation) console.warn('creator session failed:', reason)
+          if (isActive() && request === generation) console.warn('creator session failed:', reason)
           return false
         }
       }

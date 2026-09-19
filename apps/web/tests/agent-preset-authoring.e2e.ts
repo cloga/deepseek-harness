@@ -284,7 +284,7 @@ describe('web e2e: agent-preset authoring is a host-side copy', () => {
     await expect.poll(hostSessions, { timeout: 15_000 }).toEqual([
       expect.objectContaining({
         sessionId: original.sessionId, blank: true,
-        projections: expect.objectContaining({ values: expect.objectContaining({ agentPreset: 'standard' }) }),
+        projections: expect.objectContaining({ values: expect.objectContaining({ agentPreset: 'standard' }) as unknown }) as unknown,
       }),
     ])
     // Blank Sessions need not have a physical log; observe the owned live log instead.
@@ -300,7 +300,7 @@ describe('web e2e: agent-preset authoring is a host-side copy', () => {
 
     // Hold the real request before Host creation; never substitute a Remote success.
     const createPattern = '**/api/session/create'
-    const release = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<undefined>()
     let createRequest: Request | undefined
     let routeWork: Promise<void> | undefined
     const holdCreate = (route: Route): Promise<void> => {
@@ -323,7 +323,7 @@ describe('web e2e: agent-preset authoring is a host-side copy', () => {
       expect(await selectedId()).toBe(original.sessionId)
       expect(await hostSessions()).toHaveLength(1)
     } finally {
-      release.resolve()
+      release.resolve(undefined)
       await page.unroute(createPattern, holdCreate)
       await routeWork
     }

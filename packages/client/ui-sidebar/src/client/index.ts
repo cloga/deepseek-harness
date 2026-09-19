@@ -34,7 +34,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 const NS = 'sidebar'
 
 interface WorkspaceNavigation {
-  startSession(workspaceId?: Parameters<SidebarRootInjected['startSession']>[0]): void
+  startSession(workspaceId?: Parameters<SidebarRootInjected['startSession']>[0]): Promise<unknown>
 }
 
 /** Services required by the sidebar plugin. */
