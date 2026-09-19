@@ -33,9 +33,11 @@ function workflow(file: string): Workflow {
 // Missing context properties use the Actions empty-string value.
 function evaluate(expression: string, context: Record<string, string | boolean>): unknown {
   const source = expression.trim().replace(/^\$\{\{|\}\}$/g, '')
-    .replace(/\b(?:github|vars|runner)(?:\.[a-zA-Z_][a-zA-Z_0-9]*)+/g,
+    .replace(/\b(?:github|vars|runner|inputs)(?:\.[a-zA-Z_][a-zA-Z_0-9]*)+/g,
       key => JSON.stringify(context[key] ?? ''))
-  return runInNewContext(source, { fromJSON: JSON.parse }, { timeout: 1000 }) as unknown
+  return runInNewContext(source, { fromJSON: JSON.parse,
+    format: (template: string, ...values: string[]) => template.replace(/\{(\d+)\}/g, (_match, index: string) => values[Number(index)]!),
+  }, { timeout: 1000 }) as unknown
 }
 
 function assertSharedPersistentStore(run: string | undefined): void {
@@ -85,10 +87,21 @@ for (const [file, jobIds] of [['release.yml', ['dependencies', 'pack']], ['relea
   describe(file, () => {
     const release = workflow(file)
     it('preserves the logical jobs, rehearsal events and read-only permission', () => {
-      expect(Object.keys(release.jobs)).toEqual(jobIds)
-      expect(release.on).toEqual({ pull_request: null, push: { branches: ['master'] }, workflow_dispatch: null })
+      expect(Object.keys(release.jobs)).toEqual(file === 'release.yml' ? [...jobIds, 'github-artifacts'] : jobIds)
+      expect(Object.keys(release.on)).toEqual(['pull_request', 'push', 'workflow_dispatch'])
+      expect(release.on.pull_request).toBeNull()
+      expect(release.on.push).toEqual({ branches: ['master'] })
       expect(release.permissions).toEqual({ contents: 'read' })
-      expect(release.concurrency).toEqual({ group: '${{ github.workflow }}-${{ github.ref }}', 'cancel-in-progress': true })
+      if (file === 'release.yml') {
+        expect(release.on.workflow_dispatch).toMatchObject({ inputs: { publish_github_artifacts: { type: 'boolean', default: false } } })
+        expect(release.concurrency).toEqual({
+          group: "${{ github.event_name == 'workflow_dispatch' && inputs.publish_github_artifacts && format('{0}-github-artifacts-{1}', github.workflow, github.run_id) || format('{0}-{1}', github.workflow, github.ref) }}",
+          'cancel-in-progress': "${{ !(github.event_name == 'workflow_dispatch' && inputs.publish_github_artifacts) }}",
+        })
+      } else {
+        expect(release.on.workflow_dispatch).toBeNull()
+        expect(release.concurrency).toEqual({ group: '${{ github.workflow }}-${{ github.ref }}', 'cancel-in-progress': true })
+      }
     })
     for (const jobId of jobIds) {
       describe(jobId, () => {
@@ -158,6 +171,17 @@ for (const [file, jobIds] of [['release.yml', ['dependencies', 'pack']], ['relea
     }
   })
 }
+
+it('preserves exact PR cancellation and isolates non-cancelling publication workflow runs', () => {
+  const concurrency = workflow('release.yml').concurrency!
+  const context = { ...trustedPr, 'github.workflow': 'Release (dsh)' }
+  expect(evaluate(String(concurrency.group), context)).toBe('Release (dsh)-refs/pull/42/merge')
+  expect(evaluate(String(concurrency['cancel-in-progress']), context)).toBe(true)
+  const publication = { ...context, 'github.event_name': 'workflow_dispatch', 'inputs.publish_github_artifacts': true, 'github.run_id': '100' }
+  expect(evaluate(String(concurrency.group), publication)).toBe('Release (dsh)-github-artifacts-100')
+  expect(evaluate(String(concurrency['cancel-in-progress']), publication)).toBe(false)
+  expect(evaluate(String(concurrency.group), { ...publication, 'github.run_id': '101' })).toBe('Release (dsh)-github-artifacts-101')
+})
 
 it.each(['release-publish.yml', 'release-vendor-publish.yml'])('keeps %s manual and entirely hosted', (file) => {
   const publish = workflow(file)

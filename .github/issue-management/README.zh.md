@@ -8,7 +8,7 @@ description: "面向仓库维护者的 Issue 策略强制范围、Project 访问
 
 ## 摘要
 
-贡献者可以引用 Issue 作为背景，而无需让 PR（Pull Request）校验依赖 Project 可用性。解决型引用还会强制检查 Project Priority。必需的 `Issue policy` job 与独立的生命周期工作流使用受信任的默认分支代码。
+贡献者可以引用 Issue 作为背景，而无需让 PR（Pull Request）校验依赖 Project 可用性。解决型引用还会强制检查 Project Priority。必需的 `Issue policy` job 使用受信任的检出；独立的生命周期工作流使用默认分支代码。
 
 ## 目录
 
@@ -53,6 +53,12 @@ PR 打开时，工作流按配置时区中的 PR 创建日期，为每个被引�
 ## 配置与限制
 
 [config.json](config.json)选择仓库、Project、字段名、状态、生命周期操作者和时区。策略读取 Project 自定义单选 `Priority` 字段，而非组织原生 Issue Priority 字段。维护者手动设置 Project Priority；指引编辑原生 Issue 字段的 skill 不会填充该值。Issue 审计先移除 PR 专用 kind 标签和已停用的标签别名，再校验其余元数据。不提供字段迁移或 Priority 同步。
+
+PR 预检和校验接受可选的环境变量 `DSH_ISSUE_REPOSITORY_OWNER`。未设置时，仓库读取仍使用配置中的组织。唯一允许的覆盖值是 `cloga`：`GITHUB_REPOSITORY`、事件仓库和 PR 基础仓库必须全部为 `cloga/deepseek-harness`，且配置中的仓库仍为 `deepseek-harness/deepseek-harness`。空值或上下文不匹配会在任何 API 读取前失败。解析后的所有者用于 PR、评审和被引用 Issue 的读取，以及同仓库引用解析；Project 的组织、编号、字段、凭据和校验规则不变。生命周期处理不使用此覆盖值。
+
+仅 `cloga/deepseek-harness` 使用[工作流检出配置](../workflows/issue-policy.yml)中另行批准的不可变版本。工作流执行完整且干净的检出，绝不从 PR head 叠加策略代码，且仅在预检和最终校验进程中启用所有者覆盖值。其他仓库仍使用默认分支代码，覆盖变量保持未设置，而不是空字符串。固定版本不会随 PR 推送前移；改变它需要维护者对精确版本另行批准。
+
+[仓库引用检查](../../scripts/verify-repository-references.ts)仅允许第一个策略检出步骤的 `with.ref` 字段中供机器使用的字面固定版本标识，且必须保留精确 fork 条件、默认分支回退、清理以及禁用凭据持久化。同一标识出现在注释、其他字段或文档中仍被禁止。此例外不批准新的版本，也不证明拥有原 Project 的访问权限；必需的 Project 校验仍可能失败。
 
 生命周期处理由事件驱动，不是协调器。被省略的事件不会修复 Project 状态，并发 Project mutation 也没有原子比较并交换保护。选择性求值不重新设计必需检查的权威来源，也不保证已测得的 Actions 分钟节省。[选择性求值决策](../../.agents/notes/implemented/process/2026-09-07-selective-issue-policy-evaluation.zh.md)记录取舍。
 

@@ -46,6 +46,17 @@ kind: "package-reference"
 
 **插件 → Subagent** 页面的限制部分编辑 Host 的 `subagent` 设置分节。用户值覆盖本插件的组合配置；恢复默认会删除用户覆盖。`maxDepth` 默认为 `1`，在委派工具自身未配置深度时提供默认值。工具显式指定的深度（包括 `provider-managed`）优先。深度 `0` 禁止继承此设置的工具委派；深度 `1` 只允许直接子代理。修改在下一次委派时生效。直接调用服务的调用方仍自行提供可选的请求深度。
 
+<a id="creation-time-model-rules"></a>
+### 创建时模型规则
+
+Host 的 `subagent` 设置分节中，`modelRules` 默认为 `[]`。每行包含 `parent: { provider, model }` 和 `child: { provider, model }`；四个值都必须是非空的精确 id，每个父级组合最多出现一次。通过添加或删除规则行修改策略。主 agent 的模型选择仍由 Session 模型选择器负责。匹配读取直接父级的有效委派选项：使用其最新请求 header，首次请求前使用创建选项，绝不使用全局模型默认值。孙级匹配自己的直接父级，而不是根级。
+
+规则仅用于模型可配置、原本会继承父级路由的新子级：一次性提供方必须支持 `agentOptions`，可继续子级的组装则由管理器负责，不依赖提供方的一次性能力标记。由外部产品自行管理模型的一次性子级保持不变。
+
+新建的 `start()` 和 `startContinuable()` 调用只要提供了子级的提供方、模型或推理强度中的任意字段，就会绕过规则。显式传入或配置的上述任意字段都优先，提供方自有的路由默认值也优先。仅覆盖 `maxTokens` 仍允许规则匹配。路由改变时清除继承的父级推理强度，由目标模型提供自身默认值。匹配规则、有效子级选项和委派权限覆盖项在异步校验前捕获，因此后续设置、父级模型选择或父级权限变化只影响未来的委派。继续发送消息或冷恢复子级不会重新应用规则；可继续子级保留已记录的路由和推理强度。
+
+匹配的目标必须在子级发布前通过 `llm.resolveCallConfig()` 校验。缺少 LLM（大语言模型）服务、目标不可用或已改名、取消或提供方替换，都会拒绝创建，不尝试其他模型。未匹配的调用保持普通继承，不增加 LLM 查询。显式工具请求在调用此服务前仍须通过工具的模型选择权限校验。
+
 ### 可续接子代理容量
 
 在 Host 的 `dsh-subagent` 插件上设置 `maxActiveSubagents`，限制通过连续可续接父子关系共享名额的存活子代理数。默认值为 `8`，接受正安全整数。非可续接父代理建立独立的池，自身不占名额；可续接后代继承该池。新建和冷恢复在重建 Agent 前预占名额，清理在 handle 释放后归还名额。等待后代的父代理、有待处理收件箱内容的代理以及正在停止的 Activation 仍占名额。向驻留子代理发送消息复用其名额。一次性和外部提供方运行不受此限制。池的继承不会跨越一次性父代理；其可续接子代理共享独立的池。深度仍由委派工具的独立策略决定。
@@ -96,13 +107,14 @@ kind: "package-reference"
 | [`src/types.ts`](src/types.ts) | 公开的请求、结果与提供方约定 |
 | [`src/descriptor.ts`](src/descriptor.ts) | 版本化的 `subagent/descriptor` 会话事件词汇 |
 | [`src/child-agent.ts`](src/child-agent.ts) | 子级组装、委派策略、深度辅助函数 |
+| [`src/model-rules.ts`](src/model-rules.ts) | 精确父级路由匹配、子级选项捕获与目标在线校验 |
 | [`src/list-children.ts`](src/list-children.ts) | 基于在线会话存储与可选持久化的发现 |
 | [`src/control.ts`](src/control.ts) | 浏览器控制面组装：目录活性采样、浏览器时区校验、失败分码 |
 | [`src/control-types.ts`](src/control-types.ts) | client-safe 的目录行、控制面请求、回执与失败 |
 
 ### 一次性流程
 
-请求先对照提供方声明的能力进行校验，随后对持久化描述符做快照，再由提供方构建子 agent。两个进程内提供方都声明 `agentOptions`：创建子级时把请求字段叠加到父级最新已记录请求的提供方、模型与推理强度之上；父级还没有请求时回退到创建选项，并保留配置的 token 上限。它们还会在第一次 await 前快照委派权限状态：Auto 或 Full access 父级让子级获得相同的 `permission/preset` 身份，而既有沙箱覆盖与审批策略固定仍然生效；同时记录这两个身份可防止 fork 中更早的同旋钮组合身份胜出。Auto 随后会独立审查 child 的每个受支持调用：普通项目内工作为低风险并直接允许；中风险工作必须在既有创建 prompt 或已核验的 human／直接父级消息中获得动作、准确目标和范围的明确授权，且不与 human 限制冲突；高风险工作始终拒绝。reviewer 从 `parentSession` 与既有消息派生这份上下文；委派不会新增父 call metadata、委派记录、review receipt 或 Session format。更改路由而不显式指定推理强度时，会清除继承的路由自有强度，使所选模型解析自己的默认值。DSH SDK 也声明 `agentOptions`，但会运行独立子运行时，因此不继承 Auto；ACP、Codex 与 Claude Code 同样在父级委派调用通过审查后保留各自的权限系统。成功时运行被发布、所有权转移给调用方；失败时提供方回滚每个尚未发布的资源。结果携带子 agent 的最终输出、可选的结构化值、停止原因与可选的安全诊断。
+请求先对照提供方声明的能力进行校验，随后对持久化描述符做快照，再由提供方构建子 agent。两个进程内提供方都声明 `agentOptions`：除非服务提供了模型规则捕获的选项，否则创建子级时把请求字段叠加到父级最新已记录请求的提供方、模型与推理强度之上；父级还没有请求时回退到创建选项，并保留配置的 token 上限。它们还会在第一次 await 前快照委派权限状态：Auto 或 Full access 父级让子级获得相同的 `permission/preset` 身份，而既有沙箱覆盖与审批策略固定仍然生效；同时记录这两个身份可防止 fork 中更早的同旋钮组合身份胜出。Auto 随后会独立审查 child 的每个受支持调用：普通项目内工作为低风险并直接允许；中风险工作必须在既有创建 prompt 或已核验的 human／直接父级消息中获得动作、准确目标和范围的明确授权，且不与 human 限制冲突；高风险工作始终拒绝。reviewer 从 `parentSession` 与既有消息派生这份上下文；委派不会新增父 call metadata、委派记录、review receipt 或 Session format。更改路由而不显式指定推理强度时，会清除继承的路由自有强度，使所选模型解析自己的默认值。DSH SDK 也声明 `agentOptions`，但会运行独立子运行时，因此不继承 Auto；ACP、Codex 与 Claude Code 同样在父级委派调用通过审查后保留各自的权限系统。成功时运行被发布、所有权转移给调用方；失败时提供方回滚每个尚未发布的资源。结果携带子 agent 的最终输出、可选的结构化值、停止原因与可选的安全诊断。
 
 ### 可继续流程
 
@@ -129,6 +141,7 @@ kind: "package-reference"
 - [Subagent 子系统](../../../docs/subsystems/subagent.zh.md)——服务约定、提供方约定与终态结果语义。
 - [Subagent 能力 seam](../../../.agents/notes/implemented/feature/2026-06-21-subagent-capability-seam.zh.md)——委派能力家族的设计记录。
 - [可继续的 subagent](../../../.agents/notes/implemented/feature/2026-07-28-continuable-subagent-conversations.zh.md)——接受后续轮次的持久子级。
+- [创建时模型规则](../../../.agents/notes/implemented/feature/2026-09-19-subagent-model-rules.zh.md)——用户拥有的默认值、选项捕获与保留的模型选择权限。
 - [进程内 spawn 后端](../subagent-spawn-in-process/README.zh.md)——最容易组合的提供方。
 - [Auto review](../../experimental/auto-review/README.zh.md)——只有进程内 DSH 子级继承的当前会话授权模式。
 - [进程外 ACP 后端](../subagent-acp/README.zh.md)——经 Agent Client Protocol 拥有自有运行时的子级。
@@ -138,6 +151,20 @@ kind: "package-reference"
 
 <a id="model-experience"></a>
 ## 模型体验
+
+### 创建时模型选择
+
+#### 模型看到什么
+
+规则选择新子级的路由，不会把规则列表加入任一 agent 的提示词。校验失败会拒绝委派。校验期间替换适配器或 LLM 服务时报告 `LLM catalog/provider changed during subagent model rule preflight; retry delegation`；替换 subagent 提供方时报告 `subagent provider changed during model rule preflight; retry delegation`。两种诊断都不会触发自动重试。
+
+#### Token 影响
+
+路由预检解析模型元数据，不会发起模型流式请求。成功时不增加提示词 token；所选子级模型照常统计自身请求的用量。
+
+#### KV Cache 影响
+
+父级的路由和已有请求前缀保持不变。每个新子级使用所选路由的独立请求缓存。即使工具禁用了模型自主选择，用户编写的规则仍可改变 fork 子级的路由。fork 仍继承父级已完成的历史，但改变提供方或模型可能失去前缀缓存复用，需要在目标路由上重新计算这些继承历史。
 
 ### 结算通知
 
@@ -180,6 +207,7 @@ You are a delegated subagent: your permission scope was fixed when you were star
 
 这些限制说明该 seam 何时不合适，或何时需要特别的运维注意。它们是当前包约束，不是通用委派对比或任务积压。
 
+- **模型规则预检拒绝并发适配器拓扑变化**——匹配规则校验期间，任何适配器注册更新都会拒绝该次创建，包括无关提供方的更新。目录稳定后须显式重试；已接受的子级不受影响。
 - **ACP 子级仍为一次性，且无法通过追踪枚举**——ACP 运行在父级会话语料中没有本地子会话，远程提供方需要 Activation 所有权约定才能支持可继续子级。
 - **仅允许相邻模型消息**——`sendMessage()` 要求确切在线 sender；每个 sender 都可以指定直接可继续 child，只有具备驻留可继续 Activation 的 sender 可以指定自己的直接 parent。浏览器提示使用独立的人类 Queue 或 Steer 控制路径。
 - **child 到 parent 的投递要求直接 parent 保持在线**——服务没有持久 parent mailbox；parent 缺失时会拒绝消息，而非接受无法唤醒的工作。

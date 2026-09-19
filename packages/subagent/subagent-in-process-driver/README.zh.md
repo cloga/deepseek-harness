@@ -37,7 +37,9 @@ kind: "package-library"
 
 ### 子 agent 获得什么
 
-子 agent 获得父级的工作目录／会话谱系，除非 `request.agentOptions` 覆盖，否则继承父级的提供方、模型、推理强度与输出 token 上限。它获得全新的扁平注册作用域：父级工具限制与权限不会被导入。一次运行会把父级显式的沙箱覆盖项与 `'never'` 审批钉定带入子 agent，并在子 agent 的初始轮次内追加一份每次运行的描述符。
+子 agent 获得父级的工作目录／会话谱系。通常，除非 `request.agentOptions` 覆盖，否则继承父级的提供方、模型、推理强度与输出 token 上限。当服务匹配到[创建时模型规则](../subagent/README.zh.md#creation-time-model-rules)时，改由 `request.resolvedAgentOptions` 提供完整的已捕获选项。驱动器只写入子级深度，不合并父级后续的模型选择；即使父级在预检期间切换到该路由，捕获时缺省的推理强度仍保持缺省。规则选择与目标校验由服务负责，不属于本驱动器。
+
+子 agent 获得全新的扁平注册作用域：父级工具限制与权限不会被导入。一次运行会把父级显式的沙箱覆盖项与 `'never'` 审批钉定带入子 agent，并在子 agent 的初始轮次内追加一份每次运行的描述符。匹配规则时，`request.resolvedDelegatedPolicies` 提供模型预检前捕获的策略；驱动器不会重新读取父级后续的权限选择。没有该快照时，驱动器在自身第一次 await 前捕获策略。
 
 -----
 

@@ -68,6 +68,8 @@ Set `modelSelectionSettings: true` to sample the Host's `subagent-model-selectio
 
 A call supplies `provider` and `model` together, or supplies only an effort when configured, parent, or provider-owned defaults provide the route. Static `provider.agentRouteDefaults`, when present, form the provider/model baseline; tool configuration and model fields overlay it before route-aware effort merging and exact-route preflight. Providers without these defaults use compatible values from the parent's latest logged request, then the parent's creation options before its first request, while retaining the configured `maxTokens`. Changing the route without an explicit effort clears the inherited route-owned effort, so the selected model resolves its default. The live LLM adapter validates the effective route before child creation. Catalog membership remains advisory, so a model can use an unlisted id when its adapter accepts it.
 
+When neither the call nor tool/provider defaults choose a route or effort, [Host creation-time model rules](../subagent/README.md#creation-time-model-rules) may select the child model. These user-owned defaults do not enable model-facing selection or relax the Session allowlist. Invalid or denied explicit choices still fail instead of falling through to a rule. The parent Session's model remains unchanged.
+
 -----
 
 <a id="understand-the-implementation"></a>

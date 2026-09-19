@@ -82,6 +82,9 @@ function renderSubagent(
     ...settled,
     maxDepth: field('3'),
     maxActiveSubagents: field('8'),
+    conflicted: false,
+    rules: { supported: true, rows: [], dirty: false, incomplete: false, duplicate: false,
+      groups: [], catalogStatus: 'idle', catalogPartial: false },
     ...limitState,
   })
   const models = createSnapshotStore<SubagentModelSelectionCardState>({
@@ -96,6 +99,10 @@ function renderSubagent(
   const actions = {
     editLimit: vi.fn(),
     resetLimit: vi.fn(),
+    addRule: vi.fn(),
+    removeRule: vi.fn(),
+    editRule: vi.fn(),
+    retryRulesCatalog: vi.fn(),
     toggleEnabled: vi.fn(),
     toggleModel: vi.fn(),
     retryCatalog: vi.fn(),

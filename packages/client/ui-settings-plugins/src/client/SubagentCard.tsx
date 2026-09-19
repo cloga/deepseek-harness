@@ -1,4 +1,4 @@
-/** One settings card for Subagent delegation limits and model authorization. */
+/** One settings card for Subagent limits, model defaults, and model authorization. */
 
 import { useId } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -6,6 +6,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import { PluginConfigForm } from './PluginConfigForm.tsx'
 import { SubagentLimitsFields } from './SubagentLimitsFields.tsx'
 import { SubagentModelSelectionFields } from './SubagentModelSelectionFields.tsx'
+import { SubagentModelRulesFields } from './SubagentModelRulesFields.tsx'
 import { subagentCardShell, type SubagentCardFace } from './subagent-card-controller.ts'
 import css from './SubagentCard.module.css'
 
@@ -37,6 +38,15 @@ export function SubagentCard(props: SubagentCardProps) {
           </section>
         )
         : null}
+      {limits.available ? (
+        <section className={css.section} aria-labelledby={`${headingId}-rules`}>
+          <h3 className={css.heading} id={`${headingId}-rules`}>{t('subagentRulesTitle')}</h3>
+          <SubagentModelRulesFields t={t} state={{ ...limits, saving: state.saving }}
+            addRule={props.addRule} removeRule={props.removeRule} editRule={props.editRule}
+            retryRulesCatalog={props.retryRulesCatalog} />
+          {limits.conflicted ? <p role="status">{t('subagentModelSelectionConflict')}</p> : null}
+        </section>
+      ) : null}
       {models.available
         ? (
           <section className={css.section} aria-labelledby={`${headingId}-models`}>
