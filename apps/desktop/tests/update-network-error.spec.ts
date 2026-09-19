@@ -82,7 +82,9 @@ describe('Desktop update network error messages', () => {
     const error = wrapped as Error
     expect(error.message).toBe(desktopUpdateNetworkDetails(wrapped, en))
     expect(error.message).not.toMatch(/private|https:|secret|token=/u)
-    expect(desktopUpdateNetworkDetails(Object.create(Object.getPrototypeOf(error)))).toBeUndefined()
+    const prototype: unknown = Object.getPrototypeOf(error)
+    if (typeof prototype !== 'object' || prototype === null) throw new Error('owned wrapper must have an object prototype')
+    expect(desktopUpdateNetworkDetails(Object.create(prototype))).toBeUndefined()
     expect(desktopUpdateNetworkDetails(new Proxy(error, {}))).toBeUndefined()
   })
 
@@ -98,7 +100,8 @@ describe('Desktop update network error messages', () => {
     const primary = new Proxy(new TypeError('invalid configuration'), {
       get(target, key, receiver) {
         if (key === field) throw new Error('private proxy token=secret')
-        return Reflect.get(target, key, receiver)
+        const value: unknown = Reflect.get(target, key, receiver)
+        return value
       },
     })
     expect(await caught(primary)).toBe(primary)
@@ -128,7 +131,8 @@ describe('Desktop update network error messages', () => {
     const primary = new Proxy(Object.assign(new Error('private request token=secret'), { code: 'ECONNRESET' }), {
       get(target, key, receiver) {
         if (key === 'name') throw new Error('private constructor token=secret')
-        return Reflect.get(target, key, receiver)
+        const value: unknown = Reflect.get(target, key, receiver)
+        return value
       },
       getPrototypeOf() { throw new Error('private prototype token=secret') },
     })
@@ -149,7 +153,7 @@ describe('Desktop update network error messages', () => {
     for (const primary of [revoked.proxy, prototypeTrap, conversionTrap]) {
       await withDesktopUpdateNetworkError('manifest-download', async () => { throw primary }).then(
         () => { throw new Error('expected failure') },
-        (failure) => { expect(failure).toBe(primary) },
+        (failure: unknown) => { expect(failure).toBe(primary) },
       )
       expect(desktopUpdateNetworkDetails(primary)).toBeUndefined()
       expect(describeDesktopUpdateError(primary, en)).toBe(en.unknownError)

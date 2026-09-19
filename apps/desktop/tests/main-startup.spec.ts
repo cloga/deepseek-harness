@@ -947,9 +947,9 @@ describe('desktop main startup', () => {
       harness.updateState = failed
       return harness.publishUpdate(failed)
     })
-    const shown = Promise.withResolvers<void>()
+    const shown = Promise.withResolvers<undefined>()
     harness.dialog.showMessageBox.mockImplementation((options: { type?: string }) => {
-      if (options.type === 'error') shown.resolve()
+      if (options.type === 'error') shown.resolve(undefined)
       return Promise.resolve({ response: 0 })
     })
     // The status indicator owns the preserved-baseline notice; the menu still checks updates.
