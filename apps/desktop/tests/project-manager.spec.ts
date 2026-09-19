@@ -1236,6 +1236,8 @@ describe('desktop external plugin profile', () => {
       return actualRecord(directory, record)
     })
     await expect(manager.mutate({ type: 'plugin-add', spec: 'new-plugin@1.0.0' }, hooks())).rejects.toThrow('committed audit unavailable')
+    expect(audit.mock.calls.map(([, record]) => record.outcome)).toEqual(['started', 'committed'])
+    expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(['manual-plugin', 'new-plugin'])
     audit.mockRestore()
     const journalPath = join(manager.paths.root, 'profile-activation.json')
     const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as { schemaVersion: number; transaction: string; phase: string; before: { sha256: string; names: string[] }; after: { sha256: string; names: string[] } }
@@ -1289,10 +1291,12 @@ describe('desktop external plugin profile', () => {
     const directory = join(manager.paths.root, 'profile-operations')
     const texts = readdirSync(directory).filter(name => name.endsWith('.json')).map(name => readFileSync(join(directory, name), 'utf8'))
     const records = texts.map(text => JSON.parse(text) as operationAudit.DesktopProfileOperationRecord)
-    expect(records).toEqual(expect.arrayContaining([
-      expect.objectContaining({ operation: 'plugin-install', target: fixture.source.packageName, outcome: 'committed', after: expect.objectContaining({ names: [fixture.source.packageName] }) }),
-      expect.objectContaining({ operation: 'plugin-add', target: 'other', outcome: 'failed', before: expect.objectContaining({ names: [fixture.source.packageName] }) }),
-    ]))
+    const committed = records.find(record => record.operation === 'plugin-install' && record.outcome === 'committed')
+    expect(committed).toMatchObject({ target: fixture.source.packageName, after: { names: [fixture.source.packageName] } })
+    const failed = records.find(record => record.operation === 'plugin-add' && record.target === 'other' && record.outcome === 'failed')
+    expect(failed).toMatchObject({ before: { names: [fixture.source.packageName] }, after: { names: [fixture.source.packageName] } })
+    expect(records.filter(record => record.transaction === failed?.transaction).map(record => record.outcome).sort())
+      .toEqual(['failed', 'started'])
     expect(texts.join('')).not.toMatch(/github\.com|dependencyRegistry|health failure with private source text/u)
     expect(existsSync(join(manager.paths.root, 'profile-activation.json'))).toBe(false)
   })

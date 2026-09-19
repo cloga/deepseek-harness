@@ -1,7 +1,7 @@
 import { beforeEach, expect, it, onTestFinished, vi } from 'vitest'
 import {
   chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
-  readdirSync, symlinkSync, utimesSync, writeFileSync,
+  readdirSync, realpathSync, symlinkSync, utimesSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -123,12 +123,13 @@ it('publishes only projected leaves with its own version and timestamp, retainin
     toJSON: () => ({ secret: 'caller serialization hook' }),
   }
   const path = recordDesktopProfileOperation(desktopRoot, extra)
-  expect(dirname(path)).toBe(directory)
+  expect(dirname(path)).toBe(realpathSync.native(directory))
   expect(basename(path)).toMatch(/^[0-9a-f-]{36}\.json$/u)
   const text = readFileSync(path, 'utf8')
-  const parsed = JSON.parse(text) as { recordedAt: string }
-  expect(parsed).toEqual({ ...record, schemaVersion: 1, recordedAt: expect.any(String) })
-  expect(new Date(parsed.recordedAt).toISOString()).toBe(parsed.recordedAt)
+  const { recordedAt, ...parsed } = JSON.parse(text) as Record<string, unknown>
+  expect(parsed).toEqual({ ...record, schemaVersion: 1 })
+  if (typeof recordedAt !== 'string') throw new Error('Audit timestamp must be a string')
+  expect(new Date(recordedAt).toISOString()).toBe(recordedAt)
   expect(text).not.toMatch(/secret|private|rawSpec|config|prompt|source|toJSON/u)
   const pending = path.replace(/\.json$/u, '.pending')
   expect(readFileSync(pending, 'utf8')).toBe(text)
@@ -149,8 +150,10 @@ it('preserves null evidence and omits an absent target', () => {
   const path = recordDesktopProfileOperation(desktopRoot, {
     transaction: 'recovery', operation: 'recovery', phase: 'recovery', outcome: 'recovered', before: null, after: null,
   })
-  expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({
-    schemaVersion: 1, recordedAt: expect.any(String), transaction: 'recovery', operation: 'recovery',
+  const { recordedAt, ...parsed } = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+  expect(typeof recordedAt).toBe('string')
+  expect(parsed).toEqual({
+    schemaVersion: 1, transaction: 'recovery', operation: 'recovery',
     phase: 'recovery', outcome: 'recovered', before: null, after: null,
   })
 })

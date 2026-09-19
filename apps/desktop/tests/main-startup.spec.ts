@@ -1037,8 +1037,10 @@ describe('desktop main startup', () => {
       type: 'warning', defaultId: 1, cancelId: 1,
       message: 'Delete all Desktop plugins and configuration?',
       buttons: ['Delete Plugins and Reset', 'Cancel'],
-      detail: expect.stringContaining('not a normal update or restart'),
     }))
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
+    const options = harness.dialog.showMessageBox.mock.calls[0]?.[1] as { detail: string }
+    expect(options.detail).toContain('not a normal update or restart')
     expect(harness.mutations).toEqual([])
     expect(harness.pluginsEnabled).toBe(true)
     expect(harness.hosts).toHaveLength(0)

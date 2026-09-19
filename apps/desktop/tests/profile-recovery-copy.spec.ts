@@ -240,7 +240,7 @@ it.each(['completed', 'failed'] as const)('records a %s reset outcome without ch
   expect(readFileSync(join(copy.directory, 'receipt.json'), 'utf8')).toBe(receipt)
   expect(readFileSync(join(copy.directory, 'profile', 'package.json'), 'utf8')).toBe(manifest)
   const recorded = readFileSync(join(copy.directory, 'outcome.json'), 'utf8')
-  expect(() => recordDesktopProfileRecoveryOutcome(copy, outcome === 'completed' ? 'failed' : 'completed')).toThrow()
+  expect(() => { recordDesktopProfileRecoveryOutcome(copy, outcome === 'completed' ? 'failed' : 'completed') }).toThrow()
   expect(readFileSync(join(copy.directory, 'outcome.json'), 'utf8')).toBe(recorded)
   expect(readFileSync(join(profile, 'package.json'), 'utf8')).toBe(manifest)
 })

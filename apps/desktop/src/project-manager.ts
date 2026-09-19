@@ -494,7 +494,8 @@ function canonicalInventory(value: unknown): string {
     return `{${Object.keys(value).sort().filter(key => value[key] !== undefined)
       .map(key => `${JSON.stringify(key)}:${canonicalInventory(value[key])}`).join(',')}}`
   }
-  return JSON.stringify(value) ?? 'null'
+  if (value === undefined || typeof value === 'function' || typeof value === 'symbol') return 'null'
+  return JSON.stringify(value)
 }
 
 /** Fingerprint declared inventory and referenced bytes, not generated node_modules or Host documents. */
@@ -572,7 +573,7 @@ function parseActivationEvidence(value: Record<string, unknown>): DesktopActivat
   return {
     before: parseInventoryEvidence(value.before), after: parseInventoryEvidence(value.after),
     operation: value.operation as DesktopProjectMutation['type'],
-    ...(value.target === undefined ? {} : { target: value.target as string }),
+    ...(value.target === undefined ? {} : { target: value.target }),
   }
 }
 
@@ -1051,6 +1052,8 @@ export class DesktopProjectManager {
       const packagesChanged = mutation.type !== 'plugin-toggle'
       let auditStarted = false
       let committed = false
+      // Read the runtime latch across nested catch regions; post-commit audit/cleanup calls can still throw.
+      const hasCommitted = (): boolean => committed
       let phase: 'preparation' | 'activation' | 'rollback' = 'preparation'
       try {
         recordDesktopProfileOperation(this.paths.root, {
@@ -1210,7 +1213,7 @@ export class DesktopProjectManager {
         return result
       } catch (operationError) {
         // A committed journal remains recoverable if its retained audit cannot be published.
-        if (auditStarted && !committed) {
+        if (auditStarted && !hasCommitted()) {
           try {
             recordDesktopProfileOperation(this.paths.root, {
               transaction: basename(transaction), operation: mutation.type, ...(targetName === undefined ? {} : { target: targetName }),
