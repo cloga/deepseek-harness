@@ -65,6 +65,40 @@ test('direct fixture invocation refuses a workstation before loading Playwright 
   assert.match(result.stderr, /Installer qualification (?:requires Windows|is GitHub-only)/)
 })
 
+for (const [edition, shell] of [
+  ['Core', 'pwsh'],
+  ['Desktop', join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')],
+]) {
+  test(`actual installer helper compiles in fresh PowerShell ${edition} without invoking native methods`, { skip: process.platform !== 'win32' }, t => {
+    const helper = fileURLToPath(new URL('./windows-installer-ui.ps1', import.meta.url))
+    const script = `
+$ErrorActionPreference = 'Stop'
+. $env:DSH_INSTALLER_UI_HELPER
+$helperType = 'InstallerCapture' -as [type]
+if ($null -eq $helperType) { throw 'InstallerCapture was not compiled' }
+if ($null -ne $helperType.TypeInitializer) { throw 'InstallerCapture must not run a static initializer' }
+$members = @($helperType.GetMethods([System.Reflection.BindingFlags]'Public,Static') | ForEach-Object { $_.Name } | Sort-Object -Unique)
+. $env:DSH_INSTALLER_UI_HELPER
+if (('InstallerCapture' -as [type]) -ne $helperType) { throw 'Repeated loading replaced the helper type' }
+[pscustomobject]@{ edition = $PSVersionTable.PSEdition; version = $PSVersionTable.PSVersion.ToString(); members = $members } | ConvertTo-Json -Compress
+`
+    const names = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'PSMODULEPATH', 'PROGRAMFILES'])
+    const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => names.has(name.toUpperCase())))
+    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8', timeout: 10_000, env: { ...environment, DSH_INSTALLER_UI_HELPER: helper },
+    })
+    assert.equal(result.error, undefined)
+    assert.equal(result.signal, null)
+    assert.equal(result.status, 0, result.stderr)
+    const observed = JSON.parse(result.stdout.trim())
+    assert.equal(observed.edition, edition)
+    for (const member of ['Initialize', 'Find', 'FindText', 'FindButton', 'Progress', 'Save', 'SaveWithShadow', 'SendMessage']) {
+      assert.ok(observed.members.includes(member), `Actual helper is missing ${member}`)
+    }
+    t.diagnostic(`Compilation only: PowerShell ${observed.edition} ${observed.version}`)
+  })
+}
+
 test('owned paths reject roots, escapes and existing junction ancestors', t => {
   const root = directory(t)
   assert.equal(root, realpathSync.native(root))

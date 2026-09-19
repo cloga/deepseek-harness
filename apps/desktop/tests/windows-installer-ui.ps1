@@ -1,6 +1,20 @@
 ﻿Add-Type -AssemblyName System.Drawing
 if (-not ('InstallerCapture' -as [type])) {
-    Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
+    # Drawing's implementation and interface assemblies vary between .NET Framework and Core.
+    $installerCaptureReferences = @(
+        @([System.Drawing.Bitmap], [System.Drawing.Graphics], [System.Drawing.Color], [System.Text.RegularExpressions.Regex]) |
+            ForEach-Object {
+                $_.Assembly.Location
+                $_.GetInterfaces() | ForEach-Object { $_.Assembly.Location }
+            } | Where-Object { $_ -ne [object].Assembly.Location } | Sort-Object -Unique
+    )
+    # Core's compiler needs the Thread reference facade, not its runtime CoreLib implementation.
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        $installerThreadReference = Join-Path $PSHOME 'ref/System.Threading.Thread.dll'
+        if (-not (Test-Path -LiteralPath $installerThreadReference -PathType Leaf)) { throw 'PowerShell Thread reference assembly is unavailable' }
+        $installerCaptureReferences += $installerThreadReference
+    }
+    Add-Type -ReferencedAssemblies $installerCaptureReferences -TypeDefinition @'
 using System;
 using System.Drawing;
 using System.Drawing.Imaging;
