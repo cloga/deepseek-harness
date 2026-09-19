@@ -28,10 +28,19 @@ describe('CI workflow', () => {
   it.each(['ci.yml', 'ci-master.yml', 'e2e.yml', 'release.yml', 'release-vendor.yml'])(
     '%s cancels superseded validation runs without crossing workflow or ref boundaries', (name) => {
       const workflow = loadWorkflow('.github/workflows/' + name)
-      expect(workflow.concurrency).toEqual({
-        group: '${{ github.workflow }}-${{ github.ref }}',
-        'cancel-in-progress': true,
-      })
+      if (name === 'release.yml') {
+        // Runtime selector cases, including exact PR group equality, also live
+        // in tests/ci-release-selfhosted.spec.ts.
+        expect(workflow.concurrency).toEqual({
+          group: "${{ github.event_name == 'workflow_dispatch' && inputs.publish_github_artifacts && format('{0}-github-artifacts-{1}', github.workflow, github.run_id) || format('{0}-{1}', github.workflow, github.ref) }}",
+          'cancel-in-progress': "${{ !(github.event_name == 'workflow_dispatch' && inputs.publish_github_artifacts) }}",
+        })
+      } else {
+        expect(workflow.concurrency).toEqual({
+          group: '${{ github.workflow }}-${{ github.ref }}',
+          'cancel-in-progress': true,
+        })
+      }
     },
   )
 
@@ -1076,7 +1085,7 @@ describe('npm release workflows', () => {
     for (const file of ['release.yml', 'release-vendor.yml']) {
       const workflow = loadWorkflow(`.github/workflows/${file}`)
       if (!isRecord(workflow.jobs)) throw new TypeError(`${file} must define jobs`)
-      expect(Object.keys(workflow.jobs).sort()).toEqual(file === 'release.yml' ? ['dependencies', 'pack'] : ['pack'])
+      expect(Object.keys(workflow.jobs).sort()).toEqual(file === 'release.yml' ? ['dependencies', 'github-artifacts', 'pack'] : ['pack'])
     }
 
     // publication is workflow_dispatch-only (never a PR check) and keeps the
@@ -1090,6 +1099,39 @@ describe('npm release workflows', () => {
       expect(publish.environment).toBe('npm-publish')
       expect(publish.concurrency).toMatchObject({ group: 'Release-publish' })
     }
+  })
+
+  it('isolates the explicit GitHub-only publisher from credential-free rehearsals', () => {
+    const workflow = loadWorkflow('.github/workflows/release.yml')
+    const publish = workflowJob(workflow, 'github-artifacts')
+    const pack = workflowJob(workflow, 'pack')
+    expect(workflow.permissions).toEqual({ contents: 'read' })
+    expect(workflowEvent(workflow, 'workflow_dispatch')).toMatchObject({ inputs: {
+      publish_github_artifacts: { type: 'boolean', default: false },
+    } })
+    expect(publish.needs).toEqual(['dependencies', 'pack'])
+    expect(publish.if).toContain("github.event_name == 'workflow_dispatch'")
+    expect(publish.if).toContain('inputs.publish_github_artifacts')
+    expect(publish.if).toContain("github.repository == 'cloga/deepseek-harness'")
+    expect(publish.if).toContain("startsWith(github.ref, 'refs/tags/dsh-v')")
+    expect(publish.permissions).toEqual({ contents: 'write', actions: 'read', checks: 'read', 'pull-requests': 'read', statuses: 'read' })
+    expect(publish.concurrency).toEqual({ group: 'Core-Web-GitHub-artifacts', 'cancel-in-progress': false })
+    expect(publish['runs-on']).toBe('ubuntu-24.04')
+    if (!Array.isArray(publish.steps) || !Array.isArray(pack.steps)) throw new TypeError('Release jobs must define steps')
+    const steps = publish.steps.filter(isRecord)
+    expect(JSON.stringify(steps)).not.toMatch(/pnpm|npm publish|npm install|release:publish|release:pack|build:official/)
+    expect(steps.find(step => step.uses === 'actions/checkout@v6')).toMatchObject({ with: { 'persist-credentials': false, clean: true } })
+    expect(steps.find(step => step.uses === 'actions/download-artifact@v4')).toMatchObject({ with: {
+      'artifact-ids': '${{ needs.pack.outputs.artifact-id }}', 'merge-multiple': true,
+    } })
+    const packSteps = pack.steps.filter(isRecord)
+    expect(packSteps.findIndex(step => step.name === 'Seal original GitHub release artifacts'))
+      .toBeGreaterThan(packSteps.findIndex(step => step.name === 'Verify packed install'))
+    expect(packSteps.find(step => step.name === 'Seal original GitHub release artifacts')?.if)
+      .toBe("github.event_name == 'workflow_dispatch' && inputs.publish_github_artifacts")
+    const writer = steps.find(step => step.name === 'Verify evidence and publish original artifacts')
+    expect(writer?.run).toContain('node scripts/release/github-artifacts.ts publish')
+    expect(writer?.env).toEqual({ GITHUB_TOKEN: '${{ github.token }}', RELEASE_ARTIFACT_ID: '${{ needs.pack.outputs.artifact-id }}' })
   })
 
   it('runs dependency policy and npm layout checks in the DSH release workflow', () => {
