@@ -15,6 +15,7 @@ import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { ObjectJsonSchema, ToolRestriction } from '@deepseek-ai/dsh-tools'
 import type { SubagentDescriptorData } from './descriptor.ts'
+import type { DelegatedPolicyOverrides } from './child-agent.ts'
 
 /** Identifies one accepted subagent run across its lifecycle event pair. */
 export type SubagentRunId = Branded<'SubagentRunId'>
@@ -207,6 +208,20 @@ export interface SubagentStartRequest {
 export interface ResolvedSubagentStartRequest extends SubagentStartRequest {
   /** Detached descriptor a session-backed provider persists in the child log. */
   readonly descriptor: SubagentDescriptorData
+  /**
+   * Complete effective options captured for a matched creation-time model rule.
+   * In-process providers stamp depth but must not merge these with a later
+   * parent selection, including when reasoningEffort is absent. Without a
+   * matched rule, omission preserves the provider's ordinary inheritance.
+   */
+  readonly resolvedAgentOptions?: AgentOptions
+  /**
+   * Detached delegation policy captured alongside resolvedAgentOptions before
+   * a matched model rule's asynchronous preflight. In-process providers use
+   * this snapshot rather than a later parent permission selection. Omission
+   * preserves ordinary provider-owned capture for starts without a rule.
+   */
+  readonly resolvedDelegatedPolicies?: DelegatedPolicyOverrides
 }
 
 /**

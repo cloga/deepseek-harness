@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { runInNewContext } from 'node:vm'
 import * as yaml from 'js-yaml'
 import { describe, expect, it } from 'vitest'
 
@@ -10,10 +11,15 @@ const workflow = yaml.load(readFileSync(resolve(import.meta.dirname, '../.github
   env: Record<string, string>
   jobs: Record<'preview', {
     'runs-on': string
-    steps: Array<{ name?: string; uses?: string; run?: string; with?: Record<string, unknown>; env?: Record<string, string> }>
+    steps: Array<{ name?: string; uses?: string; if?: string; run?: string; with?: Record<string, unknown>; env?: Record<string, string> }>
   }>
 }
 const preview = workflow.jobs.preview
+const deploymentSteps = [
+  'Upload to Cloudflare Pages',
+  'Verify the protected deployment serves the image',
+  'Comment the preview URL',
+]
 
 describe('PR preview workflow', () => {
   it('keeps every PR author on the selected GitHub-hosted runner', () => {
@@ -36,6 +42,27 @@ describe('PR preview workflow', () => {
     expect(preview.steps.find(step => step.uses === 'actions/cache/restore@v4')?.with).toMatchObject({
       key: "${{ runner.os }}-node-${{ env.PRIMARY_NODE_VERSION }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}",
     })
+  })
+
+  it.each(deploymentSteps)('%s runs only for the repository that owns the Cloudflare service', (name) => {
+    const step = preview.steps.find(candidate => candidate.name === name)!
+    expect(step.if).toBe("github.repository == 'deepseek-harness/deepseek-harness'")
+    // Canonical strings only: Actions comparisons are case-insensitive.
+    for (const repository of ['deepseek-harness/deepseek-harness', 'cloga/deepseek-harness', 'deepseek-ai/deepseek-harness', 'other/deepseek-harness', 'deepseek-harness/other']) {
+      expect(runInNewContext(step.if!, { github: { repository } }, { timeout: 1000 }))
+        .toBe(repository === 'deepseek-harness/deepseek-harness')
+    }
+    expect(step).not.toHaveProperty('continue-on-error')
+  })
+
+  it('keeps all setup, install, build and VFS preparation steps unconditional and blocking on forks', () => {
+    expect(preview).not.toHaveProperty('if')
+    expect(preview).not.toHaveProperty('continue-on-error')
+    expect(preview.steps.filter(step => step.if !== undefined).map(step => step.name)).toEqual(deploymentSteps)
+    for (const step of preview.steps.filter(step => !deploymentSteps.includes(step.name ?? ''))) {
+      expect(step).not.toHaveProperty('if')
+      expect(step).not.toHaveProperty('continue-on-error')
+    }
   })
 
   it('retains per-PR deployment, protected image verification, and idempotent URL comments', () => {

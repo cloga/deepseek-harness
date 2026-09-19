@@ -89,12 +89,14 @@ export async function issueSnapshot(number, status = undefined) {
  * @param {number} number Same-repository Issue number.
  * @param {boolean} includeStatusActor Include the latest matching status-event actor.
  * @param {boolean} includeStartDate Include and validate the Project Start Date field.
+ * @param {string} repositoryOwner Resolved Issue repository owner; does not change the Project organization.
  * @returns {Promise<object>} Project, Issue, fields, optional item, and status actor; never writes.
  */
-export async function projectContext(number, includeStatusActor = false, includeStartDate = false) {
+export async function projectContext(number, includeStatusActor = false, includeStartDate = false, repositoryOwner = config.organization) {
   const data = await graphql(
     `query(
       $organization: String!
+      $repositoryOwner: String!
       $repository: String!
       $number: Int!
       $project: Int!
@@ -126,7 +128,7 @@ export async function projectContext(number, includeStatusActor = false, include
           }
         }
       }
-      repository(owner: $organization, name: $repository) {
+      repository(owner: $repositoryOwner, name: $repository) {
         issue(number: $number) {
           id
           timelineItems(last: 100, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT])
@@ -160,6 +162,7 @@ export async function projectContext(number, includeStatusActor = false, include
     }`,
     {
       organization: config.organization,
+      repositoryOwner,
       repository: config.repository,
       number,
       project: config.projectNumber,

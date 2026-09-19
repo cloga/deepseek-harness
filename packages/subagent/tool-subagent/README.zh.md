@@ -68,6 +68,8 @@ kind: "package-reference"
 
 一次调用需同时提供 `provider` 与 `model`；当配置值、父 agent 值或提供方持有的默认值能提供路由时，也可只提供推理等级。静态的 `provider.agentRouteDefaults` 在存在时构成提供方／模型基线；工具配置与模型字段会在路由相关强度合并和确切路由预检前覆盖它。没有这些默认值的提供方会使用父 agent 最新已记录请求中的兼容值，再使用父级首次请求前的创建选项，并保留配置的 `maxTokens`。更改路由但未显式提供推理等级时，会清除继承的路由自有等级，使所选模型解析自己的默认值。实时 LLM 适配器在创建子 agent 前校验有效路由。目录成员资格只提供建议，因此适配器接受时，模型可以使用未列出的 id。
 
+当调用和工具／提供方默认值都未选择路由或推理等级时，[Host 创建时模型规则](../subagent/README.zh.md#creation-time-model-rules)可以选择子级模型。这些用户自有默认值不会启用面向模型的选择，也不会放宽 Session 允许列表。无效或被拒绝的显式选择仍然失败，不会转而套用规则。父 Session 的模型保持不变。
+
 -----
 
 <a id="understand-the-implementation"></a>

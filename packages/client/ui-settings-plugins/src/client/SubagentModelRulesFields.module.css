@@ -1,0 +1,92 @@
+.editor {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  padding-top: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+}
+
+.hint {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+}
+
+.row {
+  min-width: 0;
+  padding-block: 12px;
+  border-block-start: 0.5px solid var(--dsw-alias-border-l2);
+}
+
+.routes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
+.route {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.route legend {
+  padding: 0;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.route label {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.route select {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 8px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+}
+
+.route select:hover:not(:disabled) {
+  border-color: var(--dsw-alias-label-secondary);
+}
+
+.route select:focus-visible {
+  outline: 2px solid var(--dsw-alias-label-primary);
+  outline-offset: 2px;
+}
+
+.route select:disabled {
+  opacity: 0.5;
+}
+
+.notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.invalid {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.invalid:empty {
+  display: none;
+}
+
+.invalid p {
+  margin: 0;
+}

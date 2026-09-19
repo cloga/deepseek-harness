@@ -37,7 +37,9 @@ One call starts and drives one one-shot child. Fulfillment means the child is al
 
 ### What the child gets
 
-The child receives the parent's working-directory/session lineage and inherits the parent provider, model, reasoning effort, and output-token cap unless `request.agentOptions` overrides them. It gets a fresh flat registration scope: parent tool restrictions and authority are not imported. A run carries the parent's explicit sandbox override and `'never'` approval pin into the child and appends a per-run descriptor inside the child's initial turn.
+The child receives the parent's working-directory/session lineage. Normally it inherits the parent provider, model, reasoning effort, and output-token cap unless `request.agentOptions` overrides them. When the service matches a [creation-time model rule](../subagent/README.md#creation-time-model-rules), `request.resolvedAgentOptions` instead supplies the complete captured options. The driver stamps child depth without merging the parent's later selection; an absent captured effort stays absent even if the parent switches to that route during preflight. Rule selection and target validation belong to the service, not this driver.
+
+The child gets a fresh flat registration scope: parent tool restrictions and authority are not imported. A run carries the parent's explicit sandbox override and `'never'` approval pin into the child and appends a per-run descriptor inside the child's initial turn. With a matched rule, `request.resolvedDelegatedPolicies` supplies the policy captured before model preflight; the driver does not reread the parent's later permission choice. Without that snapshot, the driver captures policy before its own first await.
 
 -----
 

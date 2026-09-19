@@ -2663,16 +2663,36 @@ Source: [`packages/storage/storage-sqlite/src/index.ts:24`](../packages/storage/
 ## `@deepseek-ai/dsh-subagent`
 
 ```ts config-catalog
-/** Host configuration for continuable subagent capacity. */
+/** Host configuration for subagent capacity, depth, and creation-time model rules. */
 export interface Config {
   /** Maximum live children sharing uninterrupted continuable parent links; defaults to 8. */
   maxActiveSubagents?: number
   /** Default delegation depth for tools without an explicit limit; defaults to 1. */
   maxDepth?: number
+  /** Exact direct-parent to child routes for new implicit delegations; defaults to none. */
+  modelRules?: SubagentModelRule[]
+}
+
+/** One exact parent route and the child route used for new implicit delegations. */
+export interface SubagentModelRule {
+  /** Effective direct-parent provider and model ids. */
+  readonly parent: {
+    /** Registered provider id used by the direct parent. */
+    readonly provider: string
+    /** Exact provider-owned model id used by the direct parent. */
+    readonly model: string
+  }
+  /** Exact child provider and model ids validated at creation. */
+  readonly child: {
+    /** Registered provider id selected for the new child. */
+    readonly provider: string
+    /** Exact provider-owned model id selected for the new child. */
+    readonly model: string
+  }
 }
 ```
 
-Source: [`packages/subagent/subagent/src/index.ts:190`](../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:195`](../packages/subagent/subagent/src/index.ts)
 
 <a id="deepseek-aidsh-subagent-acp"></a>
 

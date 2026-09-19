@@ -40,7 +40,7 @@ export function PluginConfigForm(props: PluginConfigFormProps) {
   discard.current = props.onDiscard
   useEffect(() => () => { discard.current() }, [])
   if (!state.available) return <p className={css.unavailable} role="status">{props.t('unavailable')}</p>
-  const blocked = !state.dirty || state.invalid || state.saving
+  const blocked = !state.writable || !state.dirty || state.invalid || state.saving
   return (
     <div className={css.form}>
       {!state.writable ? <p className={css.readOnly} role="status">{props.t('readOnly')}</p> : null}
