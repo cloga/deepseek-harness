@@ -224,9 +224,13 @@ export class DesktopHostProcess {
     })
   }
 
-  /** Read current Host work through the same private request transport used by the application. */
-  async updateImpact(): Promise<DesktopUpdateImpact> {
-    const response = await this.fetch(new Request('dsh-app://app/.dsh/update-impact'))
+  /**
+   * Read current Host work through the application's private request transport.
+   * @param signal - Optional caller-owned cancellation and deadline.
+   * @returns Validated current activity counts.
+   */
+  async updateImpact(signal?: AbortSignal): Promise<DesktopUpdateImpact> {
+    const response = await this.fetch(new Request('dsh-app://app/.dsh/update-impact', signal === undefined ? undefined : { signal }))
     if (!response.ok) throw new Error(`dsh desktop host update impact returned HTTP ${String(response.status)}`)
     const value: unknown = await response.json()
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {

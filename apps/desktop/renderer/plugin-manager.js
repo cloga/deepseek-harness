@@ -16,6 +16,13 @@ async function main() {
   document.querySelector('#install').textContent = messages.install
   document.querySelector('#installed-heading').textContent = messages.installed
   document.querySelector('#empty').textContent = messages.noPlugins
+  document.querySelector('#verified-heading').textContent = messages.verifiedReleaseHeading
+  document.querySelector('#verified-label').textContent = messages.verifiedReleaseLabel
+  document.querySelector('#verified-source').placeholder = messages.verifiedReleasePlaceholder
+  document.querySelector('#verified-help').textContent = messages.verifiedReleaseHelp
+  document.querySelector('#verified-ownership').textContent = messages.verifiedReleaseOwnership
+  document.querySelector('#verified-interrupt').textContent = messages.verifiedReleaseInterrupt
+  document.querySelector('#verified-submit').textContent = messages.verifiedReleaseInstall
 
   document.querySelector('#recovery-description').textContent = messages.recoveryDescription
   document.querySelector('#retry').textContent = messages.retry
@@ -27,6 +34,10 @@ async function main() {
   const form = document.querySelector('#install-form')
   const input = document.querySelector('#package-spec')
   const refresh = document.querySelector('#refresh')
+  const verifiedForm = document.querySelector('#verified-install-form')
+  const verifiedInput = document.querySelector('#verified-source')
+  const verifiedError = document.querySelector('#verified-error')
+  let busy = false
   const dialog = document.querySelector('#package-dialog')
   const dialogInput = document.querySelector('#package-dialog-input')
   const dialogLabel = document.querySelector('#package-dialog-label')
@@ -69,8 +80,11 @@ async function main() {
     finishPrompt(null)
   })
 
-  function setBusy(busy, statusMessage = '') {
-    for (const control of document.querySelectorAll('button, input')) control.disabled = busy
+  function setBusy(nextBusy, statusMessage = '') {
+    busy = nextBusy
+    for (const control of document.querySelectorAll('button, input, textarea')) control.disabled = nextBusy
+    form.setAttribute('aria-busy', String(nextBusy))
+    verifiedForm.setAttribute('aria-busy', String(nextBusy))
     status.textContent = statusMessage
   }
 
@@ -175,6 +189,16 @@ async function main() {
       ))
       actions.append(toggle)
       if (plugin.source?.type !== 'githubRelease') actions.append(update)
+      else {
+        const verified = document.createElement('button')
+        verified.type = 'button'
+        verified.textContent = messages.verifiedReleaseInstall
+        verified.addEventListener('click', () => {
+          document.querySelector('#verified-install').open = true
+          verifiedInput.focus()
+        })
+        actions.append(verified)
+      }
       actions.append(remove)
       item.append(identity, actions)
       return item
@@ -182,12 +206,13 @@ async function main() {
     empty.hidden = plugins.length !== 0
   }
 
-  async function run(operation, statusMessage) {
+  async function run(operation, statusMessage, success = messages.operationComplete) {
+    if (busy) return
     setBusy(true, statusMessage)
     try {
       await operation()
       await render()
-      status.textContent = messages.operationComplete
+      status.textContent = success
     } catch (error) {
       status.textContent = error instanceof Error ? error.message : String(error)
     } finally {
@@ -196,6 +221,7 @@ async function main() {
   }
 
   async function load(statusMessage, success) {
+    if (busy) return
     setBusy(true, statusMessage)
     try {
       await render()
@@ -206,6 +232,43 @@ async function main() {
       setBusy(false, status.textContent)
     }
   }
+
+  verifiedInput.addEventListener('input', () => {
+    verifiedError.hidden = true
+    verifiedError.textContent = ''
+    verifiedInput.removeAttribute('aria-invalid')
+  })
+  verifiedForm.addEventListener('submit', (event) => {
+    event.preventDefault()
+    if (busy) return
+    status.textContent = ''
+    let source
+    try { source = JSON.parse(verifiedInput.value) }
+    catch {
+      verifiedError.textContent = messages.verifiedReleaseInvalidJson
+      verifiedError.hidden = false
+      verifiedInput.setAttribute('aria-invalid', 'true')
+      verifiedInput.focus()
+      return
+    }
+    if (source === null || typeof source !== 'object' || Array.isArray(source) || source.type !== 'githubRelease') {
+      verifiedError.textContent = messages.verifiedReleaseWrongType
+      verifiedError.hidden = false
+      verifiedInput.setAttribute('aria-invalid', 'true')
+      verifiedInput.focus()
+      return
+    }
+    verifiedError.hidden = true
+    verifiedError.textContent = ''
+    verifiedInput.removeAttribute('aria-invalid')
+    void run(async () => {
+      const receipt = await api.plugins.install(source)
+      if (receipt?.states?.verified !== true || receipt.states.activated !== true || receipt.states.rolledBack !== false) {
+        throw new Error(messages.verifiedReleaseMissingReceipt)
+      }
+      verifiedInput.value = ''
+    }, messages.verifiedReleasePreparing, messages.verifiedReleaseComplete)
+  })
 
   form.addEventListener('submit', (event) => {
     event.preventDefault()

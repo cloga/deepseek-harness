@@ -31,6 +31,8 @@ export const DESKTOP_IPC = {
   updatesState: 'dsh-desktop:updates-state',
   capabilitiesGet: 'dsh-desktop:capabilities-get',
   updatesImpactReport: 'dsh-desktop:updates-impact-report',
+  pluginImpactRequest: 'dsh-desktop:plugin-impact-request',
+  pluginImpactResponse: 'dsh-desktop:plugin-impact-response',
 } as const
 
 /** Unsaved application-document work reported through the fixed preload bridge. */

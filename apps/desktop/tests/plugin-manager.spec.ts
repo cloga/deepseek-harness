@@ -55,6 +55,9 @@ async function mount(plugins: readonly DesktopPluginRecord[], locale = 'en') {
     plugins: {
       list: vi.fn(async () => plugins),
       add: vi.fn(async (_spec: string) => {}),
+      install: vi.fn<(source: unknown) => Promise<unknown>>(async () => ({
+        states: { verified: true, activated: true, rolledBack: false },
+      })),
       update: vi.fn(async (_name: string, _version: string) => {}),
       remove: vi.fn(), toggle: vi.fn(), disableAll: vi.fn(),
     },
@@ -68,6 +71,7 @@ async function mount(plugins: readonly DesktopPluginRecord[], locale = 'en') {
   runInContext(readFileSync(new URL('../renderer/plugin-manager.js', import.meta.url), 'utf8'), dom.getInternalVMContext())
   await expect.poll(() => document.querySelectorAll('#plugins li').length).toBe(plugins.length)
   await expect.poll(() => document.querySelector('#source-help')?.textContent).toBe(resolveDesktopLocale(locale).messages.pluginSourceHelp)
+  await expect.poll(() => document.querySelector<HTMLButtonElement>('#install')?.disabled).toBe(false)
   return { dom, document, api }
 }
 
@@ -92,6 +96,63 @@ function answerDialog(document: Document, answer: string | null): void {
 
 afterEach(() => {
   for (const dom of windows.splice(0)) dom.window.close()
+})
+
+describe('verified-release descriptor installation', () => {
+  const descriptor = { schemaVersion: 1, type: 'githubRelease', owner: 'example', repo: 'release-plugin', tag: 'v1.0.0', asset: 'plugin.tgz', assetId: 1, packageName: 'example-plugin', version: '1.0.0', size: 100, sha256, targetCommit: commit }
+  function submit(dom: JSDOM): void {
+    dom.window.document.querySelector('#verified-install-form')!.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+  }
+  it.each(['en', 'zh-CN'])('localizes ownership, descriptor and interruption guidance in %s', async (locale) => {
+    const { document } = await mount([], locale)
+    const { messages } = resolveDesktopLocale(locale)
+    expect(document.querySelector('#verified-heading')?.textContent).toBe(messages.verifiedReleaseHeading)
+    expect(document.querySelector('#verified-label')?.textContent).toBe(messages.verifiedReleaseLabel)
+    expect(document.querySelector('#verified-help')?.textContent).toBe(messages.verifiedReleaseHelp)
+    expect(document.querySelector('#verified-ownership')?.textContent).toBe(messages.verifiedReleaseOwnership)
+    expect(document.querySelector('#verified-interrupt')?.textContent).toBe(messages.verifiedReleaseInterrupt)
+  })
+  it('passes the descriptor unchanged to the real install bridge, disables duplicates, and clears only a verified activated receipt', async () => {
+    const { dom, document, api } = await mount([])
+    let finish!: (value: unknown) => void
+    api.plugins.install.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    const input = document.querySelector<HTMLTextAreaElement>('#verified-source')!
+    input.value = JSON.stringify(descriptor)
+    submit(dom); submit(dom)
+    expect(api.plugins.install).toHaveBeenCalledExactlyOnceWith(descriptor)
+    expect(input.disabled).toBe(true)
+    expect(document.querySelector('#verified-install-form')?.getAttribute('aria-busy')).toBe('true')
+    expect(document.querySelector('#status')?.textContent).toBe(resolveDesktopLocale('en').messages.verifiedReleasePreparing)
+    expect(api.plugins.add).not.toHaveBeenCalled()
+    finish({ states: { verified: true, activated: true, rolledBack: false } })
+    await expect.poll(() => input.value).toBe('')
+    await expect.poll(() => input.disabled).toBe(false)
+    expect(document.querySelector('#status')?.textContent).toBe(resolveDesktopLocale('en').messages.verifiedReleaseComplete)
+  })
+  it.each(['<img src=x onerror=alert(1)>', 'null', '[]', '{"type":"packageSpec","spec":"example"}'])('rejects invalid descriptor text safely: %s', async (text) => {
+    const { dom, document, api } = await mount([])
+    const input = document.querySelector<HTMLTextAreaElement>('#verified-source')!
+    input.value = text; submit(dom)
+    expect(api.plugins.install).not.toHaveBeenCalled()
+    expect(input.value).toBe(text)
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(document.activeElement).toBe(input)
+    expect(document.querySelector('#verified-error img')).toBeNull()
+    expect(document.querySelector('#verified-error')?.textContent).toBe(text.startsWith('<') ? resolveDesktopLocale('en').messages.verifiedReleaseInvalidJson : resolveDesktopLocale('en').messages.verifiedReleaseWrongType)
+  })
+  it.each(['cancel', 'missing', 'rollback'])('preserves input and never reports success after %s', async (failure) => {
+    const { dom, document, api } = await mount([])
+    const messages = resolveDesktopLocale('en').messages
+    if (failure === 'cancel') api.plugins.install.mockRejectedValueOnce(new dom.window.Error(messages.pluginMutationCancelled))
+    else api.plugins.install.mockResolvedValueOnce(failure === 'missing' ? undefined : { states: { verified: true, activated: false, rolledBack: true } })
+    const input = document.querySelector<HTMLTextAreaElement>('#verified-source')!
+    const text = JSON.stringify(descriptor)
+    input.value = text; submit(dom)
+    await expect.poll(() => input.disabled).toBe(false)
+    expect(input.value).toBe(text)
+    expect(document.querySelector('#status')?.textContent).toBe(failure === 'cancel' ? messages.pluginMutationCancelled : messages.verifiedReleaseMissingReceipt)
+    expect(api.plugins.add).not.toHaveBeenCalled()
+  })
 })
 
 describe('source-aware plugin manager', () => {
@@ -279,12 +340,15 @@ describe('source-aware plugin manager', () => {
       },
     }
     const { document, api } = await mount([plugin])
-    expect([...document.querySelectorAll('#plugins button')].map(button => button.textContent)).toEqual(['Disable', 'Remove'])
+    expect([...document.querySelectorAll('#plugins button')].map(button => button.textContent)).toEqual(['Disable', 'Install Verified Release', 'Remove'])
     expect(document.querySelector('.package-source')?.textContent).toContain('GitHub Release: example/release-plugin@v1.0.0')
-    expect(document.querySelector('.package-source')?.textContent).toContain('Update this plugin through its verified release source')
+    expect(document.querySelector('.package-source')?.textContent).toContain(resolveDesktopLocale('en').messages.sourceReleaseUpdate)
+    action(document, 'Install Verified Release').click()
+    expect(document.querySelector<HTMLDetailsElement>('#verified-install')?.open).toBe(true)
+    expect(document.activeElement).toBe(document.querySelector('#verified-source'))
     document.querySelector<HTMLButtonElement>('#refresh')?.click()
     await expect.poll(() => api.plugins.list.mock.calls.length).toBe(2)
-    expect([...document.querySelectorAll('#plugins button')].map(button => button.textContent)).toEqual(['Disable', 'Remove'])
+    expect([...document.querySelectorAll('#plugins button')].map(button => button.textContent)).toEqual(['Disable', 'Install Verified Release', 'Remove'])
     expect(api.plugins.update).not.toHaveBeenCalled()
   })
 

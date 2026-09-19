@@ -26,6 +26,12 @@ Desktop release 也可以携带通用的 `desktopNativePluginProvisioning` schem
 
 活动 profile 存储规范 plan hash、逐插件 source 与 receipt、required 标记、组合状态、被删除的 release-owned 包、rollback 状态和 verification 状态。复用要求 desired/result 成员完全一致，已安装版本、启用状态、receipt 与来源、本地 artifact 字节均匹配，且没有多余 release-owned 根包，空 plan 也不例外。托管 completion 在最终位置的 Host ready 后独立验证此清单。Neutral browser 证据证明通用 Models 组合与认证 dispatch，而不是某个外部 provider release。
 
+受信管理页为既有 verified-release 安装 API 提供独立 JSON 入口。它不会把普通归档 URL 变成经过证明的 Release，不会弱化原生来源解析器，也不会授予应用渲染进程安装权限。显式安装仍归用户所有；下次启动时，release plan 仍控制其自身的包名。
+
+原生插件管理变更在串行事务首次调用 `beforeChange` 时获取中断同意，此时 staging 已完成而 Host 尚未停止。确认绑定当前 Host 活动数量与最新的渲染进程输入影响；影响变化时必须再次确认。缺少影响数据时拒绝中断。在获得同意前保持应用文档存活，可在准备失败或用户取消时保留草稿。回滚的 stop hook 不再询问：profile 激活后允许取消会阻止必要的恢复。启动协调保留其启动流程，不打开手动插件对话框。
+
+桌面壳在停止 Host 或更改应用页面前，确保手动恢复、插件变更和应用更新安装互斥。它保留插件事务 Promise，直到清理结束。退出会取消尚未中断 Host 的确认和读取，等待已获准事务完成激活或回滚并释放 staged Host，然后关闭后端。中断后的启动页导航位于 staged 健康检查的恢复路径内，因此导航失败也会重新启动先前的 Host。
+
 ## Consumer transition
 
 Windows Ops 在由源码拥有的 Desktop release plan 中选择插件 lock。受保护的 workflow 嵌入规范化 plan，将它与 installer 一起发布，并在 build receipt 中记录文件 hash 与规范 hash。部署只有在 release 包含该 plan 后才能依赖自动 provisioning。0.1.5 恢复 plan 通过 `https://packagefeedproxy.microsoft.io/npm/` 解析传递依赖；后续 plan 各自显式选择无凭据的 HTTPS registry。
@@ -46,4 +52,4 @@ Windows Ops 在由源码拥有的 Desktop release plan 中选择插件 lock。�
 
 插件变更需要临时磁盘空间并重建包，即使只是兼容运行时升级或 bundle toggle。Required 与 optional 健康检查增加启动工作，但阻止失败 candidate 修改活动依赖图。精确状态删除只作用于 release-owned 插件；无关手动插件仍由用户拥有。测试覆盖多来源 checksum acquisition、来源与清单漂移、Host peer 替换/删除、按阶段隔离 optional 失败、最终激活失败、rollback 恢复失败、中断重命名以及拒绝提前 completion。每个选定 provider release 都需要其实际不可变制品、目标共享包依赖图及 Models、account、discovery、device-code 行为的独立证据；neutral fixture 不能证明其符合要求。
 
-经过评审的 release plan 选择不可变的 `dsh-github-copilot@0.4.0-alpha.24`，其搜索 UI 声明路由 Remote namespace 依赖，打包的 authorization 与 Schemastery 依赖均为必需的 Host peer。React 是 Client external，而非必需的 Node peer 或第二份私有运行时副本。已发布制品和历史共享清单检查不证明新 Desktop 的物化或已安装 UI 行为。Models、account、discovery、device-code 与更新持久性仍属于 rehearsal 和 release 的验收义务。
+经过评审的 release plan 选择不可变的 `dsh-github-copilot@0.4.0-alpha.27`，同时保留 Core `0.1.6-alpha.1`。其搜索 UI 声明路由 Remote namespace 依赖，打包的 authorization 与 Schemastery 依赖均为必需的 Host peer。React 是 Client external，而非必需的 Node peer 或第二份私有运行时副本。打包设置验收要求只读显示当前工作区，而不是可编辑的目标选择器。Cron 不进入 release plan，继续归用户所有。已发布制品和 peer 范围检查不证明新 Desktop 的物化或已安装 UI 行为。Models、account、discovery、device-code 与更新持久性仍属于 rehearsal 和 release 的验收义务。

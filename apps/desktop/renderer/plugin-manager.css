@@ -48,7 +48,9 @@ label {
   font-weight: 600;
 }
 
-input {
+input,
+textarea {
+  font: inherit;
   flex: 1;
   min-width: 0;
   padding: 9px 11px;
@@ -74,7 +76,8 @@ li button {
 }
 
 button:disabled,
-input:disabled {
+input:disabled,
+textarea:disabled {
   opacity: 0.55;
   cursor: wait;
 }
@@ -165,6 +168,53 @@ dialog input {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 16px;
+}
+
+details {
+  margin-top: 28px;
+  padding-block: 16px;
+  border-block: 1px solid ButtonBorder;
+}
+
+summary {
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#verified-install-form {
+  margin-top: 20px;
+}
+
+#verified-source {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+#verified-submit {
+  margin-top: 16px;
+}
+
+.input-error {
+  margin-block: 12px 0;
+  overflow-wrap: anywhere;
+}
+
+[aria-invalid="true"] {
+  border-style: dashed;
+  border-color: CanvasText;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 2px solid AccentColor;
+  outline-offset: 3px;
 }
 
 @media (max-width: 580px) {

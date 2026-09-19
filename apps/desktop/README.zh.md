@@ -41,9 +41,13 @@ Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.
 4. 插件添加、更新和删除使用内置 pnpm 及 Desktop 独有的包管理器状态。`githubRelease` 来源绑定精确 Release、资产、commit、大小、hash、integrity、包身份与依赖 registry 元数据；Desktop 只通过批准的 GitHub 主机下载，并在禁用生命周期脚本的情况下从经过验证的本地 tgz 安装根包。保留的宿主包必须声明为 peer。运行时模式根据打包清单验证这些 peer，不要求 profile 链接。
 5. 插件变更先在私有目录中准备目标依赖图，再停止活动 Host 以执行 staged 健康检查，随后把 staged profile 重命名到最终位置并激活。Staged 健康检查失败时会重新启动先前的 Host。旧 profile 一直保留到最终位置的 Host 启动且 required 清单验证完成。激活失败恢复旧 profile；恢复失败保留事务与恢复 journal，而不删除剩余旧数据。
 
+原生插件管理操作在私有 staging 期间保持应用页面打开。在首次中断 Host 前，Electron 通过原生确认框展示运行中的 Session、排队消息、job，以及最新的输入草稿、附件和提交状态。确认后重新读取影响；状态变化时再次询问。无法获取影响时不允许中断；取消会保留活动 profile、Host 和应用页面，也不会报告安装成功。事务获得同意并中断 Host 后，失败恢复会还原先前 profile，不再提供可取消的二次确认。插件变更、应用更新安装和手动恢复不能重叠执行。退出会取消尚未完成的确认，并等待插件事务及其 staged Host 结束，再关闭活动后端。
+
 ### 插件来源与快照
 
-插件窗口接受以下来源输入。安装要求包具有真实名称、精确版本、`dsh.bundle.patch`，以及声明的预构建 Host 与 Client 文件。仓库名称不决定安装后的包名称。
+插件窗口提供独立的 verified-release JSON 表单，以 `githubRelease` 描述符调用带版本的安装 API。使用经过评审的 lock，其中包含精确 Release、资产、commit、包与 checksum 数据；原生解析器和下载器仍负责最终校验。此显式安装记录用户归属。Release-owned 包名在启动时仍遵循打包计划，因此持久更改该基线需要发布 Desktop。把 Release tgz URL 输入普通来源表单只会创建来源快照，不会生成 verified-release receipt。
+
+普通来源表单接受以下输入。安装要求包具有真实名称、精确版本、`dsh.bundle.patch`，以及声明的预构建 Host 与 Client 文件。仓库名称不决定安装后的包名称。
 
 | 来源 | 接受的输入 | 保存的安装结果 |
 |---|---|---|
