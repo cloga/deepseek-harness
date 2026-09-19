@@ -219,7 +219,8 @@ async function launchOwnedHelper(
     })
     if (child.stderr instanceof Socket) child.stderr.unref()
     if (child.pid === undefined) throw new Error('desktop managed update: helper process did not start')
-    const deadline = operations.now() + 15_000
+    // Three bounded metadata attempts plus backoff fit within 181.5 seconds; wait-PIDs stay owned until acknowledgement.
+    const deadline = operations.now() + 185_000
     for (;;) {
       if (spawnFailure !== undefined) throw spawnFailure
       const helperPid = await readAcknowledgement(

@@ -46,7 +46,8 @@ import { DesktopManagedUpdateCoordinator } from './managed-update-coordinator.ts
 import { loadDesktopManagedUpdateConfiguration } from './managed-update-state.ts'
 import { isDesktopManagedUpdateHelperQuiescent, launchDesktopManagedUpdate, type DesktopManagedUpdateAcknowledgement } from './managed-update-launcher.ts'
 import { resolveDesktopManagedNode } from './managed-update-node.ts'
-import { completeDesktopManagedUpdate } from './managed-update-completion.ts'
+import { completeDesktopManagedUpdate, type DesktopManagedUpdateCompletion } from './managed-update-completion.ts'
+import { MANAGED_UPDATE_RECOVERY_ARGUMENT, managedUpdateRecoveryCommand } from './managed-update-recovery.ts'
 import { DesktopUpdateSchedule, resolveDesktopUpdateScheduleConfig } from './update-schedule.ts'
 import { desktopUpdateErrorSummary, presentDesktopUpdate } from './update-presentation.ts'
 import { desktopErrorState } from './startup-error.ts'
@@ -57,6 +58,8 @@ import { DesktopUpdateDialog, type UpdateDialogOptions } from './update-dialog.t
 import { readDesktopRuntime } from './runtime-tree.ts'
 
 let focusPrimaryWindow = (): void => {}
+let managedRecoveryRequested = process.argv.includes(MANAGED_UPDATE_RECOVERY_ARGUMENT)
+let requestManagedRecovery = (): void => { managedRecoveryRequested = true }
 let stopForRecovery = async (): Promise<void> => {}
 let cancelPendingConsentForRecovery = (): void => {}
 let shuttingDown = false
@@ -216,6 +219,11 @@ async function main(): Promise<void> {
   let quitDrainComplete = false
   let lifecycleDrain: Promise<void> | undefined
   let managedHandoffOperation: Promise<boolean> | undefined
+  let managedCompletionOperation: Promise<DesktopManagedUpdateCompletion | undefined> | undefined
+  let managedRecoveryOperation: Promise<boolean> | undefined
+  let managedRecoveryReady = false
+  let managedCompletionIssue: Extract<DesktopManagedUpdateCompletion, { status: 'recovery-required' }> | undefined
+  let managedCompletionBootGate: PromiseWithResolvers<undefined> | undefined
   // Only confirmed abandonment or installer-owned transfer clears possible detached-helper ownership.
   let managedHelperMayRun = false
   let startup: Promise<void> | undefined
@@ -328,8 +336,17 @@ async function main(): Promise<void> {
     if (state.phase === 'error' && packageAdmissionId === undefined) reportFatal(new Error(state.message))
   })
 
+  let managedCompletionAdmission: {
+    id: string; host: NonNullable<typeof backend.host>; window: BrowserWindow; documentGeneration: number
+  } | undefined
+  const completionOwnsAdmission = (): boolean => managedCompletionOperation !== undefined || managedRecoveryOperation !== undefined
+  const completionBootBlocked = (): boolean => managedCompletionAdmission !== undefined
+    || packageAdmissionId !== undefined || managedCompletionIssue !== undefined
   const reviewPackageChanges = (initialRecovery = false, startupTransactionId?: string): Promise<void> => {
-    if (lifecycleUnavailable() || managedHandoffOperation !== undefined || managedHelperMayRun) return Promise.resolve()
+    if (!initialRecovery && (!managedRecoveryReady || startup !== undefined)) return Promise.resolve()
+    if (lifecycleUnavailable() || managedHandoffOperation !== undefined || managedHelperMayRun || completionOwnsAdmission()) {
+      return Promise.resolve()
+    }
     if (packageOperation !== undefined) return packageOperation
     packageOperation = (async () => {
       if (development || packagePolicy === undefined) throw new Error('Package graph activation requires a packaged staging capability')
@@ -524,13 +541,17 @@ async function main(): Promise<void> {
 
   const cancelLifecycleConsent = (): void => {
     baselineAbort.abort()
+    managedRecoveryRequested = false
+    managedCompletionBootGate?.resolve(undefined)
     for (const pending of ordinaryDialogs) pending.abort()
   }
   cancelPendingConsentForRecovery = cancelLifecycleConsent
   const drainLifecycle = (): Promise<void> => {
     lifecycleDrain ??= (async () => {
       // Keep the owned Host alive through activation/rollback and helper acknowledgement/abandonment.
-      const operations = await Promise.allSettled([packageOperation, managedHandoffOperation])
+      const operations = await Promise.allSettled([
+        packageOperation, managedHandoffOperation, managedCompletionOperation, managedRecoveryOperation,
+      ])
       for (const operation of operations) if (operation.status === 'rejected') console.error(operation.reason)
       if (managedHelperMayRun) throw new Error('Desktop cannot exit: managed helper cancellation is unconfirmed')
       const results = await Promise.allSettled([backend.close(), startup])
@@ -585,6 +606,64 @@ async function main(): Promise<void> {
     publishBaseline(undefined)
   }
 
+  const readManagedCompletion = (claimStartupAdmission = false): Promise<DesktopManagedUpdateCompletion | undefined> => {
+    if (managedCompletionOperation !== undefined) return managedCompletionOperation
+    const host = backend.host
+    if (managedUpdate === undefined || host === undefined || lifecycleUnavailable()) return Promise.resolve(undefined)
+    const window = mainWindow
+    const documentGeneration = inputDocumentGeneration
+    const admissionId = packageAdmissionId
+    const current = (): boolean => !lifecycleUnavailable() && backend.host === host && mainWindow === window
+      && (claimStartupAdmission || inputDocumentGeneration === documentGeneration) && packageAdmissionId === admissionId
+    const operation: Promise<DesktopManagedUpdateCompletion | undefined> = Promise.resolve().then(async () => {
+      if (!current()) return undefined
+      let completion: DesktopManagedUpdateCompletion
+      try {
+        completion = await completeDesktopManagedUpdate(managedUpdate.operationsRoot, managedUpdate.completionPath,
+          managedUpdate.capability, managedCompletedSequence, process.execPath,
+          join(resources.dsh, 'desktop-runtime.json'), join(process.resourcesPath, 'desktop-provisioning', 'plan.json'), activeProject,
+          baselineNotice?.status)
+      } catch (error) {
+        completion = { status: 'recovery-required', message: desktopErrorState(error).message,
+          command: managedUpdateRecoveryCommand(process.execPath) }
+      }
+      if (!current()) return undefined
+      if (completion.status === 'recovery-required') {
+        managedCompletionIssue = completion
+        if (claimStartupAdmission && admissionId !== undefined && packageOperation === undefined) {
+          if (window === undefined) throw new Error(messages.updateTasksUnavailable)
+          managedCompletionAdmission = { id: admissionId, host, window, documentGeneration: inputDocumentGeneration }
+          managedCompletionBootGate ??= Promise.withResolvers<undefined>()
+        }
+        return completion
+      }
+      const owned = managedCompletionAdmission
+      if (owned !== undefined) {
+        if (owned.host !== host || owned.id !== admissionId || owned.window !== window
+          || owned.documentGeneration !== documentGeneration || packageOperation !== undefined) return undefined
+        await host.updateTasks('unlock')
+        if (!current()) return undefined
+        packageAdmissionId = undefined
+        managedCompletionAdmission = undefined
+        managedCompletionBootGate?.resolve(undefined)
+        managedCompletionBootGate = undefined
+      }
+      managedCompletionIssue = undefined
+      if (completion.status === 'complete') managedCompletedSequence = Math.max(managedCompletedSequence, completion.sequence)
+      return completion
+    }).finally(() => { if (managedCompletionOperation === operation) managedCompletionOperation = undefined })
+    managedCompletionOperation = operation
+    return operation
+  }
+  const showManagedCompletionIssue = async (): Promise<boolean> => {
+    const issue = managedCompletionIssue
+    if (issue === undefined || lifecycleUnavailable()) return false
+    const answer = await ordinaryMessageBox({ type: 'warning', title: messages.updateFailedTitle,
+      message: messages.updateFailedTitle, detail: `${issue.message}\n\n${issue.command}`,
+      buttons: [messages.checkUpdatesMenu, messages.updateLater], defaultId: 1, cancelId: 1 })
+    return answer.response === 0 && !lifecycleUnavailable() && managedCompletionIssue === issue
+  }
+
   const reconcileBackend = (): Promise<void> => {
     if (lifecycleUnavailable()) return Promise.resolve()
     startup ??= (async () => {
@@ -620,14 +699,11 @@ async function main(): Promise<void> {
       }
       await verifyBaseline()
       if (managedUpdate !== undefined) {
-        const completion = await completeDesktopManagedUpdate(managedUpdate.operationsRoot, managedUpdate.completionPath,
-          managedUpdate.capability, managedCompletedSequence, process.execPath,
-          join(resources.dsh, 'desktop-runtime.json'), join(process.resourcesPath, 'desktop-provisioning', 'plan.json'), activeProject,
-          baselineNotice?.status)
-        if (completion.status === 'recovery-required') throw new Error(`${completion.message}\n${completion.command}`)
-        if (completion.status === 'complete') managedCompletedSequence = completion.sequence
+        const completion = await readManagedCompletion(true)
+        if (completion === undefined && !lifecycleUnavailable()) throw new Error(messages.updateTasksUnavailable)
       }
-      if (!lifecycleUnavailable() && packageAdmissionId !== undefined && packageOperation === undefined && backend.host !== undefined) {
+      if (!lifecycleUnavailable() && managedCompletionIssue === undefined && packageAdmissionId !== undefined
+        && packageOperation === undefined && backend.host !== undefined) {
         await backend.host.updateTasks('unlock')
         packageAdmissionId = undefined
       }
@@ -638,20 +714,26 @@ async function main(): Promise<void> {
       updateJournal?.action('workspace-failed')
       reportFatal(error)
       throw error
-    }).finally(() => { startup = undefined })
+    }).finally(() => {
+      startup = undefined
+      managedRecoveryReady = !lifecycleUnavailable() && backend.host !== undefined
+    })
     return startup
   }
 
   // Read current ownership at every await boundary; other lifecycle callbacks can change these values.
   const helperOwnsRestartAdmission = (): boolean => managedHelperMayRun
   const packageOwnsRestartAdmission = (): boolean => packageOperation !== undefined || packageAdmissionId !== undefined
+  const completionRequiresRecovery = (): boolean => managedCompletionIssue !== undefined
   const prepareRestart = async (beforeStop?: (hostPid: number | undefined) => Promise<void>): Promise<boolean> => {
     if (lifecycleUnavailable()) throw new Error('Desktop shutdown or recovery already owns restart admission')
+    if (completionOwnsAdmission()) throw new Error('Managed completion recheck already owns admission')
+    if (completionRequiresRecovery()) throw new Error('Managed update completion requires recovery before restart')
     if (helperOwnsRestartAdmission()) throw new Error('A managed helper already owns restart admission')
     if (packageOwnsRestartAdmission()) throw new Error('A package activation already owns restart admission')
     await workspaceRecovery
     await startup?.catch(() => undefined)
-    if (lifecycleUnavailable() || packageOwnsRestartAdmission()) {
+    if (lifecycleUnavailable() || packageOwnsRestartAdmission() || completionOwnsAdmission() || completionRequiresRecovery()) {
       throw new Error('Desktop lifecycle changed before restart admission')
     }
     const host = backend.host
@@ -802,7 +884,19 @@ async function main(): Promise<void> {
   ipcMain.handle(DESKTOP_IPC.boot, async (event) => {
     assertDesktopSender(event, ['app'])
     await startup
-    if (backend.host === undefined || hostUrl === undefined) throw new Error('Desktop Host is unavailable')
+    const held = managedCompletionAdmission
+    if (held !== undefined) {
+      const frame = event.senderFrame
+      const documentCurrent = (): boolean => mainWindow === held.window && !held.window.isDestroyed()
+        && event.sender === held.window.webContents && frame === held.window.webContents.mainFrame
+        && inputDocumentGeneration === held.documentGeneration && backend.host === held.host
+      if (!documentCurrent()) throw new Error('Desktop completion boot document is unavailable')
+      await managedCompletionBootGate?.promise
+      if (lifecycleUnavailable() || !documentCurrent() || completionBootBlocked()) {
+        throw new Error('Desktop completion boot document is unavailable')
+      }
+    }
+    if (lifecycleUnavailable() || backend.host === undefined || hostUrl === undefined) throw new Error('Desktop Host is unavailable')
     return { injections, streamBaseUrl: new URL(hostUrl).origin }
   })
 
@@ -848,6 +942,7 @@ async function main(): Promise<void> {
   })
   ipcMain.handle(DESKTOP_IPC.updatesOpen, async (event) => {
     assertProductSender(event)
+    if (completionRequiresRecovery()) { await recoverManagedCompletion(); return }
     if (baselineNotice !== undefined && updates.state.phase === 'idle') {
       await ordinaryMessageBox({ type: 'warning', title: messages.baselineTitle,
         message: baselineNotice.status === 'preserved-user-choice' ? messages.baselinePreserved : messages.baselinePending,
@@ -887,6 +982,7 @@ async function main(): Promise<void> {
           state = await updateSchedule.check(true)
         } finally { controller.abort(); ordinaryDialogs.delete(controller); await progress }
       }
+      if (lifecycleUnavailable() || completionRequiresRecovery()) return
       if (isMandatory()) { mandatoryUI?.focus(); return }
       if (state.phase === 'error' && state.failedOperation === 'check') { await showUpdateFailure(state); return }
       if (state.phase === 'idle') {
@@ -917,6 +1013,39 @@ async function main(): Promise<void> {
       message: desktopErrorState(error).message }))
       .finally(() => { promptOperation = undefined; flushQueuedPolicyAuthentication() })
     return promptOperation
+  }
+
+  const managedRecoveryAvailable = (): boolean => {
+    const owned = managedCompletionAdmission
+    const ownsHeldAdmission = packageAdmissionId === undefined || (owned !== undefined && owned.id === packageAdmissionId
+      && owned.host === backend.host && owned.window === mainWindow && owned.documentGeneration === inputDocumentGeneration)
+    return managedRecoveryReady && managedUpdate !== undefined && !lifecycleUnavailable() && startup === undefined
+      && backend.host !== undefined && packageOperation === undefined && managedHandoffOperation === undefined
+      && !managedHelperMayRun && !shellInstallerOwnsQuit && updateState.phase !== 'installing' && ownsHeldAdmission
+  }
+  const recoverManagedCompletion = (): Promise<void> => {
+    if (managedRecoveryOperation !== undefined) return managedRecoveryOperation.then(() => {})
+    if (!managedRecoveryAvailable()) return Promise.resolve()
+    const operation: Promise<boolean> = Promise.resolve().then(async () => {
+      if (!managedRecoveryAvailable()) return false
+      const completion = await readManagedCompletion()
+      if (completion === undefined || !managedRecoveryAvailable()) return false
+      return showManagedCompletionIssue()
+    }).catch((error: unknown) => {
+      console.error('Desktop managed completion recheck failed', error)
+      return false
+    }).finally(() => { if (managedRecoveryOperation === operation) managedRecoveryOperation = undefined })
+    managedRecoveryOperation = operation
+    return operation.then(async (checkUpdates) => {
+      // This authorizes a metadata review only; normal restart admission still rejects an unresolved issue or held token.
+      if (checkUpdates && managedRecoveryAvailable()) await openUpdatePrompt(true)
+    })
+  }
+  requestManagedRecovery = () => {
+    if (lifecycleUnavailable()) { managedRecoveryRequested = false; return }
+    if (!managedRecoveryReady) { managedRecoveryRequested = true; return }
+    managedRecoveryRequested = false
+    void recoverManagedCompletion().catch((error: unknown) => { console.error(error) })
   }
 
   let authenticationOperation: Promise<DesktopPolicyState | undefined> | undefined
@@ -1197,7 +1326,13 @@ async function main(): Promise<void> {
   automaticCheck()
   await reconcileBackend().catch(() => undefined)
   // Window lifecycle callbacks run while backend startup is pending.
-  if (isQuitting()) return
+  if (lifecycleUnavailable()) return
+  if (managedRecoveryRequested) requestManagedRecovery()
+  else if (managedCompletionIssue !== undefined && managedRecoveryOperation === undefined) {
+    void showManagedCompletionIssue().then(async (checkUpdates) => {
+      if (checkUpdates && managedRecoveryAvailable()) await openUpdatePrompt(true)
+    }).catch((error: unknown) => { console.error(error) })
+  }
   const window = currentMainWindow()
   if (window !== undefined && development && process.env.DSH_DESKTOP_OPEN_DEVTOOLS !== '0') {
     window.webContents.openDevTools({ mode: 'detach' })
@@ -1206,6 +1341,9 @@ async function main(): Promise<void> {
 }
 
 const ownsDesktopInstance = claimDesktopSingleInstance(app, () => { focusPrimaryWindow() })
+if (ownsDesktopInstance) app.on('second-instance', (_event, argv: string[]) => {
+  if (argv.includes(MANAGED_UPDATE_RECOVERY_ARGUMENT)) requestManagedRecovery()
+})
 
 if (ownsDesktopInstance) void app.whenReady().then(main).catch(async (error: unknown) => {
   const message = error instanceof Error ? error.message : String(error)

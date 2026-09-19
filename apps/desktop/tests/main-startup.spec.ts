@@ -13,6 +13,7 @@ import { DesktopUpdatePreparationError } from '../src/update-error.ts'
 import type { DesktopManagedUpdateConfiguration } from '../src/managed-update-state.ts'
 import type { DesktopManagedUpdateSelection } from '../src/managed-update-coordinator.ts'
 import type { DesktopManagedUpdateAcknowledgement } from '../src/managed-update-launcher.ts'
+import { MANAGED_UPDATE_RECOVERY_ARGUMENT } from '../src/managed-update-recovery.ts'
 import { managedCapability, managedManifest } from './managed-update-fixture.ts'
 import type { DesktopPreparedPackageActivation, DesktopProvisioningAssessment } from '../src/profile-package-staging.ts'
 import type { DesktopProfilePackageActivationOptions } from '../src/profile-package-activation.ts'
@@ -22,7 +23,7 @@ const manifestRead = vi.hoisted(() => ({ read: undefined as (() => Promise<strin
 
 const baseline = vi.hoisted(() => ({
   assess: vi.fn<() => Promise<DesktopProvisioningAssessment>>(),
-  commit: vi.fn(), stage: vi.fn(), create: vi.fn(), completion: vi.fn(),
+  commit: vi.fn(), stage: vi.fn(), create: vi.fn(), completion: vi.fn(), list: vi.fn(),
   createdProfile: false,
 }))
 
@@ -391,8 +392,9 @@ beforeEach(() => {
   baseline.stage.mockReset()
   baseline.commit.mockReset().mockResolvedValue({ planSha256: 'a'.repeat(64) })
   baseline.completion.mockReset().mockResolvedValue({ status: 'none' })
+  baseline.list.mockReset().mockImplementation(async () => packageReview.input === undefined ? [] : [packageReview.input.prepared])
   baseline.create.mockReset().mockImplementation(() => ({ protocolVersion: 1, stage: vi.fn(), status: vi.fn(), cancel: vi.fn(),
-    listPending: async () => packageReview.input === undefined ? [] : [packageReview.input.prepared],
+    listPending: baseline.list,
     assessProvisioning: baseline.assess, commitSatisfiedProvisioning: baseline.commit, stageProvisioning: baseline.stage,
   }))
   harness.dialog.showMessageBox.mockReset()
@@ -842,7 +844,7 @@ describe('desktop main startup', () => {
     harness.app.quit()
     expect(window.hide).toHaveBeenCalledOnce()
     await host.stopping.promise
-    harness.app.emit('second-instance')
+    harness.app.emit('second-instance', {}, ['Desktop.exe'])
     expect(window.show).not.toHaveBeenCalled()
     expect(window.focus).not.toHaveBeenCalled()
     host.exited.resolve()
@@ -1265,13 +1267,258 @@ describe('desktop main startup', () => {
       .toContain(mode === 'invalid-evidence' ? 'corrupt ownership evidence' : 'repair unavailable')
   })
 
-  it('keeps managed executable corruption fatal even when the baseline preserves user choice', async () => {
-    managedFixture()
+  it('retains a managed evidence issue without making it an unrelated fatal recovery or authorizing restart', async () => {
+    const selected = managedFixture()
     baseline.completion.mockResolvedValue({ status: 'recovery-required', message: 'fixture executable mismatch', command: 'fixture recover' })
-    await readyForUpdate()
-    await harness.dialogShown.promise
+    const host = await readyForUpdate()
+    await invoke(DESKTOP_IPC.boot)
+    await vi.advanceTimersByTimeAsync(0)
     expect(baseline.completion.mock.lastCall?.[8]).toBe('preserved-user-choice')
-    expect((harness.dialog.showMessageBox.mock.calls[0]![0] as MessageBoxOptions).detail).toContain('fixture executable mismatch')
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      title: en.updateFailedTitle, detail: expect.stringContaining('fixture executable mismatch') as unknown,
+    }))
+    await expect(managed.launch!(selected)).rejects.toThrow('Managed update completion requires recovery before restart')
+    expect(host.stop).not.toHaveBeenCalled()
+    expect(host.updateTasks).not.toHaveBeenCalled()
+    baseline.completion.mockResolvedValue({ status: 'none' })
+    requestManagedRecovery()
+    await vi.advanceTimersByTimeAsync(0)
+    await expect(managed.launch!(selected)).resolves.toBe(false)
+    expect(host.stop).not.toHaveBeenCalled()
+  })
+
+  function requestManagedRecovery() {
+    harness.app.emit('second-instance', {}, ['Desktop.exe', MANAGED_UPDATE_RECOVERY_ARGUMENT])
+  }
+
+  it('performs a fresh single-flight completion recheck after startup found no pending update, without navigation or interruption', async () => {
+    const selected = managedFixture()
+    const host = await readyForUpdate()
+    await invoke(DESKTOP_IPC.boot)
+    await vi.advanceTimersByTimeAsync(0)
+    const entered = Promise.withResolvers<undefined>()
+    const result = Promise.withResolvers<{ status: 'none' }>()
+    packageReview.cleanup = () => { result.resolve({ status: 'none' }) }
+    baseline.completion.mockImplementation(() => { entered.resolve(undefined); return result.promise })
+    const urls = [...harness.windows[0]!.urls]
+    reportInput({ hasDraft: true, attachmentCount: 2, submitting: false })
+    requestManagedRecovery()
+    requestManagedRecovery()
+    await entered.promise
+    await expect(managed.launch!(selected)).rejects.toThrow('Managed completion recheck already owns admission')
+    expect(baseline.completion).toHaveBeenCalledTimes(2)
+    result.resolve({ status: 'none' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.windows[0]!.urls).toEqual(urls)
+    expect(host.stop).not.toHaveBeenCalled()
+    expect(host.updateTasks).not.toHaveBeenCalled()
+    expect(harness.applyRelease).toHaveBeenCalledOnce()
+    expect(harness.app.relaunch).not.toHaveBeenCalled()
+  })
+
+  it.each(['cold', 'early-second-instance'] as const)('queues %s recovery intent only until startup is ready', async (entry) => {
+    managedFixture()
+    const entered = Promise.withResolvers<undefined>()
+    const loaded = Promise.withResolvers<string>()
+    const manifest = JSON.stringify({ dshDesktopAppId: 'com.deepseek.dsh' })
+    packageReview.cleanup = () => { loaded.resolve(manifest) }
+    manifestRead.read = () => { entered.resolve(undefined); return loaded.promise }
+    if (entry === 'cold') vi.stubGlobal('process', { ...process, argv: [...process.argv, MANAGED_UPDATE_RECOVERY_ARGUMENT] })
+    await import('../src/main.ts')
+    await entered.promise
+    if (entry === 'early-second-instance') { requestManagedRecovery(); requestManagedRecovery() }
+    expect(baseline.completion).not.toHaveBeenCalled()
+    loaded.resolve(manifest)
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await invoke(DESKTOP_IPC.boot)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(baseline.completion).toHaveBeenCalledTimes(2)
+    expect(harness.hosts).toHaveLength(1)
+    expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
+    expect(harness.applyRelease).toHaveBeenCalledOnce()
+  })
+
+  it('does not reinterpret an ordinary second launch as managed recovery', async () => {
+    managedFixture()
+    await readyForUpdate()
+    await invoke(DESKTOP_IPC.boot)
+    await vi.advanceTimersByTimeAsync(0)
+    harness.app.emit('second-instance', {}, ['Desktop.exe'])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(baseline.completion).toHaveBeenCalledOnce()
+  })
+
+  it('drains a completion recheck before quit and ignores late recovery intent and presentation', async () => {
+    managedFixture()
+    const host = await readyForUpdate()
+    await invoke(DESKTOP_IPC.boot)
+    await vi.advanceTimersByTimeAsync(0)
+    const entered = Promise.withResolvers<undefined>()
+    const result = Promise.withResolvers<{ status: 'recovery-required'; message: string; command: string }>()
+    const blocked = { status: 'recovery-required' as const, message: 'late evidence', command: 'fixture recover' }
+    packageReview.cleanup = () => { result.resolve(blocked) }
+    baseline.completion.mockImplementation(() => { entered.resolve(undefined); return result.promise })
+    const urls = [...harness.windows[0]!.urls]
+    requestManagedRecovery()
+    await entered.promise
+    harness.app.quit()
+    requestManagedRecovery()
+    expect(host.stop).not.toHaveBeenCalled()
+    result.resolve(blocked)
+    await host.stopping.promise
+    expect(harness.windows[0]!.urls).toEqual(urls)
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(baseline.completion).toHaveBeenCalledTimes(2)
+    host.exited.resolve()
+    await harness.quitCompleted.promise
+  })
+
+  it('does not clear an unrelated fatal owner when a pending managed recheck completes', async () => {
+    const selected = managedFixture()
+    const host = await readyForUpdate()
+    await invoke(DESKTOP_IPC.boot)
+    await vi.advanceTimersByTimeAsync(0)
+    const entered = Promise.withResolvers<undefined>()
+    const result = Promise.withResolvers<{ status: 'none' }>()
+    packageReview.cleanup = () => { result.resolve({ status: 'none' }) }
+    baseline.completion.mockImplementation(() => { entered.resolve(undefined); return result.promise })
+    requestManagedRecovery()
+    await entered.promise
+    harness.windows[0]!.webContents.emit('preload-error', {}, 'preload-app.cjs', new Error('unrelated renderer failure'))
+    await harness.dialogShown.promise
+    result.resolve({ status: 'none' })
+    await vi.advanceTimersByTimeAsync(0)
+    await expect(managed.launch!(selected)).rejects.toThrow('Desktop shutdown or recovery already owns restart admission')
+    expect(host.stop).not.toHaveBeenCalled()
+    expect(harness.dialog.showMessageBox.mock.calls.some(call =>
+      (call.at(-1) as MessageBoxOptions).detail?.includes('unrelated renderer failure'))).toBe(true)
+  })
+
+  async function heldManagedCompletion(disposition?: 'pending' | 'preserved-user-choice', beforeQualification?: () => Promise<void>) {
+    managedFixture()
+    const identity = { packageName: 'fixture-provider', planSha256: 'a'.repeat(64), planResourceSha256: 'b'.repeat(64) }
+    const exact = { ...identity, status: 'exact-satisfied' as const, packageOwner: 'user' as const, qualification: 'pending' as const,
+      owner: { profile: 'desktop-test-profile', runtimeDir: 'runtime', installAnchor: 'runtime', runtimeFingerprint: 'c'.repeat(64),
+        dependencyRegistry: 'https://registry.example.test/', configPaths: [] },
+      baseFingerprint: 'd'.repeat(64), baseGraphFingerprint: 'e'.repeat(64), assessmentFingerprint: 'f'.repeat(64) }
+    baseline.assess.mockResolvedValue(exact)
+    if (disposition === 'preserved-user-choice') baseline.assess.mockResolvedValueOnce(exact).mockResolvedValue({
+      ...identity, status: 'preserved-user-choice', reason: 'disabled',
+    })
+    if (disposition === 'pending') baseline.commit.mockRejectedValue(new Error('fixture baseline evidence remains pending'))
+    if (beforeQualification !== undefined) baseline.commit.mockImplementation(async () => {
+      await beforeQualification()
+      return { planSha256: identity.planSha256 }
+    })
+    baseline.completion.mockResolvedValue({ status: 'recovery-required', message: 'fixture completion issue', command: 'fixture recover' })
+    const shown = Promise.withResolvers<undefined>()
+    harness.dialog.showMessageBox.mockImplementation((options: MessageBoxOptions) => {
+      if (options.title === en.startupFailed) { harness.dialogShown.resolve(); return new Promise(() => {}) }
+      if (options.title === en.updateFailedTitle) shown.resolve(undefined)
+      return Promise.resolve({ response: 1, checkboxChecked: false })
+    })
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.packages = [{ name: 'fixture-provider', version: '1.0.0', enabled: true, healthy: true }]
+    host.ready.resolve()
+    harness.windows[0]!.webContents.emit('did-finish-load')
+    reportInput({ hasDraft: false, attachmentCount: 0, submitting: false })
+    await shown.promise
+    expect(host.initiallyLocked).toBe(true)
+    expect(host.updateTasks).not.toHaveBeenCalledWith('unlock')
+    return host
+  }
+
+  it('refuses ordinary package review during startup qualification and retains the completion boot gate', async () => {
+    const entered = Promise.withResolvers<undefined>()
+    const proceed = Promise.withResolvers<undefined>()
+    const listing = Promise.withResolvers<never[]>()
+    packageReview.cleanup = () => { proceed.resolve(undefined); listing.resolve([]) }
+    baseline.list.mockImplementation(() => listing.promise)
+    const starting = heldManagedCompletion(undefined, () => { entered.resolve(undefined); return proceed.promise })
+    await entered.promise
+    const action = applicationMenuItems().find(item => item.label === en.packageReview)!
+    Reflect.apply(action.click!, undefined, [])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(baseline.list).not.toHaveBeenCalled()
+    proceed.resolve(undefined)
+    const host = await starting
+    const boot = Promise.resolve(invoke(DESKTOP_IPC.boot))
+    let settled = false
+    void boot.then(() => { settled = true }, () => { settled = true })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(settled).toBe(false)
+    expect(host.updateTasks).not.toHaveBeenCalledWith('unlock')
+    baseline.completion.mockResolvedValue({ status: 'none' })
+    requestManagedRecovery()
+    await expect(boot).resolves.toMatchObject({ streamBaseUrl: 'http://127.0.0.1:3080' })
+  })
+
+  it.each(['none', 'complete', 'pending', 'preserved-user-choice'] as const)(
+    'resumes the same initial document only after a nonfatal %s recheck releases its exact startup token', async (outcome) => {
+      const disposition = outcome === 'pending' || outcome === 'preserved-user-choice' ? outcome : undefined
+      const host = await heldManagedCompletion(disposition)
+      const urls = [...harness.windows[0]!.urls]
+      const boot = Promise.resolve(invoke(DESKTOP_IPC.boot))
+      let settled = false
+      void boot.then(() => { settled = true }, () => { settled = true })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(settled).toBe(false)
+      const commits = baseline.commit.mock.calls.length
+      baseline.completion.mockResolvedValue(outcome === 'none' ? { status: 'none' }
+        : outcome === 'complete' ? { status: 'complete', sequence: 2, version: '1.2.3' }
+          : { status: 'baseline-not-qualified', disposition: outcome, sequence: 2, version: '1.2.3' })
+      requestManagedRecovery()
+      await expect(boot).resolves.toMatchObject({ streamBaseUrl: 'http://127.0.0.1:3080' })
+      expect(host.updateTasks.mock.calls.filter(([action]) => action === 'unlock')).toHaveLength(1)
+      expect(baseline.completion.mock.lastCall?.[8]).toBe(disposition)
+      expect(baseline.commit).toHaveBeenCalledTimes(commits)
+      expect(baseline.stage).not.toHaveBeenCalled()
+      expect(harness.windows[0]!.urls).toEqual(urls)
+      expect(harness.hosts).toHaveLength(1)
+      expect(host.stop).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['blocked', 'rejected'] as const)('retains the startup token for a %s recheck and refuses boot injections on quit', async (outcome) => {
+    const host = await heldManagedCompletion()
+    const boot = Promise.resolve(invoke(DESKTOP_IPC.boot))
+    let settled = false
+    void boot.then(() => { settled = true }, () => { settled = true })
+    if (outcome === 'blocked') baseline.completion.mockResolvedValue({
+      status: 'recovery-required', message: 'still blocked', command: 'fixture recover',
+    })
+    else baseline.completion.mockRejectedValue(new Error('fixture completion read failed'))
+    requestManagedRecovery()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(settled).toBe(false)
+    expect(host.updateTasks).not.toHaveBeenCalledWith('unlock')
+    const unavailable = expect(boot).rejects.toThrow('Desktop completion boot document is unavailable')
+    harness.app.quit()
+    await unavailable
+    await host.stopping.promise
+    host.exited.resolve()
+    await harness.quitCompleted.promise
+  })
+
+  it('does not return deferred boot injections or release admission after an unrelated fatal renderer failure', async () => {
+    const host = await heldManagedCompletion()
+    const boot = Promise.resolve(invoke(DESKTOP_IPC.boot))
+    const unavailable = expect(boot).rejects.toThrow('Desktop completion boot document is unavailable')
+    await vi.advanceTimersByTimeAsync(0)
+    harness.windows[0]!.webContents.emit('preload-error', {}, 'preload-app.cjs', new Error('fixture fatal renderer'))
+    await unavailable
+    requestManagedRecovery()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(baseline.completion).toHaveBeenCalledOnce()
+    expect(host.updateTasks).not.toHaveBeenCalledWith('unlock')
+    expect(host.stop).not.toHaveBeenCalled()
   })
 
   it('shows the sealed registry identity before native refusal without stopping the Host', async () => {
@@ -1327,6 +1574,7 @@ describe('desktop main startup', () => {
   }
 
   it('does not create policy work or reconcile a profile when the manifest read finishes after quit', async () => {
+    managedFixture()
     const entered = Promise.withResolvers<undefined>()
     const loaded = Promise.withResolvers<string>()
     const manifest = JSON.stringify({ dshDesktopAppId: 'com.deepseek.dsh', dshMandatoryUpdatePolicy: {
@@ -1339,12 +1587,15 @@ describe('desktop main startup', () => {
     vi.stubGlobal('fetch', request)
     await import('../src/main.ts')
     await entered.promise
+    requestManagedRecovery()
     harness.app.quit()
+    requestManagedRecovery()
     await harness.quitCompleted.promise
     loaded.resolve(manifest)
     await vi.advanceTimersByTimeAsync(0)
     expect(harness.applyRelease).not.toHaveBeenCalled()
     expect(baseline.create).not.toHaveBeenCalled()
+    expect(baseline.completion).not.toHaveBeenCalled()
     expect(harness.hosts).toEqual([])
     expect(request).not.toHaveBeenCalled()
     expect(harness.updateCheck).not.toHaveBeenCalled()
@@ -1415,6 +1666,10 @@ describe('desktop main startup', () => {
     const urls = [...harness.windows[0]!.urls]
     f.review()
     await admitted.promise
+    const completionChecks = baseline.completion.mock.calls.length
+    requestManagedRecovery()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(baseline.completion).toHaveBeenCalledTimes(completionChecks)
     const candidateStarted = harness.nextHostStart()
     if (phase === 'admitted') {
       harness.app.quit()
@@ -1638,7 +1893,11 @@ describe('desktop main startup', () => {
     harness.app.quit()
     acknowledged.resolve({ operationRoot: 'owned-operation', helperPid: 789, token: 'fixture', abandon })
     await rejected
+    const completionChecks = baseline.completion.mock.calls.length
+    baseline.completion.mockResolvedValue({ status: 'none' })
+    requestManagedRecovery()
     await vi.advanceTimersByTimeAsync(0)
+    expect(baseline.completion).toHaveBeenCalledTimes(completionChecks)
     expect(host.stop).not.toHaveBeenCalled()
     expect(host.updateTasks).not.toHaveBeenCalledWith('unlock')
     expect(harness.app.quit).toHaveBeenCalledOnce()
@@ -1681,6 +1940,11 @@ describe('desktop main startup', () => {
     expect(host.stop).not.toHaveBeenCalled()
     expect(host.updateTasks.mock.calls).toEqual([['inspect'], ['lock']])
     expect(harness.windows[0]!.setEnabled.mock.calls).toEqual([[false]])
+    const completionChecks = baseline.completion.mock.calls.length
+    baseline.completion.mockResolvedValue({ status: 'none' })
+    requestManagedRecovery()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(baseline.completion).toHaveBeenCalledTimes(completionChecks)
     harness.app.quit()
     await vi.advanceTimersByTimeAsync(0)
     expect(host.stop).not.toHaveBeenCalled()

@@ -42,7 +42,13 @@ Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须�
 
 独立 helper 是自包含 bundle：因为 launcher 不复制依赖目录，所以只有 Node builtin 可以保留为 external。Finalization 检查模块语法，强制执行的打包字节 smoke 在安全取消前证明隔离启动与有效合成 handoff acknowledgement。仅相对 import 检查或源码 runner 测试不能证明不依赖 workspace 包。确认前 stderr 在持久化前进行限量与脱敏；发现更新成功不构成 helper 启动证据。
 
+Helper 下载仍最多尝试三次，退避为 500/1000 毫秒。每次元数据请求的总期限为 60 秒、无活动期限为 15 秒；每次安装器请求的总期限为 30 分钟、无活动期限为 60 秒。Launcher 的 185 秒 acknowledgement 预算容纳 manifest 传输预算，但不证明 helper 已退出。只有封闭枚举且由模块拥有的传输类别才能控制重试及持久化 helper 诊断。未知错误保留原始拒绝对象身份；受保护的字段探测不能替换错误，也不能在持久化诊断中暴露原始消息、cause 或 URL。完整性与重定向错误仍是终止性失败，传输层绝不重试安装器执行。
+
 普通退出与原生恢复会等待已获准的插件激活和托管更新交接，再关闭最终 Host。尚未完成的确认会取消；已获准的候选启动或回滚可以完成，但不会重新开放请求准入，也不会导航正在关闭的窗口。Launcher 用确认未启动 helper 或确认 helper 已退出的证据标识失败；任意 Promise 拒绝、终止请求或超时都不证明 helper 已停止。Helper 清理未获确认时，普通退出仍被阻止，并恢复仍可用的壳窗口显示，避免父进程 PID 消失意外授权安装。经过验证、由安装器拥有的交接保留独立退出路径。
+
+保留事务的协调在接受取消标记前，先验证新版 helper 的阶段、错误类别、安装状态与退出证据；取消文件不能掩盖格式错误或相互矛盾的安装器证据。旧 schema-2 handoff 只作为历史身份读取，绝不授权新的启动。失败或中断的 stage 本身不能获得完成资格。候选必须匹配已安装 executable、runtime、capability sequence、无冲突的 release 身份及打包 plan。基线尚待处理或保留用户选择时，只在所选候选的证据目录记录 `baseline-not-qualified`，不写 completion receipt，也不触发重新安装；只有后续通过清单验证的复查才可完成。
+
+打包的 `--recover-managed-update` 入口向拥有应用的 Electron 实例请求一次新的、串行化的证据复查。它与持续生效的原生致命恢复状态分离，绝不清除致命状态或当前 helper 是否已停止的不确定性。只有就绪 Host 与 completion 所拥有的启动准入 token 仍精确匹配时，可用结果才能释放门控。因门控等待的初始文档通过原有 boot Promise 继续，不重新加载。退出会等待已获准的复查；检查保留证据不会停止或重启 Host、改写 profile、授权安装或绕过请求准入。普通第二实例启动只聚焦应用。尚待处理或保留用户选择的基线仍可用，但不视为已认证。
 
 加载后的配置区分打包的 discovery 下限与持久完成的 sequence。Discovery 与 handoff 使用打包和已完成 sequence 中的较大值；completion 只使用持久 receipt 的 sequence，缺失时为零。若 completion 使用打包下限，就会跳过新安装 release 自身的待完成结果及清单检查。重复 completion 是幂等的，清单验证失败会保留先前 receipt，较高的已完成 sequence 绝不降低。
 

@@ -36,7 +36,7 @@ async function quiescenceFixture() {
     return child
   })
   const waitForExit = vi.fn(async () => true)
-  const sleep = vi.fn(async () => { now = 15_000 })
+  const sleep = vi.fn(async () => { now = 185_000 })
   const launch = () => launchDesktopManagedUpdate({
     operationsRoot: join(root, 'operations'), nodeExecutable: node,
     nodeSha256: createHash('sha256').update('node').digest('hex'), helperBundle: helper,
@@ -45,6 +45,7 @@ async function quiescenceFixture() {
     now: () => now, sleep, waitForExit })
   return { root, node, child, spawn, sleep, waitForExit, launch,
     operationRoot: () => dirname(handoffPath),
+    advance(milliseconds: number) { now += milliseconds },
     acknowledge: async () => {
       const handoff = JSON.parse(await readFile(handoffPath, 'utf8')) as { token: string }
       await writeFile(join(dirname(handoffPath), 'ack.json'), JSON.stringify({
@@ -56,6 +57,16 @@ async function quiescenceFixture() {
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true })))
+})
+
+it('keeps the helper alive across bounded metadata retries beyond the previous acknowledgement deadline', async () => {
+  const f = await quiescenceFixture()
+  f.sleep.mockImplementationOnce(async () => { f.advance(181_500) }).mockImplementation(f.acknowledge)
+  const acknowledgement = await f.launch()
+  expect(f.sleep).toHaveBeenCalledTimes(2)
+  expect(f.child.kill).not.toHaveBeenCalled()
+  await acknowledgement.abandon()
+  expect(f.waitForExit).toHaveBeenCalledExactlyOnceWith(f.child, 5000)
 })
 
 it('recognizes only failures with launcher-owned quiescence evidence', async () => {
@@ -320,7 +331,7 @@ it('cancels the exact helper when acknowledgement times out', async () => {
     platform: 'win32',
     now: () => now,
     waitForExit: async () => true,
-    sleep: async () => { now = 15_000 },
+    sleep: async () => { now = 185_000 },
   })).rejects.toThrow(/did not acknowledge/u)
 
   expect(fakeChild.kill).toHaveBeenCalledOnce()

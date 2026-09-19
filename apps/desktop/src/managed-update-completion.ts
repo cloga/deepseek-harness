@@ -1,20 +1,33 @@
-/** Strict post-installer evidence checks and durable managed-update completion. */
+/** Classify retained helper transactions and verify installed evidence before recording completion. */
 
 import { createHash, randomBytes } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { readdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { lstat, readdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import {
+  parseDesktopManagedUpdateHandoff,
   parseDesktopManagedUpdateManifest,
   type DesktopManagedUpdateCapability,
+  type DesktopManagedUpdateHandoff,
+  type DesktopManagedUpdateManifest,
 } from './managed-update-protocol.ts'
+import { managedUpdateRecoveryCommand } from './managed-update-recovery.ts'
 import {
   desktopPluginProvisioningPlanSha256,
   parseDesktopPluginProvisioningPlan,
 } from './plugin-provisioning.ts'
 import { assertDesktopProvisioningInventory } from './plugin-receipts.ts'
+import type { DesktopManagedUpdateHelperErrorType, DesktopManagedUpdateHelperPhase } from './managed-update-helper.ts'
 
-const RECOVERY_COMMAND = 'pwsh -NoProfile -File .\\Install-DshOfficialDesktop.ps1 -Action Complete'
+const HELPER_PHASES: Record<DesktopManagedUpdateHelperPhase, true> = {
+  'manifest-download': true, 'manifest-validation': true, acknowledgement: true, 'process-wait': true,
+  'receipt-download': true, 'receipt-validation': true, 'installer-download': true, 'stage-promotion': true,
+  'installer-verification': true, 'installer-launch': true, 'result-persistence': true,
+}
+const HELPER_ERROR_TYPES: Record<DesktopManagedUpdateHelperErrorType, true> = {
+  timeout: true, 'network-reset': true, http: true, redirect: true, integrity: true, cancelled: true,
+  'process-wait': true, 'installer-launch': true, 'installer-exit': true, io: true, unknown: true,
+}
 
 /** Startup result shown by Desktop instead of claiming an incomplete update succeeded. */
 export type DesktopManagedUpdateCompletion =
@@ -49,6 +62,31 @@ async function readJsonIfExists(path: string): Promise<Record<string, unknown> |
   }
 }
 
+function helperProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') return true
+    throw error
+  }
+}
+
+async function stageExists(path: string): Promise<boolean> {
+  let details
+  try {
+    details = await lstat(path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+  if (!details.isDirectory() || details.isSymbolicLink()) {
+    throw new Error('desktop managed update: final stage is not a regular directory')
+  }
+  return true
+}
+
 async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   const temporary = `${path}.tmp-${randomBytes(8).toString('hex')}`
   await writeFile(temporary, `${JSON.stringify(value, undefined, 2)}\n`, { flag: 'wx', mode: 0o600 })
@@ -61,17 +99,279 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[], labe
   }
 }
 
+/** Validate retained identity without making an old capability eligible to launch an updater. */
+function retainedHandoffIdentity(
+  value: Record<string, unknown>,
+  currentCapability: DesktopManagedUpdateCapability,
+): Pick<DesktopManagedUpdateHandoff, 'token' | 'stageRoot' | 'selection' | 'installedSequence'> {
+  let normalized = value
+  const capability = value.capability
+  if (typeof capability === 'object' && capability !== null && !Array.isArray(capability)
+    && 'schemaVersion' in capability && capability.schemaVersion === 2) {
+    const historical = capability as Record<string, unknown>
+    exactKeys(historical, ['schemaVersion', 'mode', 'owner', 'tagPrefix', 'manifestAsset', 'currentSequence',
+      'minimumSequence', ...(historical.migration === undefined ? [] : ['migration'])], 'historical capability')
+    let migration = historical.migration
+    if (migration !== undefined) {
+      if (typeof migration !== 'object' || migration === null || Array.isArray(migration)) {
+        throw new Error('desktop managed update: historical migration must be an object')
+      }
+      const legacy = migration as Record<string, unknown>
+      const source = legacy.expectedSource
+      if (typeof source !== 'object' || source === null || Array.isArray(source)) {
+        throw new Error('desktop managed update: historical migration source must be an object')
+      }
+      const expectedSource = source as Record<string, unknown>
+      exactKeys(expectedSource, ['version', 'commit'], 'historical migration source')
+      if (typeof expectedSource.commit !== 'string' || !/^[a-f0-9]{40}$/u.test(expectedSource.commit)) {
+        throw new Error('desktop managed update: historical migration source commit is invalid')
+      }
+      migration = { ...legacy, expectedSource: {
+        version: expectedSource.version, tag: `dsh-v${String(expectedSource.version)}`,
+      } }
+    }
+    // Supply only parser metadata missing from schema 2; never return this synthetic capability.
+    normalized = { ...value, capability: {
+      ...historical, schemaVersion: 3, provisioning: currentCapability.provisioning,
+      ...(migration === undefined ? {} : { migration }),
+    } }
+  }
+  const parsed = parseDesktopManagedUpdateHandoff(normalized)
+  return { token: parsed.token, stageRoot: parsed.stageRoot, selection: parsed.selection, installedSequence: parsed.installedSequence }
+}
+
+function identity(value: Record<string, unknown>, label: string, minimumSequence = 1): { manifestSha256: string; sequence: number } {
+  if (value.schemaVersion !== 1 || typeof value.manifestSha256 !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(value.manifestSha256)
+    || typeof value.sequence !== 'number' || !Number.isSafeInteger(value.sequence) || value.sequence < minimumSequence) {
+    throw new Error(`desktop managed update: ${label} has invalid release identity`)
+  }
+  return { manifestSha256: value.manifestSha256, sequence: value.sequence }
+}
+
+function blockedResult(value: Record<string, unknown>, minimumSequence = 1): void {
+  const diagnosticKeys = value.installationState === undefined ? [] : [
+    'phase', 'errorType', 'installationState', ...(value.asset === undefined ? [] : ['asset']),
+  ]
+  exactKeys(value, [
+    'schemaVersion', 'status', 'manifestSha256', 'sequence', 'reason',
+    ...(value.installerExitCode === undefined ? [] : ['installerExitCode']), ...diagnosticKeys,
+  ], 'blocked helper result')
+  identity(value, 'blocked helper result', minimumSequence)
+  if (value.status !== 'blocked' || typeof value.reason !== 'string' || value.reason === ''
+    || (value.installerExitCode !== undefined && (!Number.isSafeInteger(value.installerExitCode)
+      || value.installerExitCode === 0))
+    || (diagnosticKeys.length > 0 && (typeof value.phase !== 'string' || !Object.hasOwn(HELPER_PHASES, value.phase)
+      || typeof value.errorType !== 'string' || !Object.hasOwn(HELPER_ERROR_TYPES, value.errorType)
+      || (value.asset !== undefined && (typeof value.asset !== 'string' || value.asset === ''))
+      || (value.installationState !== 'not-started' && value.installationState !== 'may-have-started')))) {
+    throw new Error('desktop managed update: invalid blocked helper result')
+  }
+  if (diagnosticKeys.length === 0) return
+  const launchPhase = value.phase === 'installer-launch' || value.phase === 'result-persistence'
+  if (launchPhase !== (value.installationState === 'may-have-started')
+    || (value.errorType === 'installer-launch' && value.phase !== 'installer-launch')
+    || (value.errorType === 'installer-exit' && value.phase !== 'installer-launch')
+    || (value.errorType === 'installer-exit') !== (value.installerExitCode !== undefined)) {
+    throw new Error('desktop managed update: helper phase contradicts installer evidence')
+  }
+}
+
+interface PendingFailure {
+  readonly sequence: number
+  readonly manifestSha256: string
+  readonly message: string
+}
+
+interface CompletionCandidate {
+  readonly manifest: DesktopManagedUpdateManifest
+  readonly operationRoot: string
+  readonly staged: boolean
+}
+
+interface OperationClassification {
+  readonly status: 'none' | 'pre-install-failed' | 'pending'
+  readonly candidate?: CompletionCandidate
+  readonly failure?: PendingFailure
+}
+
+async function classifyOperation(
+  operationRoot: string,
+  token: string,
+  capability: DesktopManagedUpdateCapability,
+  completedSequence: number,
+  helperRunning: (pid: number) => boolean,
+): Promise<OperationClassification> {
+  const stage = join(operationRoot, 'stage')
+  const [hasStage, cancellation, acknowledgement, rootResult, started, handoffValue] = await Promise.all([
+    stageExists(stage),
+    readJsonIfExists(join(operationRoot, 'cancelled.json')),
+    readJsonIfExists(join(operationRoot, 'ack.json')),
+    readJsonIfExists(join(operationRoot, 'helper-result.json')),
+    readJsonIfExists(join(operationRoot, 'install-started.json')),
+    readJsonIfExists(join(operationRoot, 'handoff.json')),
+  ])
+  const handoff = handoffValue === undefined ? undefined : retainedHandoffIdentity(handoffValue, capability)
+  if (handoff !== undefined && (handoff.token !== token || resolve(handoff.stageRoot) !== resolve(stage))) {
+    throw new Error('desktop managed update: handoff does not match its operation')
+  }
+  if (acknowledgement !== undefined) {
+    exactKeys(acknowledgement, ['schemaVersion', 'token', 'manifestSha256', 'helperPid'], 'helper acknowledgement')
+    if (acknowledgement.schemaVersion !== 1 || acknowledgement.token !== token
+      || !Number.isSafeInteger(acknowledgement.helperPid) || Number(acknowledgement.helperPid) <= 0
+      || typeof acknowledgement.manifestSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(acknowledgement.manifestSha256)
+      || (handoff !== undefined && handoff.selection.manifestSha256 !== acknowledgement.manifestSha256)) {
+      throw new Error('desktop managed update: helper acknowledgement does not match its operation')
+    }
+  }
+  const bindIdentity = (value: { readonly manifestSha256?: unknown }): void => {
+    if ((acknowledgement !== undefined && value.manifestSha256 !== acknowledgement.manifestSha256)
+      || (handoff !== undefined && value.manifestSha256 !== handoff.selection.manifestSha256)) {
+      throw new Error('desktop managed update: recorded release does not match the acknowledged handoff')
+    }
+  }
+  const readManifest = async (path: string): Promise<ReturnType<typeof parseDesktopManagedUpdateManifest>> => {
+    const body = await readFile(path)
+    if (handoff !== undefined && createHash('sha256').update(body).digest('hex') !== handoff.selection.assetSha256) {
+      throw new Error('desktop managed update: retained manifest file hash does not match the handoff')
+    }
+    const value: unknown = JSON.parse(body.toString('utf8'))
+    const recordedSequence = typeof value === 'object' && value !== null && 'sequence' in value ? value.sequence : undefined
+    // The discovery floor cannot invalidate history already covered by a verified completion receipt.
+    const historical = typeof recordedSequence === 'number' && Number.isSafeInteger(recordedSequence)
+      && recordedSequence >= 1 && recordedSequence <= completedSequence && recordedSequence < capability.minimumSequence
+    const manifest = parseDesktopManagedUpdateManifest(value,
+      historical ? { ...capability, minimumSequence: recordedSequence } : capability, 0)
+    bindIdentity(manifest)
+    if (handoff !== undefined && ((handoff.selection.kind === 'source') !== (manifest.owner === 'cloga/deepseek-harness'))) {
+      throw new Error('desktop managed update: retained manifest owner does not match the handoff')
+    }
+    return manifest
+  }
+  if (started !== undefined) {
+    exactKeys(started, ['schemaVersion', 'token', 'manifestSha256', 'sequence'], 'installer start marker')
+    identity(started, 'installer start marker')
+    bindIdentity(started)
+    if (started.token !== token || !hasStage) {
+      throw new Error('desktop managed update: installer start marker does not match its final stage')
+    }
+  }
+  if (rootResult !== undefined) {
+    blockedResult(rootResult, acknowledgement === undefined ? 0 : 1)
+    bindIdentity(rootResult)
+  }
+  if (cancellation !== undefined) {
+    exactKeys(cancellation, ['schemaVersion', 'token'], 'cancellation marker')
+    if (cancellation.schemaVersion !== 1 || cancellation.token !== token || hasStage || started !== undefined) {
+      throw new Error('desktop managed update: cancellation marker does not establish an unstarted operation')
+    }
+    if (rootResult?.installationState === 'may-have-started' || rootResult?.installerExitCode !== undefined) {
+      throw new Error('desktop managed update: cancellation conflicts with installer evidence')
+    }
+    return { status: 'none' }
+  }
+  if (rootResult !== undefined) {
+    if (acknowledgement === undefined) {
+      if (!hasStage && handoff !== undefined && rootResult.installationState === 'not-started'
+        && ['manifest-download', 'manifest-validation'].includes(String(rootResult.phase))
+        && rootResult.sequence === handoff.installedSequence && rootResult.installerExitCode === undefined) {
+        // Before validation the helper records the discovery floor, not the target sequence.
+        return { status: 'pre-install-failed' }
+      }
+      throw new Error('desktop managed update: blocked helper result has no acknowledgement')
+    }
+  }
+  if (!hasStage) {
+    if (rootResult === undefined) {
+      if (acknowledgement !== undefined) {
+        throw new Error('The managed update helper acknowledged the handoff but did not record a terminal result.')
+      }
+      return { status: 'none' }
+    }
+    if (rootResult.installationState === 'may-have-started' || rootResult.installerExitCode !== undefined
+      || ['installer-launch', 'result-persistence'].includes(String(rootResult.phase))) {
+      throw new Error('desktop managed update: installer evidence exists without its final stage')
+    }
+    // Schema-1 helpers also promoted the final stage before invoking any installer.
+    const manifestValue = await readJsonIfExists(join(operationRoot, 'release.json'))
+    if (manifestValue === undefined) return { status: 'pre-install-failed' }
+    const manifest = await readManifest(join(operationRoot, 'release.json'))
+    if (rootResult.manifestSha256 !== manifest.manifestSha256 || rootResult.sequence !== manifest.sequence) {
+      throw new Error('desktop managed update: blocked result does not match the validated manifest')
+    }
+    return {
+      status: 'pre-install-failed',
+      ...(manifest.owner === 'cloga/deepseek-harness' && manifest.sequence > completedSequence
+        && manifest.sequence === capability.currentSequence ? { candidate: { manifest, operationRoot, staged: false } } : {}),
+    }
+  }
+  const [result, pending] = await Promise.all([
+    readJsonIfExists(join(stage, 'helper-result.json')),
+    readJsonIfExists(join(stage, 'pending-completion.json')),
+  ])
+  if (result !== undefined) {
+    identity(result, 'helper result')
+    bindIdentity(result)
+    if (result.status === 'blocked') blockedResult(result)
+    else {
+      exactKeys(result, ['schemaVersion', 'status', 'manifestSha256', 'sequence', 'installerExitCode', 'pendingCompletion'], 'helper result')
+      if (result.status !== 'installer-exited' || result.installerExitCode !== 0 || result.pendingCompletion !== true) {
+        throw new Error('desktop managed update: helper result is not completable')
+      }
+    }
+  }
+  if (pending !== undefined) {
+    exactKeys(pending, ['schemaVersion', 'manifestSha256', 'sequence', 'installedEvidence'], 'pending completion')
+    identity(pending, 'pending completion')
+    bindIdentity(pending)
+  }
+  if (pending === undefined) throw new Error('The managed update final stage has no pending completion receipt.')
+  const manifest = await readManifest(join(stage, 'release.json'))
+  for (const record of [pending, result, rootResult, started]) {
+    if (record !== undefined && (record.manifestSha256 !== manifest.manifestSha256 || record.sequence !== manifest.sequence)) {
+      throw new Error('desktop managed update: operation records do not match the staged manifest')
+    }
+  }
+  if (JSON.stringify(pending.installedEvidence) !== JSON.stringify(manifest.installedEvidence)) {
+    throw new Error('desktop managed update: pending completion does not match the staged manifest')
+  }
+  if (manifest.sequence <= completedSequence) return { status: 'none' }
+  if (manifest.owner !== 'cloga/deepseek-harness') {
+    throw new Error('desktop managed update: legacy release requires Windows Ops Complete')
+  }
+  if (result === undefined && rootResult === undefined && acknowledgement !== undefined
+    && helperRunning(Number(acknowledgement.helperPid))) {
+    throw new Error('The acknowledged managed update helper is still running without a terminal result.')
+  }
+  if (result?.status === 'installer-exited' && rootResult === undefined) {
+    return { status: 'pending', candidate: { manifest, operationRoot, staged: true } }
+  }
+  return {
+    status: 'pending',
+    failure: {
+      sequence: manifest.sequence,
+      manifestSha256: manifest.manifestSha256,
+      message: typeof rootResult?.reason === 'string' ? rootResult.reason
+        : typeof result?.reason === 'string' ? result.reason
+          : 'The managed update was interrupted before the installer result was recorded.',
+    },
+  }
+}
+
 /**
- * Complete one helper operation after verifying the installed executable, runtime descriptor, and plugin transaction.
+ * Reconcile retained operations without treating pre-install failures as incomplete installations.
+ * Only installed executable/runtime hashes and active plugin inventory can advance the completion receipt.
  * @param operationsRoot - Desktop-owned operation directory.
  * @param completionPath - Durable sequence receipt path.
  * @param capability - Build-carried immutable channel selection.
- * @param completedSequence - Last sequence verified in the durable completion receipt, excluding the packaged discovery floor.
+ * @param completedSequence - Last verified receipt sequence, excluding the packaged discovery floor.
  * @param executable - Running installed Desktop executable.
  * @param runtimeDescriptor - Installed Desktop runtime descriptor.
  * @param provisioningPlan - Installed release-owned Desktop plugin plan.
  * @param activeProfile - Final-location profile, after its Host has reached readiness.
- * @param baselineDisposition - Explicit trusted assessment only; it cannot bypass executable/runtime/manifest checks or certify completion.
+ * @param baselineDisposition - Trusted unqualified-baseline assessment; never bypasses installed artifact or plan checks.
+ * @param helperRunning - Read-only liveness probe for acknowledged helpers without terminal results.
+ * @returns Verified completion, no pending installation, unqualified baseline, or actionable recovery diagnostics.
  */
 export async function completeDesktopManagedUpdate(
   operationsRoot: string,
@@ -83,152 +383,59 @@ export async function completeDesktopManagedUpdate(
   provisioningPlan: string,
   activeProfile: string,
   baselineDisposition?: 'preserved-user-choice' | 'pending',
+  helperRunning: (pid: number) => boolean = helperProcessRunning,
 ): Promise<DesktopManagedUpdateCompletion> {
+  const recovery = (error: unknown): DesktopManagedUpdateCompletion => ({
+    status: 'recovery-required',
+    message: error instanceof Error ? error.message : String(error),
+    command: managedUpdateRecoveryCommand(executable),
+  })
   let operationNames: string[]
   try {
     operationNames = await readdir(operationsRoot)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { status: 'none' }
-    throw error
-  }
-  const candidates: { root: string; result: Record<string, unknown> }[] = []
-  for (const name of operationNames) {
-    if (!/^[a-f0-9]{64}$/u.test(name)) continue
-    const operationRoot = join(operationsRoot, name)
-    const root = join(operationRoot, 'stage')
-    try {
-      const cancellation = await readJsonIfExists(join(operationRoot, 'cancelled.json'))
-      if (cancellation !== undefined) {
-        exactKeys(cancellation, ['schemaVersion', 'token'], 'cancellation marker')
-        if (cancellation.schemaVersion !== 1 || cancellation.token !== name) {
-          throw new Error('desktop managed update: cancellation marker does not match its operation')
-        }
-        continue
-      }
-      const blocked = await readJsonIfExists(join(operationRoot, 'helper-result.json'))
-      if (blocked?.status === 'blocked'
-        && Number.isSafeInteger(blocked.sequence) && Number(blocked.sequence) > completedSequence) {
-        return {
-          status: 'recovery-required',
-          message: typeof blocked.reason === 'string' ? blocked.reason : 'The managed update helper could not continue.',
-          command: RECOVERY_COMMAND,
-        }
-      }
-      const [acknowledgement, result, pending] = await Promise.all([
-        readJsonIfExists(join(operationRoot, 'ack.json')),
-        readJsonIfExists(join(root, 'helper-result.json')),
-        readJsonIfExists(join(root, 'pending-completion.json')),
-      ])
-      if (acknowledgement !== undefined) {
-        exactKeys(acknowledgement, ['schemaVersion', 'token', 'manifestSha256', 'helperPid'], 'helper acknowledgement')
-        const acknowledgedManifest = acknowledgement.manifestSha256
-        if (acknowledgement.schemaVersion !== 1 || acknowledgement.token !== name
-          || !Number.isSafeInteger(acknowledgement.helperPid) || Number(acknowledgement.helperPid) <= 0
-          || typeof acknowledgedManifest !== 'string' || !/^[a-f0-9]{64}$/u.test(acknowledgedManifest)) {
-          throw new Error('desktop managed update: helper acknowledgement does not match its operation')
-        }
-        if (result === undefined && pending === undefined) {
-          return {
-            status: 'recovery-required',
-            message: 'The managed update helper acknowledged the handoff but did not record a terminal result.',
-            command: RECOVERY_COMMAND,
-          }
-        }
-      }
-      const resultSequence = Number.isSafeInteger(result?.sequence) ? Number(result?.sequence) : undefined
-      const pendingSequence = Number.isSafeInteger(pending?.sequence) ? Number(pending?.sequence) : undefined
-      if (result?.status === 'blocked' && resultSequence !== undefined && resultSequence > completedSequence) {
-        return {
-          status: 'recovery-required',
-          message: typeof result.reason === 'string' ? result.reason : 'The managed update installer did not complete.',
-          command: RECOVERY_COMMAND,
-        }
-      }
-      if (pendingSequence !== undefined && pendingSequence > completedSequence && result === undefined) {
-        return {
-          status: 'recovery-required',
-          message: 'The managed update was interrupted before the installer result was recorded.',
-          command: RECOVERY_COMMAND,
-        }
-      }
-      if (result?.status === 'installer-exited' && resultSequence !== undefined && resultSequence > completedSequence) {
-        if (pending === undefined) {
-          return {
-            status: 'recovery-required',
-            message: 'The managed update helper result has no pending completion receipt.',
-            command: RECOVERY_COMMAND,
-          }
-        }
-        candidates.push({ root, result })
-      } else if (pendingSequence !== undefined && pendingSequence > completedSequence) {
-        return {
-          status: 'recovery-required',
-          message: 'The managed update operation has an invalid terminal result.',
-          command: RECOVERY_COMMAND,
-        }
-      }
-    } catch (error) {
-      return {
-        status: 'recovery-required',
-        message: error instanceof Error ? error.message : String(error),
-        command: RECOVERY_COMMAND,
-      }
-    }
-  }
-  if (candidates.length === 0) return { status: 'none' }
-  if (candidates.length !== 1) {
-    return { status: 'recovery-required', message: 'Multiple pending managed updates require recovery.', command: RECOVERY_COMMAND }
+    return recovery(error)
   }
   try {
-    const candidate = candidates[0]
-    if (candidate === undefined) {
-      throw new Error('desktop managed update: pending operation disappeared')
+    const operations: OperationClassification[] = []
+    for (const name of operationNames.sort()) {
+      if (!/^[a-f0-9]{64}$/u.test(name)) continue
+      operations.push(await classifyOperation(join(operationsRoot, name), name, capability, completedSequence, helperRunning))
     }
-    exactKeys(candidate.result, [
-      'schemaVersion',
-      'status',
-      'manifestSha256',
-      'sequence',
-      'installerExitCode',
-      'pendingCompletion',
-    ], 'helper result')
-    if (candidate.result.schemaVersion !== 1 || candidate.result.status !== 'installer-exited'
-      || candidate.result.installerExitCode !== 0 || candidate.result.pendingCompletion !== true) {
-      throw new Error('desktop managed update: helper result is not completable')
+    if (!operations.some(operation => operation.status === 'pending')) return { status: 'none' }
+    const candidates = operations.flatMap(operation => operation.candidate === undefined ? [] : [operation.candidate])
+    const failures = operations.flatMap(operation => operation.failure === undefined ? [] : [operation.failure])
+    if (candidates.length === 0) {
+      throw new Error(failures[0]?.message ?? 'The managed update has no verified completion candidate.')
     }
-    const manifestValue = await readJson(join(candidate.root, 'release.json'))
-    const manifest = parseDesktopManagedUpdateManifest(manifestValue, capability, completedSequence)
-    if (manifest.owner !== 'cloga/deepseek-harness') {
-      throw new Error('desktop managed update: legacy release requires Windows Ops Complete')
+    const [executableSha256, runtimeSha256] = await Promise.all([sha256File(executable), sha256File(runtimeDescriptor)])
+    const matching = candidates.filter(candidate => candidate.manifest.installedEvidence.executableSha256 === executableSha256
+      && candidate.manifest.installedEvidence.runtimeSha256 === runtimeSha256)
+    const selected = matching.sort((left, right) => right.manifest.sequence - left.manifest.sequence)[0]
+    if (selected === undefined) throw new Error('desktop managed update: installed application evidence does not match the release')
+    const manifest = selected.manifest
+    if (manifest.sequence !== capability.currentSequence) {
+      throw new Error('desktop managed update: installed release sequence does not match the build capability')
     }
-    if (candidate.result.manifestSha256 !== manifest.manifestSha256
-      || candidate.result.sequence !== manifest.sequence) {
-      throw new Error('desktop managed update: helper result does not match the staged manifest')
+    if (candidates.some(candidate => candidate.manifest.sequence === manifest.sequence && candidate.manifest.manifestSha256 !== manifest.manifestSha256)) {
+      throw new Error('desktop managed update: installed evidence identifies conflicting release manifests')
     }
-    const pending = await readJson(join(candidate.root, 'pending-completion.json'))
-    exactKeys(pending, ['schemaVersion', 'manifestSha256', 'sequence', 'installedEvidence'], 'pending completion')
-    if (pending.schemaVersion !== 1 || pending.manifestSha256 !== manifest.manifestSha256
-      || pending.sequence !== manifest.sequence
-      || JSON.stringify(pending.installedEvidence) !== JSON.stringify(manifest.installedEvidence)) {
-      throw new Error('desktop managed update: pending completion does not match the staged manifest')
-    }
-    const [executableSha256, runtimeSha256] = await Promise.all([
-      sha256File(executable),
-      sha256File(runtimeDescriptor),
-    ])
-    if (executableSha256 !== manifest.installedEvidence.executableSha256
-      || runtimeSha256 !== manifest.installedEvidence.runtimeSha256) {
-      throw new Error('desktop managed update: installed application evidence does not match the release')
+    // A different transaction may supersede an older failure, never a newer or conflicting release.
+    if (failures.some(failure => failure.sequence > manifest.sequence
+      || (failure.sequence === manifest.sequence && failure.manifestSha256 !== manifest.manifestSha256))
+      || candidates.some(candidate => candidate.manifest.sequence > manifest.sequence)) {
+      throw new Error('A newer or conflicting managed update still requires recovery.')
     }
     const installedPlan = parseDesktopPluginProvisioningPlan(await readJson(provisioningPlan))
-    if (desktopPluginProvisioningPlanSha256(installedPlan)
-      !== capability.provisioning.planSha256) {
+    if (desktopPluginProvisioningPlanSha256(installedPlan) !== capability.provisioning.planSha256) {
       throw new Error('desktop managed update: installed plugin provisioning plan does not match the release')
     }
     if (baselineDisposition !== undefined) {
       const outcome = { status: 'baseline-not-qualified' as const, disposition: baselineDisposition,
         sequence: manifest.sequence, version: manifest.version }
-      await writeJsonAtomic(join(candidate.root, 'baseline-outcome.json'), {
+      const evidenceRoot = selected.staged ? join(selected.operationRoot, 'stage') : selected.operationRoot
+      await writeJsonAtomic(join(evidenceRoot, 'baseline-outcome.json'), {
         schemaVersion: 1, ...outcome, manifestSha256: manifest.manifestSha256,
       })
       return outcome
@@ -242,10 +449,6 @@ export async function completeDesktopManagedUpdate(
     })
     return { status: 'complete', sequence: manifest.sequence, version: manifest.version }
   } catch (error) {
-    return {
-      status: 'recovery-required',
-      message: error instanceof Error ? error.message : String(error),
-      command: RECOVERY_COMMAND,
-    }
+    return recovery(error)
   }
 }

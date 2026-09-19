@@ -209,7 +209,7 @@ The command requires `DSH_DESKTOP_APP_ID` and the normal build dependencies, inc
 
 ### Fork-owned Windows release
 
-The current immutable published baseline is `0.1.6-alpha.1.cloga.4`, sequence 14. The reviewed alpha2 candidate is `0.1.6-alpha.2.cloga.1`, sequence 15; its plan is not publication or installed-upgrade evidence. The installer-upgrade fixture remains pinned to `0.1.6-alpha.1.cloga.2`, sequence 12, and does not establish upgrade acceptance from `.cloga.4`.
+The current immutable published baseline is `0.1.6-alpha.1.cloga.6`, sequence 16. The alpha2 candidate is `0.1.6-alpha.2.cloga.1`, provisionally sequence 17; recheck the channel before publication because a candidate does not reserve a sequence. Its plan is not publication or installed-upgrade evidence. The installer-upgrade fixture remains pinned to `0.1.6-alpha.1.cloga.2`, sequence 12, and does not establish upgrade acceptance from `.cloga.6`.
 
 The reviewed plan at `release/cloga-windows-x64.json` advances both semantic version and integer sequence. Every manual `Desktop fork release (Windows x64)` dispatch requires `confirm_version` and `expected_source_sha`. Before dependency installation, the source pin must be exactly 40 lowercase hexadecimal characters and equal the checked-out `HEAD`; confirming an unchanged version does not authorize a newer commit. The workflow pins Node 24.13.0 and pnpm 11.7.0, installs from the frozen lockfile, tests Desktop, packages the fixed cloga identity, and verifies the standalone helper, capability, unsigned installer, installed executable, runtime descriptor, and native-versus-managed exclusion.
 
