@@ -1,7 +1,7 @@
 /** Transactional owner of the reserved desktop profile and its private pnpm state. */
 
 import { valid } from 'semver'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import {
   copyFileSync,
@@ -37,6 +37,10 @@ import {
   writeDesktopPackageLocks, type DesktopPackageInstallLock,
 } from './plugin-package-lock.ts'
 import { removeOwnedDirectory } from './owned-directory.ts'
+import { recordDesktopProfileOperation } from './profile-operation-audit.ts'
+import {
+  createDesktopProfileRecoveryCopy, recordDesktopProfileRecoveryOutcome, type DesktopProfileRecoveryCopy,
+} from './profile-recovery-copy.ts'
 import type { DesktopRelease } from './release.ts'
 import { desktopRuntimeId, readDesktopRuntime, type DesktopRuntimeDescriptor } from './runtime-tree.ts'
 import {
@@ -144,6 +148,35 @@ interface DesktopPluginReceiptStore {
 
 type StagedDesktopPluginProvision = Omit<DesktopPluginProvisionReceipt, 'states'>
 
+interface AppliedDesktopMutation {
+  readonly target: string
+  readonly provision?: StagedDesktopPluginProvision
+}
+
+/** User declarations captured before staging; disabled packages remain part of the inventory. */
+interface DesktopUserPlugin {
+  readonly dependency: string
+  readonly enabled: boolean
+  readonly owner: DesktopPluginOwner | undefined
+  readonly receipt: DesktopPluginProvisionReceipt | undefined
+  readonly snapshot: DesktopPackageInstallLock | undefined
+  readonly artifactSha256: string | undefined
+}
+
+type DesktopUserInventory = ReadonlyMap<string, DesktopUserPlugin>
+
+interface DesktopInventoryEvidence {
+  readonly sha256: string
+  readonly names: readonly string[]
+}
+
+interface DesktopActivationEvidence {
+  readonly before: DesktopInventoryEvidence
+  readonly after: DesktopInventoryEvidence
+  readonly operation: DesktopProjectMutation['type']
+  readonly target?: string
+}
+
 interface StagedDesktopProvisioning {
   readonly plan: DesktopPluginProvisioningPlan
   results: DesktopPluginProvisioningResult[]
@@ -158,11 +191,28 @@ function writeJson(path: string, value: unknown): void {
   writeFileSync(path, `${JSON.stringify(value, undefined, 2)}\n`, { mode: 0o600 })
 }
 
-function writeActivationJournal(path: string, transaction: string, phase: 'activating' | 'committed'): void {
-  const temporary = `${path}.tmp`
-  const descriptor = openSync(temporary, 'w', 0o600)
+function writeActivationJournal(
+  path: string,
+  transaction: string,
+  phase: 'activating' | 'committed',
+  evidence: DesktopActivationEvidence,
+): void {
+  const parent = lstatSync(dirname(path))
+  const existing = lstatSync(path, { throwIfNoEntry: false })
+  if (!parent.isDirectory() || parent.isSymbolicLink()
+    || existing !== undefined && (!existing.isFile() || existing.isSymbolicLink())) {
+    throw new Error('desktop project: activation journal requires owned regular paths')
+  }
+  const temporary = `${path}.${randomUUID()}.pending`
+  const descriptor = openSync(temporary, 'wx', 0o600)
   try {
-    writeSync(descriptor, `${JSON.stringify({ schemaVersion: 1, transaction: basename(transaction), phase })}\n`)
+    const bytes = Buffer.from(`${JSON.stringify({ schemaVersion: 2, transaction: basename(transaction), phase, ...evidence })}\n`)
+    let offset = 0
+    while (offset < bytes.byteLength) {
+      const written = writeSync(descriptor, bytes, offset, bytes.byteLength - offset, null)
+      if (written === 0) throw new Error('desktop project: activation journal write made no progress')
+      offset += written
+    }
     fsyncSync(descriptor)
   } finally {
     closeSync(descriptor)
@@ -330,7 +380,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function assertPackageName(name: string): void {
-  if (!PACKAGE_NAME_PATTERN.test(name)) throw new Error(`desktop project: invalid npm package name ${JSON.stringify(name)}`)
+  if (!PACKAGE_NAME_PATTERN.test(name)) throw new Error('desktop project: invalid npm package name')
 }
 
 function assertVersion(version: string): void {
@@ -381,6 +431,196 @@ function projectManifest(projectDir: string): DesktopProjectManifest {
     throw new Error('desktop project: plugin dependencies must use exact registry versions or locked local artifacts')
   }
   return manifest
+}
+
+function userArtifactSha256(
+  projectDir: string,
+  name: string,
+  receipt: DesktopPluginProvisionReceipt | undefined,
+  snapshot: DesktopPackageInstallLock | undefined,
+): string | undefined {
+  const expected = snapshot?.sha256 ?? receipt?.artifactSha256
+  if (expected === undefined) return undefined
+  const directory = join(projectDir, PLUGIN_ARTIFACTS)
+  const path = join(directory, `${expected}.tgz`)
+  if (!existsSync(directory) || lstatSync(directory).isSymbolicLink()
+    || !existsSync(path) || !lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) {
+    throw new Error(`desktop project: missing regular user plugin artifact snapshot for ${name}`)
+  }
+  const bytes = readFileSync(path)
+  const actual = createHash('sha256').update(bytes).digest('hex')
+  const integrity = snapshot?.integrity ?? receipt?.source.integrity
+  if (actual !== expected || integrity !== undefined
+    && `sha512-${createHash('sha512').update(bytes).digest('base64')}` !== integrity) {
+    throw new Error(`desktop project: user plugin artifact snapshot integrity mismatch for ${name}`)
+  }
+  return actual
+}
+
+function readUserInventory(projectDir: string, ignoredArtifact?: string): DesktopUserInventory {
+  const manifest = projectManifest(projectDir)
+  const store = readPluginReceipts(projectDir)
+  const snapshots = readDesktopPackageLocks(projectDir)
+  const enabled = new Set(profilePluginNames(projectDir))
+  for (const [name, dependency] of Object.entries(manifest.dependencies)) {
+    const receipt = store.receipts[name], snapshot = snapshots[name]
+    if (receipt !== undefined && (snapshot !== undefined || dependency !== artifactSpecifier(receipt))
+      || snapshot !== undefined && dependency !== desktopPackageArtifactSpecifier(snapshot)) {
+      throw new Error(`desktop project: inconsistent user plugin metadata for ${name}; inspect the retained profile`)
+    }
+  }
+  const orphan = [
+    ...Object.keys(store.receipts).filter(name => store.owners[name] === 'user'),
+    ...Object.keys(snapshots),
+    ...[...enabled].filter(name => store.owners[name] !== 'release'),
+  ].find(name => !Object.hasOwn(manifest.dependencies, name))
+  if (orphan !== undefined) throw new Error(`desktop project: orphan user plugin metadata for ${orphan}; inspect the retained profile`)
+  return new Map(Object.entries(manifest.dependencies)
+    .filter(([name, dependency]) => {
+      const receipt = store.receipts[name]
+      return store.owners[name] !== 'release' || receipt === undefined
+        || dependency !== artifactSpecifier(receipt) || snapshots[name] !== undefined
+    })
+    .map(([name, dependency]) => [name, {
+      dependency, enabled: enabled.has(name), owner: store.owners[name],
+      receipt: store.receipts[name], snapshot: snapshots[name],
+      artifactSha256: name === ignoredArtifact ? undefined : userArtifactSha256(projectDir, name, store.receipts[name], snapshots[name]),
+    }]))
+}
+
+function canonicalInventory(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalInventory).join(',')}]`
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().filter(key => value[key] !== undefined)
+      .map(key => `${JSON.stringify(key)}:${canonicalInventory(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+/** Fingerprint declared inventory and referenced bytes, not generated node_modules or Host documents. */
+function profileInventoryEvidence(projectDir: string): DesktopInventoryEvidence {
+  for (const name of ['package.json', 'desktop-runtime-state.json', 'desktop-packages-pending', 'pnpm-lock.yaml', 'pnpm-workspace.yaml',
+    PLUGIN_RECEIPTS, 'desktop-plugin-package-locks.json', DESKTOP_PLUGIN_PROVISIONING_STATE_FILE]) {
+    const entry = lstatSync(join(projectDir, name), { throwIfNoEntry: false })
+    if (entry !== undefined && (!entry.isFile() || entry.isSymbolicLink())) {
+      throw new Error('desktop project: inventory metadata must contain only regular unlinked files')
+    }
+  }
+  const manifest = projectManifest(projectDir), store = readPluginReceipts(projectDir)
+  const snapshots = readDesktopPackageLocks(projectDir)
+  const directory = join(projectDir, PLUGIN_ARTIFACTS)
+  const directoryEntry = lstatSync(directory, { throwIfNoEntry: false })
+  if (directoryEntry !== undefined && (!directoryEntry.isDirectory() || directoryEntry.isSymbolicLink())) {
+    throw new Error('desktop project: inventory artifacts must use an owned directory')
+  }
+  const hashes = new Set([
+    ...Object.values(store.receipts).map(receipt => receipt.artifactSha256),
+    ...Object.values(snapshots).map(snapshot => snapshot.sha256),
+  ])
+  const artifacts = [...hashes].sort().map((hash) => {
+    const path = join(directory, `${hash}.tgz`), entry = lstatSync(path, { throwIfNoEntry: false })
+    if (entry === undefined) return { hash, content: null }
+    if (!entry.isFile() || entry.isSymbolicLink()) throw new Error('desktop project: inventory artifact must be a regular unlinked file')
+    return { hash, content: createHash('sha256').update(readFileSync(path)).digest('hex') }
+  })
+  const workspace = join(projectDir, 'pnpm-workspace.yaml')
+  const value = {
+    dependencies: manifest.dependencies, bundles: manifest.dsh.profile.bundles,
+    receipts: store, snapshots, artifacts, runtime: readDesktopProfileState(projectDir) ?? null,
+    lock: desktopPluginLockHash(projectDir), pending: existsSync(join(projectDir, 'desktop-packages-pending')),
+    workspace: existsSync(workspace) ? createHash('sha256').update(readFileSync(workspace)).digest('hex') : null,
+  }
+  return { sha256: createHash('sha256').update(canonicalInventory(value)).digest('hex'), names: Object.keys(manifest.dependencies).sort() }
+}
+
+function sameInventoryEvidence(left: DesktopInventoryEvidence, right: DesktopInventoryEvidence): boolean {
+  return left.sha256 === right.sha256 && canonicalInventory(left.names) === canonicalInventory(right.names)
+}
+
+function observableInventory(projectDir: string): DesktopInventoryEvidence | null {
+  try { return profileInventoryEvidence(projectDir) } catch (_error) {
+    // A failed or partially moved candidate has no trustworthy inventory observation.
+    return null
+  }
+}
+
+function parseInventoryEvidence(value: unknown): DesktopInventoryEvidence {
+  if (!isRecord(value) || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.sha256)
+    || !Array.isArray(value.names) || !value.names.every((name: unknown) => typeof name === 'string' && PACKAGE_NAME_PATTERN.test(name))
+    || new Set(value.names).size !== value.names.length || Object.keys(value).some(key => key !== 'sha256' && key !== 'names')) {
+    throw new Error('desktop project: invalid profile activation inventory evidence')
+  }
+  return { sha256: value.sha256, names: value.names as string[] }
+}
+
+function parseActivationEvidence(value: Record<string, unknown>): DesktopActivationEvidence | undefined {
+  if (value.schemaVersion === 1) {
+    if (Object.keys(value).some(key => !['schemaVersion', 'transaction', 'phase'].includes(key))) {
+      throw new Error('desktop project: invalid legacy activation journal fields')
+    }
+    return undefined
+  }
+  const operations = new Set<string>(['plugin-add', 'plugin-install', 'plugin-remove', 'plugin-update', 'plugin-toggle',
+    'plugins-reconcile', 'runtime-reconcile', 'plugins-disable-all'])
+  const needsTarget = typeof value.operation === 'string' && value.operation.startsWith('plugin-')
+  if (typeof value.operation !== 'string' || !operations.has(value.operation)
+    || needsTarget !== (value.target !== undefined)
+    || (value.target !== undefined && (typeof value.target !== 'string' || !PACKAGE_NAME_PATTERN.test(value.target)))
+    || Object.keys(value).some(key => !['schemaVersion', 'transaction', 'phase', 'before', 'after', 'operation', 'target'].includes(key))) {
+    throw new Error('desktop project: invalid profile activation operation evidence')
+  }
+  return {
+    before: parseInventoryEvidence(value.before), after: parseInventoryEvidence(value.after),
+    operation: value.operation as DesktopProjectMutation['type'],
+    ...(value.target === undefined ? {} : { target: value.target as string }),
+  }
+}
+
+function assertProvisioningUserSources(inventory: DesktopUserInventory, plan: DesktopPluginProvisioningPlan): void {
+  for (const { source } of plan.plugins) {
+    const manual = inventory.get(source.packageName)
+    if (manual === undefined) continue
+    if (!manual.enabled || manual.owner !== 'user' || manual.receipt === undefined || manual.snapshot !== undefined
+      || manual.dependency !== artifactSpecifier(manual.receipt)
+      || JSON.stringify(manual.receipt.source) !== JSON.stringify(source)) {
+      throw new Error(`desktop project: release plan conflicts with user plugin ${source.packageName}; install or enable the requested source explicitly`)
+    }
+  }
+}
+
+function assertUserInventory(
+  projectDir: string,
+  baseline: DesktopUserInventory,
+  mutation: DesktopProjectMutation,
+  target: string | undefined,
+  preparedTarget?: DesktopUserPlugin | null,
+  ignoredArtifact?: string,
+): void {
+  const current = readUserInventory(projectDir, ignoredArtifact ?? (mutation.type === 'plugin-remove' ? mutation.name : undefined))
+  const replacement = mutation.type === 'plugin-add' || mutation.type === 'plugin-install'
+    || mutation.type === 'plugin-remove' || mutation.type === 'plugin-update' ? target : undefined
+  if (replacement !== undefined) {
+    const removed = preparedTarget === null
+      && !Object.hasOwn(projectManifest(projectDir).dependencies, replacement)
+      && !profilePluginNames(projectDir).includes(replacement)
+      && readPluginReceipts(projectDir).receipts[replacement] === undefined
+      && readDesktopPackageLocks(projectDir)[replacement] === undefined
+    if (!removed && (preparedTarget === null || preparedTarget === undefined
+      || JSON.stringify(current.get(replacement)) !== JSON.stringify(preparedTarget))) {
+      throw new Error(`desktop project: requested plugin inventory changed for ${replacement}; refusing profile activation`)
+    }
+  }
+  for (const name of new Set([...baseline.keys(), ...current.keys()])) {
+    if (name === replacement) continue
+    const original = baseline.get(name)
+    const expected = original !== undefined && (mutation.type === 'plugins-disable-all'
+      || mutation.type === 'plugin-toggle' && name === mutation.name)
+      ? { ...original, enabled: mutation.type === 'plugin-toggle' && mutation.enabled }
+      : original
+    if (JSON.stringify(current.get(name)) !== JSON.stringify(expected)) {
+      throw new Error(`desktop project: user plugin inventory changed for ${name}; refusing profile activation`)
+    }
+  }
 }
 
 function profilePluginNames(projectDir: string): readonly string[] {
@@ -485,23 +725,72 @@ export class DesktopProjectManager {
   }
 
   /**
-   * Reinitialize the profile, deleting configuration and third-party packages without a backup.
-   * @param hooks - Stop the Host before resetting files; restart after preparation succeeds.
-   * @returns Completion of reset; the held lock and shared product data are preserved.
+   * Retain a verified configuration/artifact copy before reinitializing the stopped profile.
+   * @param hooks - Stop the Host before copying files; restart after preparation or a pre-reset failure.
+   * @returns Completion of reset and final Host readiness; the recovery copy and shared data are retained.
    */
   async resetConfiguration(hooks: DesktopProjectHooks): Promise<void> {
     await this.withLock(async () => {
       await hooks.beforeChange()
-      this.descriptor = this.readRuntime()
-      for (const entry of readdirSync(this.paths.profile, { withFileTypes: true })) {
-        const path = join(this.paths.profile, entry.name)
-        if (path === this.paths.lock) continue
-        if (entry.isDirectory()) removeOwnedDirectory(path)
-        else unlinkSync(path)
+      let recovery: DesktopProfileRecoveryCopy
+      try {
+        this.descriptor = this.readRuntime()
+        recovery = createDesktopProfileRecoveryCopy(this.paths.profile, this.paths.root)
+      } catch (copyError) {
+        const failures: unknown[] = [copyError]
+        try { await hooks.afterChange() } catch (restartError) { failures.push(restartError) }
+        try {
+          recordDesktopProfileOperation(this.paths.root, {
+            transaction: `reset-${randomUUID()}`, operation: 'reset', phase: 'reset', outcome: 'failed',
+            before: null, after: observableInventory(this.paths.profile),
+          })
+        } catch (recordError) { failures.push(recordError) }
+        if (failures.length > 1) throw new AggregateError(failures, 'desktop project: reset preparation and recovery recording or prior Host restart failed')
+        throw copyError
       }
-      createPluginProfile(this.paths.profile)
-      this.prepareProfile(this.paths.profile)
-      await hooks.afterChange()
+      const before = observableInventory(this.paths.profile)
+      let destructive = false
+      let auditStarted = false
+      let after: DesktopInventoryEvidence
+      try {
+        recordDesktopProfileOperation(this.paths.root, {
+          transaction: basename(recovery.directory), operation: 'reset', phase: 'reset', outcome: 'started', before, after: null,
+        })
+        auditStarted = true
+        destructive = true
+        for (const entry of readdirSync(this.paths.profile, { withFileTypes: true })) {
+          const path = join(this.paths.profile, entry.name)
+          if (path === this.paths.lock) continue
+          if (entry.isDirectory()) removeOwnedDirectory(path)
+          else unlinkSync(path)
+        }
+        createPluginProfile(this.paths.profile)
+        this.prepareProfile(this.paths.profile)
+        await hooks.afterChange()
+        after = profileInventoryEvidence(this.paths.profile)
+        if (after.names.length !== 0) throw new Error('desktop project: reset profile still contains external plugins')
+      } catch (resetError) {
+        const failures: unknown[] = [resetError]
+        try { recordDesktopProfileRecoveryOutcome(recovery, 'failed') } catch (recordError) { failures.push(recordError) }
+        if (!destructive) {
+          try { await hooks.afterChange() } catch (restartError) { failures.push(restartError) }
+        }
+        if (auditStarted) {
+          try {
+            recordDesktopProfileOperation(this.paths.root, {
+              transaction: basename(recovery.directory), operation: 'reset', phase: 'reset', outcome: 'failed',
+              before, after: observableInventory(this.paths.profile),
+            })
+          } catch (recordError) { failures.push(recordError) }
+        }
+        if (failures.length > 1) throw new AggregateError(failures, 'desktop project: reset failed and recovery recording or restart also failed')
+        throw resetError
+      }
+      recordDesktopProfileRecoveryOutcome(recovery, 'completed')
+      recordDesktopProfileOperation(this.paths.root, {
+        transaction: basename(recovery.directory), operation: 'reset', phase: 'reset', outcome: 'committed',
+        before, after,
+      })
     })
   }
 
@@ -536,31 +825,123 @@ export class DesktopProjectManager {
 
   private recoverActivation(): void {
     const journal = this.activationJournal()
-    if (!existsSync(journal)) return
-    const value = readJson(journal)
-    if (!isRecord(value) || value.schemaVersion !== 1
+    let value: unknown
+    try {
+      const entry = lstatSync(journal, { throwIfNoEntry: false })
+      if (entry === undefined) return
+      if (!entry.isFile() || entry.isSymbolicLink()) throw new Error('desktop project: activation journal must be a regular unlinked file')
+      value = readJson(journal)
+      this.recoverActivationInventory(value)
+    } catch (recoveryError) {
+      const transaction = isRecord(value) && typeof value.transaction === 'string'
+        && /^\.desktop-transaction-[A-Za-z0-9]+$/u.test(value.transaction) ? value.transaction : 'unidentified-recovery'
+      try {
+        recordDesktopProfileOperation(this.paths.root, {
+          transaction, operation: 'recovery', phase: 'recovery', outcome: 'failed',
+          before: null, after: observableInventory(this.paths.profile),
+        })
+      } catch (recordError) {
+        throw new AggregateError([recoveryError, recordError], 'desktop project: profile recovery failed and its audit could not be recorded')
+      }
+      throw recoveryError
+    }
+  }
+
+  private recoverActivationInventory(value: unknown): void {
+    const journal = this.activationJournal()
+    if (!isRecord(value) || (value.schemaVersion !== 1 && value.schemaVersion !== 2)
       || typeof value.transaction !== 'string' || !/^\.desktop-transaction-[A-Za-z0-9]+$/u.test(value.transaction)
       || (value.phase !== 'activating' && value.phase !== 'committed')) {
       throw new Error('desktop project: invalid profile activation recovery journal')
     }
+    const evidence = parseActivationEvidence(value)
     const transaction = join(dirname(this.paths.profile), value.transaction)
     const rollback = join(transaction, 'rollback')
-    for (const path of [transaction, rollback]) {
-      if (existsSync(path) && (!lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink())) {
-        throw new Error(`desktop project: recovery path is not an owned directory: ${path}`)
+    const requireDirectory = (path: string): boolean => {
+      const entry = lstatSync(path, { throwIfNoEntry: false })
+      if (entry === undefined) return false
+      if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error(`desktop project: recovery path is not an owned directory: ${path}`)
+      return true
+    }
+    const transactionExists = requireDirectory(transaction)
+    const candidates = [this.paths.profile, rollback, join(transaction, 'staging'), join(transaction, 'failed'),
+      ...(transactionExists
+        ? readdirSync(transaction).filter(name => /^recovery-[0-9]+$/iu.test(name)).map(name => join(transaction, name))
+        : []),
+    ]
+    const observed = new Map<string, DesktopInventoryEvidence>()
+    for (const candidate of candidates) {
+      if (!requireDirectory(candidate)) continue
+      if (!existsSync(join(candidate, 'package.json'))) {
+        if (readdirSync(candidate).length === 0 && (candidate === this.paths.profile || /^recovery-/iu.test(basename(candidate)))) continue
+        throw new Error(`desktop project: profile recovery requires inspection of ${transaction}; candidate metadata is incomplete`)
+      }
+      observed.set(candidate, profileInventoryEvidence(candidate))
+    }
+    const active = observed.get(this.paths.profile), previous = observed.get(rollback)
+    const selected = value.phase === 'activating' && previous !== undefined ? previous : active
+    if (selected === undefined) throw new Error(`desktop project: profile recovery requires inspection of ${transaction}`)
+    if (evidence !== undefined) {
+      const expectedActive = value.phase === 'committed' ? evidence.after : previous === undefined ? evidence.before : undefined
+      if (expectedActive !== undefined && (active === undefined || !sameInventoryEvidence(active, expectedActive))
+        || previous !== undefined && !sameInventoryEvidence(previous, evidence.before)) {
+        throw new Error(`desktop project: profile recovery inventory mismatch; retain ${transaction} for inspection`)
+      }
+      for (const candidate of observed.values()) {
+        if (!sameInventoryEvidence(candidate, evidence.before) && !sameInventoryEvidence(candidate, evidence.after)) {
+          throw new Error(`desktop project: profile recovery contains an unrecognized inventory; retain ${transaction} for inspection`)
+        }
+      }
+    } else {
+      for (const candidate of observed.keys()) {
+        const declarations = projectManifest(candidate)
+        if (readDesktopProfileState(candidate) === undefined || !existsSync(join(candidate, 'pnpm-workspace.yaml'))
+          || Object.keys(declarations.dependencies).length > 0 && !existsSync(join(candidate, 'pnpm-lock.yaml'))) {
+          throw new Error(`desktop project: legacy recovery metadata is incomplete; retain ${transaction} for inspection`)
+        }
+      }
+      const reference = value.phase === 'activating' && previous !== undefined ? rollback : this.paths.profile
+      const protectedInventory = canonicalInventory(
+        [...readUserInventory(reference)].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
+      )
+      for (const candidate of observed.keys()) {
+        const inventory = canonicalInventory(
+          [...readUserInventory(candidate)].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
+        )
+        if (inventory !== protectedInventory) {
+          throw new Error(`desktop project: legacy recovery user inventories differ; retain ${transaction} for inspection`)
+        }
       }
     }
-    if (value.phase === 'activating' && existsSync(rollback)) {
-      if (existsSync(this.paths.profile)) {
-        renameSync(this.paths.profile, join(transaction, `recovery-${Date.now()}`))
-      }
+    recordDesktopProfileOperation(this.paths.root, {
+      transaction: value.transaction, operation: 'recovery', ...(evidence?.target === undefined ? {} : { target: evidence.target }),
+      phase: 'recovery', outcome: 'started', before: active ?? null, after: selected,
+    })
+    if (value.phase === 'activating' && previous !== undefined) {
+      if (existsSync(this.paths.profile)) renameSync(this.paths.profile, join(transaction, `recovery-${Date.now()}`))
       renameSync(rollback, this.paths.profile)
     }
-    if (!existsSync(join(this.paths.profile, 'package.json'))) {
-      throw new Error(`desktop project: profile recovery requires inspection of ${transaction}`)
-    }
+    const recovered = profileInventoryEvidence(this.paths.profile)
+    if (!sameInventoryEvidence(recovered, selected)) throw new Error(`desktop project: recovered inventory changed; retain ${transaction} for inspection`)
+    recordDesktopProfileOperation(this.paths.root, {
+      transaction: value.transaction, operation: 'recovery', ...(evidence?.target === undefined ? {} : { target: evidence.target }),
+      phase: 'recovery', outcome: 'recovered', before: active ?? null, after: recovered,
+    })
+    // The retained operation receipt precedes cleanup; a failed audit leaves journal and copies intact.
+    if (transactionExists) removeOwnedDirectory(transaction)
     unlinkSync(journal)
-    if (existsSync(transaction)) removeOwnedDirectory(transaction)
+  }
+
+  private assertNoOrphanRollback(): void {
+    for (const name of readdirSync(dirname(this.paths.profile))) {
+      if (!/^\.desktop-transaction-[a-z0-9]+$/iu.test(name)) continue
+      const transaction = join(dirname(this.paths.profile), name)
+      const entry = lstatSync(transaction)
+      if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error('desktop project: unresolved recovery transaction requires inspection')
+      if (lstatSync(join(transaction, 'rollback'), { throwIfNoEntry: false }) !== undefined) {
+        throw new Error(`desktop project: orphan rollback prevents profile initialization; inspect ${transaction}`)
+      }
+    }
   }
 
   private currentRuntime(): DesktopRuntimeDescriptor {
@@ -611,12 +992,28 @@ export class DesktopProjectManager {
     input?: unknown,
   ): Promise<boolean> {
     const changed = await this.withLock(() => {
-      const target = this.readRuntime()
-      this.descriptor = target
-      const previous = readDesktopProfileState(this.paths.profile)
-      if (this.profileMatchesRuntime(this.paths.profile)) return false
-      if (previous === undefined) createPluginProfile(this.paths.profile)
-      return true
+      try {
+        const target = this.readRuntime()
+        this.descriptor = target
+        const previous = readDesktopProfileState(this.paths.profile)
+        if (previous !== undefined) readUserInventory(this.paths.profile)
+        if (this.profileMatchesRuntime(this.paths.profile)) return false
+        if (previous === undefined) {
+          this.assertNoOrphanRollback()
+          createPluginProfile(this.paths.profile)
+        }
+        return true
+      } catch (validationError) {
+        try {
+          recordDesktopProfileOperation(this.paths.root, {
+            transaction: `startup-${randomUUID()}`, operation: 'runtime-reconcile', phase: 'preparation', outcome: 'failed',
+            before: null, after: observableInventory(this.paths.profile),
+          })
+        } catch (recordError) {
+          throw new AggregateError([validationError, recordError], 'desktop project: startup validation failed and its audit could not be recorded')
+        }
+        throw validationError
+      }
     })
     if (input !== undefined) {
       await this.reconcileProvisioning(input, hooks)
@@ -638,7 +1035,13 @@ export class DesktopProjectManager {
   ): Promise<DesktopProjectMutationResult> {
     return this.withLock(async () => {
       this.currentRuntime()
+      if ('name' in mutation) assertPackageName(mutation.name)
       if (!existsSync(this.paths.profile)) throw new Error('desktop project: active profile is not installed')
+      const ignoredArtifact = mutation.type === 'plugin-remove' ? mutation.name : undefined
+      const userInventory = readUserInventory(this.paths.profile, ignoredArtifact)
+      const beforeInventory = profileInventoryEvidence(this.paths.profile)
+      if (mutation.type === 'plugins-reconcile') assertProvisioningUserSources(userInventory, mutation.plan)
+      let targetName = 'name' in mutation ? mutation.name : undefined
       const parent = dirname(this.paths.profile)
       mkdirSync(parent, { recursive: true, mode: 0o700 })
       const transaction = mkdtempSync(join(parent, '.desktop-transaction-'))
@@ -646,7 +1049,15 @@ export class DesktopProjectManager {
       const rollback = join(transaction, 'rollback')
       const failed = join(transaction, 'failed')
       const packagesChanged = mutation.type !== 'plugin-toggle'
+      let auditStarted = false
+      let committed = false
+      let phase: 'preparation' | 'activation' | 'rollback' = 'preparation'
       try {
+        recordDesktopProfileOperation(this.paths.root, {
+          transaction: basename(transaction), operation: mutation.type, ...(targetName === undefined ? {} : { target: targetName }),
+          phase, outcome: 'started', before: beforeInventory, after: null,
+        })
+        auditStarted = true
         copyProfileMetadata(this.paths.profile, staging)
         // Commit legacy ownership only with the staged profile, before source replacement changes its evidence.
         if (existsSync(join(staging, PLUGIN_RECEIPTS))) writePluginReceipts(staging, readPluginReceipts(staging))
@@ -683,7 +1094,9 @@ export class DesktopProjectManager {
             unlinkDesktopHostPackages(staging)
           }
           try {
-            provision = await this.applyMutation(staging, mutation, transaction)
+            const applied = await this.applyMutation(staging, mutation, transaction)
+            targetName = applied.target
+            provision = applied.provision
           } finally {
             if (materializedPackagesChanged) {
               const runtime = this.currentRuntime()
@@ -693,9 +1106,21 @@ export class DesktopProjectManager {
           }
           await this.reconcileProfile(staging, previous, materializedPackagesChanged, registry)
         }
+        const preparedTarget = mutation.type === 'plugin-remove' ? null
+          : targetName === undefined || mutation.type === 'plugin-toggle' ? undefined
+            : readUserInventory(staging).get(targetName)
+        assertUserInventory(staging, userInventory, mutation, targetName, preparedTarget)
+        const evidence: DesktopActivationEvidence = {
+          before: beforeInventory, after: profileInventoryEvidence(staging), operation: mutation.type,
+          ...(targetName === undefined ? {} : { target: targetName }),
+        }
         await hooks.beforeChange()
         try {
           await hooks.healthCheck(staging)
+          assertUserInventory(staging, userInventory, mutation, targetName, preparedTarget)
+          if (!sameInventoryEvidence(profileInventoryEvidence(staging), evidence.after)) {
+            throw new Error('desktop project: staged inventory changed during health verification')
+          }
         } catch (healthError) {
           try {
             await hooks.afterChange()
@@ -735,7 +1160,13 @@ export class DesktopProjectManager {
         let previousMoved = false
         let stagedActivated = false
         try {
-          writeActivationJournal(this.activationJournal(), transaction, 'activating')
+          phase = 'activation'
+          assertUserInventory(this.paths.profile, userInventory, { type: 'runtime-reconcile' }, undefined, undefined, ignoredArtifact)
+          if (!sameInventoryEvidence(profileInventoryEvidence(this.paths.profile), evidence.before)
+            || !sameInventoryEvidence(profileInventoryEvidence(staging), evidence.after)) {
+            throw new Error('desktop project: activation inventories changed before replacement')
+          }
+          writeActivationJournal(this.activationJournal(), transaction, 'activating', evidence)
           renameSync(this.paths.profile, rollback)
           previousMoved = true
           renameSync(staging, this.paths.profile)
@@ -744,8 +1175,14 @@ export class DesktopProjectManager {
           if (provision !== undefined && 'plan' in provision) {
             assertDesktopProvisioningInventory(this.paths.profile, provision.plan)
           }
-          writeActivationJournal(this.activationJournal(), transaction, 'committed')
+          assertUserInventory(this.paths.profile, userInventory, mutation, targetName, preparedTarget)
+          if (!sameInventoryEvidence(profileInventoryEvidence(this.paths.profile), evidence.after)) {
+            throw new Error('desktop project: final inventory differs from the prepared activation')
+          }
+          writeActivationJournal(this.activationJournal(), transaction, 'committed', evidence)
+          committed = true
         } catch (activationError) {
+          phase = 'rollback'
           const failures: unknown[] = [activationError]
           if (stagedActivated) {
             try { await hooks.beforeChange() } catch (error) {
@@ -764,9 +1201,26 @@ export class DesktopProjectManager {
             ? activationError
             : new AggregateError(failures, 'desktop project: activation and rollback failed')
         }
+        recordDesktopProfileOperation(this.paths.root, {
+          transaction: basename(transaction), operation: mutation.type, ...(targetName === undefined ? {} : { target: targetName }),
+          phase: 'activation', outcome: 'committed', before: evidence.before, after: evidence.after,
+        })
         removeOwnedDirectory(rollback)
         unlinkSync(this.activationJournal())
         return result
+      } catch (operationError) {
+        // A committed journal remains recoverable if its retained audit cannot be published.
+        if (auditStarted && !committed) {
+          try {
+            recordDesktopProfileOperation(this.paths.root, {
+              transaction: basename(transaction), operation: mutation.type, ...(targetName === undefined ? {} : { target: targetName }),
+              phase, outcome: 'failed', before: beforeInventory, after: observableInventory(this.paths.profile),
+            })
+          } catch (recordError) {
+            throw new AggregateError([operationError, recordError], 'desktop project: transaction failed and its audit could not be recorded')
+          }
+        }
+        throw operationError
       } finally {
         if (existsSync(transaction) && !existsSync(rollback) && !existsSync(this.activationJournal())) removeOwnedDirectory(transaction)
       }
@@ -784,6 +1238,7 @@ export class DesktopProjectManager {
     hooks: DesktopProjectHooks,
   ): Promise<DesktopPluginProvisioningState> {
     const plan = parseDesktopPluginProvisioningPlan(input)
+    assertProvisioningUserSources(readUserInventory(this.paths.profile), plan)
     const path = join(this.paths.profile, DESKTOP_PLUGIN_PROVISIONING_STATE_FILE)
     if (existsSync(path)) {
       const state = parseDesktopPluginProvisioningState(readJson(path))
@@ -860,7 +1315,7 @@ export class DesktopProjectManager {
     projectDir: string,
     input: Exclude<DesktopPluginInstallSpec, { kind: 'registry' }>,
     transaction: string,
-  ): Promise<void> {
+  ): Promise<string> {
     const snapshot = await acquireDesktopSourcePackage(
       input,
       mkdtempSync(join(transaction, 'package-')),
@@ -901,6 +1356,7 @@ export class DesktopProjectManager {
       projectDir,
       [...remaining, { ...installed, enabled: true }].sort((left, right) => left.name.localeCompare(right.name)),
     )
+    return installed.name
   }
 
   private registryForMutation(projectDir: string, mutation: DesktopProjectMutation): string {
@@ -1109,13 +1565,12 @@ export class DesktopProjectManager {
     projectDir: string,
     mutation: Exclude<DesktopProjectMutation, { type: 'plugins-disable-all' | 'plugins-reconcile' | 'runtime-reconcile' }>,
     transaction: string,
-  ): Promise<StagedDesktopPluginProvision | StagedDesktopProvisioning | undefined> {
+  ): Promise<AppliedDesktopMutation> {
     switch (mutation.type) {
       case 'plugin-add': {
         const parsed = parseDesktopPluginInstallSpec(mutation.spec, process.cwd())
         if (parsed.kind !== 'registry') {
-          await this.installSourcePackage(projectDir, parsed, transaction)
-          return
+          return { target: await this.installSourcePackage(projectDir, parsed, transaction) }
         }
         const requestedName = parsed.name
         if (this.currentRuntime().sharedPackages.some(entry => entry.name === requestedName)) {
@@ -1130,7 +1585,7 @@ export class DesktopProjectManager {
           projectDir,
           [...current, installed].sort((left, right) => left.name.localeCompare(right.name)),
         )
-        return
+        return { target: installed.name }
       }
       case 'plugin-install': {
         const source = parseDesktopPluginSource(mutation.source)
@@ -1138,7 +1593,7 @@ export class DesktopProjectManager {
           if (source.type === 'npmRegistry') packageNameFromSpec(source.spec)
           return this.applyMutation(projectDir, { type: 'plugin-add', spec: source.spec }, transaction)
         }
-        return this.installGithubRelease(projectDir, source, transaction, 'user')
+        return { target: source.packageName, provision: await this.installGithubRelease(projectDir, source, transaction, 'user') }
       }
       case 'plugin-remove': {
         assertPackageName(mutation.name)
@@ -1150,7 +1605,7 @@ export class DesktopProjectManager {
         this.clearPluginReceipt(projectDir, mutation.name)
         this.clearPackageLock(projectDir, mutation.name)
         writeProfilePlugins(projectDir, remaining)
-        return
+        return { target: mutation.name }
       }
       case 'plugin-update':
         assertPackageName(mutation.name)
@@ -1170,7 +1625,7 @@ export class DesktopProjectManager {
             pluginRecords(projectDir).map(plugin => plugin.name === installed.name ? installed : plugin),
           )
         }
-        return
+        return { target: mutation.name }
       case 'plugin-toggle': {
         assertPackageName(mutation.name)
         const plugins = pluginRecords(projectDir)
@@ -1178,10 +1633,10 @@ export class DesktopProjectManager {
         writeProfilePlugins(projectDir, plugins.map(plugin => (
           plugin.name === mutation.name ? { ...plugin, enabled: mutation.enabled } : plugin
         )))
-        return
+        return { target: mutation.name }
       }
       default:
-        mutation satisfies never
+        return mutation satisfies never
     }
   }
 
@@ -1400,8 +1855,19 @@ export function createDevelopmentProjectMetadata(projectDir: string, release: De
   writeFileSync(join(projectDir, 'pnpm-workspace.yaml'), workspaceFile(), { mode: 0o600 })
 }
 
-/** Create the first external plugin profile without running a package manager. */
+/**
+ * Initialize a new profile without replacing existing package or runtime metadata.
+ * @param projectDir - New profile directory; unrelated files are retained.
+ */
 export function createPluginProfile(projectDir: string): void {
+  const metadata = [
+    'package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', 'node_modules', 'desktop.cordis.yml',
+    'desktop-runtime-state.json', 'desktop-packages-pending', 'desktop-plugin-package-locks.json',
+    PLUGIN_RECEIPTS, PLUGIN_ARTIFACTS, DESKTOP_PLUGIN_PROVISIONING_STATE_FILE,
+  ]
+  if (metadata.some(name => lstatSync(join(projectDir, name), { throwIfNoEntry: false }) !== undefined)) {
+    throw new Error('desktop project: runtime metadata is missing from an existing profile; inspect the retained files before recovery')
+  }
   mkdirSync(projectDir, { recursive: true, mode: 0o700 })
   writeJson(join(projectDir, 'package.json'), {
     name: PROJECT_NAME, private: true, version: '0.0.0', dependencies: {},
