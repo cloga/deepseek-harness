@@ -38,7 +38,9 @@ jobs:
   # in-house pool's readiness is re-proven on every master push by the
   # serial-linux-selfhosted standby lane in ci-master.yml. The Windows failover
   # switch is the separate DSH_CI_FAILOVER_WINDOWS variable on the windows-native
-  # job below.
+  # job below. Only cloga/deepseek-harness defaults to stock GitHub-hosted
+  # runners; explicit failover still wins. Its stock-runner budgets serialize
+  # gates and reduce worker fan-out without changing test inventories or budgets.
   node-24:
     if: github.event_name == 'pull_request'
     runs-on: >-
@@ -46,10 +48,11 @@ jobs:
           || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
+          || github.repository == 'cloga/deepseek-harness' && 'ubuntu-24.04'
           || 'dsh-ubuntu-24-04-16core' }}
     name: node 24 / static
     env:
-      DSH_GATE_CONCURRENCY: '8'
+      DSH_GATE_CONCURRENCY: ${{ github.repository == 'cloga/deepseek-harness' && vars.DSH_CI_FAILOVER_LINUX != 'blacksmith' && (vars.DSH_CI_FAILOVER_LINUX != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]') && '1' || '8' }}
       # Stop the aggregate at the first blocking gate failure so a red run
       # does not keep burning enterprise runner time on the remaining gates.
       DSH_GATE_FAIL_FAST: '1'
@@ -113,14 +116,15 @@ jobs:
           || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
+          || github.repository == 'cloga/deepseek-harness' && 'ubuntu-24.04'
           || 'dsh-ubuntu-24-04-16core' }}
     name: node 24 / coverage
     env:
-      # Partitioning replaces the instrumented share; this budget gives the
-      # exempt-heavy gate two workers on both hosted and failover runners.
-      DSH_COVERAGE_MAX_WORKERS: '6'
-      DSH_COVERAGE_PARTITIONS: '4'
-      DSH_GATE_CONCURRENCY: '3'
+      # Partitioning replaces the instrumented share. Stock fork runners use
+      # two partitions, then one exempt-heavy worker, without overlapping gates.
+      DSH_COVERAGE_MAX_WORKERS: ${{ github.repository == 'cloga/deepseek-harness' && vars.DSH_CI_FAILOVER_LINUX != 'blacksmith' && (vars.DSH_CI_FAILOVER_LINUX != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]') && '3' || '6' }}
+      DSH_COVERAGE_PARTITIONS: ${{ github.repository == 'cloga/deepseek-harness' && vars.DSH_CI_FAILOVER_LINUX != 'blacksmith' && (vars.DSH_CI_FAILOVER_LINUX != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]') && '2' || '4' }}
+      DSH_GATE_CONCURRENCY: ${{ github.repository == 'cloga/deepseek-harness' && vars.DSH_CI_FAILOVER_LINUX != 'blacksmith' && (vars.DSH_CI_FAILOVER_LINUX != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]') && '1' || '3' }}
       # Managed-scope teardown cases run past the default per-test budget when
       # this lane's partitions, workers, and sibling gates share one host: the
       # disposal cases in subprocess-local and bash-sandbox exceeded 5000ms on
@@ -243,20 +247,21 @@ jobs:
           || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
+          || github.repository == 'cloga/deepseek-harness' && 'ubuntu-24.04'
           || 'dsh-ubuntu-24-04-16core' }}
     name: node 24 / snapshots and artifacts
     env:
-      DSH_GATE_CONCURRENCY: '10'
+      DSH_GATE_CONCURRENCY: ${{ github.repository == 'cloga/deepseek-harness' && vars.DSH_CI_FAILOVER_LINUX != 'blacksmith' && (vars.DSH_CI_FAILOVER_LINUX != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]') && '1' || '10' }}
       DSH_NODE_COMPAT_SKIP_TYPECHECK: '1'
-      DSH_OXLINT_THREADS: '8'
-      DSH_PUBLINT_CONCURRENCY: '8'
-      DSH_WEB_SNAPSHOT_WORKERS: '6'
+      DSH_OXLINT_THREADS: ${{ github.repository == 'cloga/deepseek-harness' && vars.DSH_CI_FAILOVER_LINUX != 'blacksmith' && (vars.DSH_CI_FAILOVER_LINUX != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]') && '2' || '8' }}
+      DSH_PUBLINT_CONCURRENCY: ${{ github.repository == 'cloga/deepseek-harness' && vars.DSH_CI_FAILOVER_LINUX != 'blacksmith' && (vars.DSH_CI_FAILOVER_LINUX != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]') && '2' || '8' }}
+      DSH_WEB_SNAPSHOT_WORKERS: ${{ github.repository == 'cloga/deepseek-harness' && vars.DSH_CI_FAILOVER_LINUX != 'blacksmith' && (vars.DSH_CI_FAILOVER_LINUX != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]') && '2' || '6' }}
       # A failing gate aborts its running siblings: a failing build stops the
       # independent Node compatibility smoke, and a failing reader (e.g.
       # publint) stops the remaining artifact consumers.
       DSH_GATE_FAIL_FAST: '1'
       # Failover halves snapshot concurrency for the shared 64-core VM.
-      DSH_SNAPSHOT_MAX_CONCURRENCY: ${{ vars.DSH_CI_FAILOVER_LINUX == 'selfhosted' && github.event.pull_request.user.login != 'dependabot[bot]' && '12' || '32' }}
+      DSH_SNAPSHOT_MAX_CONCURRENCY: ${{ vars.DSH_CI_FAILOVER_LINUX == 'selfhosted' && github.event.pull_request.user.login != 'dependabot[bot]' && '12' || github.repository == 'cloga/deepseek-harness' && vars.DSH_CI_FAILOVER_LINUX != 'blacksmith' && '4' || '32' }}
     steps:
       # Runner cleanup owns tool caches and fixtures, including cancelled runs.
       - name: Use runner-owned temporary storage
@@ -504,6 +509,7 @@ jobs:
           || vars.DSH_CI_FAILOVER_WINDOWS == 'selfhosted'
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "dsh-win-ci", "windows"]')
+          || github.repository == 'cloga/deepseek-harness' && 'windows-2025'
           || 'dsh-windows-2025-16core' }}
     name: windows node 24 / build
     timeout-minutes: 60
@@ -549,14 +555,15 @@ jobs:
           || vars.DSH_CI_FAILOVER_WINDOWS == 'selfhosted'
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "dsh-win-ci", "windows"]')
+          || github.repository == 'cloga/deepseek-harness' && 'windows-2025'
           || 'dsh-windows-2025-16core' }}
     name: windows node 24 / coverage
     timeout-minutes: 120
     env:
-      DSH_COVERAGE_MAX_WORKERS: '6'
-      DSH_COVERAGE_PARTITIONS: '4'
+      DSH_COVERAGE_MAX_WORKERS: ${{ github.repository == 'cloga/deepseek-harness' && vars.DSH_CI_FAILOVER_WINDOWS != 'blacksmith' && (vars.DSH_CI_FAILOVER_WINDOWS != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]') && '3' || '6' }}
+      DSH_COVERAGE_PARTITIONS: ${{ github.repository == 'cloga/deepseek-harness' && vars.DSH_CI_FAILOVER_WINDOWS != 'blacksmith' && (vars.DSH_CI_FAILOVER_WINDOWS != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]') && '2' || '4' }}
       DSH_COVERAGE_TEST_TIMEOUT_MS: '90000'
-      DSH_GATE_CONCURRENCY: '3'
+      DSH_GATE_CONCURRENCY: ${{ github.repository == 'cloga/deepseek-harness' && vars.DSH_CI_FAILOVER_WINDOWS != 'blacksmith' && (vars.DSH_CI_FAILOVER_WINDOWS != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]') && '1' || '3' }}
       # A gate failure aborts the sibling gate instead of waiting out its
       # multi-minute instrumented run.
       DSH_GATE_FAIL_FAST: '1'
@@ -626,6 +633,7 @@ jobs:
           || vars.DSH_CI_FAILOVER_WINDOWS == 'selfhosted'
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "dsh-win-ci", "windows"]')
+          || github.repository == 'cloga/deepseek-harness' && 'windows-2025'
           || 'dsh-windows-2025-16core' }}
     name: windows node 24 / native tests
     timeout-minutes: 60
@@ -676,11 +684,12 @@ jobs:
           || vars.DSH_CI_FAILOVER_WINDOWS == 'selfhosted'
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "dsh-win-ci", "windows"]')
+          || github.repository == 'cloga/deepseek-harness' && 'windows-2025'
           || 'dsh-windows-2025-16core' }}
     name: windows node 24 / observational
     timeout-minutes: 60
     env:
-      DSH_PUBLINT_CONCURRENCY: '8'
+      DSH_PUBLINT_CONCURRENCY: ${{ github.repository == 'cloga/deepseek-harness' && vars.DSH_CI_FAILOVER_WINDOWS != 'blacksmith' && (vars.DSH_CI_FAILOVER_WINDOWS != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]') && '2' || '8' }}
     steps:
       - uses: actions/checkout@v6
         with:

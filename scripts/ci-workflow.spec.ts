@@ -232,7 +232,7 @@ describe('CI workflow', () => {
 
     // windows-coverage uses the lower 4-partition profile.
     expect(windowsCoverage.name).toBe('windows node 24 / coverage')
-    expect(windowsCoverage.env).toMatchObject({ DSH_COVERAGE_PARTITIONS: '4' })
+    expect(forkJobValue(windowsCoverage, 'env', 'DSH_COVERAGE_PARTITIONS', 'deepseek-ai/deepseek-harness')).toBe('4')
     const coverageSteps = windowsCoverage.steps as unknown[]
     const coverageCommands = coverageSteps.filter((step): step is Record<string, unknown> & { run: string } => (
       isRecord(step) && typeof step.run === 'string'
@@ -1104,6 +1104,122 @@ describe('npm release workflows', () => {
     expect(Object.keys(workflow.on).sort()).toEqual(['pull_request', 'push', 'workflow_dispatch'])
     expect(commands).toContain('pnpm run verify-package-dependencies')
     expect(commands).toContain('pnpm run verify-npm-install-layout')
+  })
+})
+
+// Equal-typed, canonical-case fixtures exercise the selectors, not the complete
+// Actions expression language (whose string comparisons are case-insensitive).
+function forkJobValue(
+  job: Record<string, unknown>, field: 'runs-on' | 'env', key: string,
+  repository: string, mode = '', login = 'maintainer',
+): unknown {
+  const value = field === 'env' && isRecord(job.env) ? job.env[key] : job[field]
+  if (typeof value !== 'string' || !value.startsWith('${{')) return value
+  return evaluateRunsOn(value, {
+    vars: { DSH_CI_FAILOVER_LINUX: mode, DSH_CI_FAILOVER_WINDOWS: mode },
+    github: { repository, event: { pull_request: {
+      user: { login }, head: { repo: { full_name: repository, fork: false } },
+    } } },
+    matrix: { runner: 'ubuntu-latest' },
+    fromJSON: JSON.parse,
+  })
+}
+
+describe('cloga fork CI runners', () => {
+  const workflow = loadWorkflow('.github/workflows/ci.yml')
+  const fork = 'cloga/deepseek-harness'
+  const jobs = [
+    ['node-24', 'linux'], ['node-24-coverage', 'linux'], ['node-24-consumers', 'linux'],
+    ['windows-build', 'windows'], ['windows-coverage', 'windows'],
+    ['windows-native-tests', 'windows'], ['windows-observational', 'windows'],
+    ['node-compat', 'aggregate'], ['all-checks-passed', 'aggregate'],
+  ] as const
+
+  it.each(jobs)('%s preserves official defaults and explicit failover ahead of the fork fallback', (name, platform) => {
+    const job = workflowJob(workflow, name)
+    const stock = platform === 'windows' ? 'windows-2025' : platform === 'linux' ? 'ubuntu-24.04' : 'ubuntu-latest'
+    const official = platform === 'windows' ? 'dsh-windows-2025-16core' : platform === 'linux' ? 'dsh-ubuntu-24-04-16core' : stock
+    const blacksmith = platform === 'windows' ? 'blacksmith-16vcpu-windows-2025' : `blacksmith-${platform === 'linux' ? 16 : 4}vcpu-ubuntu-2404`
+    const selfhosted = platform === 'windows' ? ['self-hosted', 'dsh-win-ci', 'windows'] : ['self-hosted', 'linux', 'x64', 'vm-backup']
+    for (const repository of ['deepseek-ai/deepseek-harness', 'deepseek-harness/deepseek-harness', 'other/deepseek-harness', 'cloga/other', fork]) {
+      const fallback = repository === fork ? stock : official
+      for (const mode of ['', 'hosted', 'unexpected']) {
+        expect(forkJobValue(job, 'runs-on', '', repository, mode)).toBe(fallback)
+      }
+      for (const login of ['maintainer', 'dependabot[bot]']) {
+        expect(forkJobValue(job, 'runs-on', '', repository, 'blacksmith', login)).toBe(blacksmith)
+        expect(forkJobValue(job, 'runs-on', '', repository, 'selfhosted', login))
+          .toEqual(login === 'dependabot[bot]' ? fallback : selfhosted)
+      }
+    }
+  })
+
+  it.each([
+    ['node-24', 'DSH_GATE_CONCURRENCY', '1', '8'],
+    ['node-24-coverage', 'DSH_COVERAGE_MAX_WORKERS', '3', '6'],
+    ['node-24-coverage', 'DSH_COVERAGE_PARTITIONS', '2', '4'],
+    ['node-24-coverage', 'DSH_GATE_CONCURRENCY', '1', '3'],
+    ['node-24-consumers', 'DSH_GATE_CONCURRENCY', '1', '10'],
+    ['node-24-consumers', 'DSH_OXLINT_THREADS', '2', '8'],
+    ['node-24-consumers', 'DSH_PUBLINT_CONCURRENCY', '2', '8'],
+    ['node-24-consumers', 'DSH_WEB_SNAPSHOT_WORKERS', '2', '6'],
+    ['node-24-consumers', 'DSH_SNAPSHOT_MAX_CONCURRENCY', '4', '32'],
+    ['windows-coverage', 'DSH_COVERAGE_MAX_WORKERS', '3', '6'],
+    ['windows-coverage', 'DSH_COVERAGE_PARTITIONS', '2', '4'],
+    ['windows-coverage', 'DSH_GATE_CONCURRENCY', '1', '3'],
+    ['windows-observational', 'DSH_PUBLINT_CONCURRENCY', '2', '8'],
+  ])('%s bounds %s only on the fork stock-hosted path', (name, key, bounded, original) => {
+    const job = workflowJob(workflow, name)
+    if (!isRecord(job.env)) throw new TypeError(`${name} must define env`)
+    expect(job.env[key]).not.toContain(name.startsWith('windows-') ? 'DSH_CI_FAILOVER_LINUX' : 'DSH_CI_FAILOVER_WINDOWS')
+    for (const repository of ['deepseek-ai/deepseek-harness', 'other/deepseek-harness', fork]) {
+      for (const mode of ['', 'hosted', 'unexpected', 'blacksmith', 'selfhosted']) {
+        for (const login of ['maintainer', 'dependabot[bot]']) {
+          const stockFork = repository === fork && mode !== 'blacksmith' && (mode !== 'selfhosted' || login === 'dependabot[bot]')
+          const vmSnapshot = key === 'DSH_SNAPSHOT_MAX_CONCURRENCY' && mode === 'selfhosted' && login !== 'dependabot[bot]'
+          expect(forkJobValue(job, 'env', key, repository, mode, login))
+            .toBe(stockFork ? bounded : vmSnapshot ? '12' : original)
+        }
+      }
+    }
+  })
+
+  it.each(['windows-build', 'windows-observational'])('%s retains CPU-derived concurrency and inherited runner overrides', (name) => {
+    expect(workflowJob(workflow, name).env).not.toHaveProperty('DSH_GATE_CONCURRENCY')
+  })
+
+  it('retains the PR job inventory, verdict dependencies, failure assertions and permissions', () => {
+    if (!isRecord(workflow.jobs)) throw new TypeError('CI must define jobs')
+    expect(Object.keys(workflow.jobs).sort()).toEqual([
+      ...jobs.map(([name]) => name), 'node-24-bench', 'python-sdk', 'python-runtime',
+    ].sort())
+    expect(workflow.on).toEqual({ pull_request: null })
+    expect(workflow.permissions).toEqual({ contents: 'read' })
+    const verdict = workflowJob(workflow, 'all-checks-passed')
+    expect(verdict.needs).toEqual(['node-24', 'node-24-coverage', 'node-24-bench', 'node-24-consumers', 'node-compat', 'python-sdk', 'python-runtime', 'windows-build', 'windows-native-tests'])
+    expect(verdict.if).toBe("${{ !cancelled() && github.event_name == 'pull_request' }}")
+    expect(verdict.steps).toEqual([
+      { name: 'Fail if any needed job did not succeed',
+        if: "contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')",
+        run: 'echo "::error::Needed job results: ${{ join(needs.*.result, \', \') }}"\nexit 1\n' },
+      { name: 'All checks passed', run: 'echo "All needed jobs succeeded (${{ join(needs.*.result, \', \') }})"' },
+    ])
+  })
+
+  it.each([
+    ['node-24', 'pnpm run check:ci:static', undefined],
+    ['node-24-coverage', 'pnpm run check:ci:coverage', undefined],
+    ['node-24-consumers', 'pnpm run check:ci:consumers', undefined],
+    ['windows-build', 'pnpm run check:ci:windows-blocking', 60],
+    ['windows-coverage', 'pnpm run check:ci:coverage', 120],
+    ['windows-observational', 'pnpm run check:ci:windows-observational', 60],
+  ] as const)('%s retains gate commands and time budgets', (name, command, timeout) => {
+    const job = workflowJob(workflow, name)
+    expect(job['timeout-minutes']).toBe(timeout)
+    expect(job.if).toBe("github.event_name == 'pull_request'")
+    if (!Array.isArray(job.steps)) throw new TypeError(`${name} must define steps`)
+    expect(job.steps.filter(isRecord).map(step => step.run)).toContain(command)
+    if (name.includes('coverage')) expect(job.env).toMatchObject({ DSH_COVERAGE_TEST_TIMEOUT_MS: '90000', DSH_GATE_FAIL_FAST: '1' })
   })
 })
 
