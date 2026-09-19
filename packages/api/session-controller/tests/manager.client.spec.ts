@@ -7,7 +7,8 @@ import { describe, expect, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import { SessionSeq } from '@deepseek-ai/dsh-session/types'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
-import type { SessionControlFrame } from '@deepseek-ai/dsh-api-session-controller/types'
+import type { SessionControlFrame, SessionCreateRequest } from '@deepseek-ai/dsh-api-session-controller/types'
+import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 import { ok, type RemoteMock } from '@deepseek-ai/dsh-remote-mock'
 import {
   createClientTest, type ClientTestFixtures, webApp,
@@ -234,6 +235,7 @@ describe('list lifecycle', () => {
     const manager = makeManager(mock, remote)
     const result = await manager.create()
     expect(result).toMatchObject({ ok: true, value: { sessionId: S2 } })
+    expect(remote.session.create.mock.calls).toStrictEqual([[{}]])
     expect(manager.getListSnapshot().items.map(i => i.sessionId)).toEqual([S2])
   })
 
@@ -298,6 +300,63 @@ describe('list lifecycle', () => {
         },
       })
       expect(manager.getListSnapshot().items[0]?.title).toBe('Durable')
+    } finally {
+      await manager.dispose()
+    }
+  })
+})
+
+describe('create preset forwarding', () => {
+  it.for([
+    { request: {}, payload: {} },
+    { request: { cwd: '/w' }, payload: { cwd: '/w' } },
+    { request: { workspaceId: 'ws' as WorkspaceId, cwd: '/ignored' }, payload: { workspaceId: 'ws' as WorkspaceId } },
+    { request: { agentPreset: 'minimal' }, payload: { agentPreset: 'minimal' } },
+    { request: { cwd: '/w', sessionId: S1, agentPreset: 'minimal' }, payload: { cwd: '/w', sessionId: S1, agentPreset: 'minimal' } },
+    {
+      request: { workspaceId: 'ws' as WorkspaceId, cwd: '/ignored', sessionId: S1, agentPreset: 'minimal' },
+      payload: { workspaceId: 'ws' as WorkspaceId, sessionId: S1, agentPreset: 'minimal' },
+    },
+  ] satisfies Array<{ request: SessionCreateRequest; payload: SessionCreateRequest }>)(
+    'forwards only supplied create fields with workspace precedence: %j', async ({ request, payload }, { mock, remote }) => {
+      const manager = makeManager(mock, remote)
+      remote.session.create.mockResolvedValueOnce(ok({ sessionId: S1 }))
+      try {
+        await manager.create(request)
+        expect(remote.session.create.mock.calls).toStrictEqual([[payload]])
+        expect(manager.getListSnapshot().items[0]?.projectionValues).toBeUndefined()
+        expect(remote.session.follow).not.toHaveBeenCalled()
+      } finally {
+        await manager.dispose()
+      }
+    },
+  )
+
+  it.for([{}, { agentPreset: 'requested' }] satisfies SessionCreateRequest[])(
+    'projects the Host-effective preset for %j and accepts newer control values', async (request, { mock, remote }) => {
+      const manager = makeManager(mock, remote)
+      remote.session.create.mockResolvedValueOnce(ok({ sessionId: S1, agentPreset: 'effective' }))
+      try {
+        await manager.create({ sessionId: S1, ...request })
+        expect(manager.getListSnapshot().items[0]?.projectionValues).toEqual({ agentPreset: 'effective' })
+        manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'agentPreset', value: 'selected', seq: 0 })
+        expect(manager.getListSnapshot().items[0]?.projectionValues).toEqual({ agentPreset: 'selected' })
+      } finally {
+        await manager.dispose()
+      }
+    },
+  )
+
+  it('keeps a newer preset projection when the create response arrives later', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    const response = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.create>>>()
+    remote.session.create.mockReturnValueOnce(response.promise)
+    try {
+      const creating = manager.create({ sessionId: S1, agentPreset: 'requested' })
+      manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'agentPreset', value: 'selected', seq: 1 })
+      response.resolve(ok({ sessionId: S1, agentPreset: 'effective' }))
+      await creating
+      expect(manager.getListSnapshot().items[0]?.projectionValues).toEqual({ agentPreset: 'selected' })
     } finally {
       await manager.dispose()
     }

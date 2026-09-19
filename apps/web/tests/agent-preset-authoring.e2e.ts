@@ -12,7 +12,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import type { Browser, Page } from 'playwright'
+import type { Browser, Page, Request, Route } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import type { Locator } from 'playwright'
@@ -237,38 +237,136 @@ describe('web e2e: agent-preset authoring is a host-side copy', () => {
     await rm(join(userRoot, 'broken-yaml'), { recursive: true, force: true })
   }, 60_000)
 
-  it('starts a creator-mode session from the section', async () => {
+  /** The exact main Session committed by the browser's selection store. */
+  const selectedId = (): Promise<string | null> => page.evaluate(() => {
+    const current = localStorage.getItem('dsh.sessions.current')
+    return current === null ? null : (JSON.parse(current) as { sessionId?: string }).sessionId ?? null
+  })
+
+  /** Read real Host rows; preset labels alone do not establish composition. */
+  const hostSessions = async () => (
+    await scaffold.ctx.sessionController.list({}, new AbortController().signal)
+  ).items
+
+  it('keeps Settings open without a Workspace and creates no deferred Creator Session', async () => {
+    onTestFailed(() => saveFailureShot(page, 'web-e2e-preset-authoring-no-workspace'))
+    const dialog = settingsDialog()
+    const creator = dialog.getByRole('button', { name: '用「创造模式」创作自定义预设' })
+    const createRequests: Request[] = []
+    const observeCreate = (request: Request): void => {
+      if (new URL(request.url()).pathname === '/api/session/create') createRequests.push(request)
+    }
+    expect(await hostSessions()).toEqual([])
+    expect(await selectedId()).toBeNull()
+    page.on('request', observeCreate)
+    try {
+      await creator.click()
+      await expect.poll(() => creator.getAttribute('aria-busy')).toBe('false')
+      expect(await dialog.isVisible()).toBe(true)
+      expect(await creator.isEnabled()).toBe(true)
+      await dialog.getByText('请先选择工作区，再使用此操作。没有可用的工作区时，不会启动创造模式会话。', { exact: true })
+        .waitFor({ timeout: 10_000 })
+      expect(createRequests).toEqual([])
+      expect(await hostSessions()).toEqual([])
+      expect(await selectedId()).toBeNull()
+    } finally {
+      page.off('request', observeCreate)
+    }
+  })
+
+  it('commits a fresh Host Cordis Session without changing the old blank or the next default', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-preset-authoring-creator'))
-    // Without a workspace the flow only stages (there is no session to land
-    // in until one is connected); connect first so the gesture carries all
-    // the way to a composed host session.
     await settingsDialog().getByRole('button', { name: '关闭' }).last().click()
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
+    await expect.poll(hostSessions, { timeout: 15_000 }).toHaveLength(1)
+    const original = (await hostSessions())[0]!
+    await expect.poll(selectedId).toBe(original.sessionId)
+    await expect.poll(hostSessions, { timeout: 15_000 }).toEqual([
+      expect.objectContaining({
+        sessionId: original.sessionId, blank: true,
+        projections: expect.objectContaining({ values: expect.objectContaining({ agentPreset: 'standard' }) }),
+      }),
+    ])
+    // Blank Sessions need not have a physical log; observe the owned live log instead.
+    const originalSession = scaffold.ctx.sessions.get(original.sessionId)!
+    expect(originalSession).toBeDefined()
+    const originalSeq = originalSession.seq
+    await page.getByRole('button', { name: '标准模式', exact: true }).waitFor({ timeout: 10_000 })
     await page.getByRole('button', { name: '设置', exact: true }).click()
     const dialog = settingsDialog()
     await dialog.waitFor({ timeout: 10_000 })
     await dialog.getByRole('button', { name: 'Agent 预设' }).click()
-    await dialog.getByRole('button', { name: '用「创造模式」创作自定义预设' }).click()
+    const creatorButton = dialog.getByRole('button', { name: '用「创造模式」创作自定义预设' })
 
-    // Leaving settings is part of the gesture: the flow lands on the
-    // new-session screen with the self-referential preset staged, and the
-    // blank session the flow produces composes from it on the host.
-    await dialog.waitFor({ state: 'detached', timeout: 10_000 })
-    await expect.poll(async () => {
-      const response = await scaffold.hostFetch('/api/session/list', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          type: 'client-request', rpcId: 'creator-draft-stage', method: 'session/list',
-          payload: { args: { _request: {} } },
-        }),
-      })
-      const body = await response.json() as {
-        result: { value?: { items: unknown[] } }
+    // Hold the real request before Host creation; never substitute a Remote success.
+    const createPattern = '**/api/session/create'
+    const release = Promise.withResolvers<void>()
+    let createRequest: Request | undefined
+    let routeWork: Promise<void> | undefined
+    const holdCreate = (route: Route): Promise<void> => {
+      createRequest = route.request()
+      routeWork = release.promise.then(() => route.continue())
+      return routeWork
+    }
+    await page.route(createPattern, holdCreate, { times: 1 })
+    try {
+      await creatorButton.click()
+      await expect.poll(() => createRequest, { timeout: 15_000 }).toBeDefined()
+      const requestBody = createRequest!.postDataJSON() as {
+        payload: { args: { request: { agentPreset?: string; workspaceId?: string } } }
       }
-      return JSON.stringify(body.result.value?.items ?? body.result)
-    }, { timeout: 15_000 }).toContain('"agentPreset":"cordis"')
-  }, 60_000)
+      expect(requestBody.payload.args.request.agentPreset).toBe('cordis')
+      expect(requestBody.payload.args.request.workspaceId).toBeTruthy()
+      expect(await dialog.isVisible()).toBe(true)
+      expect(await creatorButton.isDisabled()).toBe(true)
+      expect(await creatorButton.getAttribute('aria-busy')).toBe('true')
+      expect(await selectedId()).toBe(original.sessionId)
+      expect(await hostSessions()).toHaveLength(1)
+    } finally {
+      release.resolve()
+      await page.unroute(createPattern, holdCreate)
+      await routeWork
+    }
+
+    await expect.poll(hostSessions, { timeout: 15_000 }).toHaveLength(2)
+    const creator = (await hostSessions()).find(row => row.sessionId !== original.sessionId)!
+    await expect.poll(selectedId, { timeout: 15_000 }).toBe(creator.sessionId)
+    await dialog.waitFor({ state: 'detached', timeout: 10_000 })
+    await expect.poll(async () => (await hostSessions()).find(row => row.sessionId === creator.sessionId), {
+      timeout: 15_000,
+    }).toMatchObject({
+      blank: true, projections: { values: { agentPreset: 'cordis' } },
+    })
+    expect(creator.parentSessionId).toBeUndefined()
+    await page.getByRole('button', { name: '创造模式', exact: true }).waitFor({ timeout: 10_000 })
+    expect((await hostSessions()).find(row => row.sessionId === original.sessionId)).toMatchObject({
+      blank: true, projections: { values: { agentPreset: 'standard' } },
+    })
+    expect(scaffold.ctx.sessions.get(original.sessionId)).toBe(originalSession)
+    expect(originalSession.seq).toBe(originalSeq)
+    const roster = await scaffold.ctx.agentPresets.remoteExportList()
+    expect(roster.presets.find(preset => preset.isDefault)?.id).toBe('standard')
+
+    await page.getByRole('button', { name: '新建会话', exact: true }).last().click()
+    await expect.poll(hostSessions, { timeout: 15_000 }).toHaveLength(3)
+    const ordinary = (await hostSessions()).find(row =>
+      row.sessionId !== original.sessionId && row.sessionId !== creator.sessionId)!
+    await expect.poll(selectedId, { timeout: 15_000 }).toBe(ordinary.sessionId)
+    await expect.poll(async () => (await hostSessions()).find(row => row.sessionId === ordinary.sessionId), {
+      timeout: 15_000,
+    }).toMatchObject({
+      blank: true, projections: { values: { agentPreset: 'standard' } },
+    })
+    await page.getByRole('button', { name: '标准模式', exact: true }).waitFor({ timeout: 10_000 })
+    expect((await hostSessions()).find(row => row.sessionId === creator.sessionId)).toMatchObject({
+      projections: { values: { agentPreset: 'cordis' } },
+    })
+    expect((await hostSessions()).find(row => row.sessionId === original.sessionId)).toMatchObject({
+      blank: true, projections: { values: { agentPreset: 'standard' } },
+    })
+    expect(scaffold.ctx.sessions.get(original.sessionId)).toBe(originalSession)
+    expect(originalSession.seq).toBe(originalSeq)
+  })
 
   it('drove every surface without a page error or a stream warning', () => {
     expect(tripwire.pageErrors).toEqual([])

@@ -44,6 +44,8 @@ Session 对象还承载本地提交回显：`session.beginSubmission` 在调用�
 
 恢复会话时若已有写句柄占用，返回 `session/writer-held`，并携带会话 id；其他恢复失败仍返回 `gateway/internal`。
 
+Client `sessions.create` 随请求的 Workspace 或工作目录及可选的调用方自有 Session id，一并转发可选的 `agentPreset`。Host 在创建期间解析该 preset；省略时保留 Host 的普通默认行为。只有 Host 返回的 preset 用于初始化 Client projection，其优先级低于已经观察到的 list 或 control 值；请求的 preset 不会作为乐观确认。创建使返回身份可在 catalog 中寻址，但不获取 `SessionReference` 或选择主视图。导航 owner 显式 retain 该结果。创建时绑定的 preset 不需要随后修改已有空白 Session。
+
 <a id="client-references"></a>
 ## Client 引用
 

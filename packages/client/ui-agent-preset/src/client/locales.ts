@@ -13,7 +13,7 @@ export type AgentPresetSettingsKey =
   | 'inUse' | 'selectionOffDefault' | 'noDescription' | 'builtInGroup' | 'customGroup'
   | 'brokenBadge' | 'brokenNoCopy' | 'switchRefused'
   | 'composition' | 'cancel' | 'close' | 'retry'
-  | 'copyTitle' | 'copyIntro' | 'create' | 'creating' | 'creatorDraft'
+  | 'copyTitle' | 'copyIntro' | 'create' | 'creating' | 'creatorDraft' | 'creatorWorkspaceHint'
   | 'openLocation' | 'showLocation' | 'revealedPathLabel'
   | 'idRequired' | 'idInvalid' | 'idTaken'
   | 'deleteTitle' | 'deleteDescription' | 'deleteConfirm' | 'deleting'
@@ -72,6 +72,7 @@ export const en: Record<AgentPresetSettingsKey, string> = {
   create: 'Create',
   creating: 'Creating…',
   creatorDraft: 'Draft a custom preset with Creator mode',
+  creatorWorkspaceHint: 'Choose a Workspace, then use this action. Without an available Workspace, no Creator Session starts.',
   openLocation: 'Open folder',
   showLocation: 'Show location',
   revealedPathLabel: 'Preset files:',
@@ -135,6 +136,7 @@ export const zh: Record<AgentPresetSettingsKey, string> = {
   create: '创建',
   creating: '正在创建…',
   creatorDraft: '用「创造模式」创作自定义预设',
+  creatorWorkspaceHint: '请先选择工作区，再使用此操作。没有可用的工作区时，不会启动创造模式会话。',
   openLocation: '打开目录',
   showLocation: '查看路径',
   revealedPathLabel: '预设文件：',

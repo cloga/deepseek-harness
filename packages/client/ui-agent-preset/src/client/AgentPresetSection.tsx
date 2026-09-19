@@ -47,11 +47,11 @@ export interface AgentPresetSectionInjected {
   /** Open one preset's directory, or reveal its path where there is no desktop. */
   openLocation: (id: string) => Promise<void>
   /**
-   * Stage the self-referential preset and start a new session on it — the
-   * guided way to author a preset, beside copying. Absent when the surface
-   * is composed without the conversation flow to land the session in.
+   * Start a fresh creator Session in the current Workspace. True means the
+   * exact new main binding committed; false includes no Workspace, failure,
+   * or supersession. The action owns failure reporting. Absent without navigation.
    */
-  startCreatorDraft?: () => void
+  startCreatorDraft?: () => Promise<boolean>
   /** Ask for delete confirmation, or dismiss it with null. */
   confirmDelete: (id: string | null) => void
   /** Delete the preset awaiting confirmation. */
@@ -181,6 +181,14 @@ function CardDescription({ text }: { text: string }): ReactNode {
 export function AgentPresetSection(props: AgentPresetSectionProps): ReactNode {
   const { useAgentPresetSection, t, load } = props
   const state = useAgentPresetSection(snapshot => snapshot)
+  const [creatorBusy, setCreatorBusy] = useState(false)
+  const creatorLifetime = useRef<{ request: object | null } | null>(null)
+  useLayoutEffect(() => {
+    const lifetime = { request: null as object | null }
+    creatorLifetime.current = lifetime
+    setCreatorBusy(false)
+    return () => { creatorLifetime.current = null }
+  }, [props.close, props.startCreatorDraft])
   const viewedId = state.view?.id
   const viewedRow = viewedId === undefined ? undefined : state.rows.find(row => row.id === viewedId)
   const viewedTitle = state.view === null
@@ -207,6 +215,25 @@ export function AgentPresetSection(props: AgentPresetSectionProps): ReactNode {
     )
   }
 
+  async function startCreator(): Promise<void> {
+    const lifetime = creatorLifetime.current
+    const action = props.startCreatorDraft
+    if (lifetime === null || lifetime.request !== null || action === undefined) return
+    const request = {}
+    lifetime.request = request
+    setCreatorBusy(true)
+    let started = false
+    try {
+      started = await action()
+    } catch (_error: unknown) {
+      // The action reports failures; rejection must not dismiss settings.
+    }
+    if (creatorLifetime.current !== lifetime || lifetime.request !== request) return
+    lifetime.request = null
+    setCreatorBusy(false)
+    if (started) props.close()
+  }
+
   /* The guided alternative to copying: the self-referential preset can
      read this very composition and author a new one in conversation.
      Offered only where that preset is actually on the roster and a
@@ -214,21 +241,22 @@ export function AgentPresetSection(props: AgentPresetSectionProps): ReactNode {
      never be discovered, so the reason rides the disabled button. */
   const creatorButton = props.startCreatorDraft !== undefined && state.rows.some(row => row.id === 'cordis')
     ? (
-      <button
-        type="button"
-        className={css.creatorButton}
-        disabled={!state.authorable || !state.showPicker || state.policySaving}
-        title={!state.showPicker
-          ? t('enablePickerToCreate')
-          : state.authorable ? undefined : t('duplicateUnavailable')}
-        onClick={() => {
-          props.startCreatorDraft?.()
-          props.close()
-        }}
-      >
-        <IconPlusOutline16 size={14} />
-        {t('creatorDraft')}
-      </button>
+      <>
+        <button
+          type="button"
+          className={css.creatorButton}
+          disabled={creatorBusy || !state.authorable || !state.showPicker || state.policySaving}
+          aria-busy={creatorBusy}
+          title={!state.showPicker
+            ? t('enablePickerToCreate')
+            : state.authorable ? undefined : t('duplicateUnavailable')}
+          onClick={() => { void startCreator() }}
+        >
+          <IconPlusOutline16 size={14} />
+          {t('creatorDraft')}
+        </button>
+        <p className={css.intro}>{t('creatorWorkspaceHint')}</p>
+      </>
     )
     : null
 

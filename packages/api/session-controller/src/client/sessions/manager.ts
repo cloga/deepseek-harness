@@ -3,8 +3,8 @@
 import type { SubagentAddress, SubagentCatalog } from '@deepseek-ai/dsh-subagent/client'
 import { SessionSeq, type SessionId, type SessionSeqCursor } from '@deepseek-ai/dsh-session/types'
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
-import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 import type {
+  SessionCreateRequest,
   SessionControlBaseline,
   SessionControlFrame,
   SessionSummary,
@@ -481,22 +481,26 @@ export class SessionManager {
    * Contract session.create; on success merge into summaries immediately (no
    * wait for the next refresh). A created session is blank by definition
    * (entity birth precedes the first message).
-   * @param opts - target workspace or working directory, plus an optional caller-owned id.
+   * @param opts - target workspace or working directory, optional caller-owned id, and requested agent preset.
    * @returns the create result.
   */
   async create(
-    opts: {
-      workspaceId?: WorkspaceId
-      cwd?: string
-      sessionId?: SessionId
-    } = {},
+    opts: SessionCreateRequest = {},
   ): Promise<RemoteResult<{ sessionId: SessionId }>> {
-    const shared = opts.sessionId === undefined ? {} : { sessionId: opts.sessionId }
+    const shared = {
+      ...(opts.sessionId === undefined ? {} : { sessionId: opts.sessionId }),
+      ...(opts.agentPreset === undefined ? {} : { agentPreset: opts.agentPreset }),
+    }
     const payload = opts.workspaceId !== undefined
       ? { workspaceId: opts.workspaceId, ...shared }
       : { ...(opts.cwd === undefined ? {} : { cwd: opts.cwd }), ...shared }
     const result = await this.remote.session.create(payload)
     if (result.ok) {
+      if (result.value.agentPreset !== undefined) {
+        // The create response has no log watermark; never replace a value
+        // already received from a list baseline or control frame.
+        this.projectionStore(result.value.sessionId).apply('agentPreset', result.value.agentPreset, -1)
+      }
       this.recordMutation({ kind: 'upsert', summary: {
         sessionId: result.value.sessionId, updatedAt: Date.now(), running: false, blank: true,
         ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),

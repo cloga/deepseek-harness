@@ -70,18 +70,18 @@ Session 实例与 scope 同生命周期；catalog 只报告可发现性，不持
   - 其他端：`host/session-status (running:true)` 帧翻转——blank 会话从不 running，首次 running 必然已非 blank；
   - 重连对齐：`session.list` 的 summary.blank 是权威，错过帧的端下次拉取自然对齐；陈旧的 blank:true 不能把已转正的会话重新标回 blank。
 - 列表纪律：store 保留全部行；Workspace browser 的分组、平铺、搜索和计数共用同一可见投影——所有非 blank 会话都显示，blank 会话只显示由 `mainView` 来源持有的一行，并强制标题为 `New Session`。切换 Workspace 后，旧 blank 实体仍在镜像中但从列表隐藏，目标 Workspace 的主 blank 显示；因此用户可见面全局至多一条 blank 行。
-- 残留账零 GC：刷新后 blank 会话带位回来，下次同 workspace 且仍为成员时复用，普通单端路径使每个 workspace 至多保留一个；host 重启后 blank 无盘痕自然蒸发；多 tab 竞态多出的空壳只会成为非 current 隐藏行，后续复用消化，不做协调。
+- 空白残留不需要专用 GC：刷新后，空白 Session 只要仍为成员，就仍可在普通的同 Workspace 选择中复用；Host 重启后，从未追加日志的空白会话不留磁盘痕迹。显式新建与多标签页竞态可以在同一 Workspace 留下多个空白会话。只有主视图的空白会话可见；普通复用不会删除其他身份。
 
-### connectWorkspace：New Session 的唯一入口
+### connectWorkspace：普通 Workspace 选择
 
-`workspaces.connectWorkspace(workspaceId): Promise<SessionId>`（归属 WorkspaceRuntime——它同时持有 workspace 规范 path 与 sessions 引用）：
+`uiWorkspace.connectWorkspace(workspaceId): Promise<SessionId>` 归于 UI 导航 owner；它读取两个 Controller，但不把选择写入任一 Controller snapshot。显式新会话采用[显式新会话创建新的身份](../bug-fix/2026-09-19-explicit-new-session-fresh-identity.zh.md)中的独立新建策略；普通选择保留以下复用规则：
 
 - 复用臂：list mirror 中找 `blank && cwd == workspace.path && sessionIds.includes(id)`——host 自己的成员规则，绝不只按 cwd。没有账户槽位的 cwd 匹配（CLI（命令行界面）/TUI 在 host cwd 创建的会话，或已删除/重建的注册）会打开一个任何分组表面都无法显示在该工作区下的会话，因此落到新建臂（见[成员复用修复](../../archived/bug-fix/2026-08-05-workspace-blank-session-reuse-membership.md)）；命中直接返回该 id，不新建。
 - 新建臂：未命中则 `session.create({workspaceId})`，返回新 id。
 - 未知 workspaceId fail loud（不静默创建到别处）。
 - 解析保证（两臂同约定）：promise resolve 时返回的 id 已在 list store。视图 owner 随后同步 retain，因此 draft 搬运方可以在历史就绪前通过该 binding 写入文本，无需等待 notifier flush。
 - 调用方拿 id 安装一份 `mainView` reference；首条提示词发送就是普通 `session.prompt`——Session 本来就在，失败即普通提示词失败，draft 文本还在 machine 里，重试即再次发送。
-- 全局 New Session 按钮默认取 `recentWorkspaceId`：先比较各 Workspace 内 Session 的最新 `updatedAt`，无 Session 时回退 Workspace `createdAt`，同值保持 Host 顺序；只有完全没有 Workspace 时才释放主视图 reference，进入无 Session 视图。Workspace 分组内的创建动作仍显式命中该 Workspace。
+- 显式新会话依次选择传入的 Workspace、主 Session 所属的 Workspace，以及最近且已就绪的 Workspace，并通过 `startSession` 创建新的身份。最近顺序比较各 Workspace 内 Session 的最新 `updatedAt`，回退到 Workspace `createdAt`，同值保留 Host 顺序。没有目标时，该动作清除 `mainView` reference、进入无 Session 视图且不创建任何会话；它不保留延后创建意图。
 - 运行时启动时订阅首次完整基线：若已有恢复成功的 current 会话则保持不动，否则自动 `connectWorkspace(recentWorkspaceId)` 并 open 返回的 blank 会话。该策略只结算一次；之后用户主动 clear 不会再次被自动选择覆盖，连接失败则等下一次基线投影重试。
 - blank Hero 中改选 Workspace 也走 `connectWorkspace`；若目标 id 与主视图 id 不同，`ui-workspace` 先 retain 目标，通过 preparation callback 搬运当前 input machine 的非空 draft，再发布新的主 reference。旧 blank 实体不删除，只因其 `mainView` reference 被释放而从列表隐藏。
 
@@ -112,7 +112,7 @@ blank Session 保留 header 的 leading 与 corner slot，让右侧栏展开入�
 - summary `blank` 列与 `host/session-added` 帧 `blank` 字段（见上文 blank 位）。
 - SSE（Server-Sent Events）帧 `host/commands-changed`（纯失效信号）；client 路由为类型事件 `commands/changed` 与 `connection/reset`（连接代建立后广播，wire 派生缓存一律视旧态为陈旧）。 该 commands 帧及其类型化 client 事件后来被「`commands/change` 经 `ctx.remote.$on` 原样转发」取代（[转发的 Remote 事件](2026-08-10-remote-event-delivery.zh.md)）；`connection/reset` 不变；本条陈述的「失效而非差分」契约依然成立。
 - `command.list/execute`、`skills/list` 一律 `sessionId` 单址（会话恒有 Agent，`agentFor` 的恢复语义现成）；命令面叙述见[命令业务面 note](../../archived/architecture/2026-07-25-web-command-surfaces-and-assembly.md)。
-- `session.create` 请求形状：workspaceId/cwd 二选一 + 可选调用方预分配 sessionId（同 id 同 cwd 重试幂等，异 cwd 报 `session-conflict`）。
+- `session.create` 接受二选一的 workspaceId/cwd、可选的创建时 `agentPreset`，以及可选的调用方预分配 sessionId（同 id 同 cwd 重试幂等，异 cwd 报 `session-conflict`）。
 
 ## 考虑过的替代方案
 
@@ -135,6 +135,6 @@ blank Session 保留 header 的 leading 与 corner slot，让右侧栏展开入�
 
 - 插件获得与 host 同构的会话上下文：逐会话状态挂 actx、随 scope fiber 一次拆装，泄漏结构性不可能；双会话隔离由 scope filter 结构性保证。
 - client 对象层收敛为 wire 镜像：会话身份、生命周期、能力判别全部以 host 实体为准——输入体系（下一层）面对的永远是「有真 Agent 的会话」，slash/skill 等提供方一律以 sessionId 直接寻址。
-- 空会话治理零专用机制：状态靠一个派生位，可见性靠统一列表投影（仅 current blank 以 `New Session` 展示），回收靠 lazy persistence 的既有约定（重启蒸发），常规上限靠同 Workspace 复用。
+- 空会话治理零专用机制：状态靠一个派生位，可见性靠统一列表投影（仅 current blank 以 `New Session` 展示），回收靠 lazy persistence 的既有约定（重启蒸发），普通选择保留同 Workspace 复用，但不限制显式新建。
 - 代价：id→ctx 换乘纪律、provide 的 Concurrent 纪律都是约定而非类型强制，靠 review 与测试钉住。单一状态轴仍会在 Session 存在前隐藏 machine face；这段时间内，[常驻会话壳](../../../../packages/client/ui-conversation/README.zh.md)会把激活操作转到 Workspace picker。
 - 已知欠账：approval/question 跨 prune 恢复（TODO）；模型选择以 live-mutation 形状回归（host `selectModel` 三件套现成，其 client 消费方尚未构建）。

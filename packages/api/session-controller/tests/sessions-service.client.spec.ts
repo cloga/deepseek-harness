@@ -2,7 +2,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
-import type { SessionReference } from '../src/client/contract/sessions.ts'
+import type { ISessions, SessionReference } from '../src/client/contract/sessions.ts'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { LlmAttemptId } from '@deepseek-ai/dsh-llm'
 import { RemoteStreamCarrierError } from '@deepseek-ai/dsh-api-gateway/client'
@@ -822,6 +822,45 @@ describe('catalog-addressed navigation', () => {
 })
 
 describe('create', () => {
+  it.for(['workspace', 'cwd'] as const)('forwards a preset through the public %s create without retaining a binding', async (target, { bench }) => {
+    const b = bench()
+    const sessions: ISessions = b.svc
+    const sessionId = sid('preset-born')
+    const destination = target === 'workspace' ? { workspaceId: 'ws' as never } : { cwd: '/w' }
+    b.mock.remote.session.create.mockResolvedValueOnce(ok({ sessionId, agentPreset: 'effective' }))
+
+    await expect(sessions.create({ ...destination, sessionId, agentPreset: 'requested' })).resolves.toBe(sessionId)
+
+    expect(b.mock.remote.session.create.mock.calls).toStrictEqual([[{ ...destination, sessionId, agentPreset: 'requested' }]])
+    expect(sessions.list.getSnapshot().byId[sessionId]).toMatchObject({
+      id: sessionId, blank: true, projectionValues: { agentPreset: 'effective' }, retainedBy: {},
+    })
+    expect(sessions.binding(sessionId)).toBeUndefined()
+    expect(sessions.scope(sessionId)).toBeUndefined()
+    expect(sessions.retainInfo(sessionId).getSnapshot()).toEqual({ referenceCount: 0, retainedBy: {} })
+    expect(b.mock.log.requests(FOLLOW)).toHaveLength(0)
+  })
+
+  it('preserves a typed preset failure and its requested id without cataloguing or retaining it', async ({ bench }) => {
+    const b = bench()
+    const sessionId = sid('preset-candidate')
+    const rpcError = new RemoteError('agent-preset/not-found', 'preset unavailable', {
+      agentPreset: 'missing', available: ['standard'],
+    })
+    b.mock.remote.session.create.mockResolvedValueOnce(err(rpcError))
+
+    const failure = await b.svc.create({ sessionId, agentPreset: 'missing' }).catch((error: unknown) => error)
+
+    expect(b.mock.remote.session.create.mock.calls).toStrictEqual([[{ sessionId, agentPreset: 'missing' }]])
+    expect(failure).toBeInstanceOf(SessionCreateError)
+    expect(failure).toMatchObject({ requestedSessionId: sessionId, rpcError })
+    expect(b.svc.list.getSnapshot().ids).toEqual([])
+    expect(b.svc.binding(sessionId)).toBeUndefined()
+    expect(b.svc.scope(sessionId)).toBeUndefined()
+    expect(b.svc.retainInfo(sessionId).getSnapshot()).toEqual({ referenceCount: 0, retainedBy: {} })
+    expect(b.mock.log.requests(FOLLOW)).toHaveLength(0)
+  })
+
   it('passes a preallocated id and preserves it on ordinary failure', async ({ bench }) => {
     const b = bench()
     b.mock.remote.session.create.mockResolvedValue(ok({ sessionId: sid('fresh') }))

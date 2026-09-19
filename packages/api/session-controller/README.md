@@ -44,6 +44,8 @@ Fork copies history through the selected completed turn, including its `turn/end
 
 A resume blocked by an existing write handle returns `session/writer-held` with the Session id; other resume failures retain `gateway/internal`.
 
+Client `sessions.create` forwards an optional `agentPreset` with the requested Workspace or working directory and optional caller-owned Session id. The Host resolves that preset during creation; omission retains the Host's ordinary default behavior. Only the Host-returned preset seeds the Client projection, at a lower priority than an already observed list or control value; the requested preset is not an optimistic confirmation. Creation makes the returned identity addressable in the catalog but does not acquire a `SessionReference` or select a main view. The navigation owner retains the result explicitly. A creation-bound preset does not require a later mutation of an existing blank Session.
+
 <a id="client-references"></a>
 ## Client references
 

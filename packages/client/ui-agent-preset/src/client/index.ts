@@ -91,15 +91,6 @@ export function apply(ctx: ClientContext): void {
     void unboundSeat.load()
     for (const seat of seats.values) void seat.load()
   })
-  const mainBlankSeat = (scope: ClientContext): AgentPresetSeatController | undefined => {
-    const summary = Object.values(scope.sessions.list.getSnapshot().byId)
-      .find((session) => {
-        /* v8 ignore next -- retained source counts omit zero-valued entries. */
-        return session.blank && (session.retainedBy.mainView ?? 0) > 0
-      })
-    const binding = summary === undefined ? undefined : scope.sessions.binding(summary.id)
-    return binding === undefined ? undefined : seatFor(scope, binding)
-  }
 
   ctx.effect(() => ctx.locale.register('settings.agentPreset', { zh, en }), 'ui-agent-preset: settings row dictionaries')
 
@@ -126,12 +117,9 @@ export function apply(ctx: ClientContext): void {
     return () => { for (const dispose of disposers) dispose() }
   }, 'ui-agent-preset: settings refresh')
 
-  // The settings section's conversational authoring entry: stage the
-  // self-referential preset and land a new session on it. Bound inside the
-  // conversation scope below (the seat and the session flow live there) and
-  // unbound with it, so the section's face reads the current binding per
-  // render and simply hides the button while no flow exists.
-  let creatorDraft: (() => void) | undefined
+  // Creator composition belongs to the fresh Host creation request, not an old blank or a deferred chip stage.
+  // The bound seat receives only a visual introduction after its main-view commit.
+  let creatorDraft: (() => Promise<boolean>) | undefined
   ctx.inject(['slots', 'conversation', 'sessions', 'uiWorkspace'], (scope: ClientContext) => {
     const seatInjected = (sessionId: SessionId | undefined): AgentPresetSeatInjected => {
       const binding = sessionId === undefined ? undefined : scope.sessions.binding(sessionId)
@@ -150,12 +138,27 @@ export function apply(ctx: ClientContext): void {
     })
 
     scope.effect(() => {
-      creatorDraft = () => {
-        if (!section.store.getSnapshot().showPicker) return
-        const seat = mainBlankSeat(scope) ?? unboundSeat
-        seat.stage('cordis', true)
-        scope.uiWorkspace.startSession()
-        void seat.apply()
+      let active = true
+      let generation = 0
+      creatorDraft = async () => {
+        if (!active || !section.store.getSnapshot().showPicker) return false
+        const request = ++generation
+        unboundSeat.discardStage()
+        try {
+          const sessionId = await scope.uiWorkspace.startSession(undefined, { agentPreset: 'cordis' })
+          if (!active || request !== generation || sessionId === undefined || !section.store.getSnapshot().showPicker) return false
+          const binding = scope.sessions.binding(sessionId)
+          const isCurrent = (): boolean => active && request === generation && binding !== undefined
+            && scope.sessions.binding(sessionId) === binding
+            && (scope.sessions.retainInfo(sessionId).getSnapshot().retainedBy.mainView ?? 0) > 0
+            && scope.sessions.list.getSnapshot().byId[sessionId]?.projectionValues?.agentPreset === 'cordis'
+          if (binding === undefined || !isCurrent()) return false
+          seatFor(scope, binding).introduce()
+          return isCurrent()
+        } catch (reason: unknown) {
+          if (active && request === generation) console.warn('creator session failed:', reason)
+          return false
+        }
       }
       const chip = scope.slots.register({
         name: 'conversation.hero.agentPreset',
@@ -171,6 +174,8 @@ export function apply(ctx: ClientContext): void {
         inject: labelInjected,
       }, AgentPresetLabel)
       return () => {
+        active = false
+        generation++
         creatorDraft = undefined
         chip()
         label()

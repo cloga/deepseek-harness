@@ -236,14 +236,14 @@ These combined facts do not enter `WorkspaceSnapshot`:
 - whether the Workspace and Session baselines are both ready;
 - the most recent Workspace derived from Session update times;
 - whether the current Session is cleared because it was archived;
-- which blank Session New Session should reuse;
+- which blank Session ordinary Workspace selection should reuse;
 - which Session initial startup should select.
 
 ### UI Workspace composition responsibilities
 
 `client/ui-workspace` registers the Workspace list source as the root standard source `workspaces`, from which the renderer provides `useWorkspaces`.
 
-Initial restoration, blank-Session reuse, new-session navigation, concurrent-create coalescing, and navigation after archival are UI policy. `ui-workspace` may read both Controllers, but it keeps the main target and reference in its own navigation owner instead of writing UI selection into a Controller snapshot.
+Initial restoration, ordinary blank-Session reuse, explicit fresh-session navigation, and navigation after archival are UI policy. `ui-workspace` keeps fresh-start coalescing separate from ordinary reuse and keys pending fresh creation by the complete Workspace and preset intent. It may read both Controllers, but it keeps the main target and `mainView` reference in its own navigation owner instead of writing UI selection into a Controller snapshot. The [fresh-identity decision](../bug-fix/2026-09-19-explicit-new-session-fresh-identity.md) owns creation and Creator binding; it does not change direct-subagent addressing or reference lifetimes.
 
 Directory pickers, directory browsing, and `openPath` are separate directory capabilities and do not enter the Workspace Controller.
 
