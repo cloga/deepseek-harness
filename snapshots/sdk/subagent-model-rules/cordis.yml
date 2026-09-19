@@ -13,6 +13,11 @@
 - id: session-title-llm
   disabled: true
 
+# This route scenario does not exercise provider Session-log delivery.
+- id: session-log-deepseek
+  config:
+    enabled: false
+
 - id: subagent
   name: '@deepseek-ai/dsh-subagent'
   config:
