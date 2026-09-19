@@ -486,6 +486,7 @@ async function main(): Promise<void> {
     const cancellation = new AbortController()
     mutationAbort = cancellation
     let interrupted = false
+    const hasStartedInterruption = (): boolean => interrupted
     const pending = (async () => {
       try {
         await startup?.catch(() => undefined)
@@ -493,7 +494,7 @@ async function main(): Promise<void> {
           ...hooks,
           beforeChange: async () => {
             // This hook runs under the transaction lock after staging; rollback must not ask again.
-            if (!interrupted) {
+            if (!hasStartedInterruption()) {
               await confirmDesktopPluginMutation({
                 messages, signal: cancellation.signal, cancelled: hasQuitStarted,
                 readImpact: async (signal) => {
@@ -504,7 +505,8 @@ async function main(): Promise<void> {
                   const host = active === undefined
                     ? { runningSessions: 0, queuedMessages: 0, runningJobs: 0 } : await active.updateImpact(signal)
                   const url = window?.webContents.getURL()
-                  const renderer = url === startupUrl || emergencyDocument
+                  const isEmergencyPage = window !== undefined && url === emergencyPages.get(window)?.url
+                  const renderer = url === startupUrl || isEmergencyPage
                     ? { hasDraft: false, attachmentCount: 0, submitting: false }
                     : window === undefined ? undefined : await requestDesktopRendererImpact(window.webContents, ipcMain, signal)
                   if (renderer === undefined) throw new Error('Application impact unavailable')
@@ -537,7 +539,7 @@ async function main(): Promise<void> {
         await navigateMain(applicationUrl)
         return receipt
       } catch (error) {
-        if (interrupted) await showStartupError(error)
+        if (hasStartedInterruption()) await showStartupError(error)
         throw error
       }
     })()

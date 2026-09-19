@@ -357,8 +357,9 @@ describe('desktop plugin interruption boundary', () => {
       { hasDraft: true, attachmentCount: 5, submitting: true }, { hasDraft: false, attachmentCount: 0, submitting: false },
     ])
     staged.resolve(undefined); await mutation
-    expect(harness.dialog.showMessageBox.mock.calls[0]?.[1]).toMatchObject({ detail: expect.stringContaining('Draft attachments: 5'), defaultId: 1, cancelId: 1 })
-    expect(harness.dialog.showMessageBox.mock.calls[1]?.[1]).toMatchObject({ detail: expect.stringContaining('Draft attachments: 0') })
+    expect(harness.dialog.showMessageBox.mock.calls[0]?.[1]).toMatchObject({ defaultId: 1, cancelId: 1 })
+    expect(harness.dialog.showMessageBox.mock.calls[0]?.[1]).toHaveProperty('detail', expect.stringContaining('Draft attachments: 5'))
+    expect(harness.dialog.showMessageBox.mock.calls[1]?.[1]).toHaveProperty('detail', expect.stringContaining('Draft attachments: 0'))
     expect(harness.hosts[0]!.updateImpact).toHaveBeenCalledTimes(2)
     expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
   })
@@ -372,10 +373,35 @@ describe('desktop plugin interruption boundary', () => {
     expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
     expect(harness.windows[0]!.urls).toEqual(before)
   })
+  it.each([true, false])('reads the retained app document after failed emergency navigation: impactAvailable=%s', async (available) => {
+    await startApplication()
+    const window = harness.windows[0]!
+    const before = [...window.urls]
+    const failure = new Error('emergency navigation failed')
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const load = vi.spyOn(window, 'loadURL').mockRejectedValueOnce(failure)
+    window.webContents.emit('preload-error', {}, 'preload-app.cjs', new Error('preload unavailable'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(load).toHaveBeenCalledWith(expect.stringMatching(/^data:text\/html/u))
+    expect(diagnostic).toHaveBeenCalledWith(failure)
+    expect(window.webContents.getURL()).toBe('dsh-app://app/index.html')
+    harness.setRendererImpacts([available ? { hasDraft: true, attachmentCount: 3, submitting: true } : null])
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
+    await expect(Promise.resolve(invoke(DESKTOP_IPC.pluginsDisableAll, shell)))
+      .rejects.toThrow(available ? 'Cancelled' : 'current work')
+    expect(window.webContents.send).toHaveBeenCalledWith(DESKTOP_IPC.pluginImpactRequest, expect.any(String))
+    if (available) {
+      expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
+      const options = harness.dialog.showMessageBox.mock.calls[0]?.[1] as { detail: string }
+      expect(options.detail).toContain('Unsaved draft: Yes\nDraft attachments: 3\nSubmission in progress: Yes')
+    } else expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
+    expect(window.urls).toEqual(before)
+  })
   it('aborts a pending native dialog on quit and prevents repeated quit until cleanup completes', async () => {
     await startApplication()
     harness.dialog.showMessageBox.mockImplementation((_window: unknown, options: { signal: AbortSignal }) => new Promise((resolve) => {
-      options.signal.addEventListener('abort', () => resolve({ response: 1 }), { once: true })
+      options.signal.addEventListener('abort', () => { resolve({ response: 1 }) }, { once: true })
     }))
     const mutation = expect(Promise.resolve(invoke(DESKTOP_IPC.pluginsDisableAll, shell))).rejects.toThrow('Cancelled')
     await vi.advanceTimersByTimeAsync(0)

@@ -40,7 +40,7 @@ export async function confirmDesktopPluginMutation(options: {
   const cancelled = (): boolean => options.cancelled() || signal?.aborted === true
   const read = async (): Promise<DesktopPluginMutationImpact> => {
     const controller = new AbortController()
-    const abort = (): void => controller.abort()
+    const abort = (): void => { controller.abort() }
     signal?.addEventListener('abort', abort, { once: true })
     if (signal?.aborted === true) abort()
     const timer = setTimeout(abort, 5000)

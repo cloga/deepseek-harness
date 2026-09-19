@@ -61,7 +61,9 @@ describe('plugin mutation interruption consent', () => {
     let received: AbortSignal | undefined
     const readImpact = (signal: AbortSignal): Promise<DesktopPluginMutationImpact> => {
       received = signal
-      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('transport cancelled')), { once: true }))
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => { reject(new Error('transport cancelled')) }, { once: true })
+      })
     }
     try {
       const pending = confirmDesktopPluginMutation({
