@@ -1,0 +1,7 @@
+Reset Desktop and retry
+Delete all Desktop plugins and configuration?
+Reset first saves a verified copy of configuration and plugin artifacts under the Harness home (desktop/profile-recovery), then removes the active Desktop configuration and plugins. node_modules is excluded; restoration is manual. If copying fails, nothing is deleted. Shared tasks and settings are retained.
+
+This is not a normal update or restart. Choose Cancel to keep your current plugins and configuration.
+Delete Plugins and Reset
+Cancel

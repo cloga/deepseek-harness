@@ -22,11 +22,11 @@ Desktop 保留旧 profile，直到 staged 健康检查、激活重命名、最�
 
 经过验证的安装在版本化 receipt 中持久保存锁定来源、GitHub Release 与资产标识、产物 hash、包身份与事务状态，并在 profile 私有目录中保留本地 tgz。类型化 preload API 暴露 source schema version 1 与 capability `{ id: "desktopNativeVerifiedRelease", schemaVersion: 1 }`，但不暴露自由格式下载 URL。一个事务只接受一种来源路径，因此外部 provisioner 与原生安装器不能同时提供根包。
 
-Desktop release 也可以携带通用的 `desktopNativePluginProvisioning` schema 1 精确状态 plan。启动协调 release-owned 插件，同时保留无关的手动 registry、来源快照与 verified-release 插件和应用拥有的 shared package。Required 条目建立经过验证的基线。Optional 条目在独立 candidate 中测试，因此 download、validation、install、graph 或 health 失败只排除对应条目。其持久结果记录阶段与原因，不包含成功 receipt；required 失败保留先前 profile。
+Desktop release 也可以携带通用的 `desktopNativePluginProvisioning` schema 1 精确状态 plan。启动协调 release-owned 插件，同时保留无关的手动 registry、来源快照与 verified-release 插件和应用拥有的 shared package。Required 条目建立经过验证的基线。Optional 条目在独立 candidate 中测试。只有[用户清单检查](../bug-fix/2026-09-19-desktop-user-inventory-guards.zh.md)允许该条目缺失时，download、validation、install、graph 或 health 失败才排除该条目；已有手动安装不能因 optional 失败而被丢弃。其持久结果记录阶段与原因，不包含成功 receipt；required 失败保留先前 profile。
 
 活动 profile 存储规范 plan hash、逐插件 source 与 receipt、required 标记、组合状态、被删除的 release-owned 包、rollback 状态和 verification 状态。复用要求 desired/result 成员完全一致，已安装版本、启用状态、receipt 与来源、本地 artifact 字节均匹配，且没有多余 release-owned 根包，空 plan 也不例外。托管 completion 在最终位置的 Host ready 后独立验证此清单。Neutral browser 证据证明通用 Models 组合与认证 dispatch，而不是某个外部 provider release。
 
-受信管理页为既有 verified-release 安装 API 提供独立 JSON 入口。它不会把普通归档 URL 变成经过证明的 Release，不会弱化原生来源解析器，也不会授予应用渲染进程安装权限。显式安装仍归用户所有；下次启动时，release plan 仍控制其自身的包名。
+受信管理页为既有 verified-release 安装 API 提供独立 JSON 入口。它不会把普通归档 URL 变成经过证明的 Release，不会弱化原生来源解析器，也不会授予应用渲染进程安装权限。显式安装仍归用户所有；同名手动来源冲突会按用户清单决策停止自动启动协调，而不是授权接管。
 
 原生插件管理变更在串行事务首次调用 `beforeChange` 时获取中断同意，此时 staging 已完成而 Host 尚未停止。确认绑定当前 Host 活动数量与最新的渲染进程输入影响；影响变化时必须再次确认。缺少影响数据时拒绝中断。在获得同意前保持应用文档存活，可在准备失败或用户取消时保留草稿。回滚的 stop hook 不再询问：profile 激活后允许取消会阻止必要的恢复。启动协调保留其启动流程，不打开手动插件对话框。
 

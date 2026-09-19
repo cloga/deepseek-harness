@@ -12,6 +12,8 @@ import type { DesktopGithubReleasePluginSource, DesktopPluginProvisionReceipt } 
 import { parseDesktopPluginProvisioningPlan } from '../src/plugin-provisioning.ts'
 import { readDesktopProfileState } from '../src/profile-packages.ts'
 import { readDesktopPackageLocks } from '../src/plugin-package-lock.ts'
+import * as recoveryCopy from '../src/profile-recovery-copy.ts'
+import * as operationAudit from '../src/profile-operation-audit.ts'
 import { runtimeFixture } from './runtime-fixture.ts'
 import { ProjectFixtureWork, trackProjectFixtureTests } from './fixtures/project-fixture-work.ts'
 
@@ -280,6 +282,7 @@ beforeEach(() => {
   fixtureWork.begin()
   originalFetch = globalThis.fetch
 })
+// Match the release lane's hook budget; owned child quiescence retains its separate 25s bound.
 afterEach(async ({ task }) => {
   const releases = releaseWorkers.splice(0).map(cleanup => fixtureWork.track('worker release', cleanup))
   const results = Promise.allSettled(releases)
@@ -298,9 +301,239 @@ afterEach(async ({ task }) => {
   for (const root of directories) rmSync(root, { recursive: true, force: true })
   const failures: unknown[] = (await results).flatMap((result): unknown[] => result.status === 'rejected' ? [result.reason] : [])
   if (failures.length > 0) throw new AggregateError(failures, 'desktop worker cleanup failed')
-})
+}, 90_000)
+
+function profileMetadata(profile: string): Record<string, string | null> {
+  return Object.fromEntries([
+    'package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', 'desktop-runtime-state.json',
+    'desktop-plugin-receipts.json', 'desktop-plugin-package-locks.json', 'desktop-plugin-provisioning-state.json',
+  ].map(name => [name, existsSync(join(profile, name)) ? readFileSync(join(profile, name)).toString('base64') : null]))
+}
 
 describe('desktop external plugin profile', () => {
+  it.each([true, false])('refuses inventory bootstrap without runtime metadata for enabled=%s', async (enabled) => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-add', spec: 'manual-plugin@1.0.0' }, hooks())
+    if (!enabled) await manager.mutate({ type: 'plugin-toggle', name: 'manual-plugin', enabled }, hooks())
+    unlinkSync(join(manager.paths.profile, 'desktop-runtime-state.json'))
+    const before = profileMetadata(manager.paths.profile), count = calls(root).length
+    const beforeChange = vi.fn(async () => {})
+    await expect(manager.applyRelease(hooks({ beforeChange }), { schemaVersion: 1, mode: 'exact', plugins: [] }))
+      .rejects.toThrow('runtime metadata is missing')
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    expect(calls(root)).toHaveLength(count)
+    expect(beforeChange).not.toHaveBeenCalled()
+  })
+
+  it('rejects orphan user receipt inventory rather than adopting an empty manifest', async () => {
+    const { root, manager } = setup()
+    const fixture = pluginFixture('manual-verified')
+    mockVerifiedPlugins([fixture])
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-install', source: fixture.source }, hooks())
+    const manifestPath = join(manager.paths.profile, 'package.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dependencies: Record<string, string>; dsh: { profile: { bundles: string[] } } }
+    manifest.dependencies = Object.fromEntries(
+      Object.entries(manifest.dependencies).filter(([name]) => name !== fixture.source.packageName),
+    )
+    manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter(name => name !== fixture.source.packageName)
+    writeFileSync(manifestPath, JSON.stringify(manifest))
+    const before = profileMetadata(manager.paths.profile), count = calls(root).length
+    await expect(manager.applyRelease()).rejects.toThrow('orphan user plugin metadata')
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    expect(calls(root)).toHaveLength(count)
+  })
+
+  it.each(['staged', 'final'] as const)('rejects user inventory shrink during %s health verification', async (phase) => {
+    const { manager } = setup()
+    const fixture = pluginFixture('release-provider')
+    mockVerifiedPlugins([fixture])
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-add', spec: 'manual-disabled@1.0.0' }, hooks())
+    await manager.mutate({ type: 'plugin-toggle', name: 'manual-disabled', enabled: false }, hooks())
+    const before = profileMetadata(manager.paths.profile)
+    let changed = false
+    const shrink = (profile: string): void => {
+      if (changed) return
+      changed = true
+      const manifestPath = join(profile, 'package.json')
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dependencies: Record<string, string> }
+      delete manifest.dependencies['manual-disabled']
+      writeFileSync(manifestPath, JSON.stringify(manifest))
+    }
+    await expect(manager.reconcileProvisioning({ schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source: fixture.source }] }, hooks({
+      healthCheck: async (profile) => { if (phase === 'staged') shrink(profile) },
+      afterChange: async () => { if (phase === 'final') shrink(manager.paths.profile) },
+    }))).rejects.toThrow('user plugin inventory changed')
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    expect(manager.listPlugins()).toEqual([{ name: 'manual-disabled', version: '1.0.0', enabled: false }])
+  })
+
+  it.each(['package.json', 'desktop.cordis.yml', 'pnpm-workspace.yaml', 'desktop-plugin-package-locks.json'])(
+    'refuses inventory bootstrap when only owned metadata %s remains', async (name) => {
+      const { root, manager } = setup()
+      mkdirSync(manager.paths.profile, { recursive: true })
+      const file = join(manager.paths.profile, name)
+      writeFileSync(file, 'retained owned metadata')
+      await expect(manager.applyRelease()).rejects.toThrow('runtime metadata is missing')
+      expect(readFileSync(file, 'utf8')).toBe('retained owned metadata')
+      expect(calls(root)).toEqual([])
+    },
+  )
+
+  it.skipIf(process.platform !== 'win32')('refuses inventory bootstrap for differently cased Package.JSON', async () => {
+    const { manager } = setup()
+    mkdirSync(manager.paths.profile, { recursive: true })
+    const file = join(manager.paths.profile, 'Package.JSON')
+    writeFileSync(file, 'retained Windows case alias')
+    await expect(manager.applyRelease()).rejects.toThrow('runtime metadata is missing')
+    expect(readFileSync(file, 'utf8')).toBe('retained Windows case alias')
+  })
+
+  it('refuses inventory bootstrap from a broken owned package link', async () => {
+    const { root, manager } = setup()
+    mkdirSync(manager.paths.profile, { recursive: true })
+    const target = join(root, 'old-modules')
+    mkdirSync(target)
+    symlinkSync(target, join(manager.paths.profile, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')
+    rmSync(target, { recursive: true })
+    await expect(manager.applyRelease()).rejects.toThrow('runtime metadata is missing')
+    expect(fs.lstatSync(join(manager.paths.profile, 'node_modules')).isSymbolicLink()).toBe(true)
+    expect(existsSync(join(manager.paths.profile, 'package.json'))).toBe(false)
+  })
+
+  it.each(['registry-add', 'registry-update', 'source-add', 'verified-install'] as const)(
+    'retains the requested %s target through final health verification', async (operation) => {
+      const { root, manager } = setup()
+      const fixture = pluginFixture('requested-target')
+      mockVerifiedPlugins([fixture])
+      await manager.applyRelease()
+      await manager.mutate({ type: 'plugin-add', spec: 'unrelated@1.0.0' }, hooks())
+      if (operation === 'registry-update') await manager.mutate({ type: 'plugin-add', spec: 'requested-target@1.0.0' }, hooks())
+      const archive = join(root, 'not-the-package-name.tgz')
+      writeFileSync(archive, fixture.archive)
+      const mutation = operation === 'registry-update' ? { type: 'plugin-update' as const, name: fixture.source.packageName, version: '2.0.0' }
+        : operation === 'verified-install' ? { type: 'plugin-install' as const, source: fixture.source }
+          : { type: 'plugin-add' as const, spec: operation === 'source-add' ? archive : 'requested-target@1.0.0' }
+      const before = profileMetadata(manager.paths.profile)
+      let changed = false
+      await expect(manager.mutate(mutation, hooks({ afterChange: async () => {
+        if (changed) return
+        changed = true
+        const file = join(manager.paths.profile, 'package.json')
+        const manifest = JSON.parse(readFileSync(file, 'utf8')) as { dependencies: Record<string, string>; dsh: { profile: { bundles: string[] } } }
+        manifest.dependencies = Object.fromEntries(
+          Object.entries(manifest.dependencies).filter(([name]) => name !== fixture.source.packageName),
+        )
+        manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter(name => name !== fixture.source.packageName)
+        writeFileSync(file, JSON.stringify(manifest))
+        const receiptPath = join(manager.paths.profile, 'desktop-plugin-receipts.json')
+        if (existsSync(receiptPath)) {
+          const store = receiptStore(manager)
+          store.receipts = Object.fromEntries(Object.entries(store.receipts).filter(([name]) => name !== fixture.source.packageName))
+          if (store.owners !== undefined) {
+            store.owners = Object.fromEntries(Object.entries(store.owners).filter(([name]) => name !== fixture.source.packageName))
+          }
+          writeFileSync(receiptPath, JSON.stringify(store))
+        }
+        const lockPath = join(manager.paths.profile, 'desktop-plugin-package-locks.json')
+        if (existsSync(lockPath)) writeFileSync(lockPath, JSON.stringify({ schemaVersion: 1, packages: {} }))
+      } }))).rejects.toThrow('requested plugin inventory changed')
+      expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    },
+  )
+
+  it.each((['source', 'verified'] as const).flatMap(kind =>
+    (['delete', 'corrupt'] as const).flatMap(damage => (['staged', 'final'] as const).map(phase => ({ kind, damage, phase }))),
+  ))('retains disabled $kind artifact bytes after $phase $damage tampering', async ({ kind, damage, phase }) => {
+    const { root, manager } = setup()
+    const fixture = pluginFixture('manual-artifact')
+    mockVerifiedPlugins([fixture])
+    await manager.applyRelease()
+    const archive = join(root, 'manual.tgz')
+    writeFileSync(archive, fixture.archive)
+    await manager.mutate(kind === 'source' ? { type: 'plugin-add', spec: archive } : { type: 'plugin-install', source: fixture.source }, hooks())
+    await manager.mutate({ type: 'plugin-toggle', name: fixture.source.packageName, enabled: false }, hooks())
+    const artifact = `.desktop-plugin-artifacts/${fixture.source.sha256}.tgz`
+    const before = profileMetadata(manager.paths.profile)
+    let changed = false
+    const damageArtifact = (profile: string): void => {
+      if (changed) return
+      changed = true
+      if (damage === 'delete') unlinkSync(join(profile, artifact))
+      else writeFileSync(join(profile, artifact), 'corrupted artifact')
+    }
+    await expect(manager.mutate({ type: 'plugin-add', spec: 'unrelated@1.0.0' }, hooks({
+      healthCheck: async (profile) => { if (phase === 'staged') damageArtifact(profile) },
+      afterChange: async () => { if (phase === 'final') damageArtifact(manager.paths.profile) },
+    }))).rejects.toThrow(/artifact snapshot|locked local artifacts/u)
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    expect(readFileSync(join(manager.paths.profile, artifact))).toEqual(fixture.archive)
+  })
+
+  it.each((['registry', 'source', 'different-verified', 'disabled-verified'] as const)
+    .flatMap(origin => [true, false].map(required => ({ origin, required }))))(
+    'rejects desired user $origin collision with required=$required before package work', async ({ origin, required }) => {
+      const { root, manager } = setup()
+      const fixture = pluginFixture('manual-collision')
+      const archive = origin === 'different-verified' ? verifiedPluginArchive(fixture.source.packageName, fixture.source.version, '>=1.0.0') : fixture.archive
+      mockVerifiedPlugins([{ archive, source: verifiedSource(archive, fixture.source.packageName) }])
+      await manager.applyRelease()
+      const input = join(root, 'collision.tgz')
+      writeFileSync(input, archive)
+      if (origin === 'registry' || origin === 'source') await manager.mutate({ type: 'plugin-add', spec: origin === 'registry' ? `${fixture.source.packageName}@${fixture.source.version}` : input }, hooks())
+      else await manager.mutate({ type: 'plugin-install', source: verifiedSource(archive, fixture.source.packageName) }, hooks())
+      if (origin === 'disabled-verified') await manager.mutate({ type: 'plugin-toggle', name: fixture.source.packageName, enabled: false }, hooks())
+      const before = profileMetadata(manager.paths.profile), count = calls(root).length
+      const acquisition = vi.spyOn(globalThis, 'fetch').mockImplementation(verifiedFetch(fixture.source, fixture.archive))
+      acquisition.mockClear()
+      await expect(manager.reconcileProvisioning({ schemaVersion: 1, mode: 'exact', plugins: [{ required, source: fixture.source }] }, hooks()))
+        .rejects.toThrow('release plan conflicts with user plugin')
+      expect(profileMetadata(manager.paths.profile)).toEqual(before)
+      expect(calls(root)).toHaveLength(count)
+      expect(acquisition).not.toHaveBeenCalled()
+    },
+  )
+
+  it('does not let a stale release receipt authorize removal of a registry declaration', async () => {
+    const { manager } = setup()
+    const fixture = pluginFixture('release-provider')
+    mockVerifiedPlugins([fixture])
+    await manager.applyRelease(hooks(), { schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source: fixture.source }] })
+    const file = join(manager.paths.profile, 'package.json')
+    const manifest = JSON.parse(readFileSync(file, 'utf8')) as { dependencies: Record<string, string> }
+    manifest.dependencies[fixture.source.packageName] = '1.0.0'
+    writeFileSync(file, JSON.stringify(manifest))
+    const before = profileMetadata(manager.paths.profile)
+    await expect(manager.reconcileProvisioning({ schemaVersion: 1, mode: 'exact', plugins: [] }, hooks())).rejects.toThrow('inconsistent user plugin metadata')
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+  })
+
+  it.each(['registry-mismatch', 'dual-store'] as const)('rejects user source inventory %s before fast-path reuse', async (damage) => {
+    const { root, manager } = setup()
+    const fixture = pluginFixture('manual-source')
+    mockVerifiedPlugins([fixture])
+    await manager.applyRelease()
+    const input = join(root, 'source.tgz')
+    writeFileSync(input, fixture.archive)
+    await manager.mutate({ type: 'plugin-add', spec: input }, hooks())
+    if (damage === 'registry-mismatch') {
+      const file = join(manager.paths.profile, 'package.json')
+      const manifest = JSON.parse(readFileSync(file, 'utf8')) as { dependencies: Record<string, string> }
+      manifest.dependencies[fixture.source.packageName] = fixture.source.version
+      writeFileSync(file, JSON.stringify(manifest))
+    } else {
+      const locks = readDesktopPackageLocks(manager.paths.profile)
+      await manager.mutate({ type: 'plugin-install', source: fixture.source }, hooks())
+      writeFileSync(join(manager.paths.profile, 'desktop-plugin-package-locks.json'), JSON.stringify({ schemaVersion: 1, packages: locks }))
+    }
+    const before = profileMetadata(manager.paths.profile), count = calls(root).length
+    await expect(manager.applyRelease()).rejects.toThrow('inconsistent user plugin metadata')
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    expect(calls(root)).toHaveLength(count)
+  })
+
   it('changes runtime generations without deleting legacy host links', async () => {
     const { root, manager } = setup()
     await manager.applyRelease()
@@ -319,6 +552,7 @@ describe('desktop external plugin profile', () => {
     await expect(runtimeManager.applyRelease()).resolves.toBe(false)
   })
 
+  // The release lane grants 90s for serial package children, rejected activation, rollback, retry and durable audit writes.
   it.each(['legacy', 'explicit'] as const)('retains off-plan user verified plugins during a runtime-mode exact-plan upgrade: %s ownership', async (ownership) => {
     const { root, manager } = setup()
     const fixtures = ['release-provider', 'manual-verified'].map((name) => {
@@ -386,7 +620,7 @@ describe('desktop external plugin profile', () => {
       expect(calls(root)).toHaveLength(beforeReuse)
       expect(calls(root).every(call => call.project !== manager.paths.profile)).toBe(true)
     } finally { globalThis.fetch = original }
-  })
+  }, 90_000)
 
   it('isolates two required release acquisitions sharing SHA256SUMS', async () => {
     const { manager } = setup()
@@ -443,6 +677,12 @@ describe('desktop external plugin profile', () => {
         const path = join(manager.paths.profile, 'desktop-plugin-provisioning-state.json')
         const state = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
         writeFileSync(path, JSON.stringify({ ...state, plugins: [] }))
+      }
+      if (drift === 'registry' || drift === 'alternate-artifact') {
+        const before = profileMetadata(manager.paths.profile)
+        await expect(manager.reconcileProvisioning(plan, hooks())).rejects.toThrow('release plan conflicts with user plugin')
+        expect(profileMetadata(manager.paths.profile)).toEqual(before)
+        return
       }
       const state = await manager.reconcileProvisioning(plan, hooks())
       if (drift === 'empty-extra') {
@@ -620,7 +860,7 @@ describe('desktop external plugin profile', () => {
     expect(readFileSync(join(next.paths.profile, '.desktop-plugin-artifacts', `${first.source.sha256}.tgz`))).toEqual(first.archive)
   }, 30_000)
 
-  it.each(['download', 'health'] as const)('does not retain ownership after optional replacement %s failure', async (phase) => {
+  it.each(['download', 'health'] as const)('retains user inventory after optional replacement %s failure', async (phase) => {
     const { root, manager } = setup()
     const target = pluginFixture('optional-target')
     const manual = pluginFixture('manual-verified')
@@ -630,25 +870,23 @@ describe('desktop external plugin profile', () => {
     await manager.mutate({ type: 'plugin-install', source: manual.source }, hooks())
     if (phase === 'download') vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('optional download failure'))
     const plan = { schemaVersion: 1, mode: 'exact', plugins: [{ required: false, source: target.source }] }
-    const state = await manager.reconcileProvisioning(plan, hooks({
+    const before = profileMetadata(manager.paths.profile)
+    await expect(manager.reconcileProvisioning(plan, hooks({
       healthCheck: async (staging) => {
         const manifest = JSON.parse(readFileSync(join(staging, 'package.json'), 'utf8')) as { dependencies: Record<string, string> }
         if (phase === 'health' && Object.hasOwn(manifest.dependencies, target.source.packageName)) throw new Error('optional health failure')
       },
-    }))
-    expect(state.plugins).toMatchObject([{ name: target.source.packageName, status: 'optional-failed', phase }])
-    expect(state.removed).toEqual([])
-    expect(receiptStore(manager).owners).toEqual({ 'manual-verified': 'user' })
-    expect(receiptStore(manager).receipts[target.source.packageName]).toBeUndefined()
-    expect(existsSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${target.source.sha256}.tgz`))).toBe(false)
-    expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(['manual-verified'])
+    }))).rejects.toThrow('user plugin inventory changed')
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    expect(receiptStore(manager).owners).toEqual({ 'manual-verified': 'user', 'optional-target': 'user' })
+    expect(readFileSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${target.source.sha256}.tgz`))).toEqual(target.archive)
+    expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(['manual-verified', 'optional-target'])
     const count = calls(root).length
-    await manager.reconcileProvisioning(plan, hooks())
-    expect(calls(root)).toHaveLength(count)
-    expect(() => assertDesktopProvisioningInventory(manager.paths.profile, parseDesktopPluginProvisioningPlan(plan))).not.toThrow()
     mockVerifiedPlugins([target, manual])
-    await manager.mutate({ type: 'plugin-install', source: target.source }, hooks())
-    expect(() => assertDesktopProvisioningInventory(manager.paths.profile, parseDesktopPluginProvisioningPlan(plan))).toThrow('active inventory')
+    await manager.reconcileProvisioning(plan, hooks())
+    expect(calls(root).length).toBeGreaterThan(count)
+    expect(() => assertDesktopProvisioningInventory(manager.paths.profile, parseDesktopPluginProvisioningPlan(plan))).not.toThrow()
+    expect(receiptStore(manager).owners?.[target.source.packageName]).toBe('user')
   }, 30_000)
 
   it('rejects malformed legacy ownership evidence without changing the active profile', async () => {
@@ -883,7 +1121,7 @@ describe('desktop external plugin profile', () => {
     expect(manager.listPlugins()).toEqual([])
   })
 
-  it.each(['old-moved', 'new-activated'] as const)('recovers an interrupted directory activation: %s', async (phase) => {
+  it.each(['old-moved', 'new-activated'] as const)('retains recoverable evidence for interrupted directory activation: %s', async (phase) => {
     const { root, manager } = setup()
     await manager.applyRelease()
     writeFileSync(join(manager.paths.profile, 'old-profile-sentinel'), 'recover me')
@@ -896,10 +1134,171 @@ describe('desktop external plugin profile', () => {
     writeFileSync(join(manager.paths.root, 'profile-activation.json'), JSON.stringify({
       schemaVersion: 1, transaction: transaction.split(/[\\/]/u).at(-1), phase: 'activating',
     }))
+    if (phase === 'new-activated') {
+      await expect(manager.applyRelease()).rejects.toThrow('candidate metadata is incomplete')
+      expect(readFileSync(join(transaction, 'rollback', 'old-profile-sentinel'), 'utf8')).toBe('recover me')
+      expect(readFileSync(join(manager.paths.profile, 'unverified-new-profile'), 'utf8')).toBe('not ready')
+      expect(existsSync(join(manager.paths.root, 'profile-activation.json'))).toBe(true)
+    } else {
+      await manager.applyRelease()
+      expect(readFileSync(join(manager.paths.profile, 'old-profile-sentinel'), 'utf8')).toBe('recover me')
+      expect(existsSync(transaction)).toBe(false)
+    }
+  })
+
+  it.each(['activating', 'committed'] as const)('keeps both profiles when legacy %s recovery would shrink manual inventory', async (phase) => {
+    const { root, manager } = setup()
     await manager.applyRelease()
-    expect(readFileSync(join(manager.paths.profile, 'old-profile-sentinel'), 'utf8')).toBe('recover me')
-    expect(existsSync(join(manager.paths.profile, 'unverified-new-profile'))).toBe(false)
-    expect(existsSync(transaction)).toBe(false)
+    await manager.mutate({ type: 'plugin-add', spec: 'manual-plugin@1.0.0' }, hooks())
+    const transaction = mkdtempSync(join(root, '.dsh', 'profiles', '.desktop-transaction-'))
+    const rollback = join(transaction, 'rollback')
+    fs.cpSync(manager.paths.profile, rollback, { recursive: true, verbatimSymlinks: true })
+    const smaller = phase === 'activating' ? rollback : manager.paths.profile
+    const manifestPath = join(smaller, 'package.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dependencies: Record<string, string>; dsh: { profile: { bundles: string[] } } }
+    delete manifest.dependencies['manual-plugin']
+    manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter(name => name !== 'manual-plugin')
+    writeFileSync(manifestPath, JSON.stringify(manifest))
+    const activeBefore = profileMetadata(manager.paths.profile), rollbackBefore = profileMetadata(rollback)
+    const journal = join(manager.paths.root, 'profile-activation.json')
+    writeFileSync(journal, JSON.stringify({ schemaVersion: 1, transaction: transaction.split(/[\\/]/u).at(-1), phase }))
+    await expect(manager.applyRelease()).rejects.toThrow('legacy recovery user inventories differ')
+    expect(profileMetadata(manager.paths.profile)).toEqual(activeBefore)
+    expect(profileMetadata(rollback)).toEqual(rollbackBefore)
+    expect(existsSync(journal)).toBe(true)
+  })
+
+  it.each(['desktop-runtime-state.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml'])(
+    'retains a complete rollback when committed legacy active lacks %s', async (missing) => {
+      const { root, manager } = setup()
+      await manager.applyRelease()
+      await manager.mutate({ type: 'plugin-add', spec: 'manual-plugin@1.0.0' }, hooks())
+      const transaction = mkdtempSync(join(root, '.dsh', 'profiles', '.desktop-transaction-'))
+      const rollback = join(transaction, 'rollback')
+      fs.cpSync(manager.paths.profile, rollback, { recursive: true, verbatimSymlinks: true })
+      const rollbackBefore = profileMetadata(rollback)
+      unlinkSync(join(manager.paths.profile, missing))
+      const activeBefore = profileMetadata(manager.paths.profile)
+      const journal = join(manager.paths.root, 'profile-activation.json')
+      writeFileSync(journal, JSON.stringify({ schemaVersion: 1, transaction: transaction.split(/[\\/]/u).at(-1), phase: 'committed' }))
+      await expect(manager.applyRelease()).rejects.toThrow('legacy recovery metadata is incomplete')
+      expect(profileMetadata(manager.paths.profile)).toEqual(activeBefore)
+      expect(profileMetadata(rollback)).toEqual(rollbackBefore)
+      expect(existsSync(journal)).toBe(true)
+    },
+  )
+
+  it('does not truncate an old journal temporary hardlinked to active metadata', async () => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    const manifest = join(manager.paths.profile, 'package.json')
+    const original = readFileSync(manifest)
+    const oldTemporary = join(manager.paths.root, 'profile-activation.json.tmp')
+    fs.linkSync(manifest, oldTemporary)
+    await manager.mutate({ type: 'plugin-add', spec: 'new-plugin@1.0.0' }, hooks())
+    expect(readFileSync(oldTemporary)).toEqual(original)
+    expect(manager.listPlugins()).toEqual([{ name: 'new-plugin', version: '1.0.0', enabled: true }])
+    expect(existsSync(join(manager.paths.root, 'profile-activation.json'))).toBe(false)
+  })
+
+  it('does not initialize an empty active path over an orphan rollback', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-add', spec: 'manual-plugin@1.0.0' }, hooks())
+    const before = profileMetadata(manager.paths.profile)
+    const transaction = mkdtempSync(join(root, '.dsh', 'profiles', '.desktop-transaction-'))
+    fs.renameSync(manager.paths.profile, join(transaction, 'rollback'))
+    const count = calls(root).length
+    await expect(manager.applyRelease()).rejects.toThrow('orphan rollback prevents profile initialization')
+    expect(profileMetadata(join(transaction, 'rollback'))).toEqual(before)
+    expect(existsSync(join(manager.paths.profile, 'package.json'))).toBe(false)
+    expect(calls(root)).toHaveLength(count)
+  })
+
+  it('reuses a healthy active profile without deleting an orphan staging directory', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const transaction = mkdtempSync(join(root, '.dsh', 'profiles', '.desktop-transaction-'))
+    mkdirSync(join(transaction, 'staging'))
+    writeFileSync(join(transaction, 'staging', 'sentinel'), 'inspect separately')
+    await expect(manager.applyRelease()).resolves.toBe(false)
+    expect(readFileSync(join(transaction, 'staging', 'sentinel'), 'utf8')).toBe('inspect separately')
+  })
+
+  it.each(['intact', 'shrunk'] as const)('checks committed versioned inventory before cleanup: %s', async (state) => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-add', spec: 'manual-plugin@1.0.0' }, hooks())
+    const before = profileMetadata(manager.paths.profile)
+    const actualRecord = operationAudit.recordDesktopProfileOperation
+    const audit = vi.spyOn(operationAudit, 'recordDesktopProfileOperation').mockImplementation((directory, record) => {
+      if (record.outcome === 'committed') throw new Error('committed audit unavailable')
+      return actualRecord(directory, record)
+    })
+    await expect(manager.mutate({ type: 'plugin-add', spec: 'new-plugin@1.0.0' }, hooks())).rejects.toThrow('committed audit unavailable')
+    expect(audit.mock.calls.map(([, record]) => record.outcome)).toEqual(['started', 'committed'])
+    expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(['manual-plugin', 'new-plugin'])
+    audit.mockRestore()
+    const journalPath = join(manager.paths.root, 'profile-activation.json')
+    const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as { schemaVersion: number; transaction: string; phase: string; before: { sha256: string; names: string[] }; after: { sha256: string; names: string[] } }
+    expect(journal).toMatchObject({ schemaVersion: 2, phase: 'committed', before: { names: ['manual-plugin'] }, after: { names: ['manual-plugin', 'new-plugin'] } })
+    const transaction = join(root, '.dsh', 'profiles', journal.transaction)
+    expect(profileMetadata(join(transaction, 'rollback'))).toEqual(before)
+    if (state === 'shrunk') {
+      const path = join(manager.paths.profile, 'package.json')
+      const manifest = JSON.parse(readFileSync(path, 'utf8')) as { dependencies: Record<string, string>; dsh: { profile: { bundles: string[] } } }
+      delete manifest.dependencies['manual-plugin']
+      manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter(name => name !== 'manual-plugin')
+      writeFileSync(path, JSON.stringify(manifest))
+      const damaged = profileMetadata(manager.paths.profile)
+      await expect(manager.applyRelease()).rejects.toThrow('recovery inventory mismatch')
+      expect(profileMetadata(manager.paths.profile)).toEqual(damaged)
+      expect(profileMetadata(join(transaction, 'rollback'))).toEqual(before)
+      expect(existsSync(journalPath)).toBe(true)
+    } else {
+      await manager.applyRelease()
+      expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(['manual-plugin', 'new-plugin'])
+      expect(existsSync(journalPath)).toBe(false)
+      expect(existsSync(transaction)).toBe(false)
+    }
+  })
+
+  it.each(['plugin-remove', 'plugin-update', 'plugin-toggle'] as const)('rejects invalid %s names before recording any input', async (operation) => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    const directory = join(manager.paths.root, 'profile-operations')
+    const names = readdirSync(directory).sort(), before = profileMetadata(manager.paths.profile)
+    const name = 'https://example.invalid/private?token=secret'
+    const mutation = operation === 'plugin-update' ? { type: operation, name, version: '1.0.0' }
+      : operation === 'plugin-toggle' ? { type: operation, name, enabled: false }
+        : { type: operation, name }
+    await expect(manager.mutate(mutation, hooks())).rejects.toThrow('invalid npm package name')
+    expect(readdirSync(directory).sort()).toEqual(names)
+    const records = names.map(file => readFileSync(join(directory, file), 'utf8')).join('')
+    expect(records).not.toContain('example.invalid')
+    expect(records).not.toContain('token=secret')
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+  })
+
+  it('retains private operation receipts after commit and failure without source text', async () => {
+    const { manager } = setup()
+    const fixture = pluginFixture('manual-verified')
+    mockVerifiedPlugins([fixture])
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-install', source: fixture.source }, hooks())
+    await expect(manager.mutate({ type: 'plugin-add', spec: 'other@1.0.0' }, hooks({ healthCheck: async () => { throw new Error('health failure with private source text') } })))
+      .rejects.toThrow('health failure')
+    const directory = join(manager.paths.root, 'profile-operations')
+    const texts = readdirSync(directory).filter(name => name.endsWith('.json')).map(name => readFileSync(join(directory, name), 'utf8'))
+    const records = texts.map(text => JSON.parse(text) as operationAudit.DesktopProfileOperationRecord)
+    const committed = records.find(record => record.operation === 'plugin-install' && record.outcome === 'committed')
+    expect(committed).toMatchObject({ target: fixture.source.packageName, after: { names: [fixture.source.packageName] } })
+    const failed = records.find(record => record.operation === 'plugin-add' && record.target === 'other' && record.outcome === 'failed')
+    expect(failed).toMatchObject({ before: { names: [fixture.source.packageName] }, after: { names: [fixture.source.packageName] } })
+    expect(records.filter(record => record.transaction === failed?.transaction).map(record => record.outcome).sort())
+      .toEqual(['failed', 'started'])
+    expect(texts.join('')).not.toMatch(/github\.com|dependencyRegistry|health failure with private source text/u)
+    expect(existsSync(join(manager.paths.root, 'profile-activation.json'))).toBe(false)
   })
 
   it('rolls back when final Host readiness leaves required receipts missing', async () => {
@@ -965,7 +1364,7 @@ describe('desktop external plugin profile', () => {
     await expect(manager.applyRelease()).resolves.toBe(false)
   })
 
-  it('resets the entire profile without backups while retaining its external lock and shared data', async () => {
+  it('retains a verified recovery copy before resetting the profile and shared data stays untouched', async () => {
     const { root, manager } = setup()
     await manager.applyRelease()
     await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
@@ -983,7 +1382,6 @@ describe('desktop external plugin profile', () => {
     const shared = join(root, 'shared-data')
     mkdirSync(shared)
     writeFileSync(join(shared, 'sentinel'), 'preserve')
-    symlinkSync(shared, join(profile, 'external-link'), process.platform === 'win32' ? 'junction' : 'dir')
     await expect(manager.applyRelease()).rejects.toThrow()
     await manager.resetConfiguration(hooks({
       beforeChange: async () => { expect(readFileSync(join(profile, 'cordis.patch.yml'), 'utf8')).toBe(': broken') },
@@ -998,7 +1396,17 @@ describe('desktop external plugin profile', () => {
     expect(existsSync(join(profile, 'cordis.patch.yml'))).toBe(false)
     expect(existsSync(join(profile, '.env'))).toBe(false)
     expect(existsSync(join(profile, '.extra'))).toBe(false)
-    expect(existsSync(join(profile, 'external-link'))).toBe(false)
+    const recoveryRoot = join(manager.paths.root, 'profile-recovery')
+    const copies = readdirSync(recoveryRoot).filter(name => name.startsWith('reset-'))
+    expect(copies).toHaveLength(1)
+    const copy = join(recoveryRoot, copies[0]!)
+    expect(JSON.parse(readFileSync(join(copy, 'receipt.json'), 'utf8'))).toMatchObject({ state: 'copy-complete', excludedDirectory: 'node_modules' })
+    expect(JSON.parse(readFileSync(join(copy, 'outcome.json'), 'utf8'))).toMatchObject({ outcome: 'completed' })
+    expect(readFileSync(join(copy, 'profile', 'desktop-runtime-state.json'), 'utf8')).toBe('{broken')
+    expect(readFileSync(join(copy, 'profile', 'cordis.patch.yml'), 'utf8')).toBe(': broken')
+    expect(readFileSync(join(copy, 'profile', '.env'), 'utf8')).toBe('NODE_OPTIONS=--bad')
+    expect(readFileSync(join(copy, 'profile', '.extra', 'custom-file'), 'utf8')).toBe('remove')
+    expect(existsSync(join(copy, 'profile', 'node_modules'))).toBe(false)
     expect(readFileSync(join(shared, 'sentinel'), 'utf8')).toBe('preserve')
     expect(readFileSync(task, 'utf8')).toBe('retained task')
     expect(readFileSync(homeEnvironment, 'utf8')).toBe('HOME_SETTING=retained')
@@ -1006,6 +1414,81 @@ describe('desktop external plugin profile', () => {
     expect(calls(root)).toHaveLength(2)
     await expect(manager.applyRelease()).resolves.toBe(false)
     expect(existsSync(homeEnvironment)).toBe(true)
+  })
+
+  it('refuses reset for linked configuration and restarts the unchanged profile', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const external = join(root, 'linked-settings')
+    mkdirSync(external)
+    writeFileSync(join(external, 'sentinel'), 'unchanged')
+    const link = join(manager.paths.profile, 'external-link')
+    symlinkSync(external, link, process.platform === 'win32' ? 'junction' : 'dir')
+    const before = profileMetadata(manager.paths.profile)
+    const afterChange = vi.fn(async () => {})
+    await expect(manager.resetConfiguration(hooks({ afterChange }))).rejects.toThrow('linked configuration requires manual recovery')
+    expect(afterChange).toHaveBeenCalledOnce()
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true)
+    expect(readFileSync(join(external, 'sentinel'), 'utf8')).toBe('unchanged')
+  })
+
+  it('does not reset after recovery copying fails and restarts the prior Host', async () => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    const before = profileMetadata(manager.paths.profile)
+    const afterChange = vi.fn(async () => {})
+    vi.spyOn(recoveryCopy, 'createDesktopProfileRecoveryCopy').mockImplementation(() => { throw new Error('copy unavailable') })
+    await expect(manager.resetConfiguration(hooks({ afterChange }))).rejects.toThrow('copy unavailable')
+    expect(afterChange).toHaveBeenCalledOnce()
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    expect(existsSync(manager.paths.lock)).toBe(false)
+  })
+
+  it('reports reset copy failure together with a failed prior Host restart', async () => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    const before = profileMetadata(manager.paths.profile)
+    vi.spyOn(recoveryCopy, 'createDesktopProfileRecoveryCopy').mockImplementation(() => { throw new Error('copy unavailable') })
+    await expect(manager.resetConfiguration(hooks({ afterChange: async () => { throw new Error('restart unavailable') } })))
+      .rejects.toMatchObject({ errors: [{ message: 'copy unavailable' }, { message: 'restart unavailable' }] })
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+  })
+
+  it('records a failed reset after final Host readiness fails and retains the recovery copy', async () => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-add', spec: 'manual-plugin@1.0.0' }, hooks())
+    await expect(manager.resetConfiguration(hooks({ afterChange: async () => { throw new Error('reset Host failed') } })))
+      .rejects.toThrow('reset Host failed')
+    const parent = join(manager.paths.root, 'profile-recovery')
+    const directory = join(parent, readdirSync(parent).find(name => name.startsWith('reset-'))!)
+    expect(JSON.parse(readFileSync(join(directory, 'outcome.json'), 'utf8'))).toMatchObject({ outcome: 'failed' })
+    expect(JSON.parse(readFileSync(join(directory, 'profile', 'package.json'), 'utf8'))).toMatchObject({ dependencies: { 'manual-plugin': '1.0.0' } })
+    expect(existsSync(join(directory, 'receipt.json'))).toBe(true)
+  })
+
+  it('does not rewrite a completed reset outcome as failed when recording fails', async () => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    const record = vi.spyOn(recoveryCopy, 'recordDesktopProfileRecoveryOutcome').mockImplementation(() => { throw new Error('outcome unavailable') })
+    const afterChange = vi.fn(async () => {})
+    await expect(manager.resetConfiguration(hooks({ afterChange }))).rejects.toThrow('outcome unavailable')
+    expect(afterChange).toHaveBeenCalledOnce()
+    expect(record).toHaveBeenCalledOnce()
+    expect(record.mock.calls[0]?.[1]).toBe('completed')
+    expect(existsSync(join(record.mock.calls[0]![0].directory, 'receipt.json'))).toBe(true)
+  })
+
+  it('reports reset failure together with a failed outcome write', async () => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    const record = vi.spyOn(recoveryCopy, 'recordDesktopProfileRecoveryOutcome').mockImplementation(() => { throw new Error('outcome unavailable') })
+    await expect(manager.resetConfiguration(hooks({ afterChange: async () => { throw new Error('reset Host failed') } })))
+      .rejects.toMatchObject({ errors: [{ message: 'reset Host failed' }, { message: 'outcome unavailable' }] })
+    expect(record).toHaveBeenCalledOnce()
+    expect(record.mock.calls[0]?.[1]).toBe('failed')
+    expect(existsSync(join(record.mock.calls[0]![0].directory, 'receipt.json'))).toBe(true)
   })
 
   it('reports damaged application metadata as a reinstall failure', async () => {
@@ -1524,7 +2007,7 @@ describe('desktop external plugin profile', () => {
     } finally { globalThis.fetch = original }
   })
 
-  it('discards source ownership when optional verified replacement fails', async () => {
+  it('rejects automatic optional replacement of a user source snapshot before acquisition', async () => {
     const { root, manager } = setup()
     await manager.applyRelease()
     const bytes = verifiedPluginArchive('plugin', '1.0.0')
@@ -1535,15 +2018,16 @@ describe('desktop external plugin profile', () => {
     const original = globalThis.fetch
     globalThis.fetch = async () => { throw new Error('fixture download unavailable') }
     try {
-      const result = await manager.reconcileProvisioning({
+      const before = profileMetadata(manager.paths.profile), count = calls(root).length
+      await expect(manager.reconcileProvisioning({
         schemaVersion: 1, mode: 'exact', plugins: [{ required: false, source: verifiedSource(bytes, 'plugin', '1.0.0') }],
-      }, hooks())
-      expect(result.plugins[0]?.status).toBe('optional-failed')
-      expect(manager.listPlugins()).toEqual([])
-      expect(readDesktopPackageLocks(manager.paths.profile)).toEqual({})
-      expect(existsSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${lock.sha256}.tgz`))).toBe(false)
+      }, hooks())).rejects.toThrow('release plan conflicts with user plugin')
+      expect(profileMetadata(manager.paths.profile)).toEqual(before)
+      expect(calls(root)).toHaveLength(count)
+      expect(readDesktopPackageLocks(manager.paths.profile)).toEqual({ plugin: lock })
+      expect(readFileSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${lock.sha256}.tgz`))).toEqual(bytes)
       await manager.mutate({ type: 'plugin-add', spec: 'unrelated@1.0.0' }, hooks())
-      expect(manager.listPlugins()[0]?.name).toBe('unrelated')
+      expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(['plugin', 'unrelated'])
     } finally { globalThis.fetch = original }
   })
 
