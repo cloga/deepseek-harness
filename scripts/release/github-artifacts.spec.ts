@@ -15,7 +15,7 @@ import {
 const sha = 'a'.repeat(40)
 const tree = 'b'.repeat(40)
 const head = 'c'.repeat(40)
-const version = '0.1.6-alpha.2.20260919.1'
+const version = '0.1.6-alpha.3'
 const selection: Selection = {
   repository: 'cloga/deepseek-harness', event: 'workflow_dispatch', publish: 'true',
   ref: `refs/tags/dsh-v${version}`, source: sha, version, reviewedHead: head, mergedCommit: sha,
@@ -55,6 +55,10 @@ describe('dispatch and checkout evidence', () => {
   })
   it('admits only the approved existing tag dispatch and first attempt', () => {
     expect(() => { assertDispatch(selection) }).not.toThrow()
+  })
+  it('rejects the previous dated candidate even when its tag matches its version', () => {
+    const previous = '0.1.6-alpha.2.20260919.1'
+    expect(() => { assertDispatch({ ...selection, version: previous, ref: `refs/tags/dsh-v${previous}` }) }).toThrow()
   })
   it.each([
     { repository: 'outsider/deepseek-harness' }, { event: 'pull_request' }, { publish: 'false' },
@@ -100,6 +104,36 @@ describe('sealed same-run artifact', () => {
 })
 
 describe('bounded HTTP', () => {
+  it('omits the request body property and content type when no body was supplied', async () => {
+    let sent: Parameters<typeof fetch>[1]
+    const api = new GitHub('synthetic-token', async (_url, options) => {
+      sent = options
+      return new Response('{}', { status: 200 })
+    }, async () => {})
+    await api.json('/releases/1')
+    expect(sent).toBeDefined()
+    expect(Object.hasOwn(sent ?? {}, 'body')).toBe(false)
+    expect(new Headers(sent?.headers).has('content-type')).toBe(false)
+  })
+  it('uploads only a nonzero-offset Buffer view as owned bytes with the original hash', async () => {
+    const backing = Buffer.from([91, 92, 0, 128, 255, 10, 93, 94])
+    const original = backing.subarray(2, 6)
+    const expected = Buffer.from(original)
+    expect(original.byteOffset).toBeGreaterThan(0)
+    let sent: Parameters<typeof fetch>[1]
+    const api = new GitHub('synthetic-token', async (_url, options) => {
+      sent = options
+      return new Response('{}', { status: 201 })
+    }, async () => {})
+    await api.json('/upload/releases/1/assets?name=original.tgz', 'POST', original)
+    const body = sent?.body
+    if (!(body instanceof Uint8Array)) throw new Error('Binary upload body missing')
+    expect(Buffer.from(body)).toEqual(expected)
+    expect(createHash('sha256').update(body).digest('hex')).toBe(createHash('sha256').update(expected).digest('hex'))
+    expect(new Headers(sent?.headers).get('content-type')).toBe('application/octet-stream')
+    original.fill(42)
+    expect(Buffer.from(body)).toEqual(expected)
+  })
   it('does not retry uncertain writes or expose credentials and response bodies', async () => {
     let calls = 0
     const api = new GitHub('secret', async () => { calls++; throw new Error('secret response') }, async () => {})

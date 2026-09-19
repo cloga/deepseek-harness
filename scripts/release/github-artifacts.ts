@@ -7,7 +7,7 @@ import { setTimeout } from 'node:timers/promises'
 import { verifyEvidence, verifyTag, verifyTagProtection } from './github-artifacts-evidence.ts'
 
 const REPOSITORY = 'cloga/deepseek-harness'
-const VERSION = '0.1.6-alpha.2.20260919.1'
+const VERSION = '0.1.6-alpha.3'
 const SHA = /^[a-f0-9]{40}$/u
 const ID = /^[1-9][0-9]*$/u
 const BASENAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u
@@ -181,7 +181,7 @@ export class GitHub {
       response = await this.fetcher(url, { method, redirect: 'manual', signal: AbortSignal.timeout(60_000),
         headers: { authorization: `Bearer ${this.token}`, accept: binary ? 'application/octet-stream' : 'application/vnd.github+json',
           'X-GitHub-Api-Version': '2022-11-28', ...(body === undefined ? {} : { 'content-type': upload ? 'application/octet-stream' : 'application/json' }) },
-        body: body as BodyInit | undefined })
+        ...(body === undefined ? {} : { body: typeof body === 'string' ? body : new Uint8Array(body) }) })
     } catch {
       throw new Error(method === 'GET' ? 'GitHub read failed' : 'GitHub write outcome uncertain; reconcile the journal and remote release before recovery')
     }
