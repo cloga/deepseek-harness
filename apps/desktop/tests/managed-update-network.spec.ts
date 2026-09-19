@@ -26,7 +26,8 @@ describe('managed update bounded transfers', () => {
         revocable.revoke()
         failure = revocable.proxy
       } else if (kind === 'forged') {
-        failure = Object.setPrototypeOf({ errorType: 'private category', retryable: true }, ManagedUpdateTransferError.prototype)
+        failure = { errorType: 'private category', retryable: true }
+        Object.setPrototypeOf(failure, ManagedUpdateTransferError.prototype)
       } else if (kind === 'cycle') Object.defineProperty(failure, 'cause', { value: failure })
       else Object.defineProperty(failure, kind, { get() { throw secret } })
       const operations = { fetch: vi.fn<ManagedUpdateNetworkOperations['fetch']>().mockRejectedValue(failure), sleep: vi.fn(async () => {}) }

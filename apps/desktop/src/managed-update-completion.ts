@@ -418,7 +418,8 @@ export async function completeDesktopManagedUpdate(
     if (manifest.sequence !== capability.currentSequence) {
       throw new Error('desktop managed update: installed release sequence does not match the build capability')
     }
-    if (candidates.some(candidate => candidate.manifest.sequence === manifest.sequence && candidate.manifest.manifestSha256 !== manifest.manifestSha256)) {
+    if (candidates.some(candidate => candidate.manifest.sequence === manifest.sequence
+      && candidate.manifest.manifestSha256 !== manifest.manifestSha256)) {
       throw new Error('desktop managed update: installed evidence identifies conflicting release manifests')
     }
     // A different transaction may supersede an older failure, never a newer or conflicting release.

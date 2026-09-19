@@ -337,7 +337,10 @@ async function main(): Promise<void> {
   })
 
   let managedCompletionAdmission: {
-    id: string; host: NonNullable<typeof backend.host>; window: BrowserWindow; documentGeneration: number
+    id: string
+    host: NonNullable<typeof backend.host>
+    window: BrowserWindow
+    documentGeneration: number
   } | undefined
   const completionOwnsAdmission = (): boolean => managedCompletionOperation !== undefined || managedRecoveryOperation !== undefined
   const completionBootBlocked = (): boolean => managedCompletionAdmission !== undefined

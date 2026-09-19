@@ -57,13 +57,14 @@ async function transferFixture() {
     },
     stageRoot: join(root, 'stage'), waitPids: [12], waitTimeoutMs: 1000, installedSequence: 1,
   }
+  const sleep = vi.fn(async () => {})
   const operations: DesktopManagedUpdateHelperOperations = {
     fetch: vi.fn(async (url: string) => response(url.endsWith('release.json') ? manifest
       : url.endsWith('build-receipt.json') ? receipt : installer)),
-    processRunning: () => false, sleep: vi.fn(async () => {}), now: () => 0,
+    processRunning: () => false, sleep, now: () => 0,
     verifyAndStartInstaller: vi.fn(async () => 0),
   }
-  return { root, installer, receipt, manifest, manifestValue, handoff, operations }
+  return { root, installer, receipt, manifest, manifestValue, handoff, operations, sleep }
 }
 
 afterEach(async () => {
@@ -83,7 +84,8 @@ describe.each(['manifest', 'receipt', 'installer', 'launch'] as const)('closed h
         revocable.revoke()
         failure = revocable.proxy
       } else if (kind === 'forged') {
-        failure = Object.setPrototypeOf({ errorType: secret, retryable: false }, ManagedUpdateTransferError.prototype)
+        failure = { errorType: secret, retryable: false }
+        Object.setPrototypeOf(failure, ManagedUpdateTransferError.prototype)
       } else if (kind === 'owned') {
         failure = new ManagedUpdateTransferError('integrity')
         Object.defineProperties(failure, { errorType: { get: readOwned }, retryable: { get: readOwned }, status: { get: readOwned } })
@@ -105,7 +107,7 @@ describe.each(['manifest', 'receipt', 'installer', 'launch'] as const)('closed h
       for (const privateText of [secret, fixture.handoff.token, 'https://', 'password', 'private-error']) expect(persisted).not.toContain(privateText)
       expect(readOwned).not.toHaveBeenCalled()
       expect(fixture.operations.fetch).toHaveBeenCalledTimes({ manifest: 1, receipt: 2, installer: 3, launch: 3 }[at])
-      expect(fixture.operations.sleep).not.toHaveBeenCalled()
+      expect(fixture.sleep).not.toHaveBeenCalled()
       if (at === 'launch') expect(fixture.operations.verifyAndStartInstaller).toHaveBeenCalledOnce()
       else {
         expect(fixture.operations.verifyAndStartInstaller).not.toHaveBeenCalled()
