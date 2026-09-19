@@ -10,7 +10,7 @@ Status: implemented
 
 ## Decision
 
-[插件保留决策](../bug-fix/2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md)取代本记录中基于 receipt 的归属与删除规则。本记录保留 fork 后端的来源获取、依赖图验证与可恢复激活理由。[官方优先迁移提案](../../proposed/architecture/2026-09-18-official-first-desktop-safety.zh.md)部分取代仅壳入口：共享 PluginManager 集成、类型化 app-boot 准备与独立授权的壳激活仍在进行中，未经验证，也未发布。保留的事务辅助函数和此前测试不证明该集成完成。
+[插件保留决策](../bug-fix/2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md)取代本记录中基于 receipt 的归属与删除规则。本记录保留 fork 后端的来源获取、依赖图验证与可恢复激活理由。共享 PluginManager 提交类型化来源供 app-boot 准备，Electron 单独授权激活。[官方优先迁移提案](../../proposed/architecture/2026-09-18-official-first-desktop-safety.zh.md)负责剩余的集成验收。此前辅助函数测试不证明打包安装或激活已通过。
 
 Desktop 接受版本化的 `githubRelease` 来源，其中锁定仓库所有者、仓库、tag、artifact asset id 与名称、包名、包版本、字节大小、SHA-256、可选 SHA-512 integrity、目标 commit、可选依赖 registry 与可选 checksum-manifest 资产。由 Release 拥有的自动 provisioning 要求 checksum manifest。它的 lock 包含精确 asset id、规范 GitHub Release URL、名称、字节大小、SHA-256、`sha256sums` 格式与可选 SHA-512 integrity。Desktop 要求存在且只存在一个匹配的 `<sha256>  <artifact>` 行，并拒绝缺失、重复、格式错误、重命名或不匹配的条目。Desktop 根据 repository 与锁定 asset id 构造 GitHub API 请求。它拒绝可变 Release 选择器、未批准的重定向主机、Release 或 tag commit 不匹配、资产元数据不匹配、归档路径逃逸、逃逸链接、异常归档根目录、包身份不匹配与包生命周期脚本。
 
@@ -20,7 +20,7 @@ Desktop 接受版本化的 `githubRelease` 来源，其中锁定仓库所有者�
 
 Desktop 保留旧 profile，直到 staged 健康检查、激活重命名、最终位置 Host ready 与活动清单验证全部完成。外部事务锁和经过 fsync 的 activation journal 标识中断的重命名。恢复在该锁下还原未提交的旧 profile。恢复失败保留 journal 与 rollback 目录，而不删除唯一剩余的旧数据。两次重命名是可恢复操作，并非 crash-atomic 目录交换。
 
-经过验证的安装在版本化 receipt 中持久保存锁定来源、GitHub Release 与资产标识、产物 hash、包身份与事务状态，并在 profile 私有目录中保留本地 tgz。保留的 source schema version 1 与 capability `{ id: "desktopNativeVerifiedRelease", schemaVersion: 1 }` 描述经过验证的获取，不代表当前插件管理 preload API。产品 preload 不含插件管理 IPC；拟议的共享管理器后端必须保留结构化来源验证，不能暴露自由格式下载器。一个事务只接受一种来源路径，因此外部 provisioner 与原生安装器不能同时提供根包。
+经过验证的安装在版本化 receipt 中持久保存锁定来源、GitHub Release 与资产标识、产物 hash、包身份与事务状态，并在 profile 私有目录中保留本地 tgz。保留的 source schema version 1 与 capability `{ id: "desktopNativeVerifiedRelease", schemaVersion: 1 }` 描述经过验证的获取，不代表当前插件管理 preload API。产品 preload 不含插件管理 IPC。共享插件页面通过类型化 Host API 接受尚未验证的描述符 JSON，由启动器验证结构化来源，而不暴露自由格式下载器。成功结果标识已暂存事务，并非已激活 receipt。该表单准备禁用的候选插件，当前插件状态不变；Electron 在 profile 锁内独立审阅，并拒绝未知或未发送的输入。Host 请求准入锁和身份检查先于中断，而非依赖渲染器汇总任务数量的确认。一个事务只接受一种来源路径，因此外部 provisioner 与原生安装器不能同时提供根包。
 
 Desktop release 也可以携带通用的 `desktopNativePluginProvisioning` schema 1 精确状态 plan。启动协调 release-owned 插件，同时保留无关的手动 registry、来源快照与 verified-release 插件和应用拥有的 shared package。Required 条目建立经过验证的基线。Optional 条目在独立 candidate 中测试，因此 download、validation、install、graph 或 health 失败只排除对应条目。其持久结果记录阶段与原因，不包含成功 receipt；required 失败保留先前 profile。
 
@@ -46,4 +46,4 @@ Windows Ops 在由源码拥有的 Desktop release plan 中选择插件 lock。�
 
 插件变更需要临时磁盘空间并重建包，即使只是兼容运行时升级或 bundle toggle。Required 与 optional 健康检查增加启动工作，但阻止失败 candidate 修改活动依赖图。精确状态删除只作用于 release-owned 插件；无关手动插件仍由用户拥有。测试覆盖多来源 checksum acquisition、来源与清单漂移、Host peer 替换/删除、按阶段隔离 optional 失败、最终激活失败、rollback 恢复失败、中断重命名以及拒绝提前 completion。每个选定 provider release 都需要其实际不可变制品、目标共享包依赖图及 Models、account、discovery、device-code 行为的独立证据；neutral fixture 不能证明其符合要求。
 
-经过评审的 release plan 选择不可变的 `dsh-github-copilot@0.4.0-alpha.24`，其搜索 UI 声明路由 Remote namespace 依赖，打包的 authorization 与 Schemastery 依赖均为必需的 Host peer。React 是 Client external，而非必需的 Node peer 或第二份私有运行时副本。已发布制品和历史共享清单检查不证明新 Desktop 的物化或已安装 UI 行为。Models、account、discovery、device-code 与更新持久性仍属于 rehearsal 和 release 的验收义务。
+经过评审的 release plan 选择不可变的 `dsh-github-copilot@0.4.0-alpha.28`。其搜索 UI 声明路由 Remote namespace 依赖，打包的 authorization 与 Schemastery 依赖仍为必需的 Host peer。React 是 Client external，而非必需的 Node peer 或第二份私有运行时副本。已发布制品和历史共享清单检查不证明新 Desktop 的物化或已安装 UI 行为。Models、account、discovery、device-code 与更新持久性仍属于 rehearsal 和 release 的验收义务。

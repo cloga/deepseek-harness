@@ -180,6 +180,212 @@ it('settles preparation as done but not installed, enabled, or restart-qualified
   } finally { b.controller.dispose() }
 })
 
+describe('verified Release preparation', () => {
+  const source = { schemaVersion: 1, type: 'githubRelease', owner: 'fixture', repo: 'sidebar', tag: 'v2.0.0',
+    asset: 'plugin.tgz', assetId: 1, packageName: BUNDLE.name, version: '2.0.0', size: 100,
+    sha256: 'a'.repeat(64), targetCommit: 'b'.repeat(40) }
+  const text = `  ${JSON.stringify(source, null, 2)}\n`
+
+  it('passes an existing package descriptor unchanged once, without string inspection or live activation', async () => {
+    const pending = deferred<ReturnType<typeof ok<ChangeResult>>>()
+    const b = bench({ installBundle: vi.fn().mockReturnValue(pending.promise) })
+    try {
+      await b.controller.load()
+      b.face.openVerifiedInstall()
+      b.face.editInstallSpec(text)
+      b.face.runInstall(); b.face.runInstall()
+      const requestId = await b.started()
+      expect(b.plugins.installBundle).toHaveBeenCalledExactlyOnceWith(source, { enabled: false, requestId })
+      expect(b.plugins.inspect).not.toHaveBeenCalled()
+      b.face.editInstallSpec('ignored while pending')
+      b.face.openVerifiedInstall()
+      expect(b.state().install.spec).toBe(text)
+      pending.resolve(ok({ stage: 'install', target: source.packageName, application: 'prepared', changed: false,
+        prepared: { ...PREPARED, transactionId: requestId } }))
+      await vi.waitFor(() => { expect(b.state().install.phase).toBe('done') })
+      expect(b.state().install).toMatchObject({ installed: null, restartRequired: false, prepared: { transactionId: requestId } })
+      expect(b.plugins.setBundleEnabled).not.toHaveBeenCalled()
+      b.face.closeInstall(); b.face.openVerifiedInstall()
+      expect(b.state().install).toMatchObject({ phase: 'idle', spec: '', verifiedRelease: true })
+    } finally { b.controller.dispose() }
+  })
+
+  it.each(['<img src=x onerror=alert(1)>', 'null', '[]', '{}', '{"type":"packageSpec"}'])('keeps invalid descriptor text without invoking the Host: %s', (invalid) => {
+    const b = bench()
+    try {
+      b.face.openVerifiedInstall(); b.face.editInstallSpec(invalid); b.face.runInstall()
+      expect(b.state().install).toMatchObject({ phase: 'idle', spec: invalid,
+        descriptorError: invalid.startsWith('<') ? 'json' : 'type' })
+      expect(b.plugins.inspect).not.toHaveBeenCalled()
+      expect(b.plugins.installBundle).not.toHaveBeenCalled()
+      b.face.editInstallSpec(text)
+      expect(b.state().install.descriptorError).toBeUndefined()
+    } finally { b.controller.dispose() }
+  })
+
+  it.each(['refused', 'failed', 'cancelled', 'applied', 'missing-prepared', 'transport-error', 'transport-text', 'codec'] as const)('preserves the descriptor and never claims activation after %s', async (outcome) => {
+    const answer = outcome === 'refused' ? refused('gateway/internal', 'rejected') : ok(outcome === 'failed' ? failed()
+      : { ...APPLIED, application: outcome === 'missing-prepared' ? 'prepared' : outcome === 'cancelled' ? 'cancelled' : 'applied' })
+    const installBundle = outcome === 'codec' ? vi.fn(() => { throw new Error('descriptor rejected before send') })
+      : outcome === 'transport-error' || outcome === 'transport-text'
+        ? vi.fn().mockRejectedValue(outcome === 'transport-error' ? new Error('transport rejected') : 'transport rejected')
+        : vi.fn().mockResolvedValue(answer)
+    const b = bench({ installBundle })
+    try {
+      b.face.openVerifiedInstall(); b.face.editInstallSpec(text); b.face.runInstall()
+      await vi.waitFor(() => { expect(b.state().install.phase).toBe(outcome === 'cancelled' ? 'idle' : 'failed') })
+      expect(b.state().install).toMatchObject({ spec: text, verifiedRelease: true, installed: null })
+      b.face.cancelInstall()
+      b.face.closeInstall(); b.face.openVerifiedInstall()
+      expect(b.state().install.spec).toBe(text)
+      expect(b.plugins.inspect).not.toHaveBeenCalled()
+      expect(b.plugins.setBundleEnabled).not.toHaveBeenCalled()
+    } finally { b.controller.dispose() }
+  })
+
+  it('leaves full descriptor rejection to the Host and retains the exact input for editing', async () => {
+    const partial = { type: 'githubRelease', packageName: { unexpected: true } }
+    const input = JSON.stringify(partial)
+    const b = bench({ installBundle: vi.fn().mockResolvedValue(refused('gateway/invalid-params', 'invalid descriptor')) })
+    try {
+      b.face.openVerifiedInstall(); b.face.editInstallSpec(input); b.face.runInstall()
+      await vi.waitFor(() => { expect(b.state().install.phase).toBe('failed') })
+      expect(b.plugins.installBundle).toHaveBeenCalledExactlyOnceWith(partial, { enabled: false, requestId: b.state().install.requestId })
+      expect(b.plugins.inspect).not.toHaveBeenCalled()
+      b.face.editInstallSpec(text)
+      expect(b.state().install).toMatchObject({ phase: 'idle', spec: text, verifiedRelease: true })
+    } finally { b.controller.dispose() }
+  })
+
+  it('does not replace a normal spec check with the descriptor form', async () => {
+    const checking = deferred<ReturnType<typeof ok<typeof INSPECTED>>>()
+    const b = bench({ inspect: vi.fn().mockReturnValue(checking.promise) })
+    try {
+      b.face.openInstall(); b.face.editInstallSpec('unlisted'); b.face.runInstall()
+      b.face.openVerifiedInstall()
+      expect(b.state().install).toMatchObject({ phase: 'checking', spec: 'unlisted' })
+      expect(b.state().install.verifiedRelease).toBeUndefined()
+      b.face.cancelInstall()
+      checking.resolve(ok(INSPECTED))
+      await checking.promise
+      expect(b.plugins.installBundle).not.toHaveBeenCalled()
+    } finally { b.controller.dispose() }
+  })
+
+  it.each(['dispose', 'cancel'] as const)('ignores a late transport rejection after %s', async (action) => {
+    const pending = Promise.withResolvers<ReturnType<typeof ok<ChangeResult>>>()
+    const b = bench({ installBundle: vi.fn().mockReturnValue(pending.promise) })
+    try {
+      b.face.openVerifiedInstall(); b.face.editInstallSpec(text); b.face.runInstall()
+      const requestId = await b.started()
+      if (action === 'dispose') b.controller.dispose()
+      else {
+        b.controller.installProgress({ requestId, phase: 'installing' })
+        b.face.cancelInstall()
+        await vi.waitFor(() => { expect(b.state().install.phase).toBe('idle') })
+      }
+      const before = b.state().install
+      pending.reject(new Error('late transport failure'))
+      await pending.promise.catch(() => undefined)
+      expect(b.state().install).toBe(before)
+    } finally { b.controller.dispose() }
+  })
+
+  it('keeps the descriptor after request-correlated cancellation and ignores the late result', async () => {
+    const pending = deferred<ReturnType<typeof ok<ChangeResult>>>()
+    const b = bench({ installBundle: vi.fn().mockReturnValue(pending.promise) })
+    try {
+      b.face.openVerifiedInstall(); b.face.editInstallSpec(text); b.face.runInstall()
+      const requestId = await b.started()
+      b.controller.installProgress({ requestId, phase: 'installing' })
+      b.face.cancelInstallAndClose()
+      await vi.waitFor(() => { expect(b.state().install.open).toBe(false) })
+      expect(b.plugins.cancelInstall).toHaveBeenCalledExactlyOnceWith(requestId)
+      b.face.openVerifiedInstall()
+      expect(b.state().install).toMatchObject({ phase: 'idle', spec: text, verifiedRelease: true })
+      pending.resolve(ok({ ...APPLIED, application: 'cancelled' }))
+      await pending.promise
+      expect(b.state().install.phase).toBe('idle')
+    } finally { b.controller.dispose() }
+  })
+})
+
+describe.each(['package', 'verified-release'] as const)('unconfirmed %s cancellation', (mode) => {
+  const text = mode === 'package' ? 'slow' : JSON.stringify({ schemaVersion: 1, type: 'githubRelease',
+    owner: 'fixture', repo: 'slow', tag: 'v1.0.0', asset: 'plugin.tgz', assetId: 1,
+    packageName: 'slow', version: '1.0.0', size: 100, sha256: 'a'.repeat(64), targetCommit: 'b'.repeat(40) })
+  const open = (b: ReturnType<typeof bench>): void => {
+    if (mode === 'package') b.face.openInstall()
+    else b.face.openVerifiedInstall()
+    b.face.editInstallSpec(text)
+    b.face.runInstall()
+  }
+
+  it.each(['throw', 'reject-error', 'reject-string'] as const)('keeps the request running when cancellation fails by %s', async (failure) => {
+    const installing = deferred<ReturnType<typeof ok<ChangeResult>>>()
+    const cancelInstall = failure === 'throw' ? vi.fn(() => { throw new Error('cancel failed') })
+      : vi.fn().mockRejectedValue(failure === 'reject-error' ? new Error('cancel failed') : 'cancel failed')
+    const b = bench({ installBundle: vi.fn().mockReturnValue(installing.promise), cancelInstall })
+    try {
+      open(b)
+      const requestId = await b.started()
+      b.controller.installProgress({ requestId, phase: 'installing' })
+      b.face.cancelInstallAndClose()
+      await vi.waitFor(() => { expect(b.state().install.phase).toBe('running') })
+      expect(cancelInstall).toHaveBeenCalledExactlyOnceWith(requestId)
+      expect(b.state().install).toMatchObject({ requestId, spec: text, open: true,
+        failure: { reason: 'cancel failed', cancelUnconfirmed: true } })
+      expect(b.state().notice).toBeNull()
+      expect(b.plugins.setBundleEnabled).not.toHaveBeenCalled()
+    } finally {
+      b.controller.dispose()
+      installing.resolve(ok({ ...failed(), application: 'cancelled' }))
+      await installing.promise
+    }
+  })
+
+  it.each(['settled', 'replaced', 'disposed', 'applying'] as const)('ignores a late cancellation rejection after the request is %s', async (outcome) => {
+    const installing = deferred<ReturnType<typeof ok<ChangeResult>>>()
+    const replacement = deferred<ReturnType<typeof ok<ChangeResult>>>()
+    const cancellation = Promise.withResolvers<ReturnType<typeof ok<{ status: 'cancelled' }>>>()
+    const b = bench({
+      installBundle: vi.fn().mockReturnValueOnce(installing.promise).mockReturnValue(replacement.promise),
+      cancelInstall: vi.fn().mockReturnValue(cancellation.promise),
+    })
+    try {
+      open(b)
+      const requestId = await b.started()
+      b.controller.installProgress({ requestId, phase: 'installing' })
+      b.face.cancelInstall()
+      expect(b.state().install.phase).toBe('cancelling')
+      if (outcome === 'disposed') b.controller.dispose()
+      else if (outcome === 'applying') b.controller.installProgress({ requestId, phase: 'applying' })
+      else {
+        installing.resolve(ok(mode === 'package' ? { ...APPLIED, bundle: 'slow' }
+          : { stage: 'install', target: 'slow', application: 'prepared', changed: false,
+            prepared: { ...PREPARED, transactionId: requestId } }))
+        await vi.waitFor(() => { expect(b.state().install.phase).toBe('done') })
+        if (outcome === 'replaced') {
+          open(b)
+          expect(await b.started()).not.toBe(requestId)
+        }
+      }
+      const before = b.state().install
+      cancellation.reject(new Error('late cancellation failure'))
+      await cancellation.promise.catch(() => undefined)
+      expect(b.state().install).toBe(before)
+      expect(b.state().notice).toBeNull()
+      expect(b.plugins.cancelInstall).toHaveBeenCalledExactlyOnceWith(requestId)
+    } finally {
+      b.controller.dispose()
+      installing.resolve(ok({ ...failed(), application: 'cancelled' }))
+      replacement.resolve(ok({ ...failed(), application: 'cancelled' }))
+      cancellation.resolve(ok({ status: 'cancelled' }))
+      await Promise.allSettled([installing.promise, replacement.promise, cancellation.promise])
+    }
+  })
+})
+
 describe('packageView', () => {
   it('joins a bundle with the entries its rows run as', () => {
     expect(packageView(BUNDLE, PLUGINS)).toEqual({

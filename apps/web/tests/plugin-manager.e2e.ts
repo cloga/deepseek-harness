@@ -5,6 +5,7 @@
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import type { Browser, Page } from 'playwright'
+import type {} from '@deepseek-ai/dsh-plugin-manager'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import { join } from 'node:path'
@@ -117,7 +118,23 @@ describe('web e2e: plugin manager', () => {
       for (const title of ['Shell', 'Agent loop', 'Subagent', 'Web search']) {
         await panel.getByRole('button', { name: `View ${title}`, exact: true }).waitFor()
       }
+      await panel.getByRole('button', { name: 'Install or upgrade verified Release', exact: true }).click()
+      const releaseDialog = page.getByRole('dialog', { name: 'Install or upgrade verified Release', exact: true })
+      await releaseDialog.waitFor({ timeout: 10_000 })
+      const descriptor = releaseDialog.getByRole('textbox', { name: 'Release descriptor JSON', exact: true })
+      expect(await descriptor.getAttribute('placeholder')).toBe('Paste the publisher’s complete githubRelease descriptor')
+      expect(await releaseDialog.getByRole('button', { name: 'Verify and prepare', exact: true }).isDisabled()).toBe(true)
+      expect(await releaseDialog.getByText('Paste the publisher’s complete JSON descriptor. Desktop verifies the release identity, artifact and checksums; this input is not yet verified.', { exact: true }).count()).toBe(1)
+      expect(await releaseDialog.getByText('Preparation leaves active plugins unchanged. Review staged changes in Desktop’s application menu and save drafts before separately confirming activation; restarting the Host may interrupt running tasks.', { exact: true }).count()).toBe(1)
+      await releaseDialog.getByRole('button', { name: 'Close', exact: true }).click()
+      await expect.poll(() => releaseDialog.count(), { timeout: 5_000 }).toBe(0)
     } finally {
+      // A failed localized-form assertion must not leave its modal blocking language restoration.
+      const releaseDialog = page.getByRole('dialog', { name: /^(Install or upgrade verified Release|安装或升级已验证 Release)$/ })
+      if (await releaseDialog.count() > 0) {
+        await releaseDialog.getByRole('button', { name: /^(Close|关闭)$/ }).click()
+        await expect.poll(() => releaseDialog.count(), { timeout: 5_000 }).toBe(0)
+      }
       if (await page.locator('html').getAttribute('lang') === 'en') {
         if (await page.getByRole('dialog', { name: 'Settings' }).count() === 0) {
           await page.getByRole('button', { name: 'Settings', exact: true }).click()
@@ -159,6 +176,91 @@ describe('web e2e: plugin manager', () => {
     await expect.poll(() => page.getByRole('dialog', { name: '添加插件' }).count(), { timeout: 5_000 }).toBe(0)
     expect(tripwire.pageErrors).toEqual([])
   }, 60_000)
+
+  it('keeps unverified Release input local, preserves refused drafts, and explains separate activation', async () => {
+    onTestFailed(() => saveFailureShot(page, 'web-e2e-plugin-manager-verified-release'))
+    const panel = await openPluginsPanel()
+    const open = panel.getByRole('button', { name: '安装或升级已验证 Release', exact: true })
+    const dialog = page.getByRole('dialog', { name: '安装或升级已验证 Release', exact: true })
+    const field = dialog.getByRole('textbox', { name: 'Release 描述符 JSON', exact: true })
+    const prepare = dialog.getByRole('button', { name: '验证并暂存', exact: true })
+    const profileFiles = () => Promise.all([
+      homeFile('profiles', 'scaffold', 'package.json'),
+      homeFile('profiles', 'scaffold', 'cordis.patch.yml'),
+    ])
+    const before = await profileFiles()
+    const toggle = panel.getByRole('switch', { name: '启用 bundle', exact: true })
+    const enabledBefore = await toggle.getAttribute('aria-checked')
+    const installPhases: string[] = []
+    const stopObserving = scaffold.ctx.on('plugin-manager/install-state', ({ phase }) => { installPhases.push(phase) })
+    try {
+      await open.click()
+      await dialog.waitFor({ timeout: 10_000 })
+      expect(await field.inputValue()).toBe('')
+      expect(await field.getAttribute('placeholder')).toBe('粘贴发布者提供的完整 githubRelease 描述符')
+      expect(await prepare.isDisabled()).toBe(true)
+      expect(await dialog.getByText('粘贴发布者提供的完整 JSON 描述符。Desktop 会验证发布身份、制品及校验值；此输入尚未通过验证。', { exact: true }).count()).toBe(1)
+      expect(await dialog.getByText('需要支持独立暂存的 Desktop。仅可替换后端确认归属的插件；不会覆盖运行时包或无归属的用户选择。候选插件在暂存副本中默认禁用；暂存不会改变当前插件的启用状态。', { exact: true }).count()).toBe(1)
+      expect(await dialog.getByText('暂存不会修改当前插件。请在 Desktop 应用菜单中查看暂存更改，保存草稿后单独确认激活；重启 Host 可能中断运行中的任务。', { exact: true }).count()).toBe(1)
+      await field.fill(' \n\t ')
+      await expect.poll(() => prepare.isDisabled(), { timeout: 5_000 }).toBe(true)
+      expect(await dialog.getByRole('alert').count()).toBe(0)
+
+      // This is a live profile, not a Desktop staging fixture. Only parser-refused
+      // input is submitted; a complete githubRelease object would start real work.
+      const invalidJson = ' \n{ "type": "githubRelease",\n'
+      await field.fill(invalidJson)
+      await prepare.click()
+      await expect.poll(() => dialog.getByRole('alert').textContent(), { timeout: 5_000 })
+        .toBe('请输入有效的 JSON 描述符；原始输入已保留。')
+      expect(await field.inputValue()).toBe(invalidJson)
+      expect(await field.getAttribute('aria-invalid')).toBe('true')
+      expect(await field.isDisabled()).toBe(false)
+      await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+      await expect.poll(() => dialog.count(), { timeout: 5_000 }).toBe(0)
+      await open.click()
+      await dialog.waitFor({ timeout: 5_000 })
+      expect(await field.inputValue()).toBe(invalidJson)
+      expect(await dialog.getByRole('alert').textContent()).toBe('请输入有效的 JSON 描述符；原始输入已保留。')
+
+      for (const text of [' \nnull\n', ' [] ', ' "githubRelease" ', ' {} ', ' { "type": "npm" }\n']) {
+        await field.fill(text)
+        await expect.poll(() => dialog.getByRole('alert').count(), { timeout: 5_000 }).toBe(0)
+        await prepare.click()
+        await expect.poll(() => dialog.getByRole('alert').textContent(), { timeout: 5_000 })
+          .toBe('描述符必须是 type 为 githubRelease 的 JSON 对象。')
+        expect(await field.inputValue()).toBe(text)
+        expect(await field.isDisabled()).toBe(false)
+      }
+      const refused = await field.inputValue()
+      await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+      await expect.poll(() => dialog.count(), { timeout: 5_000 }).toBe(0)
+      await open.click()
+      await dialog.waitFor({ timeout: 5_000 })
+      expect(await field.inputValue()).toBe(refused)
+      expect(await dialog.getByRole('alert').textContent()).toBe('描述符必须是 type 为 githubRelease 的 JSON 对象。')
+      expect(await dialog.getByText('已暂存，尚未激活', { exact: true }).count()).toBe(0)
+      await field.fill('')
+      await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+      await expect.poll(() => dialog.count(), { timeout: 5_000 }).toBe(0)
+      expect(installPhases).toEqual([])
+      expect(await profileFiles()).toEqual(before)
+      expect(await toggle.getAttribute('aria-checked')).toBe(enabledBefore)
+      expect(tripwire.pageErrors).toEqual([])
+    } finally {
+      try {
+        if (await dialog.count() > 0) {
+          // Closing retains verified drafts by design; explicitly clear this case's
+          // draft before closing so later scenarios start from their own input.
+          if (await field.count() > 0) await field.fill('')
+          await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+          await expect.poll(() => dialog.count(), { timeout: 5_000 }).toBe(0)
+        }
+      } finally {
+        stopObserving()
+      }
+    }
+  })
 
   it('enables a bundle into the profile manifest, mounts its rows live, and switches one of them', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-plugin-manager-enable'))

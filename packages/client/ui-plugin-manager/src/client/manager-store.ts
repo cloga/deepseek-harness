@@ -82,8 +82,18 @@ export interface PackageView {
   readonly rows: readonly PackageRow[]
 }
 
-/** The typed spec as the Host read it, on the installing, installed, and failed screens. */
-export type InstallSubject = Extract<PluginSpecInspection, { status: 'accepted' }> & { readonly spec: string }
+/** The existing Remote owns the complete Release descriptor vocabulary and validation. */
+type VerifiedReleaseSource = Exclude<Parameters<ClientContext['remote']['pluginManager']['installBundle']>[0], string>
+
+/** A Host-inspected package spec, or a Release descriptor still awaiting Host verification. */
+export type InstallSubject = (Extract<PluginSpecInspection, { status: 'accepted' }> | {
+  readonly status: 'unverified'
+  readonly kind: 'verified-release'
+  readonly source: VerifiedReleaseSource
+  readonly name?: never
+  readonly description?: never
+  readonly version?: never
+}) & { readonly spec: string }
 
 /** Why the typed spec was refused before anything installed. */
 export interface InstallInputError {
@@ -114,8 +124,12 @@ export interface InstallRun {
  */
 export interface InstallState {
   readonly open: boolean
-  /** The package spec as typed. */
+  /** The package spec or Release descriptor as typed. */
   readonly spec: string
+  /** The field holds an unchanged JSON Release descriptor rather than a package spec. */
+  readonly verifiedRelease?: true
+  /** Local syntax/type refusal; complete descriptor validation remains with the Host. */
+  readonly descriptorError?: 'json' | 'type'
   readonly phase: 'idle' | 'checking' | 'starting' | 'running' | 'cancelling' | 'applying' | 'done' | 'failed'
   /** Identifies this dialog's installation, including log and cancellation messages. */
   readonly requestId?: PluginInstallRequestId
@@ -147,6 +161,8 @@ export interface InstallState {
     readonly kind?: PluginInstallFailureKind
     readonly pendingBuilds?: readonly string[]
     readonly cancelUnconfirmed?: true
+    /** A verified Release request must settle as a prepared transaction, never as live activation. */
+    readonly missingPrepared?: true
   } | null
   /** The packages whose install scripts the finished run was allowed to execute, saved for this profile. */
   readonly approvedBuilds: readonly string[]
@@ -200,6 +216,8 @@ export interface PluginManagerFace {
   /** Discard only a prepared graph, without changing the active profile. */
   cancelPrepared?: (transactionId: string) => void
   openInstall: () => void
+  /** Prepare an install or upgrade from a publisher's verified Release descriptor. */
+  openVerifiedInstall: () => void
   /** Close the dialog; a check in flight is dropped, a Host-owned run has to be cancelled first. */
   closeInstall: () => void
   editInstallSpec: (text: string) => void
@@ -378,16 +396,24 @@ export class PluginManagerController {
       openInstall: () => {
         if (!isInstallPending(this.getSnapshot().install.phase)) this.patch({ install: { ...IDLE_INSTALL, open: true } })
       },
+      openVerifiedInstall: () => {
+        const install = this.getSnapshot().install
+        if (install.phase === 'checking' || isInstallPending(install.phase)) return
+        this.patch({ install: install.verifiedRelease === true && install.phase !== 'done'
+          ? { ...install, open: true } : { ...IDLE_INSTALL, open: true, verifiedRelease: true } })
+      },
       closeInstall: () => {
-        if (isInstallPending(this.getSnapshot().install.phase)) return
+        const install = this.getSnapshot().install
+        if (isInstallPending(install.phase)) return
         this.abortInspect()
-        this.patch({ install: IDLE_INSTALL })
+        this.patch({ install: install.verifiedRelease === true ? { ...install, open: false } : IDLE_INSTALL })
       },
       editInstallSpec: (text) => {
         const install = this.getSnapshot().install
         // Typing while the Host checks or installs is not possible; a new spec after an outcome starts over.
         if (install.phase === 'checking' || isInstallPending(install.phase)) return
-        this.patchInstall(install.phase === 'idle' ? { spec: text, inputError: null } : { ...IDLE_INSTALL, open: true, spec: text })
+        this.patchInstall(install.phase === 'idle' ? { spec: text, inputError: null, descriptorError: undefined }
+          : { ...IDLE_INSTALL, open: true, spec: text, verifiedRelease: install.verifiedRelease, descriptorError: undefined })
       },
       runInstall: () => { void this.runInstall() },
       approveBuildsAndRetry: () => { void this.approveBuildsAndRetry() },
@@ -534,6 +560,21 @@ export class PluginManagerController {
     const install = state.install
     const spec = install.spec.trim()
     if (install.phase === 'checking' || isInstallPending(install.phase) || spec === '') return
+    if (install.verifiedRelease === true) {
+      let source: unknown
+      try { source = JSON.parse(install.spec) as unknown } catch (_error) {
+        this.patchInstall({ descriptorError: 'json' })
+        return
+      }
+      if (source === null || typeof source !== 'object' || Array.isArray(source)
+        || !('type' in source) || source.type !== 'githubRelease') {
+        this.patchInstall({ descriptorError: 'type' })
+        return
+      }
+      // The generated Remote codec and launcher validate every field; the page only chooses the descriptor input form.
+      await this.startInstall({ status: 'unverified', kind: 'verified-release', spec: install.spec, source: source as VerifiedReleaseSource })
+      return
+    }
     // A name the list already shows is refused at once, before the Host is asked.
     if (state.packages.some(pkg => pkg.name === spec)) {
       this.patchInstall({ phase: 'idle', inputError: { problem: 'already-installed', reason: spec } })
@@ -561,7 +602,7 @@ export class PluginManagerController {
   }
 
   /**
-   * Hand the checked spec to the Host and settle the dialog from its answer.
+   * Hand the inspected spec or unverified Release descriptor to the Host and settle from its answer.
    * `approvedBuilds` names the pending install scripts the person allowed;
    * the Host saves that permission for this profile before pnpm runs.
    */
@@ -572,9 +613,18 @@ export class PluginManagerController {
     // The Host announces `plugin-manager/changed` while the run is still on
     // the wire, and every such event reads again; those reads must not cancel
     // the run's settlement.
-    const result = await this.ctx.remote.pluginManager.installBundle(spec, {
-      enabled: false, requestId, ...approvedBuilds === undefined ? {} : { approvedBuilds: [...approvedBuilds] },
-    })
+    let result: Answer<ChangeResult>
+    try {
+      result = await this.ctx.remote.pluginManager.installBundle(subject.kind === 'verified-release' ? subject.source : spec, {
+        enabled: false, requestId, ...approvedBuilds === undefined ? {} : { approvedBuilds: [...approvedBuilds] },
+      })
+    } catch (error) {
+      if (this.disposed || this.getSnapshot().install.requestId !== requestId) return
+      this.patchInstall({ phase: 'failed', runs: settledRuns(this.getSnapshot().install.runs, null),
+        failure: { reason: error instanceof Error ? error.message : String(error) } })
+      void this.load()
+      return
+    }
     if (this.disposed || this.getSnapshot().install.requestId !== requestId) return
     const runs = this.getSnapshot().install.runs
     if (!result.ok) {
@@ -589,6 +639,9 @@ export class PluginManagerController {
         runs: settledRuns(runs, packages?.exitCode ?? null),
         failure: failureOf(result.value.error, packages?.kind, result.value.pendingBuilds),
       })
+    } else if (subject.kind === 'verified-release'
+      && (result.value.application !== 'prepared' || result.value.prepared === undefined)) {
+      this.patchInstall({ phase: 'failed', runs: settledRuns(runs, null), failure: { reason: '', missingPrepared: true } })
     } else {
       this.patchInstall({
         phase: 'done',
@@ -629,7 +682,15 @@ export class PluginManagerController {
     if (install.phase !== 'running' || install.requestId === undefined) return
     const requestId = install.requestId
     this.patchInstall({ phase: 'cancelling', failure: null })
-    const result = await this.ctx.remote.pluginManager.cancelInstall(requestId)
+    let result: Awaited<ReturnType<ClientContext['remote']['pluginManager']['cancelInstall']>>
+    try { result = await this.ctx.remote.pluginManager.cancelInstall(requestId) } catch (error) {
+      const current = this.getSnapshot().install
+      if (this.disposed || current.requestId !== requestId || current.phase !== 'cancelling') return
+      this.patchInstall({ phase: 'running', failure: {
+        reason: error instanceof Error ? error.message : String(error), cancelUnconfirmed: true,
+      } })
+      return
+    }
     const current = this.getSnapshot().install
     if (this.disposed || current.requestId !== requestId || !isInstallPending(current.phase)) return
     if (!result.ok) {
@@ -638,8 +699,11 @@ export class PluginManagerController {
     }
     if (result.value.status === 'cancelled') {
       const notice: ManagerNotice = { kind: 'cancelled', seq: ++this.noticeSeq }
-      if (closeAfter) this.patch({ install: IDLE_INSTALL, notice })
-      else this.offerSpecAgain(notice)
+      if (closeAfter && install.verifiedRelease !== true) this.patch({ install: IDLE_INSTALL, notice })
+      else {
+        this.offerSpecAgain(notice)
+        if (closeAfter) this.patchInstall({ open: false })
+      }
       void this.load()
     } else if (result.value.status === 'too-late') {
       this.patchInstall({ phase: 'applying' })
@@ -654,8 +718,9 @@ export class PluginManagerController {
    * stopped the run.
    */
   private offerSpecAgain(notice: ManagerNotice | null = null): void {
-    const { open, spec } = this.getSnapshot().install
-    this.patch({ install: { ...IDLE_INSTALL, open, spec }, ...notice === null ? {} : { notice } })
+    const { open, spec, verifiedRelease } = this.getSnapshot().install
+    this.patch({ install: { ...IDLE_INSTALL, open, spec, ...(verifiedRelease === true ? { verifiedRelease } : {}) },
+      ...notice === null ? {} : { notice } })
   }
 
   /**

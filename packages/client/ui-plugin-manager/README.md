@@ -37,6 +37,8 @@ During installation, **Cancel install** asks the Host to stop the run and shows 
 
 On [launcher-staged profiles](../../boot/plugin-manager/README.md#launcher-owned-staging), success instead says **Prepared, not activated** and shows the transaction UUID. The package does not appear as installed and has no **Enable now** action. The page recovers pending stages on refresh or reconnect; **Discard prepared change** removes only the stage, never an active bundle. Activation and restart confirmation belong to the Desktop shell, not this page.
 
+**Install or upgrade verified Release** accepts a publisher's complete `githubRelease` JSON descriptor on a Desktop with launcher-owned staging. The page checks JSON and source type, then submits the object without string-spec inspection; the Host validates release identity, bytes, checksums and replacement ownership. The prepared candidate keeps the plugin disabled; currently running plugins are unchanged. Invalid input, a refused request or confirmed cancellation retains the descriptor for editing. Success requires a prepared transaction and follows the separate activation path above, never **Enable now** or an activated-receipt claim.
+
 ### Switching a bundle
 
 A bundle's page shows its full package name under the title, the spec that installs it elsewhere. A bundle's switch changes its layer selection. A profile with HMR recomposes before the operation completes; one without HMR, and a bundle a higher layer overrides, say so in a toast. A bundle the Host cannot read carries a problem tag and its reason on its page and cannot be switched on; one that provides the management components stays locked. The Host answers with error codes, which the page's dictionary words; pnpm's and the Loader's own diagnostics are shown as they are. The page excludes built-in profile bundles from cards and counts even when the profile holds them as dependencies or the Host reports an error. The Host inventory remains complete; the Settings Plugins section's Plugin list tab inspects their plugins.
@@ -116,7 +118,7 @@ These limits define the reach of the management view; they are current package c
 - **Only bundles are managed** — a dependency without a bundle patch is refused before it installs; one the profile already holds is left off the page unless the profile selects it, and loading plain plugin modules stays a file operation.
 - **Rows show a phase, not a reason** — a failed row reads as failed without the Host's error text; the Host log has it.
 - **One install at a time** — the dialog runs one pnpm command; a second spec waits for the first to finish.
-- **No version picker** — the spec is typed as pnpm accepts it; the page neither lists registry versions nor offers upgrades.
+- **No version picker** — the page does not discover registry or GitHub Release versions. A verified Release install or upgrade requires the publisher's complete descriptor and a launcher-staged Desktop; ordinary specs retain their inspection rules.
 
 <a id="dev-note"></a>
 ### Dev Note

@@ -52,7 +52,7 @@ it('cancels installation through the UI, restores files, and offers the spec aga
       await dialog.getByText('Waiting for package download', { exact: true }).waitFor()
       await dialog.getByRole('button', { name: '取消安装', exact: true }).click()
       // The Host's confirmation returns the dialog to the spec and says so in a toast.
-      await page.getByText('已取消安装，插件未启用，下载的文件可能保留', { exact: true }).waitFor()
+      await page.getByText('已取消安装请求，下载的文件可能保留。当前启用状态请查看已安装列表。', { exact: true }).waitFor()
       expect(await readFile(manifestPath, 'utf8')).toBe(manifest)
       expect(await readFile(lockPath, 'utf8')).toBe('original lockfile\n')
       expect(await dialog.getByRole('textbox').inputValue()).toBe('slow-package')

@@ -18,6 +18,8 @@ fork 身份为 `io.github.cloga.deepseek-harness.desktop`，产品为 `DeepSeek 
 
 经过评审的 plan 推进语义化 channel version 与整数 sequence。第一个由源码拥有的版本高于 `0.1.5-rc.2.local.1` 过渡构建，并使用 sequence 2。Tag 使用 `dsh-desktop-v<version>`，绝不覆盖历史。
 
+Fork 在包含自定义 Core 改动期间保留自己的 Desktop/Core 升级通道。复用官方更新交互、调度或安全机制不代表选择官方二进制制品。每次普通更新仍绑定 cloga 自编译制品；迁回官方发行版需要单独授权。
+
 ## 发布记录
 
 Manifest schema 3 对规范 JSON 进行 self-hash，并记录源码 repository、commit、tree、tag、upstream version、sequence、workflow path、lockfile hash、plan hash、固定 Node 与 pnpm 版本、依赖物化 registry、fork identities、installer filename、byte size、SHA-256、SHA-512、未签名 Authenticode 状态、build-receipt hashes、已安装 executable 与 runtime hashes、网络策略和交互式重启后 completion 语义。
@@ -39,6 +41,8 @@ Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须�
 所选 handoff 同时锁定 manifest 的规范 self-hash 与 raw release-asset SHA-256。独立 helper 在下载 receipt 与 installer 前重新验证二者。下次启动时，Desktop 会在 Host 启动前协调打包的插件 plan。Completion 在记录新 sequence 前验证运行中的 executable、runtime descriptor、预期 GitHub release 与 asset identifiers，并根据 capability schema 3 验证打包 plan。
 
 独立 helper 是自包含 bundle：因为 launcher 不复制依赖目录，所以只有 Node builtin 可以保留为 external。Finalization 检查模块语法，强制执行的打包字节 smoke 在安全取消前证明隔离启动与有效合成 handoff acknowledgement。仅相对 import 检查或源码 runner 测试不能证明不依赖 workspace 包。确认前 stderr 在持久化前进行限量与脱敏；发现更新成功不构成 helper 启动证据。
+
+普通退出与原生恢复会等待已获准的插件激活和托管更新交接，再关闭最终 Host。尚未完成的确认会取消；已获准的候选启动或回滚可以完成，但不会重新开放请求准入，也不会导航正在关闭的窗口。Launcher 用确认未启动 helper 或确认 helper 已退出的证据标识失败；任意 Promise 拒绝、终止请求或超时都不证明 helper 已停止。Helper 清理未获确认时，普通退出仍被阻止，并恢复仍可用的壳窗口显示，避免父进程 PID 消失意外授权安装。经过验证、由安装器拥有的交接保留独立退出路径。
 
 加载后的配置区分打包的 discovery 下限与持久完成的 sequence。Discovery 与 handoff 使用打包和已完成 sequence 中的较大值；completion 只使用持久 receipt 的 sequence，缺失时为零。若 completion 使用打包下限，就会跳过新安装 release 自身的待完成结果及清单检查。重复 completion 是幂等的，清单验证失败会保留先前 receipt，较高的已完成 sequence 绝不降低。
 

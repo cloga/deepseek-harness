@@ -27,15 +27,21 @@ async function bench() {
   }
   new LocaleHolder(ctx)
   const list = vi.fn(() => Promise.resolve({ ok: true as const, value: { entries: [], managementAvailable: true } }))
+  const installBundle = vi.fn(async (_source: unknown, options: { requestId: string }) => ({ ok: true as const, value: {
+    stage: 'install' as const, target: 'verified-plugin', application: 'prepared' as const, changed: false,
+    prepared: { transactionId: options.requestId, state: 'prepared' as const, packageName: 'verified-plugin', baseFingerprint: 'a'.repeat(64), health: 'pending' as const },
+  } }))
+  const inspect = vi.fn()
   const remote = new TestRemote(ctx, {
     pluginInventory: { list },
     pluginManager: {
+      installBundle, inspect,
       listBundles: vi.fn(() => Promise.resolve({ ok: true as const, value: [] })),
       listPendingPackageChanges: vi.fn(() => Promise.resolve({ ok: true as const, value: [] })),
       listPlugins: vi.fn(() => Promise.resolve({ ok: true as const, value: [] })),
     },
   })
-  return { ctx, slots: ctx.get('slots') as SlotRegistry, locale, list, remote }
+  return { ctx, slots: ctx.get('slots') as SlotRegistry, locale, list, remote, installBundle, inspect }
 }
 
 function declare(slots: SlotRegistry): () => void {
@@ -49,6 +55,26 @@ function declare(slots: SlotRegistry): () => void {
 }
 
 describe('ui-plugin-manager browser plugin', () => {
+  it('binds verified Release preparation to the shared Remote and retains the prepared transaction', async () => {
+    const b = await bench()
+    declare(b.slots)
+    const fiber = b.ctx.plugin({ inject: [...inject], apply })
+    try {
+      await fiber.await()
+      const face = (b.slots.entries('main')[0]!.inject as unknown as () => PluginManagerFace)()
+      const source = { schemaVersion: 1, type: 'githubRelease', owner: 'fixture', repo: 'verified-plugin', tag: 'v1.0.0',
+        asset: 'plugin.tgz', assetId: 1, packageName: 'verified-plugin', version: '1.0.0', size: 100,
+        sha256: 'a'.repeat(64), targetCommit: 'b'.repeat(40) }
+      face.openVerifiedInstall(); face.editInstallSpec(JSON.stringify(source)); face.runInstall()
+      await vi.waitFor(() => { expect(face.hooks.pluginManager.getSnapshot().install.phase).toBe('done') })
+      const install = face.hooks.pluginManager.getSnapshot().install
+      expect(b.installBundle).toHaveBeenCalledExactlyOnceWith(source, { enabled: false, requestId: install.requestId })
+      expect(install.prepared?.transactionId).toBe(install.requestId)
+      expect(install.installed).toBeNull()
+      expect(b.inspect).not.toHaveBeenCalled()
+    } finally { await fiber.dispose() }
+  })
+
   it('keeps the host Loader entry inert', () => {
     expect(hostApply).not.toThrow()
   })

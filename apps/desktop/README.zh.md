@@ -80,7 +80,7 @@ Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.
 
 ### Fork 安全扩展
 
-Fork 保留受限来源获取、内容寻址快照、经过验证的 Release receipt、用户与发行版归属区分、冻结锁文件规范化和可恢复 profile 事务，并分别维护其所有权。其理由与限制见[来源快照决策](../../.agents/notes/implemented/feature/2026-09-17-desktop-plugin-source-snapshots.zh.md)、[验证 Release 事务决策](../../.agents/notes/implemented/architecture/2026-09-15-desktop-verified-release-plugin-transactions.zh.md)和[插件保留决策](../../.agents/notes/implemented/bug-fix/2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md)。这些记录不证明共享 Web Plugin Manager 已暴露这些机制。[官方优先迁移提案](../../.agents/notes/proposed/architecture/2026-09-18-official-first-desktop-safety.zh.md)负责尚未完成的集成及必需验证。
+Fork 保留受限来源获取、内容寻址快照、经过验证的 Release receipt、用户与发行版归属区分、冻结锁文件规范化和可恢复 profile 事务，并分别维护其所有权。其理由与限制见[来源快照决策](../../.agents/notes/implemented/feature/2026-09-17-desktop-plugin-source-snapshots.zh.md)、[验证 Release 事务决策](../../.agents/notes/implemented/architecture/2026-09-15-desktop-verified-release-plugin-transactions.zh.md)和[插件保留决策](../../.agents/notes/implemented/bug-fix/2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md)。共享[插件页面](../../packages/client/ui-plugin-manager/README.zh.md)接受锁定的 Release 描述符以安装或升级，并报告已暂存事务，而非已激活。Desktop 负责独立审阅、输入检查、Host 请求准入锁和激活。[官方优先迁移提案](../../.agents/notes/proposed/architecture/2026-09-18-official-first-desktop-safety.zh.md)记录剩余的打包运行验收要求。
 
 未签名托管通道仍与已签名原生更新分离。[发布通道决策](../../.agents/notes/implemented/architecture/2026-09-15-fork-owned-windows-desktop-release-channel.zh.md)负责固定发布发现、不可变资产与校验和验证、独立 helper 确认以及完成证据。暂存 profile 或 helper 确认都不构成安装完成。渲染器更新操作不能选择产物或授权安装。Windows 警告和 UAC 仍由用户决定。
 

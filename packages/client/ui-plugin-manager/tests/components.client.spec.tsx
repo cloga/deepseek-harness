@@ -71,6 +71,7 @@ function renderTab(
     ensure: vi.fn(),
     refresh: vi.fn(),
     openInstall: vi.fn(),
+    openVerifiedInstall: vi.fn(),
     closeInstall: vi.fn(),
     editInstallSpec: vi.fn(),
     runInstall: vi.fn(),
@@ -106,6 +107,43 @@ function renderTab(
 }
 
 describe('PluginManagerPage', () => {
+  it.each([en, zh])('offers localized verified Release input without claiming an active installation', (dictionary) => {
+    const { actions, set, setLanguage } = renderTab()
+    setLanguage(dictionary)
+    fireEvent.click(screen.getByRole('button', { name: dictionary.verifiedReleaseTitle }))
+    expect(actions.openVerifiedInstall).toHaveBeenCalledOnce()
+    const install = { ...IDLE_INSTALL, open: true, verifiedRelease: true as const, spec: '{"type":"githubRelease"}' }
+    set({ install })
+    const field = screen.getByRole('textbox', { name: dictionary.verifiedReleaseLabel })
+    expect(field.tagName).toBe('TEXTAREA')
+    expect(field).toHaveProperty('value', install.spec)
+    expect(screen.getByText(dictionary.verifiedReleaseHelp)).toBeTruthy()
+    expect(screen.getByText(dictionary.verifiedReleaseOwnership)).toBeTruthy()
+    expect(screen.getByText(dictionary.verifiedReleaseInterrupt)).toBeTruthy()
+    expect(screen.queryByText(dictionary.installGuideToggle)).toBeNull()
+    fireEvent.change(field, { target: { value: 'original text' } })
+    expect(actions.editInstallSpec).toHaveBeenCalledWith('original text')
+    fireEvent.click(screen.getByRole('button', { name: dictionary.verifiedReleaseRun }))
+    expect(actions.runInstall).toHaveBeenCalledOnce()
+    for (const descriptorError of ['json', 'type'] as const) {
+      set({ install: { ...install, descriptorError } })
+      expect(screen.getByRole('alert').textContent).toBe(dictionary[descriptorError === 'json' ? 'verifiedReleaseInvalidJson' : 'verifiedReleaseWrongType'])
+      expect(screen.getByRole('textbox').getAttribute('aria-invalid')).toBe('true')
+    }
+    set({ install: { ...install, phase: 'failed', failure: { reason: '', missingPrepared: true }, subject: {
+      status: 'unverified', kind: 'verified-release', spec: install.spec,
+      source: { schemaVersion: 1, type: 'githubRelease', owner: 'fixture', repo: 'plugin', tag: 'v1.0.0',
+        asset: 'plugin.tgz', assetId: 1, packageName: 'fixture-plugin', version: '1.0.0', size: 100,
+        sha256: 'a'.repeat(64), targetCommit: 'b'.repeat(40) },
+    } } })
+    expect(screen.getByText(dictionary.verifiedReleaseMissingPrepared)).toBeTruthy()
+    expect(screen.getByText(dictionary.verifiedReleaseHelp)).toBeTruthy()
+    set({ install: { ...install, phase: 'done', prepared: PREPARED } })
+    expect(screen.getByText(dictionary.preparedTitle)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: dictionary.installEnableNow })).toBeNull()
+    expect(screen.queryByText(dictionary.installedTitle)).toBeNull()
+  })
+
   it('asks the store once mounted and renders the loading, unavailable, error, and empty states', () => {
     const { actions, set } = renderTab({ status: 'loading' })
     expect(actions.ensure).toHaveBeenCalledTimes(1)

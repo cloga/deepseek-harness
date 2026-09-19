@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -8,6 +8,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import {
   completeDesktopManagedUpdateHandoff,
   launchDesktopManagedUpdate,
+  isDesktopManagedUpdateHelperQuiescent,
 } from '../src/managed-update-launcher.ts'
 import { MANAGED_VERSION, managedCapability } from './managed-update-fixture.ts'
 
@@ -20,8 +21,112 @@ const selection = {
 
 const roots: string[] = []
 
+async function quiescenceFixture() {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-managed-quiescence-'))
+  roots.push(root)
+  const node = join(root, 'node.exe'), helper = join(root, 'helper.mjs')
+  await writeFile(node, 'node')
+  await writeFile(helper, 'helper')
+  const child = { pid: 456, exitCode: null as number | null, signalCode: null as NodeJS.Signals | null,
+    on: vi.fn(), unref: vi.fn(), kill: vi.fn(() => true), stderr: undefined }
+  let handoffPath = ''
+  let now = 0
+  const spawn = vi.fn((_command: string, args: readonly string[]) => {
+    handoffPath = args[1]!
+    return child
+  })
+  const waitForExit = vi.fn(async () => true)
+  const sleep = vi.fn(async () => { now = 15_000 })
+  const launch = () => launchDesktopManagedUpdate({
+    operationsRoot: join(root, 'operations'), nodeExecutable: node,
+    nodeSha256: createHash('sha256').update('node').digest('hex'), helperBundle: helper,
+    capability: managedCapability(), selection, installedSequence: 1, waitPids: [12, 34],
+  }, { platform: 'win32', spawn: spawn as unknown as typeof import('node:child_process').spawn,
+    now: () => now, sleep, waitForExit })
+  return { root, node, child, spawn, sleep, waitForExit, launch,
+    operationRoot: () => dirname(handoffPath),
+    acknowledge: async () => {
+      const handoff = JSON.parse(await readFile(handoffPath, 'utf8')) as { token: string }
+      await writeFile(join(dirname(handoffPath), 'ack.json'), JSON.stringify({
+        schemaVersion: 1, token: handoff.token, manifestSha256: selection.manifestSha256, helperPid: child.pid,
+      }))
+    },
+  }
+}
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true })))
+})
+
+it('recognizes only failures with launcher-owned quiescence evidence', async () => {
+  expect(isDesktopManagedUpdateHelperQuiescent(new Error('helper did not start'))).toBe(false)
+  expect(isDesktopManagedUpdateHelperQuiescent({ quiescent: true })).toBe(false)
+  expect(isDesktopManagedUpdateHelperQuiescent(undefined)).toBe(false)
+  const f = await quiescenceFixture()
+  await rm(f.node)
+  const failure: unknown = await f.launch().catch((error: unknown) => error)
+  expect(failure).toBeInstanceOf(Error)
+  expect(isDesktopManagedUpdateHelperQuiescent(failure)).toBe(true)
+  expect(f.spawn).not.toHaveBeenCalled()
+})
+
+it('preserves a synchronous spawn failure as safe only when no child was returned', async () => {
+  const f = await quiescenceFixture()
+  const failure = new Error('fixture spawn failed before child creation')
+  f.spawn.mockImplementation(() => { throw failure })
+  await expect(f.launch()).rejects.toBe(failure)
+  expect(isDesktopManagedUpdateHelperQuiescent(failure)).toBe(true)
+  expect(f.waitForExit).not.toHaveBeenCalled()
+})
+
+it.each([true, false])('cleans up a post-spawn setup failure and reports confirmed exit=%s', async (exited) => {
+  const f = await quiescenceFixture()
+  const primary = new Error('fixture post-spawn setup failed')
+  f.child.unref.mockImplementation(() => { throw primary })
+  f.waitForExit.mockResolvedValue(exited)
+  const failure: unknown = await f.launch().catch((error: unknown) => error)
+  expect(f.child.kill).toHaveBeenCalledOnce()
+  expect(f.waitForExit).toHaveBeenCalledExactlyOnceWith(f.child, 5000)
+  expect(isDesktopManagedUpdateHelperQuiescent(failure)).toBe(exited)
+  if (exited) expect(failure).toMatchObject({ cause: primary })
+  else {
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect((failure as AggregateError).errors[0]).toBe(primary)
+  }
+})
+
+it('keeps primary and diagnostic-write failures after confirmed helper cleanup', async () => {
+  const f = await quiescenceFixture()
+  f.sleep.mockImplementation(async () => {
+    await mkdir(join(f.operationRoot(), 'helper-startup-error.json'))
+    throw new Error('fixture acknowledgement failed')
+  })
+  const failure: unknown = await f.launch().catch((error: unknown) => error)
+  expect(failure).toBeInstanceOf(AggregateError)
+  expect((failure as AggregateError).errors).toHaveLength(2)
+  expect((failure as AggregateError).errors[0]).toMatchObject({ message: 'fixture acknowledgement failed' })
+  expect(isDesktopManagedUpdateHelperQuiescent(failure)).toBe(true)
+})
+
+it('does not classify a cancellation deadline or kill intent as helper exit', async () => {
+  const f = await quiescenceFixture()
+  f.waitForExit.mockResolvedValue(false)
+  const failure: unknown = await f.launch().catch((error: unknown) => error)
+  expect(failure).toBeInstanceOf(AggregateError)
+  expect(f.child.kill).toHaveBeenCalledOnce()
+  expect(isDesktopManagedUpdateHelperQuiescent(failure)).toBe(false)
+})
+
+it.each([false, true])('classifies a returned abandonment failure using observed signal exit=%s', async (exited) => {
+  const f = await quiescenceFixture()
+  f.sleep.mockImplementation(f.acknowledge)
+  const acknowledgement = await f.launch()
+  if (exited) f.child.signalCode = 'SIGTERM'
+  await rm(f.operationRoot(), { recursive: true, force: true })
+  const failure: unknown = await acknowledgement.abandon().catch((error: unknown) => error)
+  expect(failure).toBeInstanceOf(Error)
+  expect(isDesktopManagedUpdateHelperQuiescent(failure)).toBe(exited)
+  expect(f.child.kill).not.toHaveBeenCalled()
 })
 
 it('refuses to execute a copied Node whose bytes differ from the sealed runtime hash', async () => {
@@ -53,6 +158,7 @@ it('returns only after the detached helper acknowledges the one-time handoff', a
     stderr: new PassThrough(),
     pid: 456,
     exitCode: null as number | null,
+    signalCode: null,
     unref: vi.fn(),
     kill: vi.fn(() => {
       fakeChild.exitCode = 1
@@ -139,6 +245,7 @@ it('rejects an acknowledgement for a different manifest', async () => {
     stderr: new PassThrough(),
     pid: 456,
     exitCode: null as number | null,
+    signalCode: null,
     unref: vi.fn(),
     kill: vi.fn(() => {
       fakeChild.exitCode = 1
@@ -191,6 +298,7 @@ it('cancels the exact helper when acknowledgement times out', async () => {
     stderr: new PassThrough(),
     pid: 456,
     exitCode: null as number | null,
+    signalCode: null,
     unref: vi.fn(),
     kill: vi.fn(() => {
       fakeChild.exitCode = 1
@@ -254,7 +362,7 @@ it('persists bounded redacted bootstrap stderr without recording the handoff tok
   await writeFile(node, 'node')
   await writeFile(helper, 'helper')
   const stderr = new PassThrough()
-  const child = { pid: 456, exitCode: null as number | null, stderr, on: vi.fn(), unref: vi.fn(), kill: vi.fn() }
+  const child = { pid: 456, exitCode: null as number | null, signalCode: null, stderr, on: vi.fn(), unref: vi.fn(), kill: vi.fn() }
   let handoffPath = ''
   await expect(launchDesktopManagedUpdate({
     operationsRoot: join(root, 'operations'), nodeExecutable: node, nodeSha256: createHash('sha256').update(await readFile(node)).digest('hex'), helperBundle: helper,
@@ -296,7 +404,7 @@ it('records a spawn failure without waiting for or killing an unstarted process'
   const helper = join(root, 'helper.mjs')
   await writeFile(node, 'node')
   await writeFile(helper, 'helper')
-  const child = { pid: undefined, exitCode: null, stderr: new PassThrough(), on: vi.fn(), unref: vi.fn(), kill: vi.fn() }
+  const child = { pid: undefined, exitCode: null, signalCode: null, stderr: new PassThrough(), on: vi.fn(), unref: vi.fn(), kill: vi.fn() }
   const waitForExit = vi.fn()
   await expect(launchDesktopManagedUpdate({
     operationsRoot: join(root, 'operations'), nodeExecutable: node, nodeSha256: createHash('sha256').update(await readFile(node)).digest('hex'), helperBundle: helper,

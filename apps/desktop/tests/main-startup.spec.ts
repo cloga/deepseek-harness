@@ -18,6 +18,8 @@ import type { DesktopPreparedPackageActivation, DesktopProvisioningAssessment } 
 import type { DesktopProfilePackageActivationOptions } from '../src/profile-package-activation.ts'
 import type { ProfilePackageHealth } from '@deepseek-ai/dsh-app-boot'
 
+const manifestRead = vi.hoisted(() => ({ read: undefined as (() => Promise<string>) | undefined }))
+
 const baseline = vi.hoisted(() => ({
   assess: vi.fn<() => Promise<DesktopProvisioningAssessment>>(),
   commit: vi.fn(), stage: vi.fn(), create: vi.fn(), completion: vi.fn(),
@@ -27,6 +29,9 @@ const baseline = vi.hoisted(() => ({
 const packageReview = vi.hoisted(() => ({
   input: undefined as DesktopPreparedPackageActivation | undefined,
   confirmed: undefined as ((accepted: boolean) => void) | undefined,
+  run: undefined as ((options: DesktopProfilePackageActivationOptions, input: DesktopPreparedPackageActivation) => Promise<void>) | undefined,
+  beforeConfirm: undefined as (() => Promise<void>) | undefined,
+  cleanup: undefined as (() => void | Promise<void>) | undefined,
 }))
 
 vi.mock('../src/profile-package-activation.ts', async (importOriginal) => {
@@ -36,10 +41,14 @@ vi.mock('../src/profile-package-activation.ts', async (importOriginal) => {
     if (input === undefined) return original.createDesktopProfilePackageActivation(options)
     return {
       activate: async (transactionId: string) => {
+        await packageReview.beforeConfirm?.()
         const accepted = await options.confirm(input)
         packageReview.confirmed?.(accepted)
-        if (accepted) throw new Error('review-only fixture must not activate')
-        return { status: 'cancelled' as const, transactionId }
+        if (accepted) {
+          if (packageReview.run === undefined) throw new Error('review-only fixture must not activate')
+          await packageReview.run(options, input)
+        }
+        return { status: accepted ? 'committed' as const : 'cancelled' as const, transactionId }
       },
       recover: async () => { throw new Error('review-only fixture must not recover') },
     }
@@ -51,6 +60,7 @@ const managed = vi.hoisted(() => ({
   messages: undefined as DesktopMessages | undefined,
   launch: undefined as ((selection: DesktopManagedUpdateSelection) => Promise<boolean>) | undefined,
   acknowledge: vi.fn<() => Promise<DesktopManagedUpdateAcknowledgement>>(),
+  realLaunch: undefined as typeof import('../src/managed-update-launcher.ts').launchDesktopManagedUpdate | undefined,
   abandon: vi.fn(async () => {}),
 }))
 
@@ -84,6 +94,7 @@ const harness = await vi.hoisted(async () => {
   let policyBlocked = deferred()
   let embeddedPolicy: unknown
   let closeWindowsOnQuit = false
+  let drainingHosts = false
   let updateState: DesktopUpdateState = { phase: 'idle' }
   const updateCheck = vi.fn(async (_manual?: boolean): Promise<DesktopUpdateState> => updateState)
   const updateDownload = vi.fn(async (_version: string): Promise<DesktopUpdateState> => updateState)
@@ -161,7 +172,10 @@ const harness = await vi.hoisted(async () => {
       readonly packageManager?: { pnpm: string; nodeBin: string },
       readonly packageTransactions?: unknown,
       readonly initiallyLocked?: boolean,
-    ) { hosts.push(this) }
+    ) {
+      hosts.push(this)
+      if (drainingHosts) { this.ready.resolve(); this.exited.resolve() }
+    }
   }
   const app = Object.assign(new EventEmitter(), {
     isPackaged: true,
@@ -213,6 +227,10 @@ const harness = await vi.hoisted(async () => {
     get pluginsEnabled() { return pluginsEnabled },
     set pluginsEnabled(value: boolean) { pluginsEnabled = value },
     set closeWindowsOnQuit(value: boolean) { closeWindowsOnQuit = value },
+    drainHosts() {
+      drainingHosts = true
+      for (const host of hosts) { host.ready.resolve(); host.exited.resolve() }
+    },
     reset() {
       windows.length = 0; hosts.length = 0; handlers.clear(); app.removeAllListeners()
       powerMonitor.removeAllListeners()
@@ -220,6 +238,7 @@ const harness = await vi.hoisted(async () => {
       windowFailure = undefined
       pluginsEnabled = false
       closeWindowsOnQuit = false
+      drainingHosts = false
       prepareUpdate = undefined
       publishUpdate = undefined
       updateState = { phase: 'idle' }
@@ -266,7 +285,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs/promises')>()
   return { ...original, readFile: vi.fn((path: Parameters<typeof original.readFile>[0], encoding?: 'utf8') => {
     if (path === join('desktop-test-app', 'package.json')) {
-      return Promise.resolve(JSON.stringify({ dshDesktopAppId: 'com.deepseek.dsh', dshMandatoryUpdatePolicy: harness.embeddedPolicy }))
+      return manifestRead.read?.() ?? Promise.resolve(JSON.stringify({ dshDesktopAppId: 'com.deepseek.dsh', dshMandatoryUpdatePolicy: harness.embeddedPolicy }))
     }
     return encoding === undefined ? original.readFile(path) : original.readFile(path, encoding)
   }) }
@@ -275,7 +294,11 @@ vi.mock('../src/runtime-tree.ts', () => ({ readDesktopRuntime: () => ({ release:
 vi.mock('../src/paths.ts', () => ({ resolveDesktopPaths: () => ({ profile: 'desktop-test-profile' }) }))
 vi.mock('../src/managed-update-state.ts', () => ({ loadDesktopManagedUpdateConfiguration: async () => managed.config }))
 vi.mock('../src/managed-update-node.ts', () => ({ resolveDesktopManagedNode: () => ({ path: 'verified-primary-node.exe', sha256: 'a'.repeat(64) }) }))
-vi.mock('../src/managed-update-launcher.ts', () => ({ launchDesktopManagedUpdate: managed.acknowledge }))
+vi.mock('../src/managed-update-launcher.ts', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/managed-update-launcher.ts')>()
+  managed.realLaunch = original.launchDesktopManagedUpdate
+  return { ...original, launchDesktopManagedUpdate: managed.acknowledge }
+})
 vi.mock('../src/managed-update-completion.ts', () => ({ completeDesktopManagedUpdate: baseline.completion }))
 vi.mock('../src/managed-update-coordinator.ts', () => ({ DesktopManagedUpdateCoordinator: class {
   constructor(_capability: unknown, _sequence: unknown, publish: (state: DesktopUpdateState) => DesktopUpdateState,
@@ -346,6 +369,7 @@ function applicationMenuItems(): MenuItemConstructorOptions[] {
 }
 
 beforeEach(() => {
+  manifestRead.read = undefined
   managed.config = undefined
   managed.messages = undefined
   managed.launch = undefined
@@ -356,6 +380,9 @@ beforeEach(() => {
   baseline.createdProfile = false
   packageReview.input = undefined
   packageReview.confirmed = undefined
+  packageReview.run = undefined
+  packageReview.beforeConfirm = undefined
+  packageReview.cleanup = undefined
   baseline.assess.mockReset().mockResolvedValue({ status: 'preserved-user-choice', reason: 'ambiguous-legacy', packageName: 'fixture-provider',
     planSha256: 'a'.repeat(64), planResourceSha256: 'b'.repeat(64) })
   baseline.stage.mockReset()
@@ -388,7 +415,8 @@ beforeEach(() => {
 
 afterEach(async () => {
   harness.prepared.resolve()
-  for (const host of harness.hosts) { host.ready.resolve(); host.exited.resolve() }
+  harness.drainHosts()
+  await packageReview.cleanup?.()
   harness.app.quit()
   await harness.quitCompleted.promise
   vi.restoreAllMocks()
@@ -1275,6 +1303,253 @@ describe('desktop main startup', () => {
     expect(baseline.commit).not.toHaveBeenCalled()
   })
 
+  async function readyForPackageLifecycle() {
+    managedFixture()
+    const host = await readyForUpdate()
+    await invoke(DESKTOP_IPC.boot)
+    packageReview.input = {
+      transactionDir: 'fixture-stage', candidateDir: 'fixture-stage/profile', rollbackDir: 'fixture-stage/rollback',
+      owner: { profile: 'desktop-test-profile', runtimeDir: 'fixture-runtime', installAnchor: 'fixture-anchor',
+        runtimeFingerprint: 'a'.repeat(64), dependencyRegistry: 'https://registry.example.test/', configPaths: [] },
+      baseGraphFingerprint: 'b'.repeat(64), candidateFingerprint: 'c'.repeat(64), intentFingerprint: 'd'.repeat(64),
+      mutation: { kind: 'install', source: { schemaVersion: 1, type: 'npmRegistry', spec: '@example/plugin@1.2.3' } },
+      prepared: { transactionId: '12345678-1234-4234-8234-123456789abc', state: 'prepared',
+        packageName: '@example/plugin', baseFingerprint: 'e'.repeat(64), health: 'pending' },
+    }
+    const action = applicationMenuItems().find(item => item.label === en.packageReview)!
+    return { host, review: () => { Reflect.apply(action.click!, undefined, []) } }
+  }
+
+  it('does not create policy work or reconcile a profile when the manifest read finishes after quit', async () => {
+    const entered = Promise.withResolvers<undefined>()
+    const loaded = Promise.withResolvers<string>()
+    const manifest = JSON.stringify({ dshDesktopAppId: 'com.deepseek.dsh', dshMandatoryUpdatePolicy: {
+      origin: 'https://policy.example.com', allowedPageOrigins: ['https://downloads.example.com'],
+      intervalMs: 10_000, jitter: 0,
+    } })
+    manifestRead.read = () => { entered.resolve(undefined); return loaded.promise }
+    packageReview.cleanup = () => loaded.resolve(manifest)
+    const request = vi.fn(() => { throw new Error('manifest continuation must not make policy requests') })
+    vi.stubGlobal('fetch', request)
+    await import('../src/main.ts')
+    await entered.promise
+    harness.app.quit()
+    await harness.quitCompleted.promise
+    loaded.resolve(manifest)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.applyRelease).not.toHaveBeenCalled()
+    expect(baseline.create).not.toHaveBeenCalled()
+    expect(harness.hosts).toEqual([])
+    expect(request).not.toHaveBeenCalled()
+    expect(harness.updateCheck).not.toHaveBeenCalled()
+  })
+
+  it('vetoes every repeated quit until the owned Host has exited', async () => {
+    const host = await readyForUpdate()
+    harness.app.quit()
+    await host.stopping.promise
+    const repeated = { preventDefault: vi.fn() }
+    harness.app.emit('before-quit', repeated)
+    expect(repeated.preventDefault).toHaveBeenCalledOnce()
+    expect(host.stop).toHaveBeenCalledOnce()
+    host.exited.resolve()
+    await harness.quitCompleted.promise
+  })
+
+  it.each(['staging', 'confirmation'] as const)('cancels package %s on quit before admission or navigation', async (phase) => {
+    const f = await readyForPackageLifecycle()
+    const entered = Promise.withResolvers<undefined>()
+    const proceed = Promise.withResolvers<undefined>()
+    const answer = Promise.withResolvers<Electron.MessageBoxReturnValue>()
+    const confirmed = Promise.withResolvers<boolean>()
+    packageReview.cleanup = () => { proceed.resolve(undefined); answer.resolve({ response: 1, checkboxChecked: false }) }
+    packageReview.confirmed = confirmed.resolve
+    if (phase === 'staging') packageReview.beforeConfirm = () => { entered.resolve(undefined); return proceed.promise }
+    harness.dialog.showMessageBox.mockImplementation((options: MessageBoxOptions) => {
+      entered.resolve(undefined)
+      options.signal?.addEventListener('abort', () => answer.resolve({ response: 1, checkboxChecked: false }), { once: true })
+      return answer.promise
+    })
+    const urls = [...harness.windows[0]!.urls]
+    f.review()
+    await entered.promise
+    harness.app.quit()
+    if (phase === 'staging') {
+      expect(f.host.stop).not.toHaveBeenCalled()
+      proceed.resolve(undefined)
+    }
+    expect(await confirmed.promise).toBe(false)
+    await f.host.stopping.promise
+    expect(f.host.updateTasks.mock.calls.some(([action]) => action === 'lock')).toBe(false)
+    expect(harness.windows[0]!.urls).toEqual(urls)
+    f.host.exited.resolve()
+    await harness.quitCompleted.promise
+  })
+
+  it.each(['admitted', 'candidate', 'rollback'] as const)('drains %s package activation on repeated quit before closing its replacement Host', async (phase) => {
+    const f = await readyForPackageLifecycle()
+    const admitted = Promise.withResolvers<undefined>()
+    const proceed = Promise.withResolvers<undefined>()
+    const finished = Promise.withResolvers<undefined>()
+    packageReview.cleanup = () => proceed.resolve(undefined)
+    packageReview.run = async (options, input) => {
+      const release = await options.acquireAdmission(input)
+      admitted.resolve(undefined)
+      await proceed.promise
+      await options.stopHost()
+      await options.startHost()
+      if (phase === 'rollback') {
+        await options.stopHost()
+        await options.startHost()
+      }
+      await release()
+      finished.resolve(undefined)
+    }
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 0 })
+    const urls = [...harness.windows[0]!.urls]
+    f.review()
+    await admitted.promise
+    const candidateStarted = harness.nextHostStart()
+    if (phase === 'admitted') {
+      harness.app.quit()
+      expect(f.host.stop).not.toHaveBeenCalled()
+    }
+    proceed.resolve(undefined)
+    await f.host.stopping.promise
+    f.host.exited.resolve()
+    await candidateStarted
+    const candidate = harness.hosts[1]!
+    expect(candidate.initiallyLocked).toBe(true)
+    let last = candidate
+    if (phase === 'rollback') {
+      candidate.ready.resolve()
+      await candidate.stopping.promise
+      harness.app.quit()
+      const rollbackStarted = harness.nextHostStart()
+      candidate.exited.resolve()
+      await rollbackStarted
+      last = harness.hosts[2]!
+      expect(last.initiallyLocked).toBe(true)
+    }
+    if (phase === 'candidate') harness.app.quit()
+    const repeated = { preventDefault: vi.fn() }
+    harness.app.emit('before-quit', repeated)
+    expect(repeated.preventDefault).toHaveBeenCalledOnce()
+    expect(last.stop).not.toHaveBeenCalled()
+    last.ready.resolve()
+    await finished.promise
+    await last.stopping.promise
+    expect(last.updateTasks).not.toHaveBeenCalledWith('unlock')
+    expect(harness.windows[0]!.urls).toEqual(urls)
+    expect(harness.windows[0]!.setEnabled).not.toHaveBeenCalledWith(true)
+    last.exited.resolve()
+    await harness.quitCompleted.promise
+    expect(last.stop).toHaveBeenCalledOnce()
+  })
+
+  it('refuses a package admission whose Host lock completes after quit intent without reopening the API', async () => {
+    const f = await readyForPackageLifecycle()
+    const entered = Promise.withResolvers<undefined>()
+    const locked = Promise.withResolvers<boolean>()
+    packageReview.cleanup = () => locked.resolve(false)
+    f.host.updateTasks.mockImplementation(action => {
+      if (action !== 'lock') return Promise.resolve(false)
+      entered.resolve(undefined)
+      return locked.promise
+    })
+    packageReview.run = async (options, input) => { await options.acquireAdmission(input) }
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 0 })
+    f.review()
+    await entered.promise
+    harness.app.quit()
+    expect(f.host.stop).not.toHaveBeenCalled()
+    locked.resolve(false)
+    await f.host.stopping.promise
+    expect(f.host.updateTasks).not.toHaveBeenCalledWith('unlock')
+    expect(harness.hosts).toHaveLength(1)
+    f.host.exited.resolve()
+    await harness.quitCompleted.promise
+  })
+
+  it('cancels pending package consent when fatal recovery opens without interrupting before a recovery choice', async () => {
+    const f = await readyForPackageLifecycle()
+    const consentShown = Promise.withResolvers<undefined>()
+    const consent = Promise.withResolvers<Electron.MessageBoxReturnValue>()
+    const recoveryAnswer = Promise.withResolvers<Electron.MessageBoxReturnValue>()
+    const confirmed = Promise.withResolvers<boolean>()
+    packageReview.confirmed = confirmed.resolve
+    packageReview.cleanup = () => {
+      consent.resolve({ response: 1, checkboxChecked: false })
+      recoveryAnswer.resolve({ response: 0, checkboxChecked: false })
+    }
+    harness.dialog.showMessageBox.mockImplementation((options: MessageBoxOptions) => {
+      if (options.title === en.startupFailed) return recoveryAnswer.promise
+      consentShown.resolve(undefined)
+      options.signal?.addEventListener('abort', () => consent.resolve({ response: 1, checkboxChecked: false }), { once: true })
+      return consent.promise
+    })
+    f.review()
+    await consentShown.promise
+    harness.windows[0]!.webContents.emit('preload-error', {}, 'preload-app.cjs', new Error('fixture preload failure'))
+    expect(await confirmed.promise).toBe(false)
+    expect(f.host.stop).not.toHaveBeenCalled()
+    expect(f.host.updateTasks).not.toHaveBeenCalledWith('lock')
+    recoveryAnswer.resolve({ response: 0, checkboxChecked: false })
+    await f.host.stopping.promise
+    f.host.exited.resolve()
+    await harness.quitCompleted.promise
+  })
+
+  it('excludes new package and restart admission during fatal recovery while draining an admitted activation', async () => {
+    const f = await readyForPackageLifecycle()
+    const selected = managedFixture()
+    const admitted = Promise.withResolvers<undefined>()
+    const proceed = Promise.withResolvers<undefined>()
+    const recoveryShown = Promise.withResolvers<undefined>()
+    const recoveryAnswer = Promise.withResolvers<Electron.MessageBoxReturnValue>()
+    packageReview.cleanup = () => { proceed.resolve(undefined); recoveryAnswer.resolve({ response: 0, checkboxChecked: false }) }
+    const confirmed = vi.fn()
+    packageReview.confirmed = confirmed
+    packageReview.run = async (options, input) => {
+      const release = await options.acquireAdmission(input)
+      admitted.resolve(undefined)
+      await proceed.promise
+      await options.stopHost()
+      await options.startHost()
+      await release()
+    }
+    harness.dialog.showMessageBox.mockImplementation((options: MessageBoxOptions) => {
+      if (options.title !== en.startupFailed) return Promise.resolve({ response: 0, checkboxChecked: false })
+      recoveryShown.resolve(undefined)
+      return recoveryAnswer.promise
+    })
+    f.review()
+    await admitted.promise
+    harness.windows[0]!.webContents.emit('preload-error', {}, 'preload-app.cjs', new Error('fixture preload failure'))
+    await recoveryShown.promise
+    f.review()
+    await expect(managed.launch!(selected)).rejects.toThrow('already owns restart admission')
+    expect(confirmed).toHaveBeenCalledOnce()
+    recoveryAnswer.resolve({ response: 1, checkboxChecked: false })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(f.host.stop).not.toHaveBeenCalled()
+    const urls = [...harness.windows[0]!.urls]
+    const next = harness.nextHostStart()
+    proceed.resolve(undefined)
+    await f.host.stopping.promise
+    f.host.exited.resolve()
+    await next
+    const replacement = harness.hosts[1]!
+    expect(replacement.initiallyLocked).toBe(true)
+    replacement.ready.resolve()
+    await replacement.stopping.promise
+    expect(replacement.updateTasks).not.toHaveBeenCalledWith('unlock')
+    expect(harness.windows[0]!.urls).toEqual(urls)
+    replacement.exited.resolve()
+    await harness.quitCompleted.promise
+    expect(harness.app.relaunch).toHaveBeenCalledOnce()
+  })
+
   it('keeps the Host alive until managed helper acknowledgement and passes only fixed handoff fields', async () => {
     const selected = managedFixture()
     const entered = Promise.withResolvers<undefined>()
@@ -1300,15 +1575,112 @@ describe('desktop main startup', () => {
     }))
   })
 
-  it('does not stop the Host when managed acknowledgement fails and restores input admission', async () => {
+  it('keeps both wait PIDs alive through a quit during helper acknowledgement and pending abandonment', async () => {
+    const selected = managedFixture()
+    const entered = Promise.withResolvers<undefined>()
+    const acknowledged = Promise.withResolvers<DesktopManagedUpdateAcknowledgement>()
+    const abandoning = Promise.withResolvers<undefined>()
+    const abandoned = Promise.withResolvers<undefined>()
+    managed.acknowledge.mockImplementation(() => { entered.resolve(undefined); return acknowledged.promise })
+    const abandon = vi.fn(() => { abandoning.resolve(undefined); return abandoned.promise })
+    packageReview.cleanup = () => {
+      acknowledged.resolve({ operationRoot: 'owned-operation', helperPid: 789, token: 'fixture', abandon })
+      abandoned.resolve(undefined)
+    }
+    const host = await readyForUpdate()
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
+    const handoff = managed.launch!(selected)
+    const rejected = expect(handoff).rejects.toThrow('shutdown or recovery prevents restart')
+    await entered.promise
+    harness.app.quit()
+    expect(host.stop).not.toHaveBeenCalled()
+    const repeated = { preventDefault: vi.fn() }
+    harness.app.emit('before-quit', repeated)
+    expect(repeated.preventDefault).toHaveBeenCalledOnce()
+    acknowledged.resolve({ operationRoot: 'owned-operation', helperPid: 789, token: 'fixture', abandon })
+    await abandoning.promise
+    expect(host.stop).not.toHaveBeenCalled()
+    expect(harness.app.quit).toHaveBeenCalledOnce()
+    abandoned.resolve(undefined)
+    await rejected
+    await host.stopping.promise
+    host.exited.resolve()
+    await harness.quitCompleted.promise
+    expect(abandon).toHaveBeenCalledOnce()
+  })
+
+  it('refuses ordinary exit after an acknowledged helper fails to confirm abandonment', async () => {
+    const selected = managedFixture()
+    const entered = Promise.withResolvers<undefined>()
+    const acknowledged = Promise.withResolvers<DesktopManagedUpdateAcknowledgement>()
+    managed.acknowledge.mockImplementation(() => { entered.resolve(undefined); return acknowledged.promise })
+    const abandon = vi.fn(async () => { throw new Error('fixture helper is still alive') })
+    // This is a deliberately non-quiescent fake shell. Retire its event listeners only after proving the veto;
+    // production must not infer helper exit from a rejected cancellation Promise.
+    let handoff: Promise<boolean> | undefined
+    packageReview.cleanup = async () => {
+      acknowledged.resolve({ operationRoot: 'owned-operation', helperPid: 789, token: 'fixture', abandon })
+      await handoff?.catch(() => undefined)
+      harness.app.removeAllListeners('before-quit')
+    }
+    const host = await readyForUpdate()
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
+    handoff = managed.launch!(selected)
+    const rejected = expect(handoff).rejects.toThrow('helper cancellation failed')
+    await entered.promise
+    harness.app.quit()
+    acknowledged.resolve({ operationRoot: 'owned-operation', helperPid: 789, token: 'fixture', abandon })
+    await rejected
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.stop).not.toHaveBeenCalled()
+    expect(host.updateTasks).not.toHaveBeenCalledWith('unlock')
+    expect(harness.app.quit).toHaveBeenCalledOnce()
+    const repeated = { preventDefault: vi.fn() }
+    harness.app.emit('before-quit', repeated)
+    expect(repeated.preventDefault).toHaveBeenCalledOnce()
+    expect(harness.windows[0]!.setEnabled).not.toHaveBeenCalledWith(true)
+  })
+
+  it('restores input and normal exit after a launcher-proven no-child failure', async () => {
+    const selected = managedFixture()
+    const launcher = await import('../src/managed-update-launcher.ts')
+    // Use the same actual module instance as the mocked export's private evidence predicate across resetModules.
+    const safeFailure: unknown = await managed.realLaunch!({
+      operationsRoot: 'unused', nodeExecutable: 'unused', nodeSha256: 'a'.repeat(64), helperBundle: 'unused',
+      capability: managedCapability(), selection: selected, installedSequence: 1, waitPids: [12],
+    }, { platform: 'linux', spawn: vi.fn() as unknown as typeof import('node:child_process').spawn,
+      now: () => 0, sleep: async () => {}, waitForExit: async () => true }).catch((error: unknown) => error)
+    expect(launcher.isDesktopManagedUpdateHelperQuiescent(safeFailure)).toBe(true)
+    managed.acknowledge.mockRejectedValue(safeFailure)
+    const host = await readyForUpdate()
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
+    await expect(managed.launch!(selected)).rejects.toBe(safeFailure)
+    expect(host.stop).not.toHaveBeenCalled()
+    expect(host.updateTasks.mock.calls).toEqual([['inspect'], ['lock'], ['unlock']])
+    expect(harness.windows[0]!.setEnabled.mock.calls).toEqual([[false], [true]])
+    harness.app.quit()
+    await host.stopping.promise
+    host.exited.resolve()
+    await harness.quitCompleted.promise
+  })
+
+  it('does not treat a rejected helper launch as evidence that an owned helper cannot run', async () => {
     const selected = managedFixture()
     managed.acknowledge.mockRejectedValue(new Error('helper acknowledgement failed'))
+    packageReview.cleanup = () => { harness.app.removeAllListeners('before-quit') }
     const host = await readyForUpdate()
     harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
     await expect(managed.launch!(selected)).rejects.toThrow('helper acknowledgement failed')
     expect(host.stop).not.toHaveBeenCalled()
-    expect(host.updateTasks.mock.calls).toEqual([['inspect'], ['lock'], ['unlock']])
-    expect(harness.windows[0]!.setEnabled.mock.calls).toEqual([[false], [true]])
+    expect(host.updateTasks.mock.calls).toEqual([['inspect'], ['lock']])
+    expect(harness.windows[0]!.setEnabled.mock.calls).toEqual([[false]])
+    harness.app.quit()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.stop).not.toHaveBeenCalled()
+    expect(harness.app.quit).toHaveBeenCalledOnce()
+    const repeated = { preventDefault: vi.fn() }
+    harness.app.emit('before-quit', repeated)
+    expect(repeated.preventDefault).toHaveBeenCalledOnce()
   })
 
   it('abandons an acknowledged helper when graceful Host teardown is not accepted', async () => {

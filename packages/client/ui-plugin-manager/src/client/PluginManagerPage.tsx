@@ -561,6 +561,7 @@ const SUBJECT_KIND_KEYS = {
   path: 'installSubjectPath',
   git: 'installSubjectGit',
   tarball: 'installSubjectTarball',
+  'verified-release': 'verifiedReleaseHelp',
 } satisfies Record<InstallSubject['kind'], PluginManagerLocaleKey | undefined>
 
 /**
@@ -569,6 +570,7 @@ const SUBJECT_KIND_KEYS = {
  */
 function failureText(failure: InstallState['failure'], t: Translate): string {
   if (failure === null) return t('installFailureGeneric')
+  if (failure.missingPrepared === true) return t('verifiedReleaseMissingPrepared')
   // Blocked scripts the Host could not name leave the person to allow them in the profile's pnpm settings by hand.
   if (failure.kind === 'build-blocked' && !failure.pendingBuilds?.length) return t('installFailureBuildBlockedManual')
   if (failure.kind !== undefined) return t(FAILURE_KIND_KEYS[failure.kind])
@@ -576,9 +578,9 @@ function failureText(failure: InstallState['failure'], t: Translate): string {
   return failure.reason === '' ? t('installFailureGeneric') : failure.reason
 }
 
-/** The package the install is about: its name, one-liner, and version, as the Host read them before installing. */
+/** The Host-inspected package identity, or a Release submission still awaiting verification. */
 function SubjectCard({ subject, t }: { readonly subject: InstallSubject; readonly t: Translate }): ReactNode {
-  const title = subject.name ?? subject.spec
+  const title = subject.kind === 'verified-release' ? t('verifiedReleaseTitle') : subject.name ?? subject.spec
   const kindKey = SUBJECT_KIND_KEYS[subject.kind]
   const description = subject.description ?? (kindKey === undefined ? undefined : t(kindKey))
   return (
@@ -618,49 +620,71 @@ function InstallDialog({
   if (phase === 'idle' || phase === 'checking') {
     const checking = phase === 'checking'
     const empty = install.spec.trim() === ''
+    const verified = install.verifiedRelease === true
+    const inputError = install.descriptorError === undefined
+      ? install.inputError === null ? undefined : t(INPUT_PROBLEM_KEYS[install.inputError.problem], { reason: install.inputError.reason })
+      : t(install.descriptorError === 'json' ? 'verifiedReleaseInvalidJson' : 'verifiedReleaseWrongType')
     return (
       <Modal
         open={install.open}
         onClose={onClose}
-        title={t('installTitle')}
+        title={t(verified ? 'verifiedReleaseTitle' : 'installTitle')}
         closeLabel={t('close')}
-        description={t('installDescription')}
+        description={t(verified ? 'verifiedReleaseHelp' : 'installDescription')}
         className={css.installDialog as string}
         footer={(
           <Button variant="primary" className={css.wide} disabled={checking || empty} aria-busy={checking} onClick={onRun}>
             {checking ? <span className={css.spinner} aria-hidden="true" /> : null}
-            {t(checking ? 'installChecking' : 'installRun')}
+            {t(checking ? 'installChecking' : verified ? 'verifiedReleaseRun' : 'installRun')}
           </Button>
         )}
       >
         <div className={css.installBody}>
           <label className={css.installField}>
-            <span>{t('installSpecLabel')}</span>
-            <input
-              type="text"
-              value={install.spec}
-              placeholder={t('installSpecPlaceholder')}
-              disabled={checking}
-              aria-invalid={install.inputError !== null}
-              aria-describedby={install.inputError === null ? undefined : errorId}
-              onChange={(event) => { onEditSpec(event.currentTarget.value) }}
-              onKeyDown={(event) => { if (event.key === 'Enter' && !empty && !checking) onRun() }}
-            />
+            <span>{t(verified ? 'verifiedReleaseLabel' : 'installSpecLabel')}</span>
+            {verified ? (
+              <textarea
+                rows={8}
+                value={install.spec}
+                placeholder={t('verifiedReleasePlaceholder')}
+                spellCheck={false}
+                disabled={checking}
+                aria-invalid={inputError !== undefined}
+                aria-describedby={`${guideId}${inputError === undefined ? '' : ` ${errorId}`}`}
+                onChange={(event) => { onEditSpec(event.currentTarget.value) }}
+              />
+            ) : (
+              <input
+                type="text"
+                value={install.spec}
+                placeholder={t('installSpecPlaceholder')}
+                disabled={checking}
+                aria-invalid={inputError !== undefined}
+                aria-describedby={inputError === undefined ? undefined : errorId}
+                onChange={(event) => { onEditSpec(event.currentTarget.value) }}
+                onKeyDown={(event) => { if (event.key === 'Enter' && !empty && !checking) onRun() }}
+              />
+            )}
           </label>
-          {install.inputError === null
-            ? null
-            : <p id={errorId} className={css.inputError} role="alert">{t(INPUT_PROBLEM_KEYS[install.inputError.problem], { reason: install.inputError.reason })}</p>}
-          <button
-            type="button"
-            className={css.guideToggle}
-            aria-expanded={guideOpen}
-            aria-controls={guideId}
-            onClick={() => { setGuideOpen(open => !open) }}
-          >
-            <IconChevronDownOutline14 className={css.guideChevron} aria-hidden="true" />
-            <span>{t(guideOpen ? 'installGuideHide' : 'installGuideToggle')}</span>
-          </button>
-          {guideOpen
+          {inputError === undefined ? null : <p id={errorId} className={css.inputError} role="alert">{inputError}</p>}
+          {verified ? (
+            <div id={guideId} className={css.guide}>
+              <p className={css.guideNote}>{t('verifiedReleaseOwnership')}</p>
+              <p className={css.guideSafety}>{t('verifiedReleaseInterrupt')}</p>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className={css.guideToggle}
+              aria-expanded={guideOpen}
+              aria-controls={guideId}
+              onClick={() => { setGuideOpen(open => !open) }}
+            >
+              <IconChevronDownOutline14 className={css.guideChevron} aria-hidden="true" />
+              <span>{t(guideOpen ? 'installGuideHide' : 'installGuideToggle')}</span>
+            </button>
+          )}
+          {!verified && guideOpen
             ? (
               <div id={guideId} className={css.guide} data-install-guide>
                 <p className={css.guideIntro}>{t('installGuideIntro')}</p>
@@ -922,6 +946,7 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
               <button type="button" className={css.iconButton} aria-label={t('refresh')} title={t('refresh')} disabled={!loaded} onClick={props.refresh}>
                 <span className={css.iconWrap} aria-hidden="true"><IconRefreshOutline16 /></span>
               </button>
+              <Button variant="outline" size="sm" disabled={!loaded || isInstallPending(state.install.phase)} onClick={props.openVerifiedInstall}>{t('verifiedReleaseTitle')}</Button>
               <Button variant="primary" size="sm" icon={<IconPlusOutline16 size={13} />} disabled={!loaded} onClick={props.openInstall}>{t('addPlugin')}</Button>
             </div>
           </header>

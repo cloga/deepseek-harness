@@ -405,7 +405,8 @@
   font-size: 13px;
 }
 
-.installField input[type='text'] {
+.installField input[type='text'],
+.installField textarea {
   height: 36px;
   padding: 0 12px;
   border: 0.5px solid var(--dsw-alias-border-l4);
@@ -416,7 +417,14 @@
   color: var(--dsw-alias-label-primary);
 }
 
-.installField input[aria-invalid='true'] {
+.installField textarea {
+  height: auto;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+.installField input[aria-invalid='true'],
+.installField textarea[aria-invalid='true'] {
   border-color: var(--dsw-alias-state-error-primary);
 }
 

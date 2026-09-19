@@ -44,7 +44,7 @@ import { assertDesktopPackageHealth, qualifyDesktopPackageProfile } from './prof
 import type { ProfilePackageHealth } from '@deepseek-ai/dsh-app-boot'
 import { DesktopManagedUpdateCoordinator } from './managed-update-coordinator.ts'
 import { loadDesktopManagedUpdateConfiguration } from './managed-update-state.ts'
-import { launchDesktopManagedUpdate, type DesktopManagedUpdateAcknowledgement } from './managed-update-launcher.ts'
+import { isDesktopManagedUpdateHelperQuiescent, launchDesktopManagedUpdate, type DesktopManagedUpdateAcknowledgement } from './managed-update-launcher.ts'
 import { resolveDesktopManagedNode } from './managed-update-node.ts'
 import { completeDesktopManagedUpdate } from './managed-update-completion.ts'
 import { DesktopUpdateSchedule, resolveDesktopUpdateScheduleConfig } from './update-schedule.ts'
@@ -58,6 +58,7 @@ import { readDesktopRuntime } from './runtime-tree.ts'
 
 let focusPrimaryWindow = (): void => {}
 let stopForRecovery = async (): Promise<void> => {}
+let cancelPendingConsentForRecovery = (): void => {}
 let shuttingDown = false
 let windowsLanguage: string | undefined
 
@@ -80,6 +81,7 @@ const recovery = new DesktopFatalRecovery({
 function reportFatal(error: unknown): void {
   console.error(error)
   if (shuttingDown) return
+  cancelPendingConsentForRecovery()
   void recovery.report(error).catch((failure: unknown) => { console.error(failure); app.exit(1) })
 }
 
@@ -211,6 +213,11 @@ async function main(): Promise<void> {
   const manager = new DesktopProjectManager(paths, resources)
   let managedCompletedSequence = managedUpdate?.completedSequence ?? 0
   let quitting = false
+  let quitDrainComplete = false
+  let lifecycleDrain: Promise<void> | undefined
+  let managedHandoffOperation: Promise<boolean> | undefined
+  // Only confirmed abandonment or installer-owned transfer clears possible detached-helper ownership.
+  let managedHelperMayRun = false
   let startup: Promise<void> | undefined
   let workspaceRecovery: Promise<void> | undefined
   let mainWindow: BrowserWindow | undefined
@@ -236,6 +243,7 @@ async function main(): Promise<void> {
   let mandatoryUI: DesktopMandatoryUpdateWindow | undefined
   let policyAuth: DesktopPolicyTestAuth | undefined
   const isQuitting = (): boolean => quitting
+  const lifecycleUnavailable = (): boolean => shuttingDown || quitting || recovery.active
   const currentMainWindow = (): BrowserWindow | undefined => mainWindow
   const ordinaryDialogs = new Set<AbortController>()
   const locale = resolveDesktopLocale(app.getLocale())
@@ -246,7 +254,7 @@ async function main(): Promise<void> {
     const controller = new AbortController()
     ordinaryDialogs.add(controller)
     try {
-      if (mainWindow === undefined) return { response: options.cancelId ?? 0, checkboxChecked: false }
+      if (lifecycleUnavailable() || mainWindow === undefined) return { response: options.cancelId ?? 0, checkboxChecked: false }
       return await updateDialog.show(mainWindow, { ...options, signal: controller.signal })
     }
     finally { ordinaryDialogs.delete(controller) }
@@ -266,7 +274,7 @@ async function main(): Promise<void> {
   let navigation: { window: BrowserWindow; url: string; promise: Promise<void> } | undefined
   const navigateMain = (url: string): Promise<void> => {
     const window = mainWindow
-    if (quitting || window === undefined || window.isDestroyed()) return Promise.resolve()
+    if (lifecycleUnavailable() || window === undefined || window.isDestroyed()) return Promise.resolve()
     if (navigation?.window === window && navigation.url === url) return navigation.promise
     const next = { window, url, promise: Promise.resolve() }
     next.promise = window.loadURL(url).catch((error: unknown) => {
@@ -321,6 +329,7 @@ async function main(): Promise<void> {
   })
 
   const reviewPackageChanges = (initialRecovery = false, startupTransactionId?: string): Promise<void> => {
+    if (lifecycleUnavailable() || managedHandoffOperation !== undefined || managedHelperMayRun) return Promise.resolve()
     if (packageOperation !== undefined) return packageOperation
     packageOperation = (async () => {
       if (development || packagePolicy === undefined) throw new Error('Package graph activation requires a packaged staging capability')
@@ -344,10 +353,12 @@ async function main(): Promise<void> {
       const id = ids[selected]
       if (id === undefined) return
       let approved: { host: typeof backend.host; revision: number | undefined; active: boolean } | undefined
+      // Once admitted, activation owns candidate/rollback teardown until it settles, even after quit intent.
+      let admitted = false
       const activation = createDesktopProfilePackageActivation({
         profile: activeProject, backend: transactions,
         confirm: async (input) => {
-          if (quitting || isMandatory()) return false
+          if (lifecycleUnavailable() || isMandatory()) return false
           const host = backend.host
           const preparedPlanSha256 = input.owner.provisioningPlanResource?.planSha256
           const packagedPlanSha256 = managedUpdate?.capability.provisioning.planSha256
@@ -368,11 +379,12 @@ async function main(): Promise<void> {
             ...(detail === undefined ? {} : { detail }),
             buttons: [recovering.includes(id) ? messages.packageRecover : messages.packageActivate, messages.updateLater],
             defaultId: 1, cancelId: 1 })
-          if (answer.response !== 0 || isQuitting() || isMandatory()) return false
+          if (answer.response !== 0 || lifecycleUnavailable() || isMandatory()) return false
           approved = { host, revision, active }
           return true
         },
         acquireAdmission: async () => {
+          if (lifecycleUnavailable() || isMandatory()) throw new Error('Desktop shutdown or recovery prevents package admission')
           const consent = approved
           if (consent === undefined || (packageAdmissionId !== undefined && packageAdmissionId !== id)) throw new Error('Package activation consent is unavailable')
           const alreadyHeld = packageAdmissionId === id
@@ -383,21 +395,27 @@ async function main(): Promise<void> {
             if (consent.revision !== undefined) updateInput.check(messages.updateUnsentInput, consent.revision)
             const active = await consent.host?.updateTasks('lock') ?? false
             if (active && !consent.active) throw new Error(messages.updateTasksChanged)
+            if (backend.host !== consent.host) throw new Error(messages.updateTasksUnavailable)
             if (consent.revision !== undefined) updateInput.check(messages.updateUnsentInput, consent.revision)
+            if (lifecycleUnavailable() || isMandatory()) throw new Error('Desktop shutdown or recovery prevents package admission')
+            admitted = true
           } catch (error) {
-            if (!alreadyHeld) {
+            if (!alreadyHeld && !lifecycleUnavailable()) {
               await consent.host?.updateTasks('unlock')
               packageAdmissionId = undefined
             }
             throw error
           }
           return async () => {
+            // Shutdown owns the next action; never reopen API admission or the old document.
+            if (lifecycleUnavailable()) return
             const current = backend.host
             if (current === undefined) throw new Error(messages.updateTasksUnavailable)
             // Initial activation/recovery keeps the generation-spanning gate until
             // baseline qualification and managed completion finish in reconcileBackend.
             if (!initialRecovery) {
               await current.updateTasks('unlock')
+              if (lifecycleUnavailable()) return
               packageAdmissionId = undefined
             }
             if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.setEnabled(true)
@@ -426,7 +444,7 @@ async function main(): Promise<void> {
           } finally { requireCleanStop = false }
         },
         startHost: async () => {
-          if (quitting) throw new Error('Desktop is quitting during package activation')
+          if (lifecycleUnavailable() && !admitted) throw new Error('Desktop is quitting before package admission')
           await backend.start(async () => {})
         },
         verifyHost: async (input, role) => {
@@ -445,7 +463,7 @@ async function main(): Promise<void> {
       const result = recovering.includes(id) ? await activation.recover(id) : await activation.activate(id)
       if (result.status === 'cancelled' && initialRecovery) throw new Error(messages.packageRefused)
     })().catch(async (error: unknown) => {
-      if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.setEnabled(true)
+      if (!lifecycleUnavailable() && mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.setEnabled(true)
       // The generation-spanning API barrier remains held after an unverified failure.
       if (initialRecovery) throw error
       console.error(error)
@@ -476,9 +494,9 @@ async function main(): Promise<void> {
       window.webContents.send(DESKTOP_IPC.updatesPresentation, updatePresentation(state))
     }
     if (state.phase === 'error' && state.failedOperation !== 'check') {
-      const restoreHost = state.failedOperation === 'install' && updateStoppedHost && !quitting
+      const restoreHost = state.failedOperation === 'install' && updateStoppedHost && !managedHelperMayRun && !lifecycleUnavailable()
       shellInstallerOwnsQuit = false
-      if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.setEnabled(true)
+      if (!managedHelperMayRun && !lifecycleUnavailable() && mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.setEnabled(true)
       updateStoppedHost = false
       if (restoreHost) {
         // Only confirmed process exit permits replacement before another installation confirmation.
@@ -502,12 +520,26 @@ async function main(): Promise<void> {
     return state
   }
 
-  stopForRecovery = async () => {
+  const cancelLifecycleConsent = (): void => {
     baselineAbort.abort()
     for (const pending of ordinaryDialogs) pending.abort()
-    const results = await Promise.allSettled([backend.close(), startup, packageOperation])
-    if (results[0].status === 'rejected') throw results[0].reason
-    for (const result of results.slice(1)) if (result.status === 'rejected') console.error(result.reason)
+  }
+  cancelPendingConsentForRecovery = cancelLifecycleConsent
+  const drainLifecycle = (): Promise<void> => {
+    lifecycleDrain ??= (async () => {
+      // Keep the owned Host alive through activation/rollback and helper acknowledgement/abandonment.
+      const operations = await Promise.allSettled([packageOperation, managedHandoffOperation])
+      for (const operation of operations) if (operation.status === 'rejected') console.error(operation.reason)
+      if (managedHelperMayRun) throw new Error('Desktop cannot exit: managed helper cancellation is unconfirmed')
+      const results = await Promise.allSettled([backend.close(), startup])
+      if (results[0].status === 'rejected') throw results[0].reason
+      if (results[1].status === 'rejected') console.error(results[1].reason)
+    })()
+    return lifecycleDrain
+  }
+  stopForRecovery = () => {
+    cancelLifecycleConsent()
+    return drainLifecycle()
   }
 
   const publishBaseline = (notice: DesktopBaselineNotice | undefined): void => {
@@ -552,8 +584,10 @@ async function main(): Promise<void> {
   }
 
   const reconcileBackend = (): Promise<void> => {
+    if (lifecycleUnavailable()) return Promise.resolve()
     startup ??= (async () => {
       await navigateMain(applicationUrl)
+      if (lifecycleUnavailable()) return
       if (pendingDesktopActivationTransactions(activeProject).length > 0) {
         await reviewPackageChanges(true)
         if (backend.host === undefined) throw new Error(messages.packageRefused)
@@ -591,7 +625,7 @@ async function main(): Promise<void> {
         if (completion.status === 'recovery-required') throw new Error(`${completion.message}\n${completion.command}`)
         if (completion.status === 'complete') managedCompletedSequence = completion.sequence
       }
-      if (packageAdmissionId !== undefined && packageOperation === undefined && backend.host !== undefined) {
+      if (!lifecycleUnavailable() && packageAdmissionId !== undefined && packageOperation === undefined && backend.host !== undefined) {
         await backend.host.updateTasks('unlock')
         packageAdmissionId = undefined
       }
@@ -607,9 +641,14 @@ async function main(): Promise<void> {
   }
 
   const prepareRestart = async (beforeStop?: (hostPid: number | undefined) => Promise<void>): Promise<boolean> => {
+    if (lifecycleUnavailable()) throw new Error('Desktop shutdown or recovery already owns restart admission')
+    if (managedHelperMayRun) throw new Error('A managed helper already owns restart admission')
     if (packageOperation !== undefined || packageAdmissionId !== undefined) throw new Error('A package activation already owns restart admission')
     await workspaceRecovery
     await startup?.catch(() => undefined)
+    if (lifecycleUnavailable() || packageOperation !== undefined || packageAdmissionId !== undefined) {
+      throw new Error('Desktop lifecycle changed before restart admission')
+    }
     const host = backend.host
     if (host === undefined) throw new DesktopUpdatePreparationError('tasks-unavailable', messages.updateTasksUnavailable)
     const inputRevision = updateInput.check(messages.updateUnsentInput)
@@ -628,9 +667,10 @@ async function main(): Promise<void> {
       if (!await mandatoryUI?.confirm(updates.state.version ?? '', active)) return false
     } else {
       if (mainWindow === undefined) return false
-      const result = await updateDialog.show(mainWindow, confirmation)
+      const result = await ordinaryMessageBox(confirmation)
       if (result.response !== 0 || isMandatory()) return false
     }
+    if (lifecycleUnavailable()) return false
     if (backend.host !== host) throw new DesktopUpdatePreparationError('tasks-unavailable', messages.updateTasksUnavailable)
     const inputWindow = mainWindow
     inputWindow?.setEnabled(false)
@@ -639,8 +679,10 @@ async function main(): Promise<void> {
       const stillActive = await host.updateTasks('lock')
       updateInput.check(messages.updateUnsentInput, inputRevision)
       if (stillActive && !active) throw new DesktopUpdatePreparationError('tasks-changed', messages.updateTasksChanged)
+      if (lifecycleUnavailable()) throw new Error('Desktop shutdown or recovery prevents restart')
       await beforeStop?.(host.processId)
       if (backend.host !== host) throw new DesktopUpdatePreparationError('tasks-unavailable', messages.updateTasksUnavailable)
+      if (lifecycleUnavailable()) throw new Error('Desktop shutdown or recovery prevents restart')
       updateInput.check(messages.updateUnsentInput, inputRevision)
       mandatoryUI?.preparingRestart(stillActive)
       requireCleanStop = true
@@ -650,48 +692,73 @@ async function main(): Promise<void> {
       // The backend's async cleanup callback can assign this after the reset above.
       const stopFailure = updateStopFailure as DesktopHostUncleanExitError | undefined
       if (stopFailure !== undefined) throw new DesktopUpdatePreparationError('stop-failed', messages.updateStopFailed, stopFailure.message)
+      if (lifecycleUnavailable()) throw new Error('Desktop shutdown or recovery prevents installer handoff')
       updateJournal?.action('install-confirmed')
       shellInstallerOwnsQuit = true
     } catch (error) {
-      if (!updateStoppedHost) await host.updateTasks('unlock').catch((unlockError: unknown) => { console.error(unlockError) })
+      if (!updateStoppedHost && !managedHelperMayRun && !lifecycleUnavailable()) await host.updateTasks('unlock').catch((unlockError: unknown) => { console.error(unlockError) })
       throw error
     } finally {
       requireCleanStop = false
-      if (!shellInstallerOwnsQuit && inputWindow !== undefined && !inputWindow.isDestroyed()) inputWindow.setEnabled(true)
+      if (!shellInstallerOwnsQuit && !managedHelperMayRun && !lifecycleUnavailable() && inputWindow !== undefined && !inputWindow.isDestroyed()) inputWindow.setEnabled(true)
     }
     return true
   }
   const updates = managedUpdate === undefined
     ? new DesktopUpdateCoordinator(publishUpdate, () => prepareRestart())
     : new DesktopManagedUpdateCoordinator(managedUpdate.capability, () => managedUpdate.installedSequence,
-      publishUpdate, async (selection) => {
-        let acknowledgement: DesktopManagedUpdateAcknowledgement | undefined
-        try {
-          const approved = await prepareRestart(async (hostPid) => {
-            if (hostPid === undefined || !Number.isSafeInteger(hostPid) || hostPid <= 0) throw new Error('Managed update Host identity is unavailable')
-            const node = resolveDesktopManagedNode(resources.dsh, join(process.resourcesPath, 'runtime', 'primary-runtime'))
-            acknowledgement = await launchDesktopManagedUpdate({
-              operationsRoot: managedUpdate.operationsRoot,
-              nodeExecutable: node.path, nodeSha256: node.sha256,
-              helperBundle: managedUpdate.helperBundle,
-              capability: managedUpdate.capability,
-              selection: { kind: selection.kind, manifestUrl: selection.manifestUrl,
-                manifestSha256: selection.manifestSha256, assetSha256: selection.assetSha256 },
-              installedSequence: managedUpdate.installedSequence,
-              waitPids: [process.pid, hostPid],
+      publishUpdate, (selection) => {
+        if (managedHandoffOperation !== undefined) return managedHandoffOperation
+        const operation = (async () => {
+          let acknowledgement: DesktopManagedUpdateAcknowledgement | undefined
+          let handoffHost: typeof backend.host = undefined
+          try {
+            const approved = await prepareRestart(async (hostPid) => {
+              if (hostPid === undefined || !Number.isSafeInteger(hostPid) || hostPid <= 0) throw new Error('Managed update Host identity is unavailable')
+              const node = resolveDesktopManagedNode(resources.dsh, join(process.resourcesPath, 'runtime', 'primary-runtime'))
+              handoffHost = backend.host
+              managedHelperMayRun = true
+              acknowledgement = await launchDesktopManagedUpdate({
+                operationsRoot: managedUpdate.operationsRoot,
+                nodeExecutable: node.path, nodeSha256: node.sha256,
+                helperBundle: managedUpdate.helperBundle,
+                capability: managedUpdate.capability,
+                selection: { kind: selection.kind, manifestUrl: selection.manifestUrl,
+                  manifestSha256: selection.manifestSha256, assetSha256: selection.assetSha256 },
+                installedSequence: managedUpdate.installedSequence,
+                waitPids: [process.pid, hostPid],
+              })
             })
-          })
-          if (!approved) return false
-          app.quit()
-          return true
-        } catch (error) {
-          if (acknowledgement !== undefined) {
-            try { await acknowledgement.abandon() } catch (abandonError) {
-              throw new AggregateError([error, abandonError], 'Managed update handoff failed and helper cancellation failed')
+            if (!approved) return false
+            // prepareRestart has verified clean stop and transferred quit ownership. This bypass avoids self-wait.
+            managedHelperMayRun = false
+            app.quit()
+            return true
+          } catch (error) {
+            let failure = error
+            if (acknowledgement !== undefined) {
+              try {
+                await acknowledgement.abandon()
+                managedHelperMayRun = false
+              } catch (abandonError) {
+                if (isDesktopManagedUpdateHelperQuiescent(abandonError)) managedHelperMayRun = false
+                failure = new AggregateError([error, abandonError], 'Managed update handoff failed and helper cancellation failed')
+              }
+            } else if (isDesktopManagedUpdateHelperQuiescent(error)) managedHelperMayRun = false
+            // Rejection alone cannot clear ownership; only the launcher can attest no child or confirmed exit.
+            if (!managedHelperMayRun && handoffHost !== undefined && !lifecycleUnavailable()) {
+              try {
+                if (!updateStoppedHost && backend.host === handoffHost) await handoffHost.updateTasks('unlock')
+                if (!lifecycleUnavailable() && mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.setEnabled(true)
+              } catch (restoreError) {
+                throw new AggregateError([failure, restoreError], 'Managed helper stopped but restart admission restoration failed')
+              }
             }
+            throw failure
           }
-          throw error
-        }
+        })()
+        managedHandoffOperation = operation
+        return operation.finally(() => { if (managedHandoffOperation === operation) managedHandoffOperation = undefined })
       }, undefined, messages)
 
   const updateSchedule = new DesktopUpdateSchedule(updates, resolveDesktopUpdateScheduleConfig(process.env))
@@ -1047,21 +1114,32 @@ async function main(): Promise<void> {
       mandatoryUI?.dispose()
       return
     }
-    if (quitting) return
+    if (quitDrainComplete) return
     event.preventDefault()
+    if (quitting) return
     quitting = true
+    cancelLifecycleConsent()
     mainWindow?.hide()
     updateSchedule.dispose()
     updateDialog.dispose()
     mandatoryUI?.dispose()
-    void Promise.allSettled([Promise.resolve(mandatoryPolicy?.dispose()).then(() => policyAuth?.dispose()), backend.close(),
-      startup, packageOperation]).then((results) => {
+    void Promise.allSettled([Promise.resolve(mandatoryPolicy?.dispose()).then(() => policyAuth?.dispose()),
+      drainLifecycle()]).then((results) => {
       for (const result of results) if (result.status === 'rejected') console.error(result.reason)
-    }).finally(() => { app.quit() })
+      // Rejection is not proof that a detached helper stopped; keep the shell PID alive and every quit vetoed.
+      if (managedHelperMayRun) {
+        if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.show()
+        return
+      }
+      quitDrainComplete = true
+      app.quit()
+    })
   })
 
   mainWindow = createMainWindow()
-  const manifest: unknown = JSON.parse(await readFile(join(app.getAppPath(), 'package.json'), 'utf8'))
+  const manifestText = await readFile(join(app.getAppPath(), 'package.json'), 'utf8')
+  if (lifecycleUnavailable()) return
+  const manifest: unknown = JSON.parse(manifestText)
   if (typeof manifest !== 'object' || manifest === null) throw new Error('desktop policy: invalid application manifest')
   const developmentPolicy = app.isPackaged ? undefined : process.env.DSH_DESKTOP_MANDATORY_UPDATE_CONFIG
   const policyInput: unknown = app.isPackaged

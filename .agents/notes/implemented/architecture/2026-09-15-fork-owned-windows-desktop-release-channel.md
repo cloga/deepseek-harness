@@ -18,6 +18,8 @@ The fork identity is `io.github.cloga.deepseek-harness.desktop`, product `DeepSe
 
 The reviewed plan advances a semantic channel version and integer sequence. The first source-owned version is greater than the `0.1.5-rc.2.local.1` transition build and uses sequence 2. Tags use `dsh-desktop-v<version>` and never overwrite history.
 
+The fork retains its own Desktop/Core update channel while it carries custom Core changes. Reusing official update interaction, scheduling, or safety mechanisms does not select official binaries. Every ordinary update remains bound to cloga-built artifacts; returning to the official distribution requires a separately authorized migration.
+
 ## Release records
 
 Manifest schema 3 self-hashes canonical JSON and records the source repository, commit, tree, tag, upstream version, sequence, workflow path, lockfile hash, plan hash, pinned Node and pnpm versions, dependency materialization registry, fork identities, installer filename, byte size, SHA-256, SHA-512, unsigned Authenticode state, build-receipt hashes, installed executable and runtime hashes, network policy, and interactive post-restart completion semantics.
@@ -39,6 +41,8 @@ Check lists the fixed repository's GitHub Releases. Every matching release must 
 The selected handoff locks both the manifest's canonical self-hash and its raw release-asset SHA-256. The detached helper revalidates both before it downloads the receipt and installer. On the next launch, Desktop reconciles the packaged plugin plan before Host startup. Completion verifies the running executable, runtime descriptor, expected GitHub release and asset identifiers, and the packaged plan against capability schema 3 before it records the new sequence.
 
 The detached helper is a self-contained bundle: only Node builtins remain external because the launcher copies no dependency directory. Finalization checks module syntax, and a mandatory packaged-byte smoke proves isolated bootstrap and a valid synthetic handoff acknowledgement before safe cancellation. Relative-import checks or source-runner tests alone cannot prove independence from workspace packages. Pre-acknowledgement stderr is bounded and redacted before persistence; discovery success is not helper boot evidence.
+
+Ordinary quit and native recovery wait for admitted package activation and managed-update handoff before closing the final Host. Pending confirmation is cancelled; an admitted candidate or rollback may finish without reopening task admission or navigating the closing window. The launcher identifies failures with confirmed no-helper or helper-exit evidence; an arbitrary rejected promise, a kill request, or a timeout does not establish quiescence. Unconfirmed helper cleanup keeps ordinary exit blocked and restores an available shell window, so disappearing parent PIDs cannot accidentally authorize installation. Verified installer-owned transfer retains its separate quit path.
 
 The loaded configuration distinguishes the packaged discovery floor from the persisted completed sequence. Discovery and handoff use the greater of packaged and completed sequences; completion uses only the durable receipt's sequence, or zero when absent. Using the packaged floor for completion would skip the newly installed release's own pending result and its inventory checks. Repeated completion is idempotent, failed inventory validation preserves the previous receipt, and a higher completed sequence never decreases.
 
