@@ -21,6 +21,7 @@ import {
   webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
 import { ZH_BROWSER_LOCALE, connectFreshWorkspaceZh, saveFailureShot } from './support.ts'
+import { finishCreatorRoute, type CreatorRoutePrimaryOutcome } from './creator-route-ownership.ts'
 
 const SNAPSHOT_DIR = fileURLToPath(new URL('./expected/agent-preset-authoring', import.meta.url))
 const SECTION_EXPECTED = join(SNAPSHOT_DIR, 'section.expected.md')
@@ -300,21 +301,23 @@ describe('web e2e: agent-preset authoring is a host-side copy', () => {
 
     // Hold the real request before Host creation; never substitute a Remote success.
     const createPattern = '**/api/session/create'
-    const release = Promise.withResolvers<undefined>()
+    let heldRoute: Route | undefined
     let createRequest: Request | undefined
-    let routeWork: Promise<void> | undefined
-    const holdCreate = (route: Route): Promise<void> => {
+    let primary: CreatorRoutePrimaryOutcome = { failed: false }
+    // Returning from the handler does not release interception; only the outer owner continues this route.
+    const holdCreate = (route: Route): void => {
+      heldRoute = route
       createRequest = route.request()
-      routeWork = release.promise.then(() => route.continue())
-      return routeWork
     }
-    await page.route(createPattern, holdCreate, { times: 1 })
     try {
+      await page.route(createPattern, holdCreate, { times: 1 })
       await creatorButton.click()
       await expect.poll(() => createRequest, { timeout: 15_000 }).toBeDefined()
+      expect(createRequest!.method()).toBe('POST')
       const requestBody = createRequest!.postDataJSON() as {
         payload: { args: { request: { agentPreset?: string; workspaceId?: string } } }
       }
+      expect(requestBody).toMatchObject({ type: 'client-request', method: 'session/create' })
       expect(requestBody.payload.args.request.agentPreset).toBe('cordis')
       expect(requestBody.payload.args.request.workspaceId).toBeTruthy()
       expect(await dialog.isVisible()).toBe(true)
@@ -322,11 +325,11 @@ describe('web e2e: agent-preset authoring is a host-side copy', () => {
       expect(await creatorButton.getAttribute('aria-busy')).toBe('true')
       expect(await selectedId()).toBe(original.sessionId)
       expect(await hostSessions()).toHaveLength(1)
-    } finally {
-      release.resolve(undefined)
-      await page.unroute(createPattern, holdCreate)
-      await routeWork
+    } catch (error: unknown) {
+      primary = { failed: true, error }
     }
+    // Unroute can auto-continue an in-flight request: settle this fixture's sole continuation first.
+    await finishCreatorRoute(primary, heldRoute, () => page.unroute(createPattern, holdCreate))
 
     await expect.poll(hostSessions, { timeout: 15_000 }).toHaveLength(2)
     const creator = (await hostSessions()).find(row => row.sessionId !== original.sessionId)!
