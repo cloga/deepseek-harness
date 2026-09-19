@@ -212,7 +212,7 @@ class UiWorkspaceService extends Service implements UiWorkspace {
       if (attempt === undefined) {
         attempt = this.sessions.create({ workspaceId, ...(agentPreset === undefined ? {} : { agentPreset }) })
           .finally(() => {
-            if (pending.get(agentPreset) === attempt) pending.delete(agentPreset)
+            pending.delete(agentPreset)
             if (pending.size === 0 && this.starting.get(workspaceId) === pending) this.starting.delete(workspaceId)
           })
         pending.set(agentPreset, attempt)
@@ -272,10 +272,6 @@ class UiWorkspaceService extends Service implements UiWorkspace {
       const workspace = this.workspaces.list.getSnapshot()
       const sessions = this.sessions.list.getSnapshot()
       if (workspace.phase !== 'ready' || sessions.phase !== 'ready') return
-      if (this.mainReference !== undefined) {
-        initial = 'done'
-        return
-      }
       const saved = this.selection.getSnapshot()
       const savedTarget = saved.subagentAddress
         ?? (saved.sessionId !== undefined && sessions.byId[saved.sessionId] !== undefined

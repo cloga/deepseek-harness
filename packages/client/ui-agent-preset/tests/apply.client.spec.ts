@@ -802,7 +802,7 @@ describe('ui-agent-preset apply', () => {
     } finally { list.mockRestore(); conversation() }
   })
 
-  it.each(['failure', 'superseded', 'disposed', 'reselected', 'newer-action', 'different-preset'] as const)(
+  it.each(['failure', 'superseded', 'disposed', 'reselected', 'newer-action', 'different-preset', 'disposed-rejection', 'newer-rejection'] as const)(
     'does not retain creator composition or late feedback after %s', async (outcome) => {
       const { ctx, slots, calls } = await bench()
       declareRoot(slots); declareConversation(slots)
@@ -828,13 +828,15 @@ describe('ui-agent-preset apply', () => {
         await section.load()
         const starting = section.startCreatorDraft!()
         if (outcome !== 'reselected') state.current = 'fresh'
-        if (outcome === 'disposed') await fiber.dispose()
-        if (outcome === 'newer-action') expect(await section.startCreatorDraft!()).toBe(false)
-        if (outcome === 'failure') creation.reject(new Error('create failed'))
+        const disposed = outcome === 'disposed' || outcome === 'disposed-rejection'
+        if (disposed) await fiber.dispose()
+        if (outcome === 'newer-action' || outcome === 'newer-rejection') expect(await section.startCreatorDraft!()).toBe(false)
+        if (outcome === 'failure' || outcome === 'disposed-rejection' || outcome === 'newer-rejection') creation.reject(new Error('create failed'))
         else creation.resolve(outcome === 'superseded' ? undefined : SessionId('fresh'))
         expect(await starting).toBe(false)
         expect(calls.some(call => call.startsWith('select:'))).toBe(false)
-        if (outcome !== 'disposed') {
+        if (outcome === 'disposed-rejection' || outcome === 'newer-rejection') expect(warning).not.toHaveBeenCalled()
+        if (!disposed) {
           const fresh = injectSeat(SessionId('fresh'))
           await fresh.load(); await unbound.load()
           expect(fresh.hooks.agentPresetSeat.getSnapshot().introduce).toBe(false)

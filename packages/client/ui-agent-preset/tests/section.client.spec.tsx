@@ -312,6 +312,30 @@ describe('the preset list', () => {
     expect(button).toHaveProperty('disabled', false)
   })
 
+  it('contains a reentrant Creator click before the busy render commits', async () => {
+    const actions = renderSection({
+      rows: [...READY.rows, { id: 'cordis', trust: 'system', isDefault: false }],
+    })
+    const result = Promise.withResolvers<boolean>()
+    const button = screen.getByRole('button', { name: en.creatorDraft })
+    actions.startCreatorDraft?.mockImplementationOnce(() => {
+      expect(button).toHaveProperty('disabled', false)
+      fireEvent.click(button)
+      return result.promise
+    })
+
+    try {
+      fireEvent.click(button)
+      expect(actions.startCreatorDraft).toHaveBeenCalledOnce()
+      expect(actions.close).not.toHaveBeenCalled()
+      expect(button).toHaveProperty('disabled', true)
+    } finally {
+      await act(async () => { result.resolve(false) })
+    }
+    expect(actions.close).not.toHaveBeenCalled()
+    expect(button).toHaveProperty('disabled', false)
+  })
+
   it('keeps settings open after a rejected creator action and permits retry', async () => {
     const actions = renderSection({
       rows: [...READY.rows, { id: 'cordis', trust: 'system', isDefault: false }],

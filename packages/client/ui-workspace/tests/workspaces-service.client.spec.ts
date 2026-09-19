@@ -247,8 +247,9 @@ interface BenchOptions {
 function bench(options: BenchOptions = {}) {
   const ctx = new Context()
   contexts.push(ctx)
+  const panelSelection = vi.fn()
   const layout = new LayoutController({
-    selectPanel: vi.fn(), retainMainPanels: vi.fn(),
+    selectPanel: panelSelection, retainMainPanels: vi.fn(),
     setSidebar: vi.fn(), toggleSidebar: vi.fn(), setViewportWidth: vi.fn(),
     setRightbar: vi.fn(), openRightbar: vi.fn(), closeRightbar: vi.fn(),
   }, () => true)
@@ -265,7 +266,7 @@ function bench(options: BenchOptions = {}) {
     workspaces,
     sessions,
   )
-  return { ctx, directoryPicker, sessions, uiWorkspace, workspaces, layout, selectPanel }
+  return { ctx, directoryPicker, sessions, uiWorkspace, workspaces, layout, selectPanel, panelSelection }
 }
 
 describe('UiWorkspaceService', () => {
@@ -502,6 +503,19 @@ describe('UiWorkspaceService', () => {
     expect(b.sessions.retained[0]!.release).toHaveBeenCalledOnce()
     expect(b.selectPanel).not.toHaveBeenCalledWith(null)
     expect(warning).not.toHaveBeenCalled()
+  })
+
+  it('does not return a fresh identity replaced by a reentrant panel-selection listener', async () => {
+    const b = bench({ workspaces: workspaceState([workspace('a')]) })
+    b.panelSelection.mockImplementationOnce(() => { b.uiWorkspace.openSession(sid('replacement')) })
+
+    await expect(b.uiWorkspace.startSession(wid('a'))).resolves.toBeUndefined()
+
+    expect(b.sessions.retained.map(item => item.reference.sessionId)).toEqual([sid('created-a'), sid('replacement')])
+    expect(b.sessions.retained[0]!.release).toHaveBeenCalledOnce()
+    expect(b.sessions.retained[1]!.release).not.toHaveBeenCalled()
+    expect(b.selectPanel.mock.calls).toEqual([[null], [null]])
+    expect(b.sessions.create).toHaveBeenCalledExactlyOnceWith({ workspaceId: wid('a') })
   })
 
   it('contains creation and retain failures and forgets settled attempts', async () => {
@@ -781,6 +795,28 @@ describe('UiWorkspaceService', () => {
     expect(b.sessions.retained).toHaveLength(1)
     expect(b.sessions.retained[0]!.reference.sessionId).toBe(sid('saved'))
     expect(navigation).toHaveBeenCalledOnce()
+  })
+
+  it.each(['panel', 'layout-disposal'] as const)('does not retry or warn after saved restoration is cancelled during retain: %s', (action) => {
+    persistSelection({ sessionId: sid('saved') })
+    const b = bench()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const failure = new Error('saved retain interrupted')
+    b.sessions.retain.mockImplementationOnce(() => {
+      if (action === 'panel') b.layout.selectPanel('replacement-panel' as MainPanelId)
+      else b.layout.dispose()
+      throw failure
+    })
+    const ready = sessionState([summary('saved')])
+    b.workspaces.list.set(workspaceState())
+    b.sessions.list.set(ready)
+    b.sessions.list.set(ready)
+
+    expect(b.sessions.retain).toHaveBeenCalledExactlyOnceWith(sid('saved'), { source: 'mainView' })
+    expect(b.sessions.retained).toEqual([])
+    expect(b.sessions.create).not.toHaveBeenCalled()
+    expect(b.selectPanel).not.toHaveBeenCalledWith(null)
+    expect(warning).not.toHaveBeenCalled()
   })
 
   it('clears a selected Session when an external archive snapshot arrives', () => {
