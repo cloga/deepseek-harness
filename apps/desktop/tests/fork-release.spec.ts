@@ -23,7 +23,14 @@ type ReleaseWorkflow = {
   jobs: Record<string, {
     permissions?: Record<string, string>
     env?: Record<string, string>
-    steps: Array<{ name?: string; shell?: string; run?: string; env?: Record<string, string> }>
+    steps: Array<{
+      name?: string
+      uses?: string
+      with?: Record<string, unknown>
+      shell?: string
+      run?: string
+      env?: Record<string, string>
+    }>
   }>
 }
 
@@ -129,7 +136,52 @@ function assertHiddenWindowSelection(workflow: ReleaseWorkflow): void {
   ])
 }
 
+function assertPublisherSelection(workflow: ReleaseWorkflow): void {
+  const steps = workflow.jobs.release!.steps
+  const checkout = steps.findIndex(step => step.uses === 'actions/checkout@v6')
+  const node = steps.findIndex(step => step.uses === 'actions/setup-node@v6')
+  const assets = steps.findIndex(step => step.uses === 'actions/download-artifact@v4')
+  const verify = steps.findIndex(step => step.name === 'Cross-check downloaded artifact set')
+  const publish = steps.findIndex(step => step.name === 'Publish reviewed release')
+  expect(checkout).toBeGreaterThanOrEqual(0)
+  expect(steps[checkout]?.with).toMatchObject({ ref: '${{ needs.build.outputs.source_sha }}', 'persist-credentials': false, clean: true })
+  expect(node).toBeGreaterThan(checkout)
+  expect(steps[node]?.with?.['node-version']).toBe('${{ env.NODE_VERSION }}')
+  expect(assets).toBeGreaterThan(node)
+  expect(verify).toBeGreaterThan(assets)
+  expect(publish).toBeGreaterThan(verify)
+  expect(steps[publish]?.run).toBe('node apps/desktop/scripts/publish-fork-release.mjs release-assets')
+  expect(steps[publish]?.env).toEqual({
+    GH_TOKEN: '${{ github.token }}',
+    RELEASE_TAG: '${{ needs.build.outputs.tag }}',
+    RELEASE_VERSION: '${{ needs.build.outputs.version }}',
+    SOURCE_SHA: '${{ needs.build.outputs.source_sha }}',
+  })
+  expect(steps.filter(step => step.env?.GH_TOKEN !== undefined)).toHaveLength(1)
+  expect(steps.some(step => /gh release (?:create|edit)/u.test(step.run ?? ''))).toBe(false)
+}
+
 describe('Desktop fork release plan', () => {
+  it('publishes through the exact-source checked publisher after asset-set verification', () => {
+    assertPublisherSelection(readReleaseWorkflow())
+  })
+
+  it.each(['missing-publisher', 'mutable-checkout', 'persisted-auth', 'wrong-source', 'unchecked-cli', 'late-assets'] as const)(
+    'rejects a %s publication workflow', (damage) => {
+      const workflow = readReleaseWorkflow()
+      const steps = workflow.jobs.release!.steps
+      const publish = steps.findIndex(step => step.name === 'Publish reviewed release')
+      const checkout = steps.find(step => step.uses === 'actions/checkout@v6')!
+      if (damage === 'missing-publisher') steps.splice(publish, 1)
+      else if (damage === 'mutable-checkout') checkout.with!.ref = 'master'
+      else if (damage === 'persisted-auth') checkout.with!['persist-credentials'] = true
+      else if (damage === 'wrong-source') steps[publish]!.env!.SOURCE_SHA = '${{ github.sha }}'
+      else if (damage === 'unchecked-cli') steps[publish]!.run = 'gh release create followed by gh release edit'
+      else steps.push(...steps.splice(steps.findIndex(step => step.name === 'Cross-check downloaded artifact set'), 1))
+      expect(() => { assertPublisherSelection(workflow) }).toThrow()
+    },
+  )
+
   it('requires native and restricted hidden-window checks before packaging', () => {
     assertHiddenWindowSelection(readReleaseWorkflow())
   })
