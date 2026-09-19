@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { DESKTOP_IPC, type DesktopUpdateState } from '../src/ipc.ts'
 import type { DesktopManagedUpdateSelection } from '../src/managed-update-coordinator.ts'
 import type { DesktopManagedUpdateLaunch } from '../src/managed-update-launcher.ts'
+import type { DesktopManagedUpdateCompletion } from '../src/managed-update-completion.ts'
 import { managedManifest } from './managed-update-fixture.ts'
 
 const harness = await vi.hoisted(async () => {
@@ -129,7 +130,7 @@ const harness = await vi.hoisted(async () => {
       version: '1.2.3',
     })),
     applyRelease: vi.fn(() => { preparing.resolve(); return prepared.promise }),
-    completeUpdate: vi.fn(async (..._args: unknown[]) => ({ status: 'none' as const })),
+    completeUpdate: vi.fn(async (..._args: unknown[]): Promise<DesktopManagedUpdateCompletion> => ({ status: 'none' })),
     assertProfileRuntime: vi.fn(),
     canRecoverProfile: vi.fn(() => true),
     get preparing() { return preparing }, get prepared() { return prepared },
@@ -290,6 +291,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   harness.reset()
   harness.runMutationHealthCheck = false
+  harness.completeUpdate.mockReset().mockResolvedValue({ status: 'none' })
   harness.dialog.showMessageBox.mockReset()
   harness.managedCheck.mockReset().mockResolvedValue({ phase: 'available', mode: 'github-release-managed', version: '1.2.3' })
   harness.managedInstall.mockReset().mockResolvedValue({ phase: 'installing', mode: 'github-release-managed', version: '1.2.3' })
@@ -311,6 +313,66 @@ afterEach(async () => {
   vi.useRealTimers()
   vi.unstubAllEnvs()
   vi.unstubAllGlobals()
+})
+
+describe('native managed-update recovery entry', () => {
+  const blocked = { status: 'recovery-required', message: 'Installation evidence needs recovery', command: 'native recovery' } as const
+
+  async function startBlocked(): Promise<void> {
+    harness.managedUpdates = true
+    harness.completeUpdate.mockResolvedValue(blocked)
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.errorPublished.promise
+    await vi.advanceTimersByTimeAsync(0)
+  }
+
+  it('rechecks evidence in the owning instance without restarting Host or touching the profile', async () => {
+    await startBlocked()
+    harness.completeUpdate.mockResolvedValue({ status: 'complete', sequence: 2, version: '1.2.3' })
+    harness.app.emit('second-instance', {}, ['Desktop.exe', '--recover-managed-update'])
+    await harness.navigated.promise
+    expect(harness.completeUpdate).toHaveBeenCalledTimes(2)
+    expect(harness.applyRelease).toHaveBeenCalledOnce()
+    expect(harness.hosts).toHaveLength(1)
+    expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
+    expect(harness.mutations).toEqual([])
+    expect(harness.app.relaunch).not.toHaveBeenCalled()
+  })
+
+  it('opens the packaged recovery entry after cold startup and keeps cancellation non-destructive', async () => {
+    vi.stubGlobal('process', { ...process, argv: [...process.argv, '--recover-managed-update'] })
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
+    await startBlocked()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.completeUpdate).toHaveBeenCalledTimes(2)
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ defaultId: 1, cancelId: 1 }))
+    expect(harness.managedCheck).not.toHaveBeenCalled()
+    expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
+  })
+
+  it('retains active-work confirmation before offering a replacement update', async () => {
+    await startBlocked()
+    harness.setHostImpacts([{ runningSessions: 3, queuedMessages: 2, runningJobs: 1 }])
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 }).mockResolvedValueOnce({ response: 1 })
+    harness.app.emit('second-instance', {}, ['Desktop.exe', '--recover-managed-update'])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.hosts[0]!.updateImpact).toHaveBeenCalledOnce()
+    expect(harness.dialog.showMessageBox.mock.calls[1]?.[0]).toHaveProperty('detail', expect.stringContaining('3'))
+    expect(harness.managedInstall).not.toHaveBeenCalled()
+    expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
+  })
+
+  it('does not reinterpret an ordinary second launch as a recovery request', async () => {
+    await startBlocked()
+    harness.app.emit('second-instance', {}, ['Desktop.exe'])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.completeUpdate).toHaveBeenCalledOnce()
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+  })
 })
 
 describe('desktop plugin interruption boundary', () => {

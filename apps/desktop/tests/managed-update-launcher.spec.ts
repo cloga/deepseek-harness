@@ -23,7 +23,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true })))
 })
 
-it('returns only after the detached helper acknowledges the one-time handoff', async () => {
+it.each([50, 60_000])('waits for helper acknowledgement including a metadata retry (%s ms)', async (ackDelay) => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-managed-launch-'))
   roots.push(root)
   const node = join(root, 'source-node.exe')
@@ -61,7 +61,8 @@ it('returns only after the detached helper acknowledges the one-time handoff', a
     now: () => now,
     waitForExit: async () => true,
     sleep: async () => {
-      now += 50
+      now += Math.min(30_000, ackDelay)
+      if (now < ackDelay) return
       if (handoffPath === undefined) throw new Error('missing handoff path')
       const handoff = JSON.parse(await readFile(handoffPath, 'utf8')) as { token: string }
       await writeFile(join(dirname(handoffPath), 'ack.json'), JSON.stringify({
@@ -195,7 +196,7 @@ it('cancels the exact helper when acknowledgement times out', async () => {
     platform: 'win32',
     now: () => now,
     waitForExit: async () => true,
-    sleep: async () => { now = 15_000 },
+    sleep: async () => { now += 15_000 },
   })).rejects.toThrow(/did not acknowledge/u)
 
   expect(fakeChild.kill).toHaveBeenCalledOnce()

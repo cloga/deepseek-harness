@@ -43,7 +43,7 @@ export async function smokeDesktopManagedHelper(
     if (bootstrap.error !== undefined) throw bootstrap.error
     assert.equal(bootstrap.signal, null)
     assert.equal(bootstrap.status, 1)
-    assert.match(bootstrap.stderr, /helper expects one absolute handoff.json path/u)
+    assert.equal(bootstrap.stderr.trim(), 'desktop managed update: helper failed before a result could be persisted')
     assert.doesNotMatch(bootstrap.stderr, /ERR_MODULE_NOT_FOUND/u)
 
     const version = '9999.0.0-helper-fixture'
