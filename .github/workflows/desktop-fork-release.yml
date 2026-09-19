@@ -124,6 +124,17 @@ jobs:
           pnpm exec vitest run apps/desktop/tests/project-manager.spec.ts
           --maxWorkers=1 --testTimeout=90000 --hookTimeout=90000
 
+      - name: Verify hidden Windows command paths
+        run: >-
+          pnpm exec vitest run
+          packages/subprocess/win32-process/tests
+          packages/subprocess/subprocess-local/tests/windows-job.spec.ts
+          packages/subprocess/subprocess-local/tests/native-windows.spec.ts
+          packages/sandbox/sandbox-windows-acl/tests/runner.spec.ts
+          packages/sandbox/sandbox-windows-acl/tests/provider-chain.spec.ts
+          packages/sandbox/sandbox-windows-acl/tests/control.spec.ts
+          --maxWorkers=2 --testTimeout=90000 --hookTimeout=90000
+
       - name: Prepare reviewed managed capability
         env:
           DSH_DESKTOP_RELEASE_GITHUB_TOKEN: ${{ github.token }}
@@ -244,6 +255,17 @@ jobs:
       release_url: ${{ steps.publish.outputs.release_url }}
       manifest_url: ${{ steps.publish.outputs.manifest_url }}
     steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+          persist-credentials: false
+          clean: true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+
       - uses: actions/download-artifact@v4
         with:
           name: desktop-fork-release-${{ needs.build.outputs.version }}
@@ -270,43 +292,7 @@ jobs:
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
           SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if (gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY 2>$null) {
-            throw "Immutable tag or release already exists: $env:RELEASE_TAG"
-          }
-          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
-          @"
-          Unsigned fork-owned Windows x64 Desktop release.
-
-          - Identity: `io.github.cloga.deepseek-harness.desktop` / `DeepSeek Harness (cloga)`
-          - Installer: interactive NSIS; Windows warnings and UAC remain user-controlled
-          - Update mode: source-owned immutable GitHub Release discovery
-          - Native `electron-updater`: disabled; no `app-update.yml`
-          - Source commit: `$env:SOURCE_SHA`
-          "@ | Set-Content -LiteralPath $notes -Encoding utf8NoBOM
-          $assets = Get-ChildItem -LiteralPath release-assets -File | ForEach-Object FullName
-          gh release create $env:RELEASE_TAG @assets `
-            --repo $env:GITHUB_REPOSITORY `
-            --target $env:SOURCE_SHA `
-            --title "Desktop fork $env:RELEASE_VERSION (Windows x64)" `
-            --notes-file $notes `
-            --draft `
-            --prerelease
-          gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false
-          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
-          if ($release.immutable -ne $true) { throw 'Published GitHub Release is not immutable' }
-          if ($release.target_commitish -ne $env:SOURCE_SHA) { throw 'Release target commit does not match the build commit' }
-          $tagSha = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG" --jq .object.sha
-          if ($tagSha -ne $env:SOURCE_SHA) { throw 'Release tag does not resolve to the build commit' }
-          foreach ($asset in $release.assets) {
-            $path = Join-Path 'release-assets' $asset.name
-            if (-not (Test-Path -LiteralPath $path)) { throw "Unexpected release asset $($asset.name)" }
-            $expected = "sha256:$((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant())"
-            if ($asset.digest -ne $expected) { throw "Release asset digest mismatch for $($asset.name)" }
-          }
-          "release_url=$($release.html_url)" >> $env:GITHUB_OUTPUT
-          "manifest_url=https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/release.json" >> $env:GITHUB_OUTPUT
+        run: node apps/desktop/scripts/publish-fork-release.mjs release-assets
 
   remote-check:
     name: Verify remote managed Check

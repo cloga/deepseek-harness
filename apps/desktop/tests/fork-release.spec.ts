@@ -23,7 +23,14 @@ type ReleaseWorkflow = {
   jobs: Record<string, {
     permissions?: Record<string, string>
     env?: Record<string, string>
-    steps: Array<{ name?: string; shell?: string; run?: string; env?: Record<string, string> }>
+    steps: Array<{
+      name?: string
+      uses?: string
+      with?: Record<string, unknown>
+      shell?: string
+      run?: string
+      env?: Record<string, string>
+    }>
   }>
 }
 
@@ -112,7 +119,92 @@ function assertProjectFixtureSelection(workflow: ReleaseWorkflow): void {
   expect(prepare).toBeGreaterThan(transactions)
 }
 
+function assertHiddenWindowSelection(workflow: ReleaseWorkflow): void {
+  const steps = workflow.jobs.build!.steps
+  const index = steps.findIndex(step => step.name === 'Verify hidden Windows command paths')
+  expect(index).toBeGreaterThan(steps.findIndex(step => step.name === 'Install from frozen lockfile'))
+  expect(index).toBeLessThan(steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer'))
+  expect(steps[index]?.run?.trim().split(/\s+/u)).toEqual([
+    'pnpm', 'exec', 'vitest', 'run',
+    'packages/subprocess/win32-process/tests',
+    'packages/subprocess/subprocess-local/tests/windows-job.spec.ts',
+    'packages/subprocess/subprocess-local/tests/native-windows.spec.ts',
+    'packages/sandbox/sandbox-windows-acl/tests/runner.spec.ts',
+    'packages/sandbox/sandbox-windows-acl/tests/provider-chain.spec.ts',
+    'packages/sandbox/sandbox-windows-acl/tests/control.spec.ts',
+    '--maxWorkers=2', '--testTimeout=90000', '--hookTimeout=90000',
+  ])
+}
+
+function assertPublisherSelection(workflow: ReleaseWorkflow): void {
+  const steps = workflow.jobs.release!.steps
+  const checkout = steps.findIndex(step => step.uses === 'actions/checkout@v6')
+  const node = steps.findIndex(step => step.uses === 'actions/setup-node@v6')
+  const assets = steps.findIndex(step => step.uses === 'actions/download-artifact@v4')
+  const verify = steps.findIndex(step => step.name === 'Cross-check downloaded artifact set')
+  const publish = steps.findIndex(step => step.name === 'Publish reviewed release')
+  expect(checkout).toBeGreaterThanOrEqual(0)
+  expect(steps[checkout]?.with).toMatchObject({ ref: '${{ needs.build.outputs.source_sha }}', 'persist-credentials': false, clean: true })
+  expect(node).toBeGreaterThan(checkout)
+  expect(steps[node]?.with?.['node-version']).toBe('${{ env.NODE_VERSION }}')
+  expect(assets).toBeGreaterThan(node)
+  expect(verify).toBeGreaterThan(assets)
+  expect(publish).toBeGreaterThan(verify)
+  expect(steps[publish]?.run).toBe('node apps/desktop/scripts/publish-fork-release.mjs release-assets')
+  expect(steps[publish]?.env).toEqual({
+    GH_TOKEN: '${{ github.token }}',
+    RELEASE_TAG: '${{ needs.build.outputs.tag }}',
+    RELEASE_VERSION: '${{ needs.build.outputs.version }}',
+    SOURCE_SHA: '${{ needs.build.outputs.source_sha }}',
+  })
+  expect(steps.filter(step => step.env?.GH_TOKEN !== undefined)).toHaveLength(1)
+  expect(steps.some(step => /gh release (?:create|edit)/u.test(step.run ?? ''))).toBe(false)
+}
+
 describe('Desktop fork release plan', () => {
+  it('publishes through the exact-source checked publisher after asset-set verification', () => {
+    assertPublisherSelection(readReleaseWorkflow())
+  })
+
+  it.each(['missing-publisher', 'mutable-checkout', 'persisted-auth', 'wrong-source', 'unchecked-cli', 'late-assets'] as const)(
+    'rejects a %s publication workflow', (damage) => {
+      const workflow = readReleaseWorkflow()
+      const steps = workflow.jobs.release!.steps
+      const publish = steps.findIndex(step => step.name === 'Publish reviewed release')
+      const checkout = steps.find(step => step.uses === 'actions/checkout@v6')!
+      if (damage === 'missing-publisher') steps.splice(publish, 1)
+      else if (damage === 'mutable-checkout') checkout.with!.ref = 'master'
+      else if (damage === 'persisted-auth') checkout.with!['persist-credentials'] = true
+      else if (damage === 'wrong-source') steps[publish]!.env!.SOURCE_SHA = '${{ github.sha }}'
+      else if (damage === 'unchecked-cli') steps[publish]!.run = 'gh release create followed by gh release edit'
+      else steps.push(...steps.splice(steps.findIndex(step => step.name === 'Cross-check downloaded artifact set'), 1))
+      expect(() => { assertPublisherSelection(workflow) }).toThrow()
+    },
+  )
+
+  it('requires native and restricted hidden-window checks before packaging', () => {
+    assertHiddenWindowSelection(readReleaseWorkflow())
+  })
+
+  it.each(['omitted', 'control', 'native', 'sandbox', 'budget', 'late'] as const)('rejects a %s hidden-window validation selection', (damage) => {
+    const workflow = readReleaseWorkflow()
+    const steps = workflow.jobs.build!.steps
+    const index = steps.findIndex(step => step.name === 'Verify hidden Windows command paths')
+    const step = steps[index]!
+    if (damage === 'omitted') steps.splice(index, 1)
+    else if (damage === 'late') steps.push(...steps.splice(index, 1))
+    else if (damage === 'budget') step.run = step.run!.replace('--testTimeout=90000', '--testTimeout=5000')
+    else {
+      const files = {
+        control: 'packages/sandbox/sandbox-windows-acl/tests/control.spec.ts',
+        native: 'packages/subprocess/subprocess-local/tests/native-windows.spec.ts',
+        sandbox: 'packages/sandbox/sandbox-windows-acl/tests/runner.spec.ts',
+      }
+      step.run = step.run!.replace(files[damage], '')
+    }
+    expect(() => { assertHiddenWindowSelection(workflow) }).toThrow()
+  })
+
   it('requires a step-local exact reviewed source pin before dependencies and packaging in both modes', () => {
     assertReviewedSourcePin(readReleaseWorkflow())
   })
@@ -202,8 +294,8 @@ describe('Desktop fork release plan', () => {
     expect(plan).toMatchObject({
       schemaVersion: 2,
       channel: 'cloga-windows-x64',
-      version: '0.1.6-alpha.1.cloga.6',
-      sequence: 16,
+      version: '0.1.6-alpha.1.cloga.7',
+      sequence: 17,
       upstreamVersion: '0.1.6-alpha.1',
       migration: {
         owner: 'cloga/dsh-windows-ops',
@@ -248,7 +340,7 @@ describe('Desktop fork release plan', () => {
       mode: 'github-release-managed',
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
-      currentSequence: 16,
+      currentSequence: 17,
       minimumSequence: 2,
       provisioning: {
         capability: { id: 'desktopNativePluginProvisioning' },
