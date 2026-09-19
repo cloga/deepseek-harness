@@ -53,7 +53,7 @@ const NS = 'settings.plugins'
 
 /** Required services (cordis fiber inject). */
 export const inject = [
-  'slots', 'locale', 'remote', 'remote.credentials', 'remote.session', 'settingsScope',
+  'slots', 'locale', 'remote', 'remote.credentials', 'remote.session', 'settingsScope', 'settingsSchema',
 ]
 
 /**
@@ -68,7 +68,9 @@ export function apply(ctx: ClientContext): void {
   const agentLoop = new AgentLoopCardController(ctx.settingsScope.bind({ namespace: AGENT_LOOP_NS }))
   const webSearch = new WebSearchCardController(
     ctx.settingsScope.bind({ namespace: WEB_SEARCH_NS }), ctx)
-  const subagentLimits = new SubagentLimitsCardController(ctx.settingsScope.bind({ namespace: 'subagent' }))
+  const subagentLimits = new SubagentLimitsCardController(
+    ctx.settingsScope.bind({ namespace: 'subagent' }), () => ctx.remote.session.modelCatalog(),
+  )
   const subagentModelSelection = new SubagentModelSelectionCardController(
     ctx.settingsScope.bind({ namespace: SUBAGENT_MODEL_SELECTION_NS }),
     ctx,
@@ -84,18 +86,18 @@ export function apply(ctx: ClientContext): void {
     'ui-settings-plugins: credential invalidations',
   )
   ctx.effect(
-    () => ctx.remote.$on('llm/adapters-updated', () => { subagentModelSelection.refreshCatalog() }),
+    () => ctx.remote.$on('llm/adapters-updated', () => { subagentModelSelection.refreshCatalog(); subagentLimits.refreshCatalog() }),
     'ui-settings-plugins: subagent adapter invalidations',
   )
   ctx.effect(
-    () => ctx.remote.$on('settings/document-updated', () => { subagentModelSelection.refreshCatalog() }),
+    () => ctx.remote.$on('settings/document-updated', () => { subagentModelSelection.refreshCatalog(); subagentLimits.refreshCatalog() }),
     'ui-settings-plugins: subagent settings invalidations',
   )
   ctx.effect(
-    () => ctx.on('connection/reset', () => { subagentModelSelection.resetConnection() }),
+    () => ctx.on('connection/reset', () => { subagentModelSelection.resetConnection(); subagentLimits.resetConnection() }),
     'ui-settings-plugins: subagent connection generation',
   )
-  ctx.effect(() => () => { subagentModelSelection.dispose() }, 'ui-settings-plugins: subagent preference')
+  ctx.effect(() => () => { subagentModelSelection.dispose(); subagentLimits.dispose() }, 'ui-settings-plugins: subagent preference')
 
   // Configuration pages register while the Host serves their namespaces.
   // A deployment without those plugins shows no trace of them. Card registration order is the page order, not the
@@ -125,7 +127,12 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => {
     const registered = new Map<string, () => void>()
     const sync = (): void => {
-      const served = new Set(describeFace.getSnapshot().view?.namespaces.map(view => view.ns) ?? [])
+      const namespaces = describeFace.getSnapshot().view?.namespaces ?? []
+      const subagent = namespaces.find(view => view.ns === 'subagent')
+      subagentLimits.setRulesSupported(subagent !== undefined && ctx.settingsSchema.nodeAtPath(
+        ctx.settingsSchema.rehydrate(subagent.schema), ['modelRules'],
+      )?.type === 'array')
+      const served = new Set(namespaces.map(view => view.ns))
       for (const [namespaces, register] of pages) {
         const namespace = namespaces[0]
         const available = namespaces.some(namespace => served.has(namespace))

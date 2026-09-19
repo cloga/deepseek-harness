@@ -11,6 +11,8 @@ import { apply, inject } from '@deepseek-ai/dsh-client-ui-settings-plugins/clien
 import type { PluginsSettingsSectionInjected } from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import { SubagentModelSelectionCardController } from '../src/client/subagent-model-selection-card-controller.ts'
 import { apply as hostApply } from '../src/index.ts'
+import type { SubagentCardFace } from '../src/client/subagent-card-controller.ts'
+import { SubagentLimitsCardController } from '../src/client/subagent-limits-card-controller.ts'
 
 // These specs assert the shipped Chinese copy. The lane has no jsdom `window`,
 // so browser-language detection never runs and a fresh LocaleRuntime opens on
@@ -73,7 +75,7 @@ describe('ui-settings-plugins apply', () => {
 
   it('declares the services it uses', () => {
     expect(inject).toEqual([
-      'slots', 'locale', 'remote', 'remote.credentials', 'remote.session', 'settingsScope',
+      'slots', 'locale', 'remote', 'remote.credentials', 'remote.session', 'settingsScope', 'settingsSchema',
     ])
   })
 
@@ -118,6 +120,25 @@ describe('ui-settings-plugins apply', () => {
       const face = (entry as { inject?: () => unknown }).inject?.() as { hooks: Record<string, unknown> }
       expect(Object.keys(face.hooks)).toHaveLength(entry.options.id === 'subagent' ? 2 : 1)
     }
+  })
+
+  it('enables rule editing only when the Host schema declares the rules array', async () => {
+    const { ctx, slots, describeSettings, remote } = await bench(['subagent'])
+    onTestFinished(() => ctx.fiber.dispose())
+    declareRoot(slots)
+    await ctx.plugin({ inject: [...inject], apply }).await()
+    await vi.waitFor(() => expect(slots.entries('plugins.item')).toHaveLength(1))
+    const face = (slots.entries('plugins.item')[0]!.inject as unknown as () => SubagentCardFace)()
+    expect(face.hooks.subagentLimitsCard.getSnapshot().rules.supported).toBe(false)
+    describeSettings.mockResolvedValue({ ok: true, value: {
+      writable: true, hasDocument: true,
+      namespaces: [{ ns: 'subagent', schema: {
+        type: 'object', dict: { modelRules: { type: 'array', inner: { type: 'any' }, meta: { default: [] } } },
+      }, value: {}, applies: 'live', secrets: [], revision: 1 }],
+    } })
+    remote.emit('settings/document-updated', ['subagent', 1])
+    await vi.waitFor(() => expect(face.hooks.subagentLimitsCard.getSnapshot().rules.supported).toBe(true))
+    expect(face.hooks.subagentLimitsCard.getSnapshot().rules.rows).toEqual([])
   })
 
   it('registers one configuration page per served namespace, in its own order, titled in the active locale', async () => {
@@ -232,18 +253,24 @@ describe('ui-settings-plugins apply', () => {
   it('refreshes the subagent catalog after model inputs change or the connection resets', async () => {
     const refresh = vi.spyOn(SubagentModelSelectionCardController.prototype, 'refreshCatalog')
     const reset = vi.spyOn(SubagentModelSelectionCardController.prototype, 'resetConnection')
+    const refreshRules = vi.spyOn(SubagentLimitsCardController.prototype, 'refreshCatalog')
+    const resetRules = vi.spyOn(SubagentLimitsCardController.prototype, 'resetConnection')
     const { ctx, slots, remote } = await bench(['subagent-model-selection'])
     declareRoot(slots)
     await ctx.plugin({ inject: [...inject], apply }).await()
     refresh.mockClear()
     reset.mockClear()
+    refreshRules.mockClear()
+    resetRules.mockClear()
 
     remote.emit('llm/adapters-updated', [])
     expect(refresh).toHaveBeenCalledTimes(1)
     remote.emit('settings/document-updated', ['llm-deepseek', 1])
     expect(refresh).toHaveBeenCalledTimes(2)
+    expect(refreshRules).toHaveBeenCalledTimes(2)
     ctx.emit('connection/reset')
     expect(reset).toHaveBeenCalledTimes(1)
+    expect(resetRules).toHaveBeenCalledTimes(1)
   })
 
   it('ignores a credential change for a reference no card watches', async () => {

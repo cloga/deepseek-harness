@@ -1,4 +1,4 @@
-/** Shared presentation and actions for the two Host-owned Subagent settings sections. */
+/** Shared presentation and actions for the two Host-owned Subagent settings namespaces. */
 
 import type { CardShell } from './card-form.ts'
 import type { SubagentLimitsCardFace, SubagentLimitsCardState } from './subagent-limits-card-controller.ts'
@@ -11,6 +11,10 @@ export interface SubagentCardFace {
   hooks: SubagentLimitsCardFace['hooks'] & SubagentModelSelectionCardFace['hooks']
   editLimit: SubagentLimitsCardFace['edit']
   resetLimit: SubagentLimitsCardFace['resetField']
+  addRule: SubagentLimitsCardFace['addRule']
+  removeRule: SubagentLimitsCardFace['removeRule']
+  editRule: SubagentLimitsCardFace['editRule']
+  retryRulesCatalog: SubagentLimitsCardFace['retryRulesCatalog']
   toggleEnabled: SubagentModelSelectionCardFace['toggleEnabled']
   toggleModel: SubagentModelSelectionCardFace['toggleModel']
   retryCatalog: SubagentModelSelectionCardFace['retryCatalog']
@@ -56,6 +60,10 @@ export function subagentCardFace(
     hooks: { ...limits.hooks, ...models.hooks },
     editLimit: limits.edit,
     resetLimit: limits.resetField,
+    addRule: limits.addRule,
+    removeRule: limits.removeRule,
+    editRule: limits.editRule,
+    retryRulesCatalog: limits.retryRulesCatalog,
     toggleEnabled: models.toggleEnabled,
     toggleModel: models.toggleModel,
     retryCatalog: models.retryCatalog,
