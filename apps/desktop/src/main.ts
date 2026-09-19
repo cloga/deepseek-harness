@@ -324,11 +324,11 @@ async function main(): Promise<void> {
     if (pluginMutationBusy || recoveryPending !== undefined || updateConfirmation !== undefined || hasQuitStarted()
       || updateState.phase === 'installing' || updateState.phase === 'ready') throw new DesktopOperationBusy(messages.pluginMutationBusy)
   }
-  const runRecovery = (operation: () => Promise<void>): Promise<void> => {
-    try { assertRecoveryAvailable() } catch (error) { return Promise.reject(error) }
+  const runRecovery = async (operation: () => Promise<void>): Promise<void> => {
+    assertRecoveryAvailable()
     const pending = Promise.resolve().then(operation)
     recoveryPending = pending
-    return pending.finally(() => { if (recoveryPending === pending) recoveryPending = undefined })
+    try { await pending } finally { if (recoveryPending === pending) recoveryPending = undefined }
   }
   recoverApplication = (action): Promise<void> => runRecovery(async () => {
     await startup?.catch(() => undefined)
