@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -17,7 +17,7 @@ const jsonHash = value => digest(canonical(value))
 function directory(t) {
   const root = mkdtempSync(join(tmpdir(), 'installed-upgrade-contract-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
-  return root
+  return realpathSync.native(root)
 }
 function releaseFixture(t) {
   const root = directory(t)
@@ -67,6 +67,7 @@ test('direct fixture invocation refuses a workstation before loading Playwright 
 
 test('owned paths reject roots, escapes and existing junction ancestors', t => {
   const root = directory(t)
+  assert.equal(root, realpathSync.native(root))
   assert.equal(ownedUpgradePath(root, join(root, 'new', 'home')), join(root, 'new', 'home'))
   assert.throws(() => ownedUpgradePath(root, root))
   assert.throws(() => ownedUpgradePath(root, join(root, '..', 'other')))
