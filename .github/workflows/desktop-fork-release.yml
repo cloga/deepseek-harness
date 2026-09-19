@@ -124,6 +124,17 @@ jobs:
           pnpm exec vitest run apps/desktop/tests/project-manager.spec.ts
           --maxWorkers=1 --testTimeout=90000 --hookTimeout=90000
 
+      - name: Verify hidden Windows command paths
+        run: >-
+          pnpm exec vitest run
+          packages/subprocess/win32-process/tests
+          packages/subprocess/subprocess-local/tests/windows-job.spec.ts
+          packages/subprocess/subprocess-local/tests/native-windows.spec.ts
+          packages/sandbox/sandbox-windows-acl/tests/runner.spec.ts
+          packages/sandbox/sandbox-windows-acl/tests/provider-chain.spec.ts
+          packages/sandbox/sandbox-windows-acl/tests/control.spec.ts
+          --maxWorkers=2 --testTimeout=90000 --hookTimeout=90000
+
       - name: Prepare reviewed managed capability
         env:
           DSH_DESKTOP_RELEASE_GITHUB_TOKEN: ${{ github.token }}

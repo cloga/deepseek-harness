@@ -24,6 +24,6 @@ Process creation flags, console inheritance, standard and control handles, suspe
 
 ## Consequences
 
-Background commands request hidden initial windows while retaining their original output, exit, and process-ownership behavior. Binding tests assert both startup visibility and unchanged creation flags; runner tests pin the Node launch option. Packaged validation observes real target startup information, streams, and owned process cleanup rather than treating mocked options as runtime acceptance.
+Background commands request hidden initial windows while retaining their original output, exit, and process-ownership behavior. Binding tests assert both startup visibility and unchanged creation flags; runner tests pin the Node launch option. The release workflow requires native Job and restricted-token regression suites before packaging. Packaged validation observes real target startup information, streams, and owned process cleanup before release assets are finalized, rather than treating mocked options as runtime acceptance.
 
 Console visibility observations have limits: Windows Terminal may expose a message-only console HWND, and a console surface can belong to another host process. A hidden or absent target HWND alone does not establish desktop-wide visibility or focus behavior. Interactive focus acceptance remains distinct from startup-flag and lifecycle verification; installing the release into a user's active Desktop requires separate consent.

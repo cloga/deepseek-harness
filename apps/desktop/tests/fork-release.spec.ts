@@ -112,7 +112,47 @@ function assertProjectFixtureSelection(workflow: ReleaseWorkflow): void {
   expect(prepare).toBeGreaterThan(transactions)
 }
 
+function assertHiddenWindowSelection(workflow: ReleaseWorkflow): void {
+  const steps = workflow.jobs.build!.steps
+  const index = steps.findIndex(step => step.name === 'Verify hidden Windows command paths')
+  expect(index).toBeGreaterThan(steps.findIndex(step => step.name === 'Install from frozen lockfile'))
+  expect(index).toBeLessThan(steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer'))
+  expect(steps[index]?.run?.trim().split(/\s+/u)).toEqual([
+    'pnpm', 'exec', 'vitest', 'run',
+    'packages/subprocess/win32-process/tests',
+    'packages/subprocess/subprocess-local/tests/windows-job.spec.ts',
+    'packages/subprocess/subprocess-local/tests/native-windows.spec.ts',
+    'packages/sandbox/sandbox-windows-acl/tests/runner.spec.ts',
+    'packages/sandbox/sandbox-windows-acl/tests/provider-chain.spec.ts',
+    'packages/sandbox/sandbox-windows-acl/tests/control.spec.ts',
+    '--maxWorkers=2', '--testTimeout=90000', '--hookTimeout=90000',
+  ])
+}
+
 describe('Desktop fork release plan', () => {
+  it('requires native and restricted hidden-window checks before packaging', () => {
+    assertHiddenWindowSelection(readReleaseWorkflow())
+  })
+
+  it.each(['omitted', 'control', 'native', 'sandbox', 'budget', 'late'] as const)('rejects a %s hidden-window validation selection', (damage) => {
+    const workflow = readReleaseWorkflow()
+    const steps = workflow.jobs.build!.steps
+    const index = steps.findIndex(step => step.name === 'Verify hidden Windows command paths')
+    const step = steps[index]!
+    if (damage === 'omitted') steps.splice(index, 1)
+    else if (damage === 'late') steps.push(...steps.splice(index, 1))
+    else if (damage === 'budget') step.run = step.run!.replace('--testTimeout=90000', '--testTimeout=5000')
+    else {
+      const files = {
+        control: 'packages/sandbox/sandbox-windows-acl/tests/control.spec.ts',
+        native: 'packages/subprocess/subprocess-local/tests/native-windows.spec.ts',
+        sandbox: 'packages/sandbox/sandbox-windows-acl/tests/runner.spec.ts',
+      }
+      step.run = step.run!.replace(files[damage], '')
+    }
+    expect(() => { assertHiddenWindowSelection(workflow) }).toThrow()
+  })
+
   it('requires a step-local exact reviewed source pin before dependencies and packaging in both modes', () => {
     assertReviewedSourcePin(readReleaseWorkflow())
   })
