@@ -58,8 +58,8 @@ async function completionFixture(sequence = 2) {
     schemaVersion: 1, capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
     planSha256, composition: 'active', plugins: [], removed: [], rolledBack: false, verified: true,
   }))
-  const complete = (completedSequence = 0) => completeDesktopManagedUpdate(
-    operationsRoot, completionPath, capability, completedSequence, executable, runtime, planPath, profile, () => false,
+  const complete = (completedSequence = 0, baselineDisposition?: 'preserved-user-choice' | 'pending') => completeDesktopManagedUpdate(
+    operationsRoot, completionPath, capability, completedSequence, executable, runtime, planPath, profile, baselineDisposition, () => false,
   )
   const operation = async (
     character: string,
@@ -87,7 +87,7 @@ async function completionFixture(sequence = 2) {
       await writeFile(join(path, 'helper-result.json'), JSON.stringify({
         ...identity, status: 'blocked', reason: 'receipt download failed',
         ...(state === 'pre-install' ? {
-          phase: 'receipt-download', asset: 'build-receipt', errorType: 'network', installationState: 'not-started',
+          phase: 'receipt-download', asset: 'build-receipt', errorType: 'network-reset', installationState: 'not-started',
         } : {}),
       }))
       if (state === 'pre-install') await writeFile(join(path, 'release.json'), body)
@@ -109,6 +109,100 @@ async function patchRecord(path: string, fields: Record<string, unknown>): Promi
   const value = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
   await writeFile(path, JSON.stringify({ ...value, ...fields }))
 }
+
+const malformedModernResults: { readonly name: string; readonly fields: Record<string, unknown> }[] = [
+  { name: 'unknown phase', fields: { phase: 'future-install-phase' } },
+  { name: 'unknown error category', fields: { errorType: 'network' } },
+  { name: 'non-string installation state', fields: { installationState: ['not-started'] } },
+  { name: 'started receipt download', fields: { installationState: 'may-have-started' } },
+  { name: 'unstarted installer launch', fields: { phase: 'installer-launch' } },
+  { name: 'unstarted result persistence', fields: { phase: 'result-persistence' } },
+  { name: 'exit category without exit code', fields: { errorType: 'installer-exit' } },
+  { name: 'launch error before launch', fields: { errorType: 'installer-launch' } },
+  { name: 'installer exit before launch', fields: { installerExitCode: 1 } },
+  { name: 'unknown status', fields: { status: 'complete' } },
+  { name: 'unsupported schema', fields: { schemaVersion: 2 } },
+  { name: 'invalid manifest digest', fields: { manifestSha256: 'invalid' } },
+  { name: 'mismatched manifest digest', fields: { manifestSha256: 'f'.repeat(64) } },
+  { name: 'invalid sequence', fields: { sequence: -1 } },
+  { name: 'empty reason', fields: { reason: '' } },
+  { name: 'unsupported field', fields: { unexpected: true } },
+  { name: 'partial modern diagnostics', fields: { installationState: undefined } },
+]
+
+it.each(malformedModernResults.flatMap(item => [false, true].map(cancelled => ({ ...item, cancelled }))))(
+  'rejects $name before cancellation can hide it (cancelled $cancelled)', async ({ fields, cancelled }) => {
+    const fixture = await completionFixture()
+    const operation = await fixture.operation('a', 'pre-install')
+    await patchRecord(join(operation, 'helper-result.json'), fields)
+    if (cancelled) await writeFile(join(operation, 'cancelled.json'), JSON.stringify({ schemaVersion: 1, token: 'a'.repeat(64) }))
+    await fixture.operation('f', 'success')
+    const before = await readFile(join(operation, 'helper-result.json'), 'utf8')
+    await expect(fixture.complete()).resolves.toMatchObject({ status: 'recovery-required' })
+    expect(await readFile(join(operation, 'helper-result.json'), 'utf8')).toBe(before)
+    await expect(readFile(fixture.completionPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  },
+)
+
+it.each(['preserved-user-choice', 'pending'] as const)(
+  'keeps %s separate from completion for staged and pre-install candidates', async (disposition) => {
+    for (const state of ['success', 'pre-install'] as const) {
+      const fixture = await completionFixture(3)
+      const older = await fixture.operation('a', 'blocked', managedManifest({ sequence: 2 }))
+      const candidate = await fixture.operation('b', state)
+      const evidenceRoot = state === 'success' ? join(candidate, 'stage') : candidate
+      const resultPath = join(evidenceRoot, 'helper-result.json')
+      const manifestPath = join(evidenceRoot, 'release.json')
+      const resultBytes = await readFile(resultPath, 'utf8')
+      const manifestBytes = await readFile(manifestPath, 'utf8')
+      const inventoryPath = join(fixture.profile, 'desktop-plugin-provisioning-state.json')
+      const inventoryBytes = await readFile(inventoryPath, 'utf8')
+      await rm(inventoryPath)
+      const previous = JSON.stringify({ schemaVersion: 1, status: 'complete', sequence: 1, manifestSha256: 'd'.repeat(64) })
+      await writeFile(fixture.completionPath, previous)
+      const outcome = { status: 'baseline-not-qualified', disposition, sequence: 3, version: fixture.manifest.version }
+      await expect(fixture.complete(1, disposition)).resolves.toEqual(outcome)
+      expect(await readFile(fixture.completionPath, 'utf8')).toBe(previous)
+      expect(await readFile(resultPath, 'utf8')).toBe(resultBytes)
+      expect(await readFile(manifestPath, 'utf8')).toBe(manifestBytes)
+      expect(JSON.parse(await readFile(join(evidenceRoot, 'baseline-outcome.json'), 'utf8'))).toEqual({
+        schemaVersion: 1, ...outcome, manifestSha256: fixture.manifest.manifestSha256,
+      })
+      await expect(readFile(join(older, 'stage', 'baseline-outcome.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      if (state === 'pre-install') expect(await readdir(candidate)).not.toContain('stage')
+      await writeFile(inventoryPath, inventoryBytes)
+      await expect(fixture.complete(1)).resolves.toMatchObject({ status: 'complete', sequence: 3 })
+    }
+  },
+)
+
+it.each(['executable', 'runtime', 'plan'] as const)(
+  'does not record a pre-install baseline outcome before validating installed %s', async (mismatch) => {
+    const fixture = await completionFixture()
+    await fixture.operation('a', 'blocked')
+    const candidate = await fixture.operation('b', 'pre-install')
+    if (mismatch === 'executable') await writeFile(fixture.executable, 'incorrect executable')
+    if (mismatch === 'runtime') await writeFile(fixture.runtime, 'incorrect runtime')
+    if (mismatch === 'plan') await writeFile(fixture.planPath, '{}')
+    await expect(fixture.complete(0, 'pending')).resolves.toMatchObject({ status: 'recovery-required' })
+    await expect(readFile(join(candidate, 'baseline-outcome.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(fixture.completionPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  },
+)
+
+it('keeps the tenth-argument helper probe ahead of baseline deferral', async () => {
+  const fixture = await completionFixture()
+  await fixture.operation('a', 'interrupted')
+  const candidate = await fixture.operation('b', 'pre-install')
+  const helperRunning = vi.fn(() => true)
+  await expect(completeDesktopManagedUpdate(
+    fixture.operationsRoot, fixture.completionPath, fixture.capability, 0,
+    fixture.executable, fixture.runtime, fixture.planPath, fixture.profile, 'pending', helperRunning,
+  )).resolves.toMatchObject({ status: 'recovery-required', message: /helper is still running/u })
+  expect(helperRunning).toHaveBeenCalledWith(123)
+  await expect(readFile(join(candidate, 'baseline-outcome.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+  await expect(readFile(fixture.completionPath)).rejects.toMatchObject({ code: 'ENOENT' })
+})
 
 function historicalCapability(current: ReturnType<typeof managedCapability>, migration = false): Record<string, unknown> {
   const value: Record<string, unknown> = { ...current, schemaVersion: 2 }
@@ -213,6 +307,8 @@ it.each(['missing', 'unknown-version', 'old-unknown-version', 'current-missing-p
 const inventories = [
   'valid', 'missing-state', 'required-valid', 'required-artifact-drift',
   'required-receipt-drift', 'required-first-install', 'required-already-higher',
+  'required-preserved', 'required-pending', 'required-preserved-executable-drift',
+  'required-pending-runtime-drift', 'required-preserved-manifest-drift', 'required-pending-plan-drift',
 ] as const
 it.each(inventories)('requires active inventory before completion: %s', async (inventory) => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-managed-completion-'))
@@ -351,6 +447,19 @@ it.each(inventories)('requires active inventory before completion: %s', async (i
   if (configuration === undefined) throw new Error('Fixture must select managed updates')
   expect(configuration.installedSequence).toBe(Math.max(sequence, previousSequence))
   expect(configuration.completedSequence).toBe(previousSequence)
+  const disposition = inventory.includes('preserved') ? 'preserved-user-choice' as const
+    : inventory.includes('pending') ? 'pending' as const : undefined
+  const previousCompletion = await readFile(completionPath, 'utf8').catch(() => undefined)
+  const pendingPath = join(operation, 'pending-completion.json')
+  const pendingBytes = await readFile(pendingPath, 'utf8')
+  if (disposition !== undefined) {
+    // Explicitly unqualified inventory must never mint completion, even with a healthy executable.
+    await rm(join(profile, 'desktop-plugin-provisioning-state.json'))
+    if (inventory.endsWith('executable-drift')) await writeFile(executablePath, 'wrong executable')
+    if (inventory.endsWith('runtime-drift')) await writeFile(runtimePath, 'wrong runtime')
+    if (inventory.endsWith('manifest-drift')) await writeFile(join(operation, 'release.json'), JSON.stringify({ ...manifest, sequence: 99 }))
+    if (inventory.endsWith('plan-drift')) await writeFile(provisioningPath, JSON.stringify({ schemaVersion: 1, mode: 'exact', plugins: [] }))
+  }
   const result = await completeDesktopManagedUpdate(
     configuration.operationsRoot,
     completionPath,
@@ -360,8 +469,19 @@ it.each(inventories)('requires active inventory before completion: %s', async (i
     runtimePath,
     provisioningPath,
     profile,
+    disposition,
   )
-  if (inventory === 'valid' || inventory === 'required-valid' || inventory === 'required-first-install') {
+  if (inventory === 'required-preserved' || inventory === 'required-pending') {
+    expect(result).toEqual({ status: 'baseline-not-qualified', disposition, sequence, version })
+    expect(await readFile(completionPath, 'utf8')).toBe(previousCompletion)
+    expect(await readFile(pendingPath, 'utf8')).toBe(pendingBytes)
+    expect(JSON.parse(await readFile(join(operation, 'baseline-outcome.json'), 'utf8'))).toEqual({
+      schemaVersion: 1, status: 'baseline-not-qualified', disposition, sequence, version,
+      manifestSha256: manifest.manifestSha256,
+    })
+    const restarted = await loadDesktopManagedUpdateConfiguration(resources, userData, 'win32')
+    expect(restarted?.completedSequence).toBe(previousSequence)
+  } else if (inventory === 'valid' || inventory === 'required-valid' || inventory === 'required-first-install') {
     expect(result).toEqual({ status: 'complete', sequence, version })
     expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({ status: 'complete', sequence })
     const completedBytes = await readFile(completionPath, 'utf8')
@@ -378,6 +498,11 @@ it.each(inventories)('requires active inventory before completion: %s', async (i
     expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({ status: 'complete', sequence: 4 })
   } else {
     expect(result.status).toBe('recovery-required')
+    if (disposition !== undefined) {
+      expect(await readFile(completionPath, 'utf8')).toBe(previousCompletion)
+      expect(await readFile(pendingPath, 'utf8')).toBe(pendingBytes)
+      await expect(readFile(join(operation, 'baseline-outcome.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
     expect(JSON.parse(await readFile(completionPath, 'utf8'))).toMatchObject({
       status: 'complete', sequence: previousSequence,
     })

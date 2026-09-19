@@ -6,8 +6,9 @@ set -euo pipefail
 # verify that payload before extracting it into the ephemeral runner directory.
 readonly BUBBLEWRAP_VERSION='0.9.0-1ubuntu0.1'
 readonly BUBBLEWRAP_SHA256='1b506492bd9c7fd0cdb4f02ac822f1d3e336b0aead5113c1239baf8db5db562a'
-# Launchpad retains this exact publisher artifact after Ubuntu's rolling pool removes it.
-readonly BUBBLEWRAP_URL="https://launchpadlibrarian.net/751286710/bubblewrap_${BUBBLEWRAP_VERSION}_amd64.deb"
+# Superseded versions leave the rolling pool; this snapshot retains the reviewed bytes.
+# This restores availability only, without changing the version or its security posture.
+readonly BUBBLEWRAP_URL="https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/b/bubblewrap/bubblewrap_${BUBBLEWRAP_VERSION}_amd64.deb"
 
 : "${RUNNER_TEMP:?prepare-ci-bubblewrap requires RUNNER_TEMP}"
 : "${GITHUB_PATH:?prepare-ci-bubblewrap requires GITHUB_PATH}"

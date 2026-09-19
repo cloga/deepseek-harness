@@ -24,20 +24,32 @@ const reasonKeys = {
   cancelled: 'updateReasonCancelled', network: 'updateReasonNetwork',
 } as const
 
+const networkDiagnostics = new WeakMap<object, { stage: DesktopUpdateNetworkStage; failure: NetworkFailure }>()
+
+function errorField(error: unknown, field: 'code' | 'name' | 'message' | 'cause'): unknown {
+  if (typeof error !== 'object' || error === null) return undefined
+  try { return (error as Record<string, unknown>)[field] }
+  catch (_error) {
+    // Diagnostics must not replace the primary failure with a getter or proxy failure.
+    return undefined
+  }
+}
+
 function networkFailure(error: unknown): NetworkFailure | undefined {
   const seen = new Set<unknown>()
   let current = error, fetchFailed = false
   for (let depth = 0; depth < 5 && typeof current === 'object' && current !== null && !seen.has(current); depth++) {
     seen.add(current)
-    const value = current as { code?: unknown; name?: unknown; message?: unknown; cause?: unknown }
-    if (typeof value.code === 'string' && Object.hasOwn(reasonsByCode, value.code)) {
-      const code = value.code as NetworkCode
-      return { reason: reasonsByCode[code], code }
+    const code = errorField(current, 'code')
+    if (typeof code === 'string' && Object.hasOwn(reasonsByCode, code)) {
+      const knownCode = code as NetworkCode
+      return { reason: reasonsByCode[knownCode], code: knownCode }
     }
-    if (value.name === 'TimeoutError') return { reason: 'timeout' }
-    if (value.name === 'AbortError') return { reason: 'cancelled' }
-    if (value.name === 'TypeError' && value.message === 'fetch failed') fetchFailed = true
-    current = value.cause
+    const name = errorField(current, 'name')
+    if (name === 'TimeoutError') return { reason: 'timeout' }
+    if (name === 'AbortError') return { reason: 'cancelled' }
+    if (name === 'TypeError' && errorField(current, 'message') === 'fetch failed') fetchFailed = true
+    current = errorField(current, 'cause')
   }
   return fetchFailed ? { reason: 'network' } : undefined
 }
@@ -52,10 +64,11 @@ function networkMessage(stage: DesktopUpdateNetworkStage, failure: NetworkFailur
 }
 
 class DesktopUpdateNetworkError extends Error {
-  constructor(readonly stage: DesktopUpdateNetworkStage, readonly failure: NetworkFailure, cause: unknown) {
+  constructor(stage: DesktopUpdateNetworkStage, failure: NetworkFailure, cause: unknown) {
     super(networkMessage(stage, failure, en), { cause })
+    networkDiagnostics.set(this, { stage, failure })
     // Build-time discovery sanitizers recognize these standard cancellation names.
-    const causeName = cause instanceof Error ? cause.name : undefined
+    const causeName = errorField(cause, 'name')
     this.name = causeName === 'TimeoutError' || causeName === 'AbortError' ? causeName : 'DesktopUpdateNetworkError'
   }
 }
@@ -77,13 +90,32 @@ export async function withDesktopUpdateNetworkError<T>(stage: DesktopUpdateNetwo
 }
 
 /**
- * Localize known update network errors while preserving other existing diagnostics.
+ * Return localized technical details only for a network error wrapped by this module.
  * @param error - Failure caught by the managed update coordinator.
  * @param messages - The shell's selected complete dictionary.
- * @returns User-facing text; network failures contain no raw error messages or URLs.
+ * @returns Safe stage, reason and advice, or undefined for an unclassified failure.
+ */
+export function desktopUpdateNetworkDetails(error: unknown, messages: DesktopMessages = en): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const diagnostic = networkDiagnostics.get(error)
+  return diagnostic === undefined ? undefined : networkMessage(diagnostic.stage, diagnostic.failure, messages)
+}
+
+/**
+ * Localize known update network errors while preserving readable existing diagnostics.
+ * @param error - Failure caught by the managed update coordinator.
+ * @param messages - The shell's selected complete dictionary.
+ * @returns Diagnostic text; unreadable error fields use the locale's unknown-error text.
  */
 export function describeDesktopUpdateError(error: unknown, messages: DesktopMessages = en): string {
-  return error instanceof DesktopUpdateNetworkError
-    ? networkMessage(error.stage, error.failure, messages)
-    : error instanceof Error ? error.message : String(error)
+  const details = desktopUpdateNetworkDetails(error, messages)
+  if (details !== undefined) return details
+  try {
+    if (!(error instanceof Error)) return String(error)
+    const message = errorField(error, 'message')
+    return typeof message === 'string' ? message : messages.unknownError
+  } catch (_error) {
+    // Unknown prototypes and string conversions can themselves throw private diagnostics.
+    return messages.unknownError
+  }
 }

@@ -80,6 +80,7 @@ export async function smokeDesktopManagedHelper(
     };\n`)
     acknowledgement = await launchDesktopManagedUpdate({
       operationsRoot: join(root, 'operations'), nodeExecutable: isolatedNode, helperBundle: isolatedHelper,
+      nodeSha256: createHash('sha256').update(readFileSync(isolatedNode)).digest('hex'),
       capability, selection: {
         kind: 'source', manifestUrl: url, manifestSha256: manifest.manifestSha256,
         assetSha256: createHash('sha256').update(body).digest('hex'),

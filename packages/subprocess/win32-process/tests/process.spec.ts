@@ -7,7 +7,7 @@ import {
   spawnPipedProcess,
 } from '../src/index.ts'
 import { CREATE_SUSPENDED, STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES } from '../src/abi.ts'
-import { PROCESS_INFORMATION, STARTUPINFOW } from '../src/ffi.ts'
+import { processInformationType, startupInfoType } from '../src/ffi.ts'
 import type { NativePtr, Win32ProcessBindings } from '../src/index.ts'
 
 const PVOID = koffi.pointer('void')
@@ -25,8 +25,9 @@ function inheritedApi(overrides: Partial<Win32ProcessBindings> = {}): {
   const createProcessAsUserWImpl: Win32ProcessBindings['createProcessAsUserW'] =
     overrides.createProcessAsUserW
     ?? ((_token, _app, _line, _pa, _ta, _inherit, _flags, _env, _cwd, _startup, info) => {
+      expect(koffi.decode(_startup, startupInfoType())).toMatchObject({ dwFlags: 0x101, wShowWindow: 0 })
       events.push('create')
-      koffi.encode(info, PROCESS_INFORMATION, {
+      koffi.encode(info, processInformationType(), {
         hProcess: 60n,
         hThread: 61n,
         dwProcessId: 1234,
@@ -35,7 +36,7 @@ function inheritedApi(overrides: Partial<Win32ProcessBindings> = {}): {
       return 1
     })
   const createProcessAsUserW = vi.fn<Win32ProcessBindings['createProcessAsUserW']>((...args) => {
-    startup = koffi.decode(args[9], STARTUPINFOW) as Record<string, unknown>
+    startup = koffi.decode(args[9], startupInfoType()) as Record<string, unknown>
     return createProcessAsUserWImpl(...args)
   })
   const assignProcessToJobObject = vi.fn(() => {
@@ -190,7 +191,7 @@ describe('spawnInheritedJobProcess', () => {
       closeHandle,
       terminateProcess,
       createProcessAsUserW: vi.fn((_token, _app, _line, _pa, _ta, _inherit, _flags, _env, _cwd, _startup, info) => {
-        koffi.encode(info, PROCESS_INFORMATION, {
+        koffi.encode(info, processInformationType(), {
           hProcess: 60n,
           hThread: 0n,
           dwProcessId: 1234,
@@ -249,8 +250,8 @@ describe('wait and pipe cleanup', () => {
       setHandleInformation: vi.fn(() => 1),
       createProcessAsUserW: vi.fn<Win32ProcessBindings['createProcessAsUserW']>((_token, _app, _line, _pa, _ta, _inherit, flags, _env, _cwd, startupPointer, info) => {
         creationFlags = flags
-        startup = koffi.decode(startupPointer, STARTUPINFOW) as Record<string, unknown>
-        koffi.encode(info, PROCESS_INFORMATION, {
+        startup = koffi.decode(startupPointer, startupInfoType()) as Record<string, unknown>
+        koffi.encode(info, processInformationType(), {
           hProcess: 60n,
           hThread: 0n,
           dwProcessId: 1234,

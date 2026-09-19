@@ -1,9 +1,9 @@
 {
   "schemaVersion": 2,
   "channel": "cloga-windows-x64",
-  "version": "0.1.6-alpha.1.cloga.7",
-  "sequence": 17,
-  "upstreamVersion": "0.1.6-alpha.1",
+  "version": "0.1.6-alpha.2.cloga.1",
+  "sequence": 18,
+  "upstreamVersion": "0.1.6-alpha.2",
   "identity": {
     "appId": "io.github.cloga.deepseek-harness.desktop",
     "productName": "DeepSeek Harness (cloga)",
@@ -21,24 +21,24 @@
           "type": "githubRelease",
           "owner": "cloga",
           "repo": "dsh-github-copilot",
-          "tag": "v0.4.0-alpha.27",
-          "asset": "dsh-github-copilot-0.4.0-alpha.27.tgz",
-          "assetId": 573327174,
+          "tag": "v0.4.0-alpha.28",
+          "asset": "dsh-github-copilot-0.4.0-alpha.28.tgz",
+          "assetId": 574079604,
           "packageName": "dsh-github-copilot",
-          "version": "0.4.0-alpha.27",
-          "size": 678130,
-          "sha256": "c2a1d331436e217dd76ae57635dd79ceb8839b723e036dd111019b2d14b7b186",
-          "integrity": "sha512-t6k14sg/mMLGvNGoJmrdtxLk2yAkZ3lJEYSQc2gZy8LgD0sG62Z/fCFiS71M3B9CurFtSmZn0HzSujzBhUf0sw==",
-          "targetCommit": "8f8211b0a2d39ac8b8a39cb18f2d3287403b6594",
+          "version": "0.4.0-alpha.28",
+          "size": 689841,
+          "sha256": "38ed22f50630d50165b8f52bf235326a127def10724475d006ae584cada0c858",
+          "integrity": "sha512-RFOehiBUwnVIf97hEjHhlQw/iMx5QtQQSBoWt3udJ1C4e7qmdfaQFrpA/D7IcjAXNvBWaS++OpPtggZn2ptIBA==",
+          "targetCommit": "355e0d5e2efc2bddc46e420f4c8f0daa29055d5b",
           "dependencyRegistry": "https://packagefeedproxy.microsoft.io/npm/",
           "checksumManifest": {
             "format": "sha256sums",
             "asset": "SHA256SUMS",
-            "assetId": 573327192,
-            "url": "https://github.com/cloga/dsh-github-copilot/releases/download/v0.4.0-alpha.27/SHA256SUMS",
+            "assetId": 574079611,
+            "url": "https://github.com/cloga/dsh-github-copilot/releases/download/v0.4.0-alpha.28/SHA256SUMS",
             "size": 104,
-            "sha256": "4266646d9a06e3401aa3316ac314419de17d2f5762037a55394bd29f4af16144",
-            "integrity": "sha512-J8Nt5zfuxZlBzqpsAIenfvImPp3qYVQ6eBJvsDBI2UgABCB4jSPOB1WCjJYLSN8/GRDim5puskAfIXfaNibySw=="
+            "sha256": "4e0e49d9d01c36c4bdfafb20e4190c5a87e0d1686fa2838bea3d82e30e8e0af6",
+            "integrity": "sha512-XYa8q6Wp+RMXOD+d1A+VuTEyS4zqM/lxxEoKn0HMQdAmWNrP2fZVMryIL9y7Bf3DT+ZOg9C35vdklhUXYpvMug=="
           }
         }
       }

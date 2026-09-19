@@ -5,7 +5,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DESKTOP_HOST_PROTOCOL_VERSION } from '../src/host-protocol.ts'
 import { removeOwnedDirectory } from '../src/owned-directory.ts'
-import type { DesktopRuntimeDescriptor, DesktopSharedPackage } from '../src/runtime-tree.ts'
+import { DESKTOP_RUNTIME_FILE, renderDesktopRuntimeDescriptor, type DesktopRuntimeDescriptor, type DesktopSharedPackage } from '../src/runtime-tree.ts'
 import { prepareDevelopmentProject } from './development-project.ts'
 import { smokeDesktopRuntime } from './smoke-runtime.ts'
 
@@ -139,6 +139,7 @@ export async function runDesktopWorkspaceFixture(repository: string): Promise<st
       sharedPackages: sharedWorkspacePackages(root),
       files: [],
     }
+    writeFileSync(join(root, DESKTOP_RUNTIME_FILE), renderDesktopRuntimeDescriptor(runtime), { flag: 'wx', mode: 0o600 })
     await smokeDesktopRuntime(root, process.execPath, runtime, 'msedge', output, 'workspace-linked')
     writeFileSync(join(output, 'workspace-evidence.json'), JSON.stringify({
       repository: repo,

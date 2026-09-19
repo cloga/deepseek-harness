@@ -18,6 +18,7 @@ import {
 
 import {
   ManagedUpdateTransferError,
+  managedUpdateTransferDiagnostic,
   readManagedUpdateMetadata,
   withManagedUpdateResponse,
 } from './managed-update-network.ts'
@@ -319,8 +320,13 @@ export async function waitForDesktopProcesses(
 }
 
 function helperErrorType(error: unknown, phase: DesktopManagedUpdateHelperPhase): DesktopManagedUpdateHelperErrorType {
-  if (error instanceof ManagedUpdateTransferError) return error.errorType
-  if (error instanceof Error && error.message === 'desktop managed update: operation was cancelled') return 'cancelled'
+  const diagnostic = managedUpdateTransferDiagnostic(error)
+  if (diagnostic !== undefined) return diagnostic.errorType
+  try {
+    if (error instanceof Error && error.message === 'desktop managed update: operation was cancelled') return 'cancelled'
+  } catch (_error) {
+    // Unreadable prototypes or messages cannot prevent a closed phase-based result.
+  }
   if (phase === 'installer-launch') return 'installer-launch'
   if (phase === 'manifest-validation' || phase === 'receipt-validation' || phase === 'installer-verification') return 'integrity'
   if (phase === 'process-wait') return 'process-wait'
@@ -476,6 +482,7 @@ export async function runDesktopManagedUpdateHelper(
     return result
   } catch (error) {
     await rm(temporary, { recursive: true, force: true })
+    const errorType = helperErrorType(error, phase)
     const result: DesktopManagedUpdateHelperResult = {
       schemaVersion: 1,
       status: 'blocked',
@@ -483,9 +490,9 @@ export async function runDesktopManagedUpdateHelper(
       sequence: manifest?.sequence ?? handoff.installedSequence,
       phase,
       ...(asset === undefined ? {} : { asset }),
-      errorType: helperErrorType(error, phase),
+      errorType,
       installationState,
-      reason: `desktop managed update: ${phase}: ${helperErrorType(error, phase)}`,
+      reason: `desktop managed update: ${phase}: ${errorType}`,
     }
     await writeJsonAtomic(join(operationRoot, 'helper-result.json'), result)
     return result

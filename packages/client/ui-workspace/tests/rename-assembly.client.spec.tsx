@@ -17,8 +17,9 @@ import type { ISession } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import { SessionSeq, type SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
-import { RemoteError, SlotTestRuntime, TestRemote, usePinnedBrowserLanguages } from '@deepseek-ai/dsh-client-test-runtime'
+import { RemoteError, SlotTestRuntime, usePinnedBrowserLanguages } from '@deepseek-ai/dsh-client-test-runtime'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
+import { LayoutController } from '@deepseek-ai/dsh-client-ui-layout/client'
 import { apply, inject } from '@deepseek-ai/dsh-client-ui-workspace/client'
 
 // The service reads its initial locale from the browser; these specs assert
@@ -33,13 +34,18 @@ beforeEach(() => { localStorage.clear() })
 /** Runtime with the locale face installed (the browser entry declares `locale:` — zh default backs the t seat). */
 async function createRuntime(): Promise<SlotTestRuntime> {
   const runtime = await SlotTestRuntime.create()
-  runtime.ctx.provide('layout', { selectPanel: vi.fn() })
+  const layout = new LayoutController({
+    selectPanel: vi.fn(), retainMainPanels: vi.fn(),
+    setSidebar: vi.fn(), toggleSidebar: vi.fn(), setViewportWidth: vi.fn(),
+    setRightbar: vi.fn(), openRightbar: vi.fn(), closeRightbar: vi.fn(),
+  }, () => true)
+  runtime.ctx.effect(() => () => { layout.dispose() })
+  runtime.ctx.provide('layout', layout)
   runtime.releaseWorkspaceSource()
   // The rename flow never picks a directory; the namespace only has to be there
   // for ui-workspace's inject to settle.
   const directoryPicker = {}
-  Object.assign(new TestRemote(runtime.ctx), { directoryPicker })
-  runtime.ctx.provide('remote.directoryPicker', directoryPicker as never)
+  runtime.remote.provideNamespaces({ directoryPicker })
   const locale = new LocaleRuntime(runtime.ctx)
   runtime.ctx.provide('locale', locale)
   runtime.slots.installLocale(locale)
@@ -63,6 +69,7 @@ describe('session rename through the assembled browser', () => {
       summary: { title: '旧标题', displayTitle: '旧标题', cwd: '/w/alpha' },
       session: { rename },
     })
+    await runtime.sessions.retainFor(runtime.ctx, SID, { source: 'mainView' }).ready
     await runtime.workspaces.update((draft) => {
       draft.items = [{
         workspaceId: 'w1' as WorkspaceId, title: 'alpha', path: '/w/alpha',
@@ -110,6 +117,7 @@ describe('session rename through the assembled browser', () => {
       summary: { title: '旧标题', displayTitle: '旧标题', cwd: '/w/alpha' },
       session: { rename },
     })
+    await runtime.sessions.retainFor(runtime.ctx, SID, { source: 'mainView' }).ready
     await runtime.workspaces.update((draft) => {
       draft.items = [{
         workspaceId: 'w1' as WorkspaceId, title: 'alpha', path: '/w/alpha',

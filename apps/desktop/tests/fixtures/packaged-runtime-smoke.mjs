@@ -1,4 +1,4 @@
-/** Built-plane ASAR, skill and startup smoke for an explicitly supplied packaged Windows application. */
+/** Built-plane ASAR inventory and minimal Context skill smoke for a supplied packaged Windows app. */
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -19,7 +19,7 @@ import {
 const executable = process.argv[2]
 assert(executable, 'Pass a packaged Windows Electron executable; this smoke never downloads Electron')
 verifyPackagedWindowsStartup(executable)
-verifyPackagedSkills(executable)
+await verifyPackagedSkills(executable)
 // Exercise the pinned builder's real transform and ASAR pipeline, not only the archive writer.
 const packagerRequire = createRequire(import.meta.resolve('app-builder-lib/package.json'))
 const { createTransformer } = packagerRequire('app-builder-lib/out/fileTransformer.js')
@@ -34,7 +34,9 @@ try {
   process.env.DSH_DESKTOP_TARGET_PLATFORM = 'win32'
   process.env.DSH_DESKTOP_TARGET_ARCH = 'x64'
   process.env.DSH_DESKTOP_UNSIGNED = '1'
-  const { createElectronBuilderConfig } = await import('../../electron-builder.config.mjs')
+  process.env.DSH_DESKTOP_AUTO_UPDATE_ENV = 'test'
+  process.env.DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN = 'https://policy.example.invalid'
+  const { createElectronBuilderConfig } = await import('../../scripts/electron-builder-config.mjs')
   const config = createElectronBuilderConfig(process.env, 'win32', 'x64')
   const version = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
   const source = join(root, 'prepared-dsh')

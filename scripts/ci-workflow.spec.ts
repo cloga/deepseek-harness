@@ -25,6 +25,58 @@ describe('CI workflow', () => {
     expect(steps[preparation]).not.toHaveProperty('continue-on-error', true)
   })
 
+  it('selects patched latest stable Node 24 only for Windows coverage before installation', () => {
+    const workflow = loadWorkflow('.github/workflows/ci.yml')
+    const coverage = workflowJob(workflow, 'windows-coverage')
+    if (!isRecord(workflow.env) || !isRecord(workflow.jobs) || !Array.isArray(coverage.steps)) {
+      throw new TypeError('CI must define its primary Node version and Windows coverage steps')
+    }
+    expect(workflow.env.PRIMARY_NODE_VERSION).toBe('24')
+    const steps = coverage.steps.filter(isRecord)
+    const setupIndex = steps.findIndex(step => step.uses === 'actions/setup-node@v6')
+    const guardIndex = steps.findIndex(step => step.name === 'Require patched stable Node 24 for Windows coverage')
+    const installIndex = steps.findIndex(step => step.name === 'Install (immutable)')
+    expect(setupIndex).toBeGreaterThanOrEqual(0)
+    expect(steps[setupIndex]).toMatchObject({ with: {
+      'node-version': '${{ env.PRIMARY_NODE_VERSION }}', 'check-latest': true,
+    } })
+    expect(guardIndex).toBe(setupIndex + 1)
+    expect(installIndex).toBeGreaterThan(guardIndex)
+    const guard = steps[guardIndex]
+    if (typeof guard?.run !== 'string') throw new TypeError('Windows coverage must execute its Node version guard')
+    expect(guard.shell).toBe('pwsh')
+    expect(guard).not.toHaveProperty('continue-on-error')
+    expect(guard).not.toHaveProperty('if')
+    expect(guard.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }')
+    const script = /^node -e '([^'\r\n]+)'$/mu.exec(guard.run)?.[1]
+    if (script === undefined) throw new TypeError('Node version guard must run its actual process version check')
+    for (const [version, accepted] of [
+      ['24.21.0', true], ['24.21.1', true], ['24.22.0', true], ['24.100.0', true],
+      ['24.20.99', false], ['24.13.0', false], ['22.19.0', false], ['25.0.0', false], ['26.0.0', false],
+      ['24.21.0-rc.1', false], ['24.22.0-nightly', false], ['24.21.0+custom', false],
+      ['24.021.0', false], ['24.21.00', false], ['24.21', false], ['v24.21.0', false], ['24.21.0\n', false],
+    ] as const) {
+      const termination = {}
+      let exitCode: number | undefined
+      try {
+        runInNewContext(script, {
+          process: { versions: { node: version }, exit: (code: number) => { exitCode = code; throw termination } },
+          console: { log() {}, error() {} },
+        }, { timeout: 1000 })
+      } catch (error) {
+        if (error !== termination) throw error
+      }
+      expect(exitCode, version).toBe(accepted ? undefined : 1)
+    }
+    for (const [name, job] of Object.entries(workflow.jobs)) {
+      if (name === 'windows-coverage' || !isRecord(job) || !Array.isArray(job.steps)) continue
+      for (const step of job.steps.filter(isRecord)) {
+        if (step.uses !== 'actions/setup-node@v6' || !isRecord(step.with)) continue
+        expect(step.with, name).not.toHaveProperty('check-latest')
+      }
+    }
+  })
+
   it.each(['ci.yml', 'ci-master.yml', 'e2e.yml', 'release.yml', 'release-vendor.yml'])(
     '%s cancels superseded validation runs without crossing workflow or ref boundaries', (name) => {
       const workflow = loadWorkflow('.github/workflows/' + name)
@@ -765,18 +817,22 @@ describe('Runtime and LLM e2e Blacksmith routing', () => {
 })
 
 describe('DeepSeek e2e workflow', () => {
-  it('retains the exact bubblewrap payload and verification order at its official archival location', () => {
+  it('pins the reviewed bubblewrap bytes to an official snapshot before extraction and probing', () => {
     const script = readFileSync(resolve(root, 'scripts/prepare-ci-bubblewrap.sh'), 'utf8')
-    expect(script).toContain('set -euo pipefail')
     expect(script).toContain("readonly BUBBLEWRAP_VERSION='0.9.0-1ubuntu0.1'")
     expect(script).toContain("readonly BUBBLEWRAP_SHA256='1b506492bd9c7fd0cdb4f02ac822f1d3e336b0aead5113c1239baf8db5db562a'")
-    expect(script).toContain('https://launchpadlibrarian.net/751286710/bubblewrap_${BUBBLEWRAP_VERSION}_amd64.deb')
-    const verify = script.indexOf('sha256sum --check --status')
-    const extract = script.indexOf('dpkg-deb --extract "$archive" "$root"')
-    const probe = script.indexOf('"$root/usr/bin/bwrap" --ro-bind / / --dev /dev --unshare-pid --proc /proc --die-with-parent -- true')
-    expect(verify).toBeGreaterThanOrEqual(0)
-    expect(extract).toBeGreaterThan(verify)
-    expect(probe).toBeGreaterThan(extract)
+    expect(script).toContain('readonly BUBBLEWRAP_URL="https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/'
+      + 'pool/main/b/bubblewrap/bubblewrap_${BUBBLEWRAP_VERSION}_amd64.deb"')
+    expect(script).toContain('set -euo pipefail')
+    expect(script).toContain('curl --fail --silent --show-error --location --retry 3 --retry-all-errors')
+    const verification = script.indexOf('sha256sum --check --status')
+    const extraction = script.indexOf('dpkg-deb --extract "$archive" "$root"')
+    const probe = script.indexOf('"$root/usr/bin/bwrap" --ro-bind / / --dev /dev'
+      + ' --unshare-pid --proc /proc --die-with-parent -- true')
+    expect(verification).toBeGreaterThan(-1)
+    expect(extraction).toBeGreaterThan(verification)
+    expect(probe).toBeGreaterThan(extraction)
+    expect(script).toContain('"$root/usr/bin/bwrap" --version')
     expect(script).not.toContain('--insecure')
   })
 
@@ -1058,8 +1114,9 @@ describe('Weighted approval workflow', () => {
     const recordSkip = recordSteps.find(step => step.name === 'Skip weighted approval outside canonical upstream')
 
     expect(publisher.name).toBe('weighted-approval')
-    expect(Object.keys(publisher.on)).toEqual(['pull_request_target', 'workflow_run'])
-    expect(pullRequest.types).toEqual(['opened', 'synchronize', 'reopened', 'ready_for_review', 'converted_to_draft'])
+    expect(Object.keys(publisher.on)).toEqual(['pull_request_target', 'issue_comment', 'workflow_run'])
+    expect(workflowEvent(publisher, 'issue_comment').types).toEqual(['created', 'edited', 'deleted'])
+    expect(pullRequest.types).toEqual(['opened', 'synchronize', 'reopened', 'ready_for_review', 'converted_to_draft', 'edited'])
     expect(workflowRun).toEqual({ workflows: ['weighted-approval-review-event'], types: ['completed'] })
     expect(reviewEvent.name).toBe('weighted-approval-review-event')
     expect(reviewEvent['run-name']).toBe('weighted-approval-review-event:${{ github.event.pull_request.number }}')
@@ -1068,15 +1125,18 @@ describe('Weighted approval workflow', () => {
     expect(reviewEvent.permissions).toEqual({})
     expect(publisher.permissions).toEqual({
       contents: 'read',
-      'pull-requests': 'read',
+      'pull-requests': 'write',
       statuses: 'write',
     })
     expect(publisher.concurrency).toEqual({
-      group: 'weighted-approval-${{ github.event.pull_request.number || github.event.workflow_run.head_sha }}',
+      group: "weighted-approval-${{ (github.event.pull_request.number || github.event.issue.number) && format('weighted-approval-review-event:{0}', github.event.pull_request.number || github.event.issue.number) || github.event.workflow_run.display_title }}",
       'cancel-in-progress': false,
     })
     expect(job).toMatchObject({
-      if: "github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'",
+      if: "(github.event_name != 'pull_request_target' || github.event.pull_request.state == 'open') && "
+        + "(github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && "
+        + "(github.event_name != 'issue_comment' || (github.event.issue.pull_request && github.event.issue.state == 'open' &&\n"
+        + "  (contains(github.event.comment.body, '/delegate') || contains(github.event.changes.body.from, '/delegate'))))",
       name: 'weighted approval publisher',
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 5,
@@ -1089,8 +1149,28 @@ describe('Weighted approval workflow', () => {
         'persist-credentials': false,
       },
     })
+    const setupIndex = steps.findIndex(step => typeof step.uses === 'string' && step.uses.startsWith('actions/setup-python@'))
+    expect(steps[setupIndex]?.if).toBe("steps.revoke.outputs.active == 'true'")
+    expect(steps[setupIndex]?.uses).toBe('actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1')
+    const revokeIndex = steps.findIndex(step => step.id === 'revoke')
+    expect(revokeIndex).toBeGreaterThan(steps.indexOf(checkout!))
+    expect(revokeIndex).toBeLessThan(setupIndex)
+    expect(steps[revokeIndex]?.run).toBe('node .github/review-ownership/check-approval.mjs pending')
+    expect(steps.at(-1)).toMatchObject({
+      if: "failure() && steps.revoke.outputs.active == 'true'",
+      run: 'node .github/review-ownership/check-approval.mjs error',
+    })
+    const pythonJob = workflowJob(loadWorkflow('.github/workflows/ci.yml'), 'python-sdk')
+    expect(pythonJob.steps).toContainEqual({
+      name: 'Test production blame scoring',
+      run: "uv run --python 3.10 --with-requirements .github/review-ownership/requirements.txt python -m unittest discover -s .github/review-ownership -p 'test_*.py'",
+    })
+    expect(steps.find(step => step.name === 'Install production lexer')).toMatchObject({
+      if: "steps.revoke.outputs.active == 'true'",
+      run: 'python3 -m pip install -r .github/review-ownership/requirements.txt',
+    })
     expect(publish).toMatchObject({
-      if: "github.repository == 'deepseek-ai/deepseek-harness'",
+      if: "github.repository == 'deepseek-ai/deepseek-harness' && steps.revoke.outputs.active == 'true'",
       env: {
         GITHUB_TOKEN: '${{ github.token }}',
         GITHUB_RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
@@ -1102,6 +1182,7 @@ describe('Weighted approval workflow', () => {
       run: "echo 'Weighted approval is owned by the canonical upstream repository.'",
     })
     expect(recordJob).toMatchObject({
+      if: "github.event.pull_request.state == 'open'",
       name: 'record weighted approval review event',
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 2,
@@ -1162,7 +1243,7 @@ describe('Issue lifecycle workflow', () => {
     expect(policyPullRequest.types).toContain('ready_for_review')
   })
 
-  it('mints Project credentials only after preflight and always revalidates current metadata', () => {
+  it('scopes upstream preflight to its repository before minting credentials and revalidating metadata', () => {
     const policy = loadWorkflow('.github/workflows/issue-policy.yml')
     const policyJob = workflowJob(policy, 'policy')
     if (!Array.isArray(policyJob.steps)) throw new TypeError('Issue policy job must define steps')
@@ -1173,7 +1254,7 @@ describe('Issue lifecycle workflow', () => {
     expect(preflightStep).toMatchObject({ shell: 'bash' })
     expect(preflightStep?.run).toContain('if [ -f .github/issue-management/selective-preflight.json ]; then')
     expect(preflightStep?.run).toContain('node .github/issue-management/policy.mjs pr-preflight')
-    expect(preflightStep?.if).toBeUndefined()
+    expect(preflightStep?.if).toBe("github.repository == 'deepseek-ai/deepseek-harness'")
     expect(policyJob.if).toBeUndefined()
     const projectGate =
       "github.repository == 'deepseek-ai/deepseek-harness' && steps.preflight.outputs.needs-project == 'true'"

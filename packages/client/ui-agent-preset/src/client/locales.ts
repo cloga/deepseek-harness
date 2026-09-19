@@ -13,7 +13,7 @@ export type AgentPresetSettingsKey =
   | 'inUse' | 'selectionOffDefault' | 'noDescription' | 'builtInGroup' | 'customGroup'
   | 'brokenBadge' | 'brokenNoCopy' | 'switchRefused'
   | 'composition' | 'cancel' | 'close' | 'retry'
-  | 'copyTitle' | 'copyIntro' | 'create' | 'creating' | 'creatorDraft'
+  | 'copyTitle' | 'copyIntro' | 'create' | 'creating' | 'creatorDraft' | 'creatorWorkspaceHint'
   | 'openLocation' | 'showLocation' | 'revealedPathLabel'
   | 'idRequired' | 'idInvalid' | 'idTaken'
   | 'deleteTitle' | 'deleteDescription' | 'deleteConfirm' | 'deleting'
@@ -44,7 +44,7 @@ export const en: Record<AgentPresetSettingsKey, string> = {
     'Single-tool coding agent with a persistent shell.',
   presetCordisName: 'Creator mode',
   presetCordisDescription:
-    'Built for creating custom agent presets, with all Standard mode capabilities plus runtime inspection, plugin experiments, and preset-authoring guidance.',
+    'Built for creating custom agent presets, with all Standard mode capabilities plus runtime inspection, persistent plugin management, and preset-authoring guidance.',
   duplicate: 'Duplicate',
   duplicateUnavailable: 'This deployment has no writable preset directory',
   delete: 'Delete',
@@ -72,6 +72,7 @@ export const en: Record<AgentPresetSettingsKey, string> = {
   create: 'Create',
   creating: 'Creating…',
   creatorDraft: 'Draft a custom preset with Creator mode',
+  creatorWorkspaceHint: 'Choose a Workspace, then use this action. Without an available Workspace, no Creator Session starts.',
   openLocation: 'Open folder',
   showLocation: 'Show location',
   revealedPathLabel: 'Preset files:',
@@ -109,7 +110,7 @@ export const zh: Record<AgentPresetSettingsKey, string> = {
   presetMinimalName: '极简模式',
   presetMinimalDescription: '仅提供持久 shell 的单工具编码 Agent。',
   presetCordisName: '创造模式',
-  presetCordisDescription: '用于创建自定义 Agent preset：具备标准模式的全部能力，并提供运行时检查、插件实验和 preset 创作指导。',
+  presetCordisDescription: '用于创建自定义 Agent preset：具备标准模式的全部能力，并提供运行时检查、持久化插件管理和 preset 创作指导。',
   duplicate: '复制',
   duplicateUnavailable: '此部署未配置可写的预设目录',
   delete: '删除',
@@ -135,6 +136,7 @@ export const zh: Record<AgentPresetSettingsKey, string> = {
   create: '创建',
   creating: '正在创建…',
   creatorDraft: '用「创造模式」创作自定义预设',
+  creatorWorkspaceHint: '请先选择工作区，再使用此操作。没有可用的工作区时，不会启动创造模式会话。',
   openLocation: '打开目录',
   showLocation: '查看路径',
   revealedPathLabel: '预设文件：',

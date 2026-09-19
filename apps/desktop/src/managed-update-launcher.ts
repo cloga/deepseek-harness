@@ -1,6 +1,6 @@
 /** Electron-side creation and acknowledgement of one detached updater helper. */
 
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -12,6 +12,8 @@ import type { DesktopManagedUpdateCapability, DesktopManagedUpdateHandoff } from
 export interface DesktopManagedUpdateLaunch {
   readonly operationsRoot: string
   readonly nodeExecutable: string
+  /** Expected standalone Node bytes bound by the installed Desktop runtime inventory. */
+  readonly nodeSha256: string
   readonly helperBundle: string
   readonly capability: DesktopManagedUpdateCapability
   readonly selection: {
@@ -29,7 +31,32 @@ export interface DesktopManagedUpdateAcknowledgement {
   readonly operationRoot: string
   readonly helperPid: number
   readonly token: string
+  /** Confirms owned helper exit; query isDesktopManagedUpdateHelperQuiescent on a rejection. */
   readonly abandon: () => Promise<void>
+}
+
+const quiescentFailures = new WeakSet<object>()
+
+/**
+ * Read launcher-owned evidence attached to this exact failure, never an error message or caller flag.
+ * @param error - Failure returned by helper launch or its owned abandonment operation.
+ * @returns Whether no helper started, or the owned helper is confirmed exited.
+ */
+export function isDesktopManagedUpdateHelperQuiescent(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && quiescentFailures.has(error)
+}
+
+function helperFailure(error: unknown, quiescent: boolean): unknown {
+  if (typeof error === 'object' && error !== null) {
+    if (quiescent) quiescentFailures.add(error)
+    else quiescentFailures.delete(error)
+  }
+  return error
+}
+
+/** Actual process exit, not the ChildProcess.killed termination-request flag. */
+function helperExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null
 }
 
 interface LaunchOperations {
@@ -46,7 +73,7 @@ const defaultOperations: LaunchOperations = {
   now: () => Date.now(),
   platform: process.platform,
   waitForExit(child, timeoutMs) {
-    if (child.exitCode !== null) return Promise.resolve(true)
+    if (helperExited(child)) return Promise.resolve(true)
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
         child.removeListener('exit', onExit)
@@ -115,7 +142,7 @@ async function abandonHelper(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
   }
-  if (child.exitCode !== null) return
+  if (helperExited(child)) return
   child.kill()
   if (!await operations.waitForExit(child, 5_000)) {
     throw new Error('desktop managed update: owned helper did not exit after cancellation')
@@ -127,10 +154,21 @@ async function abandonHelper(
  * @param launch - Main-process-owned paths and validated update selection.
  * @param operations - Process and clock operations replaceable by tests.
  * @returns Claimed operation identity after the helper validates its handoff.
+ * @throws Failure retaining its causes; isDesktopManagedUpdateHelperQuiescent distinguishes confirmed safe exit from uncertainty.
  */
 export async function launchDesktopManagedUpdate(
   launch: DesktopManagedUpdateLaunch,
   operations: LaunchOperations = defaultOperations,
+): Promise<DesktopManagedUpdateAcknowledgement> {
+  const ownership = { quiescent: true }
+  try { return await launchOwnedHelper(launch, operations, ownership) }
+  catch (error) { throw helperFailure(error, ownership.quiescent) }
+}
+
+async function launchOwnedHelper(
+  launch: DesktopManagedUpdateLaunch,
+  operations: LaunchOperations,
+  ownership: { quiescent: boolean },
 ): Promise<DesktopManagedUpdateAcknowledgement> {
   if (operations.platform !== 'win32') throw new Error('desktop managed update: helper launch requires Windows')
   const token = randomBytes(32).toString('hex')
@@ -143,6 +181,10 @@ export async function launchDesktopManagedUpdate(
     copyFile(launch.nodeExecutable, node),
     copyFile(launch.helperBundle, helper),
   ])
+  if (!/^[a-f0-9]{64}$/u.test(launch.nodeSha256)
+    || createHash('sha256').update(await readFile(node)).digest('hex') !== launch.nodeSha256) {
+    throw new Error('desktop managed update: copied standalone Node failed release verification')
+  }
   const handoff: DesktopManagedUpdateHandoff = {
     schemaVersion: 1,
     token,
@@ -156,6 +198,9 @@ export async function launchDesktopManagedUpdate(
   const handoffPath = join(operationRoot, 'handoff.json')
   await writeFile(handoffPath, `${JSON.stringify(handoff, undefined, 2)}\n`, { flag: 'wx', mode: 0o600 })
   const expectedManifestSha256 = launch.selection.manifestSha256
+  let spawnFailure: Error | undefined
+  let stderr = Buffer.alloc(0)
+  const capture = { truncated: false }
   const child = operations.spawn(node, [helper, handoffPath], {
     cwd: operationRoot,
     detached: true,
@@ -163,20 +208,18 @@ export async function launchDesktopManagedUpdate(
     stdio: ['ignore', 'ignore', 'pipe'],
     env: helperEnvironment(),
   })
-  let spawnFailure: Error | undefined
-  child.on('error', (error) => { spawnFailure = error })
-  child.unref()
-  let stderr = Buffer.alloc(0)
-  const capture = { truncated: false }
-  child.stderr?.on('data', (chunk: Buffer) => {
-    const combined = Buffer.concat([stderr, chunk])
-    capture.truncated ||= combined.byteLength > STDERR_LIMIT
-    stderr = combined.subarray(Math.max(0, combined.byteLength - STDERR_LIMIT))
-  })
-  if (child.stderr instanceof Socket) child.stderr.unref()
+  ownership.quiescent = child.pid === undefined
   try {
+    child.on('error', (error) => { spawnFailure = error })
+    child.unref()
+    child.stderr?.on('data', (chunk: Buffer) => {
+      const combined = Buffer.concat([stderr, chunk])
+      capture.truncated ||= combined.byteLength > STDERR_LIMIT
+      stderr = combined.subarray(Math.max(0, combined.byteLength - STDERR_LIMIT))
+    })
+    if (child.stderr instanceof Socket) child.stderr.unref()
     if (child.pid === undefined) throw new Error('desktop managed update: helper process did not start')
-    // Three bounded metadata attempts plus backoff; Desktop remains running until acknowledgement.
+    // Three bounded metadata attempts plus backoff fit within 181.5 seconds; wait-PIDs stay owned until acknowledgement.
     const deadline = operations.now() + 185_000
     for (;;) {
       if (spawnFailure !== undefined) throw spawnFailure
@@ -191,36 +234,52 @@ export async function launchDesktopManagedUpdate(
           operationRoot,
           helperPid,
           token,
-          abandon: () => abandonHelper(operationRoot, token, child, operations),
+          abandon: async () => {
+            try {
+              await abandonHelper(operationRoot, token, child, operations)
+              ownership.quiescent = true
+            } catch (error) {
+              ownership.quiescent ||= helperExited(child)
+              throw helperFailure(error, ownership.quiescent)
+            }
+          },
         }
       }
-      if (child.exitCode !== null) throw new Error(`desktop managed update: helper exited before acknowledgement (${String(child.exitCode)})`)
+      if (helperExited(child)) throw new Error(`desktop managed update: helper exited before acknowledgement (${String(child.exitCode)})`)
       if (operations.now() >= deadline) throw new Error('desktop managed update: helper did not acknowledge the handoff')
       await operations.sleep(50)
     }
   } catch (error) {
     try {
       if (child.pid !== undefined) await abandonHelper(operationRoot, token, child, operations)
+      ownership.quiescent = true
     } catch (cancellationError) {
+      ownership.quiescent ||= helperExited(child)
       throw new AggregateError(
         [error, cancellationError],
         'desktop managed update: helper handoff failed and cancellation did not complete',
       )
     }
-    child.stderr?.destroy()
+    try { child.stderr?.destroy() } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'desktop managed update: helper failed and diagnostic stream cleanup failed')
+    }
     const diagnosticPath = join(operationRoot, 'helper-startup-error.json')
     const captured = stderr.toString('utf8')
     const completeLines = capture.truncated
       ? (captured.includes('\n') ? captured.slice(captured.indexOf('\n') + 1) : '')
       : captured
-    await writeFile(diagnosticPath, `${JSON.stringify({
-      schemaVersion: 1,
-      phase: 'before-acknowledgement',
-      exitCode: child.exitCode,
-      reason: diagnosticText(error instanceof Error ? error.message : String(error), token),
-      stderr: diagnosticText(completeLines, token),
-      stderrTruncated: capture.truncated,
-    }, undefined, 2)}\n`, { flag: 'wx', mode: 0o600 })
+    try {
+      await writeFile(diagnosticPath, `${JSON.stringify({
+        schemaVersion: 1,
+        phase: 'before-acknowledgement',
+        exitCode: child.exitCode,
+        reason: diagnosticText(error instanceof Error ? error.message : String(error), token),
+        stderr: diagnosticText(completeLines, token),
+        stderrTruncated: capture.truncated,
+      }, undefined, 2)}\n`, { flag: 'wx', mode: 0o600 })
+    } catch (diagnosticError) {
+      throw new AggregateError([error, diagnosticError], 'desktop managed update: helper failed and startup diagnostic could not be written')
+    }
     throw new Error(`${diagnosticText(error instanceof Error ? error.message : String(error), token)}; `
       + 'see helper-startup-error.json in the managed-update operation directory', { cause: error })
   }

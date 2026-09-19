@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render } from '@testing-library/react'
 import { AppFrame } from '../src/client/AppFrame.tsx'
 import type { AppFrameProps } from '../src/client/AppFrame.tsx'
-import type { DesktopUpdateSnapshot } from '../src/client/desktop-update-adapter.ts'
 import type { MainPanelId, RightbarOwnerProps, SidebarOwnerProps } from '../src/client/index.ts'
 import { createLayoutStore } from '../src/client/stores.ts'
 import type { WorkspaceSnapshot } from '@deepseek-ai/dsh-api-workspace-controller/client'
@@ -16,9 +15,9 @@ const useResource = (() => ({ status: 'none' as const, value: undefined, failure
 let selectedSession: SessionId | undefined
 let selectedSessionTitle: string | undefined
 let workspacesReady = true
-type AttentionSnapshot = Parameters<Parameters<AppFrameProps['useSessionPendingInteraction']>[0]>[0]
+type AttentionSnapshot = Parameters<Parameters<AppFrameProps['useSessionStatus']>[0]>[0]
 const noAttention: AttentionSnapshot = new Map()
-const useSessionPendingInteraction: AppFrameProps['useSessionPendingInteraction'] = selector => selector(noAttention)
+const useSessionStatus: AppFrameProps['useSessionStatus'] = selector => selector(noAttention)
 
 let observers: ResizeObserverStub[]
 class ResizeObserverStub {
@@ -61,12 +60,7 @@ function resize(width: number): void {
   })
 }
 
-function mountFrame(
-  windowWidth = frameWidth,
-  desktopUpdate: DesktopUpdateSnapshot = { state: null, reviewing: false, reviewFailed: false },
-) {
-  const reviewDesktopUpdate = vi.fn(async () => {})
-  const useDesktopUpdate = bindSnapshotSelector({ getSnapshot: () => desktopUpdate, subscribe: () => () => {} })
+function mountFrame(windowWidth = frameWidth) {
   vi.stubGlobal('innerWidth', windowWidth)
   const instance = createLayoutStore().create()
   const slotCalls: { key: string; props: object; options: RenderOpts | undefined }[] = []
@@ -78,15 +72,13 @@ function mountFrame(
     ids: selectedSession === undefined ? [] : [selectedSession],
     byId: selectedSession === undefined ? {} : {
       [selectedSession]: {
-        id: selectedSession, displayTitle: 'Test', running: false, blank: false, updatedAt: 1,
+        id: selectedSession, displayTitle: 'Test', running: false, retainedBy: { mainView: 1 }, blank: false, updatedAt: 1,
         ...(selectedSessionTitle === undefined ? {} : { title: selectedSessionTitle }),
       },
     },
-    current: selectedSession,
     phase: 'ready',
     subagentsByParent: {},
     jobsBySession: {},
-    currentAddress: undefined,
   })
   const workspaceState: WorkspaceSnapshot = {
     items: [], archivedSessionIds: [], state: 'idle', phase: 'ready', error: null,
@@ -104,9 +96,8 @@ function mountFrame(
       renderSlot={renderSlot}
       useSessions={useSessions}
       usePanelInfo={usePanelInfo}
-      useDesktopUpdate={useDesktopUpdate}
-      reviewDesktopUpdate={reviewDesktopUpdate}
-      useSessionPendingInteraction={useSessionPendingInteraction}
+      useSessionStatus={useSessionStatus}
+      useSessionRetainInfo={() => undefined}
       useResource={useResource}
       useWorkspaces={sel => sel(workspaceState)}
       t={key => key === 'brand.localBuild' ? 'DSH Local Build' : key}
@@ -115,7 +106,7 @@ function mountFrame(
   const utils = render(element())
   const frame = utils.container.firstElementChild as HTMLElement
   return {
-    ...utils, instance, frame, slotCalls, reviewDesktopUpdate,
+    ...utils, instance, frame, slotCalls,
     rerenderFrame: () => { utils.rerender(element()) },
     rightOwner: () => slotCalls.findLast(c => c.key === 'rightbar')!.props as RightbarOwnerProps,
     sidebarOwner: () => slotCalls.findLast(c => c.key === 'sidebar')!.props as SidebarOwnerProps,
@@ -187,20 +178,6 @@ afterEach(() => {
 })
 
 describe('AppFrame', () => {
-  it('keeps the Desktop notice above the main panel across Session and panel changes', () => {
-    const { container, getByTestId, rerenderFrame, instance, reviewDesktopUpdate } = mountFrame(frameWidth, {
-      state: { phase: 'available', version: '2.0.0' }, reviewing: false, reviewFailed: false,
-    })
-    const notice = container.querySelector('[data-desktop-update-notice]')!
-    expect(notice.textContent).toContain('2.0.0')
-    expect(notice.nextElementSibling?.contains(getByTestId('main-content'))).toBe(true)
-    selectedSession = undefined
-    rerenderFrame()
-    act(() => { instance.actions.selectPanel('panel-a' as MainPanelId) })
-    expect(container.querySelector('[data-desktop-update-notice]')).toBe(notice)
-    expect(reviewDesktopUpdate).not.toHaveBeenCalled()
-  })
-
   it('localizes the product title without a configured build title', () => {
     mountFrame()
     expect(document.title).toBe('DSH Local Build')
@@ -241,6 +218,19 @@ describe('AppFrame', () => {
     const { getByTestId } = mountFrame()
     expect(getByTestId('main-content').getAttribute('data-entry-key')).toBe('conversation')
     expect(getByTestId('rightbar-content')).toBeTruthy()
+  })
+
+  it('keeps Windows caption controls mounted with a zero-width collapsed column', () => {
+    document.documentElement.setAttribute('data-windows-titlebar', '')
+    try {
+      const { frame, instance, sidebarOwner, getByTestId } = mountFrame()
+      act(() => { instance.actions.toggleSidebar() })
+      expect(tracks(frame)[0]).toBe(0)
+      expect(sidebarOwner()).toMatchObject({ collapsed: true, width: 0 })
+      expect(getByTestId('sidebar-content')).toBeTruthy()
+    } finally {
+      document.documentElement.removeAttribute('data-windows-titlebar')
+    }
   })
 
   it('keeps the closed sidebar mounted at its 56px rail without a handle', () => {

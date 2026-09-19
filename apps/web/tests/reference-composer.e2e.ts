@@ -54,6 +54,15 @@ async function settledSourceOption(menu: Locator): Promise<Locator> {
   return source
 }
 
+// Clear retained suggestions and insert one complete query so an intermediate
+// prefix cannot satisfy the caller's wait for a ready result row.
+async function replaceReferenceQuery(page: Page, input: Locator, text: string): Promise<void> {
+  await writeComposerDraft(page, input, '')
+  await page.getByRole('listbox', { name: 'Trigger suggestions' }).waitFor({ state: 'hidden' })
+  await input.click()
+  await page.keyboard.insertText(text)
+}
+
 /** Build one closed source session with a stable title for reference discovery. */
 function sourceSessionFixture(): string {
   const session = Session.create(SessionId(SOURCE_SESSION_ID))
@@ -300,7 +309,7 @@ describe.skipIf(MODE === 'record')('web e2e: file and session references through
 
     // Settle: Enter on the highlighted folder row resolves the folder itself
     // as an atomic chip — folder glyph, no trigger character, one unit.
-    await writeComposerDraft(page, input, '@folderx')
+    await replaceReferenceQuery(page, input, '@folderx')
     // First folder query on this page: allow the Host index a cold start.
     await readyReferenceOption(menu, 'folderx', /^folderx\//).waitFor({ timeout: 60_000 })
     await page.keyboard.press('Enter')
@@ -311,7 +320,7 @@ describe.skipIf(MODE === 'record')('web e2e: file and session references through
 
     // Tab drills: the literal descent text stays editable and the open menu
     // lists the folder's children.
-    await writeComposerDraft(page, input, '@folderx')
+    await replaceReferenceQuery(page, input, '@folderx')
     await readyReferenceOption(menu, 'folderx', /^folderx\//).waitFor()
     await page.keyboard.press('Tab')
     await expect.poll(() => input.textContent()).toBe('@folderx/')
@@ -319,7 +328,7 @@ describe.skipIf(MODE === 'record')('web e2e: file and session references through
 
     // The row chevron drills the same way by pointer, header included: a
     // pointer descent reaches the same listing a Tab descent does.
-    await writeComposerDraft(page, input, '@folderx')
+    await replaceReferenceQuery(page, input, '@folderx')
     const row = readyReferenceOption(menu, 'folderx', /^folderx\//)
     await row.waitFor()
     await row.getByRole('button', { name: 'Browse folder' }).click()
@@ -344,13 +353,12 @@ describe.skipIf(MODE === 'record')('web e2e: file and session references through
     const crumbs = page.getByRole('navigation', { name: 'Folder navigation' })
 
     // A path the user typed carries its own context: no header.
-    await writeComposerDraft(page, input, '@folderx/')
+    await replaceReferenceQuery(page, input, '@folderx/')
     await menu.getByRole('option', { name: /child\.txt/ }).waitFor({ timeout: 60_000 })
     await expect.poll(() => crumbs.count()).toBe(0)
 
-    // A retained row can still be pending, and the slashless query also finds
-    // child.txt: only the draft rewrite establishes that Tab drilled.
-    await writeComposerDraft(page, input, '@folderx')
+    // A retained row can still be pending; only the draft rewrite establishes that Tab drilled.
+    await replaceReferenceQuery(page, input, '@folderx')
     await readyReferenceOption(menu, 'folderx', /^folderx\//).waitFor()
     await page.keyboard.press('Tab')
     await expect.poll(() => input.textContent()).toBe('@folderx/')
@@ -366,7 +374,7 @@ describe.skipIf(MODE === 'record')('web e2e: file and session references through
 
     // A crumb above the current step re-lists that directory and keeps the
     // header, which now names the step it returned to.
-    await writeComposerDraft(page, input, '@folderx/nested')
+    await replaceReferenceQuery(page, input, '@folderx/nested')
     await expect.poll(() => menu.getByRole('option', { name: /child\.txt/ }).count()).toBe(0)
     const nested = readyReferenceOption(menu, 'folderx/nested', /^nested\//)
     await nested.waitFor()

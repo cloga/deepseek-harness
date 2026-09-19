@@ -1,4 +1,4 @@
-/** Packaged Electron Node-mode graph acceptance; requires Desktop's built lib/types validators. */
+/** Packaged Electron Node-mode inventory acceptance using the official read-only profile generation. */
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -24,7 +24,7 @@ function metadata(directory: string | undefined): Record<string, unknown> | unde
 
 /**
  * Collect resolver observations, not an alternative graph acceptance decision.
- * @param profile - Exact active profile passed to the production validator.
+ * @param profile - Exact profile inspected by the separate owned-inventory assertions.
  * @returns Runtime, search paths, optional peer declaration, and physical SDK target.
  */
 export function inspectPackagedGraphResolution(profile: string) {
@@ -54,8 +54,8 @@ export function inspectPackagedGraphResolution(profile: string) {
 }
 
 /**
- * Launch the built production graph validator without TypeScript hooks or runner module overrides.
- * This checks the graph inventory, not module loading; the real Host acceptance owns that evidence.
+ * Inspect the packaged generation and owned peers without TypeScript hooks or module overrides.
+ * This checks read-only inventory assertions, not module loading; the real Host acceptance owns that evidence.
  * @param profile - Absolute active Desktop profile.
  * @param runtimeRoot - Absolute ASAR-backed dsh directory visible to Electron's patched filesystem.
  * @param plugins - Active release-owned plugin names.
@@ -64,13 +64,14 @@ export function inspectPackagedGraphResolution(profile: string) {
 export function packagedGraphCheckArguments(profile: string, runtimeRoot: string, plugins: readonly string[]): string[] {
   assert(isAbsolute(profile) && isAbsolute(runtimeRoot), 'Profile and runtime must be absolute')
   assert(plugins.length > 0, 'Active plugin names are required')
-  const validator = new URL('../../lib/types/profile-packages.js', import.meta.url).href
+  const inventory = new URL('./packaged-graph-inventory.mjs', import.meta.url).href
   const reader = new URL('../../lib/types/runtime-tree.js', import.meta.url).href
   const script = `
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { validateDesktopPluginGraph } from ${JSON.stringify(validator)}
+import { pathToFileURL } from 'node:url'
+import { assertPackagedGraphInventory, resolvePackagedAppBoot } from ${JSON.stringify(inventory)}
 import { readDesktopRuntime } from ${JSON.stringify(reader)}
 const [profile, runtimeRoot, ...plugins] = process.argv.slice(1)
 const observation = {
@@ -85,7 +86,10 @@ const observation = {
 }
 try {
   const runtimeSha256 = createHash('sha256').update(readFileSync(join(runtimeRoot, 'desktop-runtime.json'))).digest('hex')
-  validateDesktopPluginGraph(profile, runtimeRoot, readDesktopRuntime(runtimeRoot), plugins, 'runtime')
+  const bootEntry = resolvePackagedAppBoot(runtimeRoot)
+  const boot = await import(pathToFileURL(bootEntry).href)
+  await assertPackagedGraphInventory({ profile, runtimeRoot, runtime: readDesktopRuntime(runtimeRoot), plugins,
+    loadProfileDirectory: boot.loadProfileDirectory, createProfileResolutionGeneration: boot.createProfileResolutionGeneration })
   console.log(JSON.stringify({ valid: true, runtimeSha256, ...observation }))
 } catch (error) {
   console.log(JSON.stringify({ valid: false, ...observation, error: String(error) }))

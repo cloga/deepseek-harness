@@ -13,30 +13,55 @@ export const managedUpdateTransferPolicy = {
   installer: { totalMs: 30 * 60_000, inactivityMs: 60_000 },
 } as const
 
+/** Constructor-owned transfer facts, independent of public Error properties. */
+interface TransferDiagnostic {
+  readonly errorType: 'timeout' | 'network-reset' | 'http' | 'redirect' | 'integrity'
+  readonly retryable: boolean
+  readonly status?: number
+}
+const transferDiagnostics = new WeakMap<object, TransferDiagnostic>()
+
 /** Closed diagnostics avoid persisting fetch messages, URLs, headers, or nested causes. */
 export class ManagedUpdateTransferError extends Error {
   constructor(
-    readonly errorType: 'timeout' | 'network-reset' | 'http' | 'redirect' | 'integrity',
+    readonly errorType: TransferDiagnostic['errorType'],
     readonly retryable = false,
     readonly status?: number,
   ) {
     super(`desktop managed update: ${errorType}${status === undefined ? '' : ` HTTP ${String(status)}`}`)
+    transferDiagnostics.set(this, Object.freeze({ errorType, retryable, ...(status === undefined ? {} : { status }) }))
+  }
+}
+
+/**
+ * Read immutable facts only for errors constructed by this module, without inspecting unknown prototypes or getters.
+ * @param error - Original caught failure.
+ * @returns Owned classification, or undefined for any other thrown value.
+ */
+export function managedUpdateTransferDiagnostic(error: unknown): TransferDiagnostic | undefined {
+  return typeof error === 'object' && error !== null ? transferDiagnostics.get(error) : undefined
+}
+
+function transferErrorField(error: object, field: 'name' | 'code' | 'cause'): unknown {
+  try { return (error as Record<string, unknown>)[field] } catch (_error) {
+    // Diagnostic access must not replace the original transfer failure.
+    return undefined
   }
 }
 
 function classifiedTransferError(error: unknown): unknown {
-  if (error instanceof ManagedUpdateTransferError) return error
+  if (managedUpdateTransferDiagnostic(error) !== undefined) return error
   let current = error
+  const seen = new Set<object>()
   for (let depth = 0; depth < 4; depth++) {
-    if (typeof current !== 'object' || current === null) break
-    const fields = current as { name?: unknown; code?: unknown; cause?: unknown }
-    if (fields.name === 'TimeoutError' || (typeof fields.code === 'string' && TIMEOUT_CODES.has(fields.code))) {
-      return new ManagedUpdateTransferError('timeout', true)
-    }
-    if (typeof fields.code === 'string' && RESET_CODES.has(fields.code)) {
-      return new ManagedUpdateTransferError('network-reset', true)
-    }
-    current = fields.cause
+    if (typeof current !== 'object' || current === null || seen.has(current)) break
+    seen.add(current)
+    const name = transferErrorField(current, 'name')
+    if (name === 'TimeoutError') return new ManagedUpdateTransferError('timeout', true)
+    const code = transferErrorField(current, 'code')
+    if (typeof code === 'string' && TIMEOUT_CODES.has(code)) return new ManagedUpdateTransferError('timeout', true)
+    if (typeof code === 'string' && RESET_CODES.has(code)) return new ManagedUpdateTransferError('network-reset', true)
+    current = transferErrorField(current, 'cause')
   }
   return error
 }
@@ -111,7 +136,7 @@ export async function withManagedUpdateResponse<T>(
         await response.body.cancel().catch(() => { /* Failed transport bodies are already closed. */ })
       }
     }
-    if (!(failure instanceof ManagedUpdateTransferError) || !failure.retryable || attempt === 3) throw failure
+    if (managedUpdateTransferDiagnostic(failure)?.retryable !== true || attempt === 3) throw failure
     await operations.sleep(attempt * 500)
   }
 }

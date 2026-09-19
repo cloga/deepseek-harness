@@ -1,11 +1,7 @@
 // @vitest-environment jsdom
 
 import { Context, type Fiber } from '@deepseek-ai/cordis'
-import { bindSnapshotSelector, stubSettingsScope } from '@deepseek-ai/dsh-client-test-runtime'
-import { createElement } from 'react'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { DesktopUpdateNotice } from '../src/client/DesktopUpdateNotice.tsx'
-import type { DesktopUpdateInject, DesktopUpdateState } from '../src/client/desktop-update-adapter.ts'
+import { stubSettingsScope } from '@deepseek-ai/dsh-client-test-runtime'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { SlotRendererHost } from '@deepseek-ai/dsh-client-ui-slots'
@@ -33,7 +29,6 @@ beforeEach(() => {
 
 afterEach(async () => {
   try {
-    cleanup()
     for (const owner of owners) await owner.dispose()
   } finally {
     owners.clear()
@@ -84,69 +79,6 @@ describe('ui-layout client apply', () => {
     expect(inject).toEqual(['slots', 'theme', 'locale'])
   })
 
-  it('owns and removes the Desktop notification dictionary with the layout fiber', async () => {
-    const { ctx } = await bench()
-    const locale = ctx.get('locale') as LocaleRuntime
-    const t = locale.bind('layout')
-    expect(t('desktopUpdate.review')).toBe('desktopUpdate.review')
-    const fiber = ctx.plugin({ inject: [...inject], apply })
-    await fiber.await()
-    expect(t('desktopUpdate.review')).not.toBe('desktopUpdate.review')
-    await fiber.dispose()
-    expect(t('desktopUpdate.review')).toBe('desktopUpdate.review')
-  })
-
-  it('owns the update source across renderer remounts and removes IPC with its Fiber', async () => {
-    const initial = Promise.withResolvers<DesktopUpdateState>()
-    const pendingReview = Promise.withResolvers<undefined>()
-    let emit: (state: DesktopUpdateState) => void = () => {}
-    const off = vi.fn()
-    const updates = {
-      status: vi.fn(() => initial.promise),
-      subscribe: vi.fn((listener: typeof emit) => { emit = listener; return off }),
-      review: vi.fn(() => pendingReview.promise),
-    }
-    vi.stubGlobal('dshDesktop', { protocolVersion: 2, updates })
-    const { ctx, slots } = await bench()
-    const fiber = ctx.plugin({ inject: [...inject], apply })
-    await fiber.await()
-    expect(updates.subscribe).toHaveBeenCalledOnce()
-    expect(updates.subscribe.mock.invocationCallOrder[0]).toBeLessThan(updates.status.mock.invocationCallOrder[0]!)
-    const entry = slots.entries('root')[0]!
-    const injected = entry.inject!() as unknown as DesktopUpdateInject
-    expect((entry.inject!() as unknown as DesktopUpdateInject).hooks.desktopUpdate).toBe(injected.hooks.desktopUpdate)
-    expect(Object.keys(injected).sort()).toEqual(['hooks', 'reviewDesktopUpdate'])
-    const useDesktopUpdate = bindSnapshotSelector(injected.hooks.desktopUpdate)
-    const t = (ctx.get('locale') as LocaleRuntime).bind('layout')
-    const Notice = () => createElement(DesktopUpdateNotice, {
-      notice: useDesktopUpdate(state => state), review: injected.reviewDesktopUpdate, t,
-    })
-    emit({ phase: 'available', version: '2.0.0' })
-    const first = render(createElement(Notice))
-    expect(screen.getByRole('status').textContent).toContain('2.0.0')
-    await act(async () => { initial.resolve({ phase: 'idle' }); await initial.promise })
-    expect(screen.getByRole('status').textContent).toContain('2.0.0')
-    fireEvent.click(screen.getByRole('button'))
-    first.unmount()
-    expect(off).not.toHaveBeenCalled()
-    const second = render(createElement(Notice))
-    expect(screen.getByRole('button').hasAttribute('disabled')).toBe(true)
-    fireEvent.click(screen.getByRole('button'))
-    expect(updates.review).toHaveBeenCalledOnce()
-    await act(async () => { pendingReview.resolve(undefined); await pendingReview.promise })
-    expect(screen.getByRole('button').hasAttribute('disabled')).toBe(false)
-    act(() => { emit({ phase: 'installing', version: '2.0.0' }) })
-    expect(screen.getByRole('button').hasAttribute('disabled')).toBe(true)
-    second.unmount()
-    const before = injected.hooks.desktopUpdate.getSnapshot()
-    await fiber.dispose()
-    expect(off).toHaveBeenCalledOnce()
-    emit({ phase: 'available', version: '3.0.0' })
-    await injected.reviewDesktopUpdate()
-    expect(injected.hooks.desktopUpdate.getSnapshot()).toBe(before)
-    expect(slots.entries('root')).toHaveLength(0)
-  })
-
   it('provides ctx.layout and declares the four root-scoped frame slots', async () => {
     const { ctx, slots } = await bench()
     const fiber = ctx.plugin({ inject: [...inject], apply })
@@ -164,7 +96,7 @@ describe('ui-layout client apply', () => {
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
     const entry = slots.entries('root')[0]!
-    expect(entry.inject).toBeTypeOf('function')
+    expect(entry.inject).toBeUndefined()
     const handle = entry.store as ReturnType<typeof createLayoutStore>
     const instance = handle.create()
     expect(handle.create()).toBe(instance)

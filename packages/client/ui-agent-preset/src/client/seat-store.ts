@@ -42,6 +42,14 @@ const INITIAL: AgentPresetSeatState = {
   showPicker: false, options: [], current: '', error: null, busy: false, introduce: false,
 }
 
+/** Mutable one-shot preset choice shared across Provider-bound seat controllers. */
+export interface AgentPresetStage {
+  /** Preset awaiting application; absence means no staged choice. */
+  id: string | undefined
+  /** Whether the receiving chip should announce the applied choice once. */
+  introduce: boolean
+}
+
 /** Stages the next session's preset and applies it when one appears. */
 export class AgentPresetSeatController {
   /** Chip snapshot the renderer subscribes to. */
@@ -53,11 +61,9 @@ export class AgentPresetSeatController {
    */
   private fallback = ''
 
-  /** Set while a pick is waiting for a session; cleared once applied. */
-  private staged: string | undefined
-
   /** Only the newest roster read may publish after overlapping refreshes. */
   private loadGeneration = 0
+  private introduction = false
 
   constructor(
     private readonly ctx: ClientContext,
@@ -66,6 +72,7 @@ export class AgentPresetSeatController {
       SessionSummary,
       'id' | 'blank' | 'projectionValues'
     > | undefined,
+    private readonly staged: AgentPresetStage = { id: undefined, introduce: false },
   ) {}
 
   private set(patch: Partial<AgentPresetSeatState>): void {
@@ -85,7 +92,11 @@ export class AgentPresetSeatController {
       return
     }
     const { presets, modeSelectionEnabled } = roster.value
-    if (!modeSelectionEnabled) this.staged = undefined
+    if (!modeSelectionEnabled) {
+      this.introduction = false
+      this.staged.id = undefined
+      this.staged.introduce = false
+    }
     this.fallback = presets.find(preset => preset.isDefault)?.id ?? presets[0]?.id ?? ''
     const session = this.currentSession()
     this.set({
@@ -97,10 +108,11 @@ export class AgentPresetSeatController {
       // an applied stage was consumed — the chip mounts (and loads) only
       // once the flow's session is current, so the reply can arrive after
       // apply() already composed it.
-      current: this.staged ?? (session === undefined ? this.fallback : presetOf(session) ?? ''),
+      current: this.staged.id ?? (session === undefined ? this.fallback : presetOf(session) ?? ''),
       error: null,
-      ...modeSelectionEnabled ? {} : { introduce: false },
+      introduce: modeSelectionEnabled && (this.introduction || this.staged.introduce),
     })
+    await this.apply()
   }
 
   /**
@@ -117,24 +129,26 @@ export class AgentPresetSeatController {
    */
   async select(id: string): Promise<string | undefined> {
     if (this.store.getSnapshot().busy) return undefined
-    this.stage(id)
-    await this.apply()
+    const session = this.currentSession()
+    if (session === undefined) this.stage(id)
+    else {
+      this.introduction = false
+      this.set({ current: id, error: null, introduce: false })
+      await this.applySelection(session, id)
+    }
     return this.store.getSnapshot().error ?? undefined
   }
 
   /**
-   * Stage a pick WITHOUT the immediate apply, for a flow that starts the
-   * receiving session after the pick (the settings section's creator entry).
-   * `select()`'s immediate apply would meet the still-current running session
-   * and drop the stage as unservable; staging alone leaves it for the
-   * list-change applier, which fires when the started session becomes
-   * current.
+   * Hold an unbound chip choice until an ordinary Workspace selection supplies a blank Session.
+   * Explicit creator Sessions use the Host create-time preset instead of this shared stage.
    * @param id - the preset to stage.
    * @param introduce - true when the stage came from another screen and the
    * chip should announce itself on the session it lands on.
    */
   stage(id: string, introduce = false): void {
-    this.staged = id
+    this.staged.id = id
+    this.staged.introduce = introduce
     this.set({ current: id, error: null, introduce })
   }
 
@@ -149,7 +163,7 @@ export class AgentPresetSeatController {
 
   /**
    * Apply a Settings choice only if its captured Session is still current and
-   * blank. The selection uses the existing stage/apply path.
+   * blank. The selection stays bound to that exact Session.
    * @param expectedSessionId - blank Session captured before the Settings write.
    * @param id - the effective default that the write persisted.
    * @returns the Host refusal text, or undefined when applied or no longer relevant.
@@ -160,14 +174,28 @@ export class AgentPresetSeatController {
   ): Promise<string | undefined> {
     const session = this.currentSession()
     if (session === undefined || !session.blank || session.id !== expectedSessionId) return undefined
-    this.stage(id)
-    await this.apply()
-    return this.store.getSnapshot().error ?? undefined
+    return this.select(id)
+  }
+
+  /** Clear an unbound selection superseded by an explicit create-time preset. */
+  discardStage(): void {
+    this.staged.id = undefined
+    this.staged.introduce = false
+    this.introduction = false
+    this.set({ current: this.fallback, introduce: false, error: null })
+  }
+
+  /** Announce an already-created bound Session without staging or selecting any composition. */
+  introduce(): void {
+    this.introduction = true
+    this.set({ introduce: true })
   }
 
   /** Acknowledge the introduction cue once the chip has played it. */
   introduced(): void {
     if (!this.store.getSnapshot().introduce) return
+    this.introduction = false
+    this.staged.introduce = false
     this.set({ introduce: false })
   }
 
@@ -179,7 +207,7 @@ export class AgentPresetSeatController {
    * @returns once the switch settled, or immediately when there is nothing to do.
    */
   async apply(): Promise<void> {
-    const staged = this.staged
+    const staged = this.staged.id
     const session = this.currentSession()
     if (staged === undefined) {
       const current = session === undefined ? this.fallback : presetOf(session) ?? ''
@@ -187,15 +215,20 @@ export class AgentPresetSeatController {
       return
     }
     if (session === undefined) return
-    // A started session's history was produced under its own composition; the
-    // host refuses the swap, so the stage is no longer meaningful.
-    if (!session.blank || presetOf(session) === staged) {
-      this.staged = undefined
-      return
-    }
+    // Consume only this unbound choice before crossing the wire; a later choice owns its own stage.
+    this.staged.id = undefined
+    this.staged.introduce = false
+    await this.applySelection(session, staged)
+  }
+
+  private async applySelection(
+    session: Pick<SessionSummary, 'id' | 'blank' | 'projectionValues'>,
+    preset: string,
+  ): Promise<void> {
+    // Bound chip/default choices belong to this exact Session, never a later main view.
+    if (!session.blank || presetOf(session) === preset) return
     this.set({ busy: true, error: null })
-    const result = await this.ctx.remote.agentPresets.select(session.id, staged)
-    this.staged = undefined
+    const result = await this.ctx.remote.agentPresets.select(session.id, preset)
     if (!result.ok) {
       const { error } = result
       this.set({

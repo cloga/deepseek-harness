@@ -13,7 +13,7 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { AgentPresetSection } from '../src/client/AgentPresetSection.tsx'
 import type { AgentPresetSectionProps } from '../src/client/AgentPresetSection.tsx'
 import type { AgentPresetSectionState, CopyDraft } from '../src/client/section-store.ts'
-import { en } from '../src/client/locales.ts'
+import { en, zh } from '../src/client/locales.ts'
 
 afterEach(cleanup)
 
@@ -42,14 +42,14 @@ const READY: AgentPresetSectionState = {
  */
 function renderSection(
   state: Partial<AgentPresetSectionState> = {},
-  options: { creator?: boolean } = {},
+  options: { creator?: boolean; locale?: typeof en } = {},
 ) {
   const store = createSnapshotStore<AgentPresetSectionState>({ ...READY, ...state })
   const actions = {
     load: vi.fn(() => Promise.resolve()),
     // The shell-owned section affordance (SettingsSectionOwnerProps.close).
     close: vi.fn(),
-    ...options.creator === false ? {} : { startCreatorDraft: vi.fn() },
+    ...options.creator === false ? {} : { startCreatorDraft: vi.fn(() => Promise.resolve(true)) },
     view: vi.fn(() => Promise.resolve()),
     closeView: vi.fn(),
     beginCopy: vi.fn(),
@@ -66,10 +66,10 @@ function renderSection(
   const props = {
     ...actions,
     useAgentPresetSection: bindSnapshotSelector(store),
-    t: (key: keyof typeof en) => en[key],
+    t: (key: keyof typeof en) => (options.locale ?? en)[key],
   } as unknown as AgentPresetSectionProps
-  render(<AgentPresetSection {...props} />)
-  return actions
+  const rendered = render(<AgentPresetSection {...props} />)
+  return { ...actions, rendered, props }
 }
 
 /** Locate a card by the id it prints, not by its display name. */
@@ -292,17 +292,112 @@ describe('the preset list', () => {
     expect(actions.view).toHaveBeenCalledWith('standard')
   })
 
-  it('starts a creator-mode draft session and leaves settings', () => {
+  it.each([true, false])('closes settings only after a committed creator result: %s', async (started) => {
     const actions = renderSection({
-      rows: [...READY.rows, { id: 'cordis', trust: 'system', isDefault: false, name: '创造模式' }],
+      rows: [...READY.rows, { id: 'cordis', trust: 'system', isDefault: false }],
     })
+    const result = Promise.withResolvers<boolean>()
+    actions.startCreatorDraft?.mockReturnValueOnce(result.promise)
+    const button = screen.getByRole('button', { name: en.creatorDraft })
 
-    fireEvent.click(screen.getByRole('button', { name: en.creatorDraft }))
+    fireEvent.click(button)
+    fireEvent.click(button)
 
     expect(actions.startCreatorDraft).toHaveBeenCalledTimes(1)
-    // Leaving settings is part of the gesture: the flow lands in the new
-    // session, not behind the modal.
-    expect(actions.close).toHaveBeenCalledTimes(1)
+    expect(button).toHaveProperty('disabled', true)
+    expect(button.getAttribute('aria-busy')).toBe('true')
+    expect(actions.close).not.toHaveBeenCalled()
+    await act(async () => { result.resolve(started) })
+    expect(actions.close).toHaveBeenCalledTimes(started ? 1 : 0)
+    expect(button).toHaveProperty('disabled', false)
+  })
+
+  it('contains a reentrant Creator click before the busy render commits', async () => {
+    const actions = renderSection({
+      rows: [...READY.rows, { id: 'cordis', trust: 'system', isDefault: false }],
+    })
+    const result = Promise.withResolvers<boolean>()
+    const button = screen.getByRole('button', { name: en.creatorDraft })
+    actions.startCreatorDraft?.mockImplementationOnce(() => {
+      expect(button).toHaveProperty('disabled', false)
+      fireEvent.click(button)
+      return result.promise
+    })
+
+    try {
+      fireEvent.click(button)
+      expect(actions.startCreatorDraft).toHaveBeenCalledOnce()
+      expect(actions.close).not.toHaveBeenCalled()
+      expect(button).toHaveProperty('disabled', true)
+    } finally {
+      await act(async () => { result.resolve(false) })
+    }
+    expect(actions.close).not.toHaveBeenCalled()
+    expect(button).toHaveProperty('disabled', false)
+  })
+
+  it('keeps settings open after a rejected creator action and permits retry', async () => {
+    const actions = renderSection({
+      rows: [...READY.rows, { id: 'cordis', trust: 'system', isDefault: false }],
+    })
+    actions.startCreatorDraft?.mockRejectedValueOnce(new Error('already reported by action'))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: en.creatorDraft })) })
+    expect(actions.close).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: en.creatorDraft })).toHaveProperty('disabled', false)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: en.creatorDraft })) })
+    expect(actions.startCreatorDraft).toHaveBeenCalledTimes(2)
+    expect(actions.close).toHaveBeenCalledOnce()
+  })
+
+  it('does not close reopened settings when the unmounted creator request succeeds', async () => {
+    const state = { rows: [...READY.rows, { id: 'cordis', trust: 'system' as const, isDefault: false }] }
+    const prior = renderSection(state)
+    const result = Promise.withResolvers<boolean>()
+    prior.startCreatorDraft?.mockReturnValueOnce(result.promise)
+    fireEvent.click(screen.getByRole('button', { name: en.creatorDraft }))
+    prior.rendered.unmount()
+    const reopened = renderSection(state)
+
+    await act(async () => { result.resolve(true) })
+
+    expect(prior.close).not.toHaveBeenCalled()
+    expect(reopened.close).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: en.creatorDraft })).toHaveProperty('disabled', false)
+  })
+
+  it.each(['close', 'startCreatorDraft'] as const)('invalidates pending success when %s changes, even when restored', async (changed) => {
+    const actions = renderSection({
+      rows: [...READY.rows, { id: 'cordis', trust: 'system', isDefault: false }],
+    })
+    const oldResult = Promise.withResolvers<boolean>()
+    const nextResult = Promise.withResolvers<boolean>()
+    actions.startCreatorDraft?.mockReturnValueOnce(oldResult.promise).mockReturnValueOnce(nextResult.promise)
+    fireEvent.click(screen.getByRole('button', { name: en.creatorDraft }))
+    const replacementClose = vi.fn()
+    const replacementStart = vi.fn(() => Promise.resolve(true))
+    actions.rendered.rerender(<AgentPresetSection {...actions.props} {...(
+      changed === 'close' ? { close: replacementClose } : { startCreatorDraft: replacementStart }
+    )} />)
+    actions.rendered.rerender(<AgentPresetSection {...actions.props} />)
+    fireEvent.click(screen.getByRole('button', { name: en.creatorDraft }))
+
+    await act(async () => { oldResult.resolve(true) })
+
+    expect(actions.close).not.toHaveBeenCalled()
+    expect(replacementClose).not.toHaveBeenCalled()
+    expect(replacementStart).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: en.creatorDraft })).toHaveProperty('disabled', true)
+    await act(async () => { nextResult.resolve(true) })
+    expect(actions.close).toHaveBeenCalledOnce()
+  })
+
+  it.each([en, zh])('shows workspace guidance beside the creator action without a click: %j', (locale) => {
+    renderSection({
+      rows: [...READY.rows, { id: 'cordis', trust: 'system', isDefault: false }],
+      showPicker: false,
+    }, { locale })
+    expect(screen.getByText(locale.creatorWorkspaceHint)).toBeTruthy()
+    expect(screen.getByRole('button', { name: locale.creatorDraft })).toHaveProperty('disabled', true)
   })
 
   it('keeps the empty custom group on screen: heading plus the creator entry', () => {
