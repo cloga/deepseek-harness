@@ -100,6 +100,8 @@
     "apps/web/tests/access-confirmation.e2e.ts",
     "apps/web/tests/agent-preset-selection.e2e.ts",
     "apps/web/tests/agent-preset-authoring.e2e.ts",
+    "apps/web/tests/creator-route-ownership.ts",
+    "apps/web/tests/creator-route-ownership.spec.ts",
     "apps/web/tests/shipped-composition.e2e.ts",
     "apps/web/tests/goal-bar.e2e.ts",
     "apps/web/tests/schedule-after.e2e.ts",
