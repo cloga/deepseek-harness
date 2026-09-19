@@ -1,6 +1,7 @@
 - heading "插件" [level=1]
 - paragraph: 添加和管理插件
 - button "刷新"
+- button "安装或升级已验证 Release"
 - button "添加插件":
   - img
   - text: 添加插件
