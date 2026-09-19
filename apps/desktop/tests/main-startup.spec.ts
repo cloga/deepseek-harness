@@ -8,7 +8,7 @@ import type { MenuItemConstructorOptions, MessageBoxOptions } from 'electron'
 import { DESKTOP_IPC, type DesktopUpdateState } from '../src/ipc.ts'
 import { MANDATORY_IPC } from '../src/mandatory-update-ipc.ts'
 import { DesktopHostUncleanExitError } from '../src/host-process.ts'
-import { en } from '../src/locale.ts'
+import { en, zh, type DesktopMessages } from '../src/locale.ts'
 import { DesktopUpdatePreparationError } from '../src/update-error.ts'
 import type { DesktopManagedUpdateConfiguration } from '../src/managed-update-state.ts'
 import type { DesktopManagedUpdateSelection } from '../src/managed-update-coordinator.ts'
@@ -48,6 +48,7 @@ vi.mock('../src/profile-package-activation.ts', async (importOriginal) => {
 
 const managed = vi.hoisted(() => ({
   config: undefined as DesktopManagedUpdateConfiguration | undefined,
+  messages: undefined as DesktopMessages | undefined,
   launch: undefined as ((selection: DesktopManagedUpdateSelection) => Promise<boolean>) | undefined,
   acknowledge: vi.fn<() => Promise<DesktopManagedUpdateAcknowledgement>>(),
   abandon: vi.fn(async () => {}),
@@ -278,7 +279,8 @@ vi.mock('../src/managed-update-launcher.ts', () => ({ launchDesktopManagedUpdate
 vi.mock('../src/managed-update-completion.ts', () => ({ completeDesktopManagedUpdate: baseline.completion }))
 vi.mock('../src/managed-update-coordinator.ts', () => ({ DesktopManagedUpdateCoordinator: class {
   constructor(_capability: unknown, _sequence: unknown, publish: (state: DesktopUpdateState) => DesktopUpdateState,
-    launch: (selection: DesktopManagedUpdateSelection) => Promise<boolean>) {
+    launch: (selection: DesktopManagedUpdateSelection) => Promise<boolean>, _operations?: unknown, messages?: DesktopMessages) {
+    managed.messages = messages
     managed.launch = launch
     harness.publishUpdate = publish
   }
@@ -345,6 +347,7 @@ function applicationMenuItems(): MenuItemConstructorOptions[] {
 
 beforeEach(() => {
   managed.config = undefined
+  managed.messages = undefined
   managed.launch = undefined
   managed.acknowledge.mockReset()
   managed.abandon.mockClear()
@@ -926,6 +929,45 @@ describe('desktop main startup', () => {
     expect(harness.dialog.showMessageBox).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'error',
       message: 'Could not check for updates. Please try again later.', technicalDetails: 'Feed unavailable' }))
     expect(harness.updateDownload).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['en-US', en, 'Could not download the update manifest: the connection was reset (ECONNRESET).\nCheck your network connection and try again.'],
+    ['zh-CN', zh, '下载更新清单时连接被重置（ECONNRESET）。\n请检查网络连接后重试。'],
+  ] as const)('keeps %s managed network details in the native dialog and sends only semantic Web status', async (locale, messages, technicalDetails) => {
+    managedFixture()
+    harness.updateState = { phase: 'idle', mode: 'github-release-managed' }
+    vi.spyOn(harness.app, 'getLocale').mockReturnValue(locale)
+    const host = await readyForUpdate()
+    expect(managed.messages).toEqual(messages)
+    const failed: DesktopUpdateState = { phase: 'error', mode: 'github-release-managed', failedOperation: 'check',
+      message: 'Could not download the update manifest: the connection was reset (ECONNRESET).\nCheck your network connection and try again.',
+      technicalDetails }
+    harness.updateCheck.mockImplementationOnce(async () => {
+      harness.updateState = failed
+      return harness.publishUpdate(failed)
+    })
+    const shown = Promise.withResolvers<void>()
+    harness.dialog.showMessageBox.mockImplementation((options: { type?: string }) => {
+      if (options.type === 'error') shown.resolve()
+      return Promise.resolve({ response: 0 })
+    })
+    // The status indicator owns the preserved-baseline notice; the menu still checks updates.
+    const action = applicationMenuItems().find(item => item.label === messages.checkUpdatesMenu)
+    expect(action?.click).toBeTypeOf('function')
+    Reflect.apply(action!.click!, undefined, [])
+    await shown.promise
+    expect(harness.dialog.showMessageBox).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: 'error', message: messages.updateCheckFailed, technicalDetails,
+    }))
+    const presentation = await invoke(DESKTOP_IPC.updatesStatus, 'app')
+    expect(presentation).toMatchObject({ phase: 'error', mode: 'github-release-managed', failure: 'check' })
+    expect(presentation).not.toHaveProperty('message')
+    expect(presentation).not.toHaveProperty('technicalDetails')
+    expect(harness.windows[0]!.webContents.send).toHaveBeenCalledWith(DESKTOP_IPC.updatesPresentation, presentation)
+    expect(harness.updateDownload).not.toHaveBeenCalled()
+    expect(harness.updateInstall).not.toHaveBeenCalled()
+    expect(host.stop).not.toHaveBeenCalled()
   })
 
   it('reports a stale download confirmation as a download failure', async () => {

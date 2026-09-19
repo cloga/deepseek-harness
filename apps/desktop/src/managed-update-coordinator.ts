@@ -15,6 +15,8 @@ import {
 } from './github-release.ts'
 import type { DesktopUpdateState } from './ipc.ts'
 import { DesktopUpdatePreparationError } from './update-error.ts'
+import { en, type DesktopMessages } from './locale.ts'
+import { desktopUpdateNetworkDetails, withDesktopUpdateNetworkError } from './update-network-error.ts'
 
 const REDIRECTS = new Set([301, 302, 303, 307, 308])
 const MAX_MANIFEST_BYTES = 1024 * 1024
@@ -104,33 +106,34 @@ export async function discoverDesktopManagedSourceRelease(
   installedSequence: number,
   operations: ManagedUpdateOperations = defaultOperations,
 ): Promise<DesktopManagedUpdateSelection | undefined> {
-  const response = await requestDesktopGithubRelease(
+  const response = await withDesktopUpdateNetworkError('release-list', () => requestDesktopGithubRelease(
     new URL(RELEASES_API),
     'application/vnd.github+json',
     false,
     (url, init) => operations.fetch(url, init),
     'desktop managed update',
-  )
+  ))
   if (response.headers.get('link')?.includes('rel="next"') === true) {
     throw new Error('desktop managed update: release discovery exceeded one immutable page')
   }
-  const releases: unknown = await response.json()
+  const releases: unknown = await withDesktopUpdateNetworkError('release-list', () => response.json())
   if (!Array.isArray(releases)) throw new Error('desktop managed update: GitHub releases response must be an array')
   const selections: DesktopManagedUpdateSelection[] = []
   for (const releaseValue of releases) {
     const release = record(releaseValue, 'GitHub release')
-    if (typeof release.tag_name !== 'string' || !release.tag_name.startsWith(capability.tagPrefix)) continue
+    const tag = release.tag_name
+    if (typeof tag !== 'string' || !tag.startsWith(capability.tagPrefix)) continue
     if (release.draft !== false || release.immutable !== true || typeof release.target_commitish !== 'string'
       || !COMMIT.test(release.target_commitish)) {
       throw new Error('desktop managed update: channel release is not immutable or commit-pinned')
     }
-    const tagCommit = await resolveDesktopGithubTagCommit(
+    const tagCommit = await withDesktopUpdateNetworkError('release-tag', () => resolveDesktopGithubTagCommit(
       SOURCE_OWNER,
       SOURCE_REPOSITORY,
-      release.tag_name,
+      tag,
       (url, init) => operations.fetch(url, init),
       'desktop managed update',
-    )
+    ))
     if (tagCommit !== release.target_commitish) {
       throw new Error('desktop managed update: release tag does not resolve to its target commit')
     }
@@ -149,8 +152,8 @@ export async function discoverDesktopManagedSourceRelease(
     const digest = ASSET_DIGEST.exec(asset.digest)?.[1]
     if (digest === undefined) throw new Error('desktop managed update: channel release manifest digest is invalid')
     const manifestUrl = `https://github.com/${DESKTOP_MANAGED_UPDATE_SOURCE_REPOSITORY}/releases/download/`
-      + `${encodeURIComponent(release.tag_name)}/${DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET}`
-    const fetched = await fetchManifest(manifestUrl, operations, digest)
+      + `${encodeURIComponent(tag)}/${DESKTOP_MANAGED_UPDATE_MANIFEST_ASSET}`
+    const fetched = await withDesktopUpdateNetworkError('manifest-download', () => fetchManifest(manifestUrl, operations, digest))
     const manifest = parseDesktopManagedUpdateManifest(fetched.value, capability, 0, true)
     if (manifest.owner !== DESKTOP_MANAGED_UPDATE_SOURCE_REPOSITORY
       || manifest.source.commit !== release.target_commitish
@@ -187,7 +190,7 @@ async function selectMigration(
 ): Promise<DesktopManagedUpdateSelection | undefined> {
   const migration = capability.migration
   if (migration === undefined || installedSequence !== 0) return undefined
-  const fetched = await fetchManifest(migration.manifestUrl, operations, migration.assetSha256)
+  const fetched = await withDesktopUpdateNetworkError('manifest-download', () => fetchManifest(migration.manifestUrl, operations, migration.assetSha256))
   const manifest = parseDesktopManagedUpdateManifest(fetched.value, capability, installedSequence, true)
   if (manifest.owner !== 'cloga/dsh-windows-ops') {
     throw new Error('desktop managed update: migration manifest owner is invalid')
@@ -218,6 +221,7 @@ export class DesktopManagedUpdateCoordinator {
    * @param publish - Publishes and returns the actual observable state.
    * @param launch - Main-owned admission and helper handoff; acknowledge before stopping Host, return false on deferral.
    * @param operations - Network operations replaceable by tests.
+   * @param messages - Shell locale used only for classified network technical details.
    */
   constructor(
     private readonly capability: DesktopManagedUpdateCapability,
@@ -225,6 +229,7 @@ export class DesktopManagedUpdateCoordinator {
     private readonly publish: (state: DesktopUpdateState) => DesktopUpdateState,
     private readonly launch: (selection: DesktopManagedUpdateSelection) => Promise<boolean>,
     private readonly operations: ManagedUpdateOperations = defaultOperations,
+    private readonly messages: DesktopMessages = en,
   ) {}
 
   /** Latest published state; immutable source identity remains main-process-owned. */
@@ -343,6 +348,7 @@ export class DesktopManagedUpdateCoordinator {
 
   private failure(error: unknown, failedOperation: 'check' | 'download' | 'install'): DesktopUpdateState {
     const version = this.version()
+    const networkDetails = desktopUpdateNetworkDetails(error, this.messages)
     return {
       phase: 'error',
       mode: 'github-release-managed',
@@ -352,7 +358,7 @@ export class DesktopManagedUpdateCoordinator {
       ...(error instanceof DesktopUpdatePreparationError ? {
         preparationFailure: error.kind,
         ...(error.technicalDetails === undefined ? {} : { technicalDetails: error.technicalDetails }),
-      } : {}),
+      } : networkDetails === undefined ? {} : { technicalDetails: networkDetails }),
     }
   }
 

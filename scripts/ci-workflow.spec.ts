@@ -833,6 +833,7 @@ describe('DeepSeek e2e workflow', () => {
     expect(extraction).toBeGreaterThan(verification)
     expect(probe).toBeGreaterThan(extraction)
     expect(script).toContain('"$root/usr/bin/bwrap" --version')
+    expect(script).not.toContain('--insecure')
   })
 
   it('prepares bubblewrap from the pinned payload without a package transaction', () => {

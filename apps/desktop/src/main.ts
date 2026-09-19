@@ -692,7 +692,7 @@ async function main(): Promise<void> {
           }
           throw error
         }
-      })
+      }, undefined, messages)
 
   const updateSchedule = new DesktopUpdateSchedule(updates, resolveDesktopUpdateScheduleConfig(process.env))
 

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import type { DesktopUpdateState } from '../src/ipc.ts'
 import { DesktopUpdatePreparationError } from '../src/update-error.ts'
+import { en, zh } from '../src/locale.ts'
 import {
   DesktopManagedUpdateCoordinator,
   type DesktopManagedUpdateSelection,
@@ -250,6 +251,102 @@ describe('DesktopManagedUpdateCoordinator', () => {
     await expect(f.coordinator.check(true)).resolves.toMatchObject({ phase: 'error', failedOperation: 'check' })
     await expect(f.coordinator.download(MANAGED_VERSION)).rejects.toThrow(/no verified update/u)
     expect(f.launch).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['/releases?', '读取发布列表', 'read the release list', 1],
+    ['/git/ref/tags/', '校验发布标签', 'verify the release tag', 2],
+    ['/releases/download/', '下载更新清单', 'download the update manifest', 3],
+  ] as const)('localizes only network details at %s without changing requests or retrying', async (failedPath, stage, englishStage, calls) => {
+    const normal = sourceFetch()
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, _init) => {
+      const url = input instanceof URL ? input.href : typeof input === 'string' ? input : input.url
+      if (url.includes(failedPath)) throw new TypeError('fetch failed', { cause: Object.assign(new Error('private signed URL'), { code: 'ECONNRESET' }) })
+      return normal(input)
+    })
+    const launch = vi.fn(async () => true)
+    const publish = vi.fn((state: DesktopUpdateState) => state)
+    const coordinator = new DesktopManagedUpdateCoordinator(managedCapability(), () => 1, publish, launch, { fetch }, zh)
+    await expect(coordinator.check()).resolves.toEqual({
+      phase: 'error', mode: 'github-release-managed', failedOperation: 'check',
+      message: `Could not ${englishStage}: the connection was reset (ECONNRESET).\nCheck your network connection and try again.`,
+      technicalDetails: `${stage}时连接被重置（ECONNRESET）。\n请检查网络连接后重试。`,
+    })
+    expect(publish).not.toHaveBeenCalled()
+    expect(coordinator.state).toEqual({ phase: 'idle', mode: 'github-release-managed' })
+    expect(fetch).toHaveBeenCalledTimes(calls)
+    const urls = fetch.mock.calls.map(([input]) => input instanceof URL ? input.href : typeof input === 'string' ? input : input.url)
+    expect(urls).toEqual([
+      'https://api.github.com/repos/cloga/deepseek-harness/releases?per_page=100',
+      `https://api.github.com/repos/cloga/deepseek-harness/git/ref/tags/${MANAGED_TAG}`,
+      `https://github.com/cloga/deepseek-harness/releases/download/${MANAGED_TAG}/release.json`,
+    ].slice(0, calls))
+    for (const [, init] of fetch.mock.calls) {
+      expect(init?.credentials).toBe('omit')
+      expect(init?.redirect).toBe('manual')
+      expect(init?.signal).toBeInstanceOf(AbortSignal)
+    }
+    expect(fetch.mock.calls[0]?.[1]?.headers).toEqual({
+      accept: 'application/vnd.github+json', 'user-agent': 'deepseek-harness-desktop', 'x-github-api-version': '2026-03-10',
+    })
+    expect(launch).not.toHaveBeenCalled()
+    await expect(coordinator.install(MANAGED_VERSION)).rejects.toThrow('confirmed target is not ready')
+    expect(fetch).toHaveBeenCalledTimes(calls)
+  })
+
+  it.each([
+    ['English', en, 'Could not read the release list: the connection was reset (ECONNRESET).\nCheck your network connection and try again.'],
+    ['Chinese', zh, '读取发布列表时连接被重置（ECONNRESET）。\n请检查网络连接后重试。'],
+  ] as const)('publishes a joined manual network failure once with %s technical details', async (_locale, messages, details) => {
+    const response = Promise.withResolvers<Response>()
+    const fetch = vi.fn<typeof globalThis.fetch>(() => response.promise)
+    const publish = vi.fn((state: DesktopUpdateState) => state)
+    const launch = vi.fn(async () => true)
+    const coordinator = new DesktopManagedUpdateCoordinator(managedCapability(), () => 1, publish, launch, { fetch }, messages)
+    const automatic = coordinator.check()
+    const manual = coordinator.check(true)
+    await Promise.resolve()
+    response.reject(new TypeError('fetch failed', { cause: Object.assign(new Error('private URL'), { code: 'ECONNRESET' }) }))
+    const [silent, published] = await Promise.all([automatic, manual])
+    expect(published).toEqual(silent)
+    expect(published).toMatchObject({ phase: 'error', failedOperation: 'check', technicalDetails: details })
+    expect(published.message).toBe('Could not read the release list: the connection was reset (ECONNRESET).\nCheck your network connection and try again.')
+    expect(coordinator.state).toBe(published)
+    expect(publish).toHaveBeenCalledOnce()
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(launch).not.toHaveBeenCalled()
+  })
+
+  it('describes a body-stream reset as a manifest download failure', async () => {
+    const normal = sourceFetch()
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      const url = input instanceof URL ? input.href : typeof input === 'string' ? input : input.url
+      if (!url.includes('/releases/download/')) return normal(input)
+      return new Response(new ReadableStream({ start(controller) {
+        controller.error(Object.assign(new Error('private stream details'), { code: 'ECONNRESET' }))
+      } }))
+    })
+    const coordinator = new DesktopManagedUpdateCoordinator(managedCapability(), () => 1, state => state, async () => true, { fetch }, zh)
+    const state = await coordinator.check()
+    expect(state).toEqual({
+      phase: 'error', mode: 'github-release-managed', failedOperation: 'check',
+      message: 'Could not download the update manifest: the connection was reset (ECONNRESET).\nCheck your network connection and try again.',
+      technicalDetails: '下载更新清单时连接被重置（ECONNRESET）。\n请检查网络连接后重试。',
+    })
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('retains the integrity error instead of reporting a network problem', async () => {
+    const normal = sourceFetch()
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      const url = input instanceof URL ? input.href : typeof input === 'string' ? input : input.url
+      return url.includes('/releases/download/') ? new Response('{}') : normal(input)
+    })
+    const coordinator = new DesktopManagedUpdateCoordinator(managedCapability(), () => 1, state => state, async () => true, { fetch }, zh)
+    const state = await coordinator.check()
+    expect(state).toEqual({ phase: 'error', mode: 'github-release-managed', failedOperation: 'check',
+      message: 'desktop managed update: manifest asset digest does not match GitHub' })
+    expect(fetch).toHaveBeenCalledTimes(3)
   })
 
   it('discovers the immutable source release and shares repeated install clicks', async () => {
