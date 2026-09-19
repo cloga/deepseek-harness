@@ -54,6 +54,10 @@ PR 打开时，工作流按配置时区中的 PR 创建日期，为每个被引�
 
 [config.json](config.json)选择仓库、Project、字段名、状态、生命周期操作者和时区。策略读取 Project 自定义单选 `Priority` 字段，而非组织原生 Issue Priority 字段。维护者手动设置 Project Priority；指引编辑原生 Issue 字段的 skill 不会填充该值。Issue 审计先移除 PR 专用 kind 标签和已停用的标签别名，再校验其余元数据。不提供字段迁移或 Priority 同步。
 
+PR 预检和校验接受可选的环境变量 `DSH_ISSUE_REPOSITORY_OWNER`。未设置时，仓库读取仍使用配置中的组织。唯一允许的覆盖值是 `cloga`：`GITHUB_REPOSITORY`、事件仓库和 PR 基础仓库必须全部为 `cloga/deepseek-harness`，且配置中的仓库仍为 `deepseek-harness/deepseek-harness`。空值或上下文不匹配会在任何 API 读取前失败。解析后的所有者用于 PR、评审和被引用 Issue 的读取，以及同仓库引用解析；Project 的组织、编号、字段、凭据和校验规则不变。生命周期处理不使用此覆盖值。
+
+工作流不启用该覆盖值，仍检出受信任的默认分支代码。准备仓库所有者支持不等于授权其他策略版本；改变受信任的检出来源需要维护者另行批准。正确的仓库路由不能证明拥有原 Project 的访问权限，也不能消除其校验失败。
+
 生命周期处理由事件驱动，不是协调器。被省略的事件不会修复 Project 状态，并发 Project mutation 也没有原子比较并交换保护。选择性求值不重新设计必需检查的权威来源，也不保证已测得的 Actions 分钟节省。[选择性求值决策](../../.agents/notes/implemented/process/2026-09-07-selective-issue-policy-evaluation.zh.md)记录取舍。
 
 -----

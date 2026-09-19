@@ -54,6 +54,10 @@ PR opening initializes an empty Project `Start Date` for every referenced Issue,
 
 [config.json](config.json) selects the repository, Project, field names, statuses, lifecycle actor, and time zone. The policy reads the Project custom single-select `Priority` field, not a native organization Issue Priority field. Maintainers set Project Priority manually; skill guidance that directs edits to native Issue fields does not populate this value. Issue audits remove PR-only kinds and retired label aliases before validating the remaining metadata. There is no field migration or Priority synchronization.
 
+PR preflight and validation accept the optional `DSH_ISSUE_REPOSITORY_OWNER` environment variable. When absent, repository reads retain the configured organization. The only accepted override is `cloga`: `GITHUB_REPOSITORY`, the event repository, and the PR base repository must all equal `cloga/deepseek-harness`, while the configured repository remains `deepseek-harness/deepseek-harness`. Empty values or mismatched context fail before any API read. The resolved owner applies to PR, review, and referenced-Issue reads and same-repository reference parsing; the Project organization, number, fields, credentials, and validation rules do not change. Lifecycle processing does not consume this override.
+
+The workflow does not enable the override and still checks out trusted default-branch code. Preparing repository-owner support does not authorize another policy revision; changing the trusted checkout requires separate maintainer approval. Correct repository routing does not establish access to the original Project or eliminate its validation failures.
+
 Lifecycle processing is event-driven, not a reconciler. Omitted events do not repair Project state, and concurrent Project mutations have no atomic compare-and-swap. Selective evaluation does not redesign required-check authority or guarantee measured Actions-minute savings. The [selective-evaluation decision](../../.agents/notes/implemented/process/2026-09-07-selective-issue-policy-evaluation.md) records the trade-offs.
 
 -----
