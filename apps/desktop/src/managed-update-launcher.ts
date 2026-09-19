@@ -176,7 +176,8 @@ export async function launchDesktopManagedUpdate(
   if (child.stderr instanceof Socket) child.stderr.unref()
   try {
     if (child.pid === undefined) throw new Error('desktop managed update: helper process did not start')
-    const deadline = operations.now() + 15_000
+    // Three bounded metadata attempts plus backoff; Desktop remains running until acknowledgement.
+    const deadline = operations.now() + 185_000
     for (;;) {
       if (spawnFailure !== undefined) throw spawnFailure
       const helperPid = await readAcknowledgement(
