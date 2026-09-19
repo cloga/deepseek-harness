@@ -14,7 +14,10 @@ const version = '0.1.6-alpha.2.cloga.1'
 const tag = `dsh-desktop-v${version}`
 const reviewedPlanBytes = await readFile(new URL('../release/cloga-windows-x64.json', import.meta.url))
 const reviewedPlan = JSON.parse(reviewedPlanBytes.toString('utf8')) as {
-  version: string; upstreamVersion: string; sequence: number; channel: string
+  version: string
+  upstreamVersion: string
+  sequence: number
+  channel: string
 }
 const api = `https://api.github.com/repos/${repository}`
 const tagUrl = `${api}/git/ref/tags/${tag}`
@@ -223,7 +226,10 @@ describe('fail-closed fork publication', () => {
       const { state, options, directory } = await fixture()
       const path = join(directory, 'release.json')
       const manifest = JSON.parse(await readFile(path, 'utf8')) as {
-        upstreamVersion: string; channel: string; sequence: number; build: { planSha256: string }
+        upstreamVersion: string
+        channel: string
+        sequence: number
+        build: { planSha256: string }
       }
       if (field === 'planSha256') manifest.build.planSha256 = digest(Buffer.concat([reviewedPlanBytes, Buffer.from('\n')]))
       else if (field === 'sequence') manifest.sequence = 17
@@ -239,7 +245,8 @@ describe('fail-closed fork publication', () => {
       const { state, options, directory } = await fixture()
       const path = join(directory, 'build-receipt.json')
       const receipt = JSON.parse(await readFile(path, 'utf8')) as {
-        identity: { upstreamVersion: string; sequence: number }; buildInputs: { planSha256: string }
+        identity: { upstreamVersion: string; sequence: number }
+        buildInputs: { planSha256: string }
       }
       if (field === 'planSha256') receipt.buildInputs.planSha256 = digest(Buffer.concat([reviewedPlanBytes, Buffer.from('\n')]))
       else if (field === 'sequence') receipt.identity.sequence = 17
