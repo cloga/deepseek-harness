@@ -43,7 +43,84 @@ function repository(test: TestContext) {
   return { root, git, write, commit, tree }
 }
 
+function policyWorkflow(commit: string): string {
+  return `jobs:
+  policy:
+    steps:
+      - name: Check out trusted policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: \${{ github.repository == 'cloga/deepseek-harness' && '${commit}' || github.event.repository.default_branch }}
+          clean: true
+          persist-credentials: false
+`
+}
+
 describe('maintained repository reference policy', () => {
+  it('admits only the fork policy checkout machine-pin token, including through the Git-backed scan', (test) => {
+    const fixture = repository(test)
+    const source = policyWorkflow(fixture.commit)
+    fixture.write('.github/workflows/issue-policy.yml', source)
+    expect(findRepositoryReferences('.github/workflows/issue-policy.yml', source, new Set([fixture.commit]))).toEqual([])
+    expect(scanRepositoryReferences(fixture.root)).toEqual([])
+  })
+
+  it('still rejects that same token in other files, fields, jobs, steps and comments', (test) => {
+    const { commit } = repository(test)
+    const source = policyWorkflow(commit)
+    const commits = new Set([commit])
+    for (const file of ['docs/policy.md', 'scripts/policy.spec.ts', '.github/workflows/other.yml']) {
+      expect(findRepositoryReferences(file, source, commits)).toHaveLength(1)
+    }
+    for (const changed of [
+      source.replace('  policy:', '  other:'),
+      source.replace('          ref:', '          other:'),
+      source.replace('Check out trusted policy', 'Check out application'),
+      source.replace('    steps:\n', '    steps:\n      - run: echo first\n'),
+      source.replace('actions/checkout@', 'untrusted/checkout@'),
+      source.replace('          clean: true', '          clean: false'),
+      source.replace('          persist-credentials: false', '          persist-credentials: true'),
+      source.replace('          clean: true\n', ''),
+      source.replace('cloga/deepseek-harness', 'other/deepseek-harness'),
+      source.replace('github.event.repository.default_branch', 'github.sha'),
+      source.replace(`'${commit}'`, `github.event.pull_request.head.sha || '${commit}'`),
+      source.replace('        with:\n', '        with:\n          repository: other/deepseek-harness\n'),
+    ]) {
+      expect(findRepositoryReferences('.github/workflows/issue-policy.yml', changed, commits)).toHaveLength(1)
+    }
+    for (const suffix of [`# ${commit}\n`, `extra: ${commit}\n`]) {
+      expect(findRepositoryReferences('.github/workflows/issue-policy.yml', source + suffix, commits))
+        .toEqual([{ file: '.github/workflows/issue-policy.yml', line: 10, kind: 'commit-hash' }])
+    }
+    const sameLine = source.replace(' }}\n', ` }} # ${commit}\n`)
+    expect(findRepositoryReferences('.github/workflows/issue-policy.yml', sameLine, commits))
+      .toEqual([{ file: '.github/workflows/issue-policy.yml', line: 7, kind: 'commit-hash' }])
+  })
+
+  it('does not grant an exception through abbreviations, aliases, duplicate keys or malformed YAML', (test) => {
+    const { commit } = repository(test)
+    const source = policyWorkflow(commit)
+    const commits = new Set([commit, commit.slice(0, 12)])
+    for (const changed of [
+      source.replace(commit, commit.slice(0, 12)),
+      source.replace('jobs:\n', 'jobs: &jobs\n') + 'copy: *jobs\n',
+      source.replace('        with:\n', '        with: &checkout\n') + 'copy: *checkout\n',
+      source.replace('  policy:\n', '  policy: {}\n  policy:\n'),
+      source.replace('          clean: true\n', '          clean: false\n          clean: true\n'),
+      source.replace('          ref: ', '          ref: *missing\n          other: '),
+      source + '[invalid\n',
+    ]) {
+      expect(findRepositoryReferences('.github/workflows/issue-policy.yml', changed, commits).some(item => item.kind === 'commit-hash')).toBe(true)
+    }
+  })
+
+  it('keeps organization URL enforcement even beside a permitted machine pin', (test) => {
+    const { commit } = repository(test)
+    const source = policyWorkflow(commit) + `# ${organizationUrl}\n`
+    expect(findRepositoryReferences('.github/workflows/issue-policy.yml', source, new Set([commit])))
+      .toEqual([{ file: '.github/workflows/issue-policy.yml', line: 10, kind: 'organization-url' }])
+  })
+
   it('permits only the independent kit repository and its source URLs', () => {
     for (const suffix of ['', '.git', '/tree/main/packages/entry']) {
       expect(findRepositoryReferences('package.json', `${organizationUrl}/libreoffice-kit${suffix}`, new Set())).toEqual([])

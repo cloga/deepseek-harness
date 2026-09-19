@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { runInNewContext } from 'node:vm'
 import config from './config.json' with { type: 'json' }
 
 import { api, graphql, initializeIssueStartDate, issueSnapshot } from './github.mjs'
@@ -1058,7 +1059,22 @@ test('keeps trusted preflight before token minting and required policy unconditi
   assert.ok(source.includes('types: [opened, edited, synchronize, reopened, labeled, unlabeled, ready_for_review, review_requested]'))
   const steps = job.split('      - name: ').slice(1)
   assert.equal(steps.length, 4)
-  assert.ok(steps[0].includes('ref: ${{ github.event.repository.default_branch }}'))
+  const ref = steps[0].match(/^          ref: (.+)$/m)?.[1]
+  const selector = ref?.match(/^\$\{\{ github\.repository == 'cloga\/deepseek-harness' && '([a-f0-9]{40})' \|\| github\.event\.repository\.default_branch \}\}$/)
+  assert.ok(selector, 'Fork checkout must use one literal full commit and retain the default-branch fallback')
+  for (const repository of ['cloga/deepseek-harness', 'deepseek-harness/deepseek-harness', 'deepseek-ai/deepseek-harness', 'cloga/other', 'other/deepseek-harness']) {
+    for (const defaultBranch of ['master', 'another-default']) {
+      const selected = runInNewContext(ref.slice(3, -2), {
+        github: { repository, sha: 'untrusted-current-head', event: {
+          repository: { default_branch: defaultBranch }, pull_request: { head: { sha: 'untrusted-pr-head' } },
+        } },
+      }, { timeout: 1000 })
+      assert.equal(selected, repository === 'cloga/deepseek-harness' ? selector[1] : defaultBranch)
+    }
+  }
+  assert.ok(steps[0].includes('clean: true'))
+  assert.doesNotMatch(steps[0], /sparse-checkout:|repository:|path:/)
+  assert.equal(source.match(/uses: actions\/checkout@/g)?.length, 1)
   assert.ok(steps[0].includes('persist-credentials: false'))
   assert.doesNotMatch(source, /pull_request\.head|pull_request_target/)
   assert.ok(steps[1].includes('id: preflight'))
@@ -1069,8 +1085,54 @@ test('keeps trusted preflight before token minting and required policy unconditi
   assert.ok(steps[2].includes("if: ${{ steps.preflight.outputs.needs-project == 'true' }}"))
   assert.ok(steps[2].includes('permission-organization-projects: read'))
   assert.ok(steps[3].includes('PROJECT_TOKEN: ${{ steps.app-token.outputs.token }}'))
-  assert.ok(steps[3].includes('run: node .github/issue-management/policy.mjs pr'))
+  assert.ok(steps[3].includes('          node .github/issue-management/policy.mjs pr\n'))
+  for (const step of [steps[1], steps[3]]) {
+    assert.ok(step.includes('shell: bash'))
+    assert.ok(step.includes([
+      '        run: |',
+      '          unset DSH_ISSUE_REPOSITORY_OWNER',
+      '          if [ "${GITHUB_REPOSITORY:-}" = "cloga/deepseek-harness" ]; then',
+      '            export DSH_ISSUE_REPOSITORY_OWNER=cloga',
+      '          fi',
+    ].join('\n')))
+  }
+  assert.doesNotMatch(source, /DSH_ISSUE_REPOSITORY_OWNER:|GITHUB_ENV|git checkout|git reset/)
   assert.ok(steps[3].includes("if: ${{ steps.preflight.outputs.legacy-automated != 'true' }}"))
+})
+
+test('sets the owner only in fork policy processes and propagates command failures', {
+  skip: process.platform === 'win32' && !process.env.DSH_POLICY_TEST_BASH ? 'Requires a POSIX bash test launcher' : false,
+}, (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-policy-owner-process-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const policyDirectory = join(directory, '.github', 'issue-management')
+  mkdirSync(policyDirectory, { recursive: true })
+  writeFileSync(join(policyDirectory, 'selective-preflight.json'), '{"version":1}\n')
+  const source = readFileSync(new URL('../workflows/issue-policy.yml', import.meta.url), 'utf8')
+  const steps = source.split('      - name: ').slice(1)
+  for (const index of [1, 3]) {
+    const body = steps[index].split('        run: |\n')[1]
+    assert.ok(body, 'Policy command must have a bash run block')
+    const script = body.split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n')
+    for (const repository of ['cloga/deepseek-harness', 'deepseek-harness/deepseek-harness', 'cloga/other']) {
+      for (const status of [0, 23]) {
+        const output = join(directory, 'probe')
+        writeFileSync(output, '')
+        const result = spawnSync(process.env.DSH_POLICY_TEST_BASH || 'bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c',
+          'node() { printf "%s|%s\\n" "${DSH_ISSUE_REPOSITORY_OWNER-absent}" "$*" >> "$POLICY_PROBE_OUTPUT"; return "$POLICY_PROBE_STATUS"; };\n' + script,
+        ], {
+          cwd: directory,
+          env: { PATH: process.env.PATH, GITHUB_REPOSITORY: repository, DSH_ISSUE_REPOSITORY_OWNER: 'inherited-invalid',
+            POLICY_PROBE_OUTPUT: output.replaceAll('\\', '/'), POLICY_PROBE_STATUS: String(status) },
+          encoding: 'utf8', timeout: 30_000,
+        })
+        assert.equal(result.error, undefined)
+        assert.equal(result.signal, null)
+        assert.equal(result.status, status, result.stderr)
+        assert.equal(readFileSync(output, 'utf8'), `${repository === 'cloga/deepseek-harness' ? 'cloga' : 'absent'}|.github/issue-management/policy.mjs ${index === 1 ? 'pr-preflight' : 'pr'}\n`)
+      }
+    }
+  }
 })
 
 test('runs trusted rollout selection with absent and present capability markers', { skip: process.platform === 'win32' ? 'The policy workflow executes under hosted Ubuntu bash' : false }, (t) => {

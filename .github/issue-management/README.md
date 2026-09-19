@@ -8,7 +8,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Contributors can link Issues as context without coupling pull-request validation to Project availability. Resolving references additionally enforce Project Priority. The required `Issue policy` job and the separate lifecycle workflow use trusted default-branch code.
+Contributors can link Issues as context without coupling pull-request validation to Project availability. Resolving references additionally enforce Project Priority. The required `Issue policy` job uses a trusted checkout; the separate lifecycle workflow uses default-branch code.
 
 ## Table of Contents
 
@@ -56,7 +56,9 @@ PR opening initializes an empty Project `Start Date` for every referenced Issue,
 
 PR preflight and validation accept the optional `DSH_ISSUE_REPOSITORY_OWNER` environment variable. When absent, repository reads retain the configured organization. The only accepted override is `cloga`: `GITHUB_REPOSITORY`, the event repository, and the PR base repository must all equal `cloga/deepseek-harness`, while the configured repository remains `deepseek-harness/deepseek-harness`. Empty values or mismatched context fail before any API read. The resolved owner applies to PR, review, and referenced-Issue reads and same-repository reference parsing; the Project organization, number, fields, credentials, and validation rules do not change. Lifecycle processing does not consume this override.
 
-The workflow does not enable the override and still checks out trusted default-branch code. Preparing repository-owner support does not authorize another policy revision; changing the trusted checkout requires separate maintainer approval. Correct repository routing does not establish access to the original Project or eliminate its validation failures.
+Only `cloga/deepseek-harness` uses the separately approved immutable revision written in the [workflow checkout](../workflows/issue-policy.yml). The workflow performs a complete clean checkout, never overlays PR-head policy code, and enables the owner override only in its preflight and final validation processes. Other repositories retain default-branch code with the override absent, not empty. The pin does not advance with PR pushes; changing it requires separate maintainer approval of the exact revision.
+
+The [repository-reference check](../../scripts/verify-repository-references.ts) permits only the literal machine-pin token in that first policy checkout's `with.ref` field, with the exact fork condition, default-branch fallback, cleanup, and disabled credential persistence. The same identifier in comments, other fields, or documentation remains prohibited. This exception does not approve a new revision or establish access to the original Project; required Project validation can still fail.
 
 Lifecycle processing is event-driven, not a reconciler. Omitted events do not repair Project state, and concurrent Project mutations have no atomic compare-and-swap. Selective evaluation does not redesign required-check authority or guarantee measured Actions-minute savings. The [selective-evaluation decision](../../.agents/notes/implemented/process/2026-09-07-selective-issue-policy-evaluation.md) records the trade-offs.
 
