@@ -15,6 +15,8 @@ import {
   JOBOBJECT_BASIC_ACCOUNTING_ACTIVE_PROCESSES_OFFSET,
   JOBOBJECT_BASIC_ACCOUNTING_SIZE,
   JobObjectBasicAccountingInformation,
+  STARTF_USESHOWWINDOW,
+  STARTF_USESTDHANDLES,
   WAIT_TIMEOUT,
 } from '../src/abi.ts'
 import { processInformationType, startupInfoType } from '../src/ffi.ts'
@@ -201,7 +203,13 @@ describe('ordinary Job process operations', () => {
       }),
     })
     expect(spawnCurrentTokenJobProcess(bindings, options())).toEqual({ pid: 1234, process: 60n, job: 50n })
-    expect(startup).toMatchObject({ dwFlags: 0x101, wShowWindow: 0, hStdInput: 104n, hStdOutput: 105n, hStdError: 106n })
+    expect(startup).toMatchObject({
+      dwFlags: STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW,
+      wShowWindow: 0,
+      hStdInput: 104n,
+      hStdOutput: 105n,
+      hStdError: 106n,
+    })
     expect(uvGetOsfhandle).toHaveBeenNthCalledWith(1, 4)
     expect(uvGetOsfhandle).toHaveBeenNthCalledWith(2, 5)
     expect(uvGetOsfhandle).toHaveBeenNthCalledWith(3, 6)

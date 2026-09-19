@@ -9,6 +9,7 @@ import { writeDesktopRuntime } from '../../lib/types/runtime-tree.js'
 import { DESKTOP_HOST_PROTOCOL_VERSION } from '../../lib/types/host-protocol.js'
 import { normalizeDesktopRuntimePackageMetadata } from '../../scripts/runtime-package-metadata.mjs'
 import { verifyPackagedSkills } from './packaged-skills-smoke.mjs'
+import { verifyPackagedWindowsStartup } from './packaged-window-smoke.mjs'
 import {
   packagedDesktopRuntimeRoot,
   readPackagedDesktopRuntimeDescriptor,
@@ -17,6 +18,7 @@ import {
 
 const executable = process.argv[2]
 assert(executable, 'Pass a packaged Windows Electron executable; this smoke never downloads Electron')
+verifyPackagedWindowsStartup(executable)
 await verifyPackagedSkills(executable)
 // Exercise the pinned builder's real transform and ASAR pipeline, not only the archive writer.
 const packagerRequire = createRequire(import.meta.resolve('app-builder-lib/package.json'))

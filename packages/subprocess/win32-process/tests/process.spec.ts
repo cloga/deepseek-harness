@@ -6,7 +6,7 @@ import {
   spawnInheritedJobProcess,
   spawnPipedProcess,
 } from '../src/index.ts'
-import { CREATE_SUSPENDED } from '../src/abi.ts'
+import { CREATE_SUSPENDED, STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES } from '../src/abi.ts'
 import { processInformationType, startupInfoType } from '../src/ffi.ts'
 import type { NativePtr, Win32ProcessBindings } from '../src/index.ts'
 
@@ -18,8 +18,10 @@ function inheritedApi(overrides: Partial<Win32ProcessBindings> = {}): {
   createProcessAsUserW: ReturnType<typeof vi.fn>
   assignProcessToJobObject: ReturnType<typeof vi.fn>
   resumeThread: ReturnType<typeof vi.fn>
+  startupInfo: () => Record<string, unknown> | undefined
 } {
   const events: string[] = []
+  let startup: Record<string, unknown> | undefined
   const createProcessAsUserWImpl: Win32ProcessBindings['createProcessAsUserW'] =
     overrides.createProcessAsUserW
     ?? ((_token, _app, _line, _pa, _ta, _inherit, _flags, _env, _cwd, _startup, info) => {
@@ -33,7 +35,10 @@ function inheritedApi(overrides: Partial<Win32ProcessBindings> = {}): {
       })
       return 1
     })
-  const createProcessAsUserW = vi.fn(createProcessAsUserWImpl)
+  const createProcessAsUserW = vi.fn<Win32ProcessBindings['createProcessAsUserW']>((...args) => {
+    startup = koffi.decode(args[9], startupInfoType()) as Record<string, unknown>
+    return createProcessAsUserWImpl(...args)
+  })
   const assignProcessToJobObject = vi.fn(() => {
     events.push('assign')
     return 1
@@ -65,6 +70,7 @@ function inheritedApi(overrides: Partial<Win32ProcessBindings> = {}): {
     createProcessAsUserW,
     assignProcessToJobObject,
     resumeThread,
+    startupInfo: () => startup,
   }
 }
 
@@ -88,6 +94,7 @@ describe('spawnInheritedJobProcess', () => {
       createProcessAsUserW,
       assignProcessToJobObject,
       resumeThread,
+      startupInfo,
     } = inheritedApi()
     const child = spawnInheritedJobProcess(api, {
       command: 'cmd.exe',
@@ -96,6 +103,13 @@ describe('spawnInheritedJobProcess', () => {
       token,
     })
     expect(child).toEqual({ pid: 1234, process: 60n, job: 50n })
+    expect(startupInfo()).toMatchObject({
+      dwFlags: STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW,
+      wShowWindow: 0,
+      hStdInput: 110n,
+      hStdOutput: 111n,
+      hStdError: 112n,
+    })
     expect(events.indexOf('create')).toBeLessThan(events.indexOf('assign'))
     expect(events.indexOf('assign')).toBeLessThan(events.indexOf('resume'))
     expect(assignProcessToJobObject).toHaveBeenCalledWith(50n, 60n)
@@ -221,8 +235,10 @@ describe('wait and pipe cleanup', () => {
     expect(closeHandle).toHaveBeenCalledWith(80n)
   })
 
-  it('terminates a piped child when CreateProcess returns a null thread handle', () => {
+  it('keeps piped windows hidden and terminates a child with a null thread handle', () => {
     let nextPipe = 10n
+    let startup: Record<string, unknown> | undefined
+    let creationFlags: number | undefined
     const terminateProcess = vi.fn(() => 1)
     const closeHandle = vi.fn(() => 1)
     const api = {
@@ -232,7 +248,9 @@ describe('wait and pipe cleanup', () => {
         return 1
       }),
       setHandleInformation: vi.fn(() => 1),
-      createProcessAsUserW: vi.fn((_token, _app, _line, _pa, _ta, _inherit, _flags, _env, _cwd, _startup, info) => {
+      createProcessAsUserW: vi.fn<Win32ProcessBindings['createProcessAsUserW']>((_token, _app, _line, _pa, _ta, _inherit, flags, _env, _cwd, startupPointer, info) => {
+        creationFlags = flags
+        startup = koffi.decode(startupPointer, startupInfoType()) as Record<string, unknown>
         koffi.encode(info, processInformationType(), {
           hProcess: 60n,
           hThread: 0n,
@@ -250,6 +268,14 @@ describe('wait and pipe cleanup', () => {
       cwd: 'C:\\work',
       token,
     })).toThrow('null process/thread handles')
+    expect(creationFlags).toBe(0)
+    expect(startup).toMatchObject({
+      dwFlags: STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW,
+      wShowWindow: 0,
+      hStdInput: 10n,
+      hStdOutput: 13n,
+      hStdError: 15n,
+    })
     expect(terminateProcess).toHaveBeenCalledWith(60n, 1)
   })
 })

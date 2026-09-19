@@ -21,6 +21,9 @@ type ReleaseWorkflow = {
   permissions: Record<string, string>
   env?: Record<string, string>
   jobs: Record<string, {
+    needs?: string | string[]
+    if?: string
+    environment?: string
     permissions?: Record<string, string>
     env?: Record<string, string>
     steps: Array<{
@@ -220,7 +223,7 @@ describe('Desktop fork release plan', () => {
       schemaVersion: 2,
       channel: 'cloga-windows-x64',
       version: '0.1.6-alpha.2.cloga.1',
-      sequence: 17,
+      sequence: 18,
       upstreamVersion: '0.1.6-alpha.2',
       migration: {
         owner: 'cloga/dsh-windows-ops',
@@ -265,7 +268,7 @@ describe('Desktop fork release plan', () => {
       mode: 'github-release-managed',
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
-      currentSequence: 17,
+      currentSequence: 18,
       minimumSequence: 2,
       provisioning: {
         capability: { id: 'desktopNativePluginProvisioning' },
@@ -344,6 +347,31 @@ describe('Desktop fork release plan', () => {
     },
   )
 
+  it('requires native Windows command and ACL acceptance before managed preparation and packaging', () => {
+    const steps = readReleaseWorkflow().jobs.build!.steps
+    const transactions = steps.findIndex(step => step.name === 'Verify Desktop project transactions')
+    const native = steps.findIndex(step => step.name === 'Verify hidden Windows command paths')
+    const prepare = steps.findIndex(step => step.name === 'Prepare reviewed managed capability')
+    const packaging = steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')
+    expect(transactions).toBeGreaterThanOrEqual(0)
+    expect(native).toBeGreaterThan(transactions)
+    expect(prepare).toBeGreaterThan(native)
+    expect(packaging).toBeGreaterThan(prepare)
+    expect(steps.filter(step => step.name === 'Verify hidden Windows command paths')).toHaveLength(1)
+    expect(steps[native]?.run?.trim()).toBe([
+      'pnpm exec vitest run',
+      'packages/subprocess/win32-process/tests',
+      'packages/subprocess/subprocess-local/tests/windows-job.spec.ts',
+      'packages/subprocess/subprocess-local/tests/native-windows.spec.ts',
+      'packages/sandbox/sandbox-windows-acl/tests/runner.spec.ts',
+      'packages/sandbox/sandbox-windows-acl/tests/provider-chain.spec.ts',
+      'packages/sandbox/sandbox-windows-acl/tests/control.spec.ts',
+      '--maxWorkers=2 --testTimeout=90000 --hookTimeout=90000',
+    ].join(' '))
+    expect(steps[native]).not.toHaveProperty('continue-on-error')
+    expect(steps[native]).not.toHaveProperty('if')
+  })
+
   it('runs packaged skill canary guards before building and testing the actual artifact', () => {
     const steps = readReleaseWorkflow().jobs.build!.steps
     const guards = steps.findIndex(step => step.name === 'Verify packaged skill canary guards')
@@ -405,11 +433,46 @@ describe('Desktop fork release plan', () => {
     expect(acquisition).toContain('$manifest.source.commit -cne $tagSha')
   })
 
-  it('formats the source commit in release notes without an interpolated Markdown here-string', () => {
-    const publish = readReleaseWorkflow().jobs.release!.steps.find(step => step.name === 'Publish reviewed release')
-    expect(publish?.run).toContain("('- Source commit: `{0}`' -f $env:SOURCE_SHA)")
-    expect(publish?.run).toContain("'- Native `electron-updater`: disabled; no `app-update.yml`'")
-    expect(publish?.run).not.toContain('@"')
+  it('invokes the plan-bound publisher from the exact build checkout only after artifact verification', () => {
+    const workflow = readReleaseWorkflow()
+    const release = workflow.jobs.release!
+    expect(release.needs).toBe('build')
+    expect(release.if).toBe("${{ !inputs.rehearsal && github.ref == 'refs/heads/master' }}")
+    expect(release.environment).toBe('desktop-fork-release')
+    const steps = release.steps
+    const checkout = steps.findIndex(step => step.uses === 'actions/checkout@v6')
+    const node = steps.findIndex(step => step.uses === 'actions/setup-node@v6')
+    const download = steps.findIndex(step => step.uses === 'actions/download-artifact@v4')
+    const verified = steps.findIndex(step => step.name === 'Cross-check downloaded artifact set')
+    const publish = steps.findIndex(step => step.name === 'Publish reviewed release')
+    expect(checkout).toBeGreaterThanOrEqual(0)
+    expect(node).toBeGreaterThan(checkout)
+    expect(download).toBeGreaterThan(node)
+    expect(verified).toBeGreaterThan(download)
+    expect(publish).toBeGreaterThan(verified)
+    expect(steps[checkout]?.with).toMatchObject({ ref: '${{ needs.build.outputs.source_sha }}', 'persist-credentials': false, clean: true })
+    expect(steps[node]?.with).toEqual({ 'node-version': '${{ env.NODE_VERSION }}', 'package-manager-cache': false })
+    expect(steps[publish]?.env).toEqual({
+      GH_TOKEN: '${{ github.token }}', RELEASE_TAG: '${{ needs.build.outputs.tag }}',
+      RELEASE_VERSION: '${{ needs.build.outputs.version }}', SOURCE_SHA: '${{ needs.build.outputs.source_sha }}',
+    })
+    expect(steps[publish]?.run).toContain('$head = git rev-parse HEAD')
+    expect(steps[publish]?.run).toContain('$LASTEXITCODE -ne 0 -or $head -cne $env:SOURCE_SHA')
+    expect(steps[publish]?.run).toContain('node apps/desktop/scripts/publish-fork-release.mjs release-assets')
+    expect(steps[publish]?.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }')
+    expect(steps[publish]?.run).not.toMatch(/gh release (?:create|edit|delete)|@"/u)
+    expect(steps[publish]).not.toHaveProperty('continue-on-error')
+    expect(steps[publish]).not.toHaveProperty('if')
+    expect(workflow.jobs['remote-check']?.needs).toEqual(['build', 'release'])
+  })
+
+  it('keeps plan-byte binding and managed installer notes in the checked publisher', () => {
+    const script = readFileSync(resolve(repositoryRoot, 'apps/desktop/scripts/publish-fork-release.mjs'), 'utf8')
+    expect(script).toContain("new URL('../release/cloga-windows-x64.json', import.meta.url)")
+    expect(script).toContain('manifest.build?.planSha256, planSha256')
+    expect(script).toContain('receipt.buildInputs?.planSha256, planSha256')
+    expect(script).toContain('Source commit: ${sourceSha}')
+    expect(script).toContain('Native electron-updater is disabled.')
   })
 
   it('keeps write permission in the reviewed release job and pins build tools', () => {

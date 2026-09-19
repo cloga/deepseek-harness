@@ -25,7 +25,7 @@ Mount `dsh-subprocess-local` in any composition that runs child processes on the
 <a id="use-this-package"></a>
 ## Use this package
 
-Mount the provider beside its consumers and start processes exactly as the subprocess service specifies; this package decides only how those processes run on the host. On Windows, non-terminal children and `taskkill` helpers start with their windows hidden so background operations do not take focus. This also hides GUI windows that honor the process startup visibility setting.
+Mount the provider beside its consumers and start processes exactly as the subprocess service specifies; this package decides only how those processes run on the host. On Windows, non-terminal children and `taskkill` helpers request hidden initial windows, including the private Windows Job runner and its native target. Startup visibility does not change standard streams or Job ownership, hide an existing parent console, or prevent a program from showing a later window. These flags alone do not establish desktop-wide visibility or focus behavior. Terminal sessions keep their separate PTY path.
 
 ### Mounting the provider
 
@@ -39,8 +39,6 @@ Load the provider in the same composition as its consumers. It has no config fie
 ### Resolving executables
 
 Absolute executable paths are verified; bare names resolve against the scrubbed PATH with platform-aware executable extensions (`.COM`/`.EXE`/`.BAT`/`.CMD` on Windows). Relative paths containing separators are rejected — provide an absolute path or a bare PATH name — and relative PATH entries resolve from the host process cwd.
-
-Windows ordinary subprocesses start the private Job runner with `windowsHide` and request hidden initial windows for native targets. Standard streams and Job ownership remain independent of window visibility; commands that explicitly create their own windows are outside this guarantee.
 
 ### Collecting output
 

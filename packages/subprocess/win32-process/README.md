@@ -47,7 +47,7 @@ The process, stdio, and Job constants plus selected structure sizes and offsets 
 g++ -std=c++20 -municode -O2 -o abi-probe.exe verify/abi-probe.cpp && ./abi-probe.exe
 ```
 
-The Koffi `STARTUPINFOW` and `PROCESS_INFORMATION` definitions also assert their 64-bit sizes at module load. The probe additionally fixes pointer and handle widths, the Unicode-environment flag, and the basic Job accounting record size and `ActiveProcesses` offset used to determine quiescence; it remains the evidence for the other recorded offsets and constants.
+The Koffi `STARTUPINFOW` and `PROCESS_INFORMATION` definitions also assert their 64-bit sizes on first native use. The probe additionally fixes pointer and handle widths, the Unicode-environment flag, and the basic Job accounting record size and `ActiveProcesses` offset used to determine quiescence; it remains the evidence for the other recorded offsets and constants.
 
 <a id="model-experience"></a>
 ## Model Experience
