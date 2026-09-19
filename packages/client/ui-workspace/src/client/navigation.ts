@@ -39,7 +39,9 @@ export interface UiWorkspace {
    */
   connectWorkspace(workspaceId: WorkspaceId): Promise<SessionId>
   /**
-   * Start a New Session flow and navigate to its Session.
+   * Create a fresh Session and open it unless a later navigation supersedes it.
+   * Concurrent starts in one Workspace share only their pending creation.
+   * With no Workspace available, show the no-session view.
    * @param workspaceId - explicit target; absent inherits the current or most recent Workspace.
    */
   startSession(workspaceId?: WorkspaceId): void
@@ -94,6 +96,7 @@ export class DirectoryBrowseError extends Error {
 /** Implements Workspace archive and directory UI operations. */
 class UiWorkspaceService extends Service implements UiWorkspace {
   private readonly connecting = new Map<WorkspaceId, Promise<SessionId>>()
+  private readonly starting = new Map<WorkspaceId, Promise<SessionId>>()
   private readonly lifetime = new AbortController()
 
   /**
@@ -172,9 +175,21 @@ class UiWorkspaceService extends Service implements UiWorkspace {
       this.ctx.layout.selectPanel(null)
       return
     }
-    void this.openWorkspace(target).catch(
+    void this.openFreshSession(target).catch(
       (reason: unknown) => { console.warn('new session failed:', reason) },
     )
+  }
+
+  private async openFreshSession(workspaceId: WorkspaceId): Promise<void> {
+    const navigation = AbortSignal.any([this.ctx.layout.beginNavigation(), this.lifetime.signal])
+    let attempt = this.starting.get(workspaceId)
+    if (attempt === undefined) {
+      attempt = this.sessions.create({ workspaceId })
+        .finally(() => { this.starting.delete(workspaceId) })
+      this.starting.set(workspaceId, attempt)
+    }
+    const sessionId = await attempt
+    if (!navigation.aborted) this.openSession(sessionId)
   }
 
   async archiveSession(sessionId: SessionId): Promise<void> {
