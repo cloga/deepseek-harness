@@ -27,3 +27,5 @@ New Session provides an independent identity without taking ownership from anoth
 ## Verification
 
 The [navigation tests](../../../../packages/client/ui-workspace/tests/workspaces-service.client.spec.ts) distinguish fresh creation from ordinary reuse and cover overlapping starts, settlement and retry, superseding navigation, and disposal. The [assembled Web regression](../../../../apps/web/tests/workspace-new-session-folding.e2e.ts) owns browser evidence for New Session beside an occupied blank and the unchanged provisional-row quota. Neither client-only evidence nor this navigation change establishes recovery of the occupied Session itself.
+
+[Assembled input fixtures](../../../../apps/web/tests/assembled-boot.ts) wait for a different selected Session and its replacement editable composer before interacting. A matching composer can still belong to the preceding Session while creation is pending.

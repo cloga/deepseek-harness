@@ -69,6 +69,9 @@ describe('web e2e: blank New Session folding quota', () => {
     await occupied.flush()
     await workspace.attachSession(occupiedId)
     scaffold.ctx.sessionProjectionCache.coldSnapshot(occupied.header, occupied.inheritedEventCount, [])
+  }, 120_000)
+
+  const openFreshSessionFromOccupiedBlank = async (): Promise<void> => {
     await expect.poll(async () => {
       const rows = await scaffold.ctx.sessionController.list({}, new AbortController().signal)
       return rows.items.find(row => row.sessionId === occupiedId)
@@ -105,7 +108,7 @@ describe('web e2e: blank New Session folding quota', () => {
     expect(fresh.id).not.toBe(occupiedId)
     await expect.poll(selectedId).toBe(fresh.id)
     expect(scaffold.ctx.agents.get(fresh.id)).toBeDefined()
-  }, 120_000)
+  }
 
   afterAll(async () => {
     try {
@@ -124,7 +127,10 @@ describe('web e2e: blank New Session folding quota', () => {
   })
 
   it('creates fresh Sessions beside an occupied blank and keeps the folding quota', async () => {
-    onTestFailed(() => saveFailureShot(page, 'web-e2e-workspace-new-session-folding'))
+    onTestFailed(async () => {
+      if (page !== undefined) await saveFailureShot(page, 'web-e2e-workspace-new-session-folding')
+    })
+    await openFreshSessionFromOccupiedBlank()
     const sidebar = page.getByRole('tree', { name: 'Sessions' })
     await expect.poll(() => sidebar.getByRole('treeitem').count(), { timeout: 15_000 }).toBe(7)
     expect(await sidebar.getByText('New Session', { exact: true }).count()).toBe(1)

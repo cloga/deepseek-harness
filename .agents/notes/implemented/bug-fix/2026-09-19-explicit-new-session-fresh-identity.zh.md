@@ -27,3 +27,5 @@ Status: implemented
 ## 验证
 
 [导航测试](../../../../packages/client/ui-workspace/tests/workspaces-service.client.spec.ts)区分新建与普通复用，并覆盖重叠的新建请求、完成与重试、后续导航替代和所有者释放。[组装后的 Web 回归](../../../../apps/web/tests/workspace-new-session-folding.e2e.ts)负责验证存在被占用空白会话时的新会话浏览器行为，以及不变的临时行配额。仅有客户端证据和这项导航变更，都不能证明被占用会话本身已经恢复。
+
+[组装后的输入夹具](../../../../apps/web/tests/assembled-boot.ts)在交互前，会等待选中的会话 ID 改变，且替换后的输入框可编辑。创建尚未完成时，匹配到的输入框仍可能属于先前的会话。
