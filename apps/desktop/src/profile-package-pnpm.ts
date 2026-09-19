@@ -37,12 +37,14 @@ export function runDesktopPackagePnpm(
       environment = Object.fromEntries(entries.filter(([name]) => name.toUpperCase() !== 'PATH'))
       if (path !== undefined) environment.PATH = path
     }
+    // Keep the OS cwd outside disposable trees: pnpm's error cleanup may briefly outlive its direct process.
     // pnpm 11 recognizes its built-in-only sentinel only at argv[0]; flags must not precede `pm`.
+    const directory = `--dir=${request.cwd}`
     const args = request.args[0] === 'pm'
-      ? ['pm', '--config.update-notifier=false', ...request.args.slice(1)]
-      : ['--config.update-notifier=false', ...request.args]
+      ? ['pm', '--config.update-notifier=false', directory, ...request.args.slice(1)]
+      : ['--config.update-notifier=false', directory, ...request.args]
     const child = spawn(runtime.node, ['--expose-internals', runtime.pnpm, ...args], {
-      cwd: request.cwd,
+      cwd: runtime.nodeBin,
       env: desktopNodeEnvironment(runtime.node, runtime.nodeBin, { ...environment, ELECTRON_RUN_AS_NODE: '1', COREPACK_ENABLE_PROJECT_SPEC: '0', CI: 'true', NO_UPDATE_NOTIFIER: '1' }),
       stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
     })

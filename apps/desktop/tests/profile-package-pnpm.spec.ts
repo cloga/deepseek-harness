@@ -10,14 +10,15 @@ it.each(['pm', 'install'])('preserves the built-in command position for %s befor
   const root = mkdtempSync(join(tmpdir(), 'desktop-pnpm-argv-'))
   const stub = join(root, 'pnpm-stub.mjs')
   const result = join(root, 'argv.json')
-  writeFileSync(stub, "import { writeFileSync } from 'node:fs'; writeFileSync(process.argv.at(-1), JSON.stringify(process.argv.slice(2)));\n")
+  writeFileSync(stub, "import { writeFileSync } from 'node:fs'; writeFileSync(process.argv.at(-1), JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }));\n")
   try {
     await runDesktopPackagePnpm({ node: process.execPath, pnpm: stub, nodeBin: dirname(process.execPath) }, {
       cwd: root, args: [command, result], env: {}, signal: AbortSignal.timeout(30000),
     })
-    expect(JSON.parse(readFileSync(result, 'utf8'))).toEqual(command === 'pm'
-      ? ['pm', '--config.update-notifier=false', result]
-      : ['--config.update-notifier=false', 'install', result])
+    const stableCwd = dirname(process.execPath)
+    expect(JSON.parse(readFileSync(result, 'utf8'))).toEqual({ cwd: stableCwd, argv: command === 'pm'
+      ? ['pm', '--config.update-notifier=false', `--dir=${root}`, result]
+      : ['--config.update-notifier=false', `--dir=${root}`, 'install', result] })
   } finally { rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) }
 })
 
