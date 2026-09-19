@@ -68,18 +68,18 @@ Session 实例与 scope 同生命周期，存活资格 = host listed（一个判
   - 其他端：`host/session-status (running:true)` 帧翻转——blank 会话从不 running，首次 running 必然已非 blank；
   - 重连对齐：`session.list` 的 summary.blank 是权威，错过帧的端下次拉取自然对齐；陈旧的 blank:true 不能把已转正的会话重新标回 blank。
 - 列表纪律：store 保留全部行；Workspace browser 的分组、平铺、搜索和计数共用同一可见投影——所有非 blank 会话都显示，blank 会话只显示 `session.id === sessions.current` 的一条，并强制标题为 `New Session`。切换 Workspace 后，旧 blank 实体仍在镜像中但从列表隐藏，目标 Workspace 的 current blank 显示；因此用户可见面全局至多一条 blank 行。
-- 残留账零 GC：刷新后 blank 会话带位回来，下次同 workspace 且仍为成员时复用，普通单端路径使每个 workspace 至多保留一个；host 重启后 blank 无盘痕自然蒸发；多 tab 竞态多出的空壳只会成为非 current 隐藏行，后续复用消化，不做协调。
+- 普通 Workspace 连接会复用符合条件的空白成员，但显式新会话会创建新的身份。因此，顺序显式创建和独立客户端可能在同一 Workspace 留下多个空白会话；非当前空白会话保持隐藏。[新身份决策](../bug-fix/2026-09-19-explicit-new-session-fresh-identity.zh.md)只取代显式新会话复用策略；作用域和供数决策仍然有效。
 
-### connectWorkspace：New Session 的唯一入口
+### connectWorkspace：普通 Workspace 选择
 
-`workspaces.connectWorkspace(workspaceId): Promise<SessionId>`（归属 WorkspaceRuntime——它同时持有 workspace 规范 path 与 sessions 引用）：
+`uiWorkspace.connectWorkspace(workspaceId): Promise<SessionId>` 归 `client/ui-workspace` 所有，由它读取 Workspace 与 Session 控制器：
 
 - 复用臂：list mirror 中找 `blank && cwd == workspace.path && sessionIds.includes(id)`——host 自己的成员规则，绝不只按 cwd。没有账户槽位的 cwd 匹配（CLI（命令行界面）/TUI 在 host cwd 创建的会话，或已删除/重建的注册）会打开一个任何分组表面都无法显示在该工作区下的会话，因此落到新建臂（见[成员复用修复](../../archived/bug-fix/2026-08-05-workspace-blank-session-reuse-membership.md)）；命中直接返回该 id，不新建。
 - 新建臂：未命中则 `session.create({workspaceId})`，返回新 id。
 - 未知 workspaceId fail loud（不静默创建到别处）。
 - 解析保证（两臂同约定）：promise resolve 时返回的 id 已在 list store 且 `sessions.binding(id)` 同步可解析——`SessionRuntime.create` 在 RPC 成功后同步投影列表再 resolve，使 draft 搬运方可以在 open 之前往新 scope 的 machine 写文本，不等 notifier flush。
 - 调用方拿 id 自行 `sessions.open`；首条提示词发送就是普通 `session.prompt`——会话本来就在，失败即普通提示词失败，draft 文本还在 machine 里，重试即再次发送。
-- 全局 New Session 按钮默认取 `recentWorkspaceId`：先比较各 Workspace 内 Session 的最新 `updatedAt`，无 Session 时回退 Workspace `createdAt`，同值保持 Host 顺序；只有完全没有 Workspace 时才 `sessions.clear()` 进入无会话视图。Workspace 分组内的创建动作仍显式命中该 Workspace。
+- 显式新会话使用 `uiWorkspace.startSession`，不使用 `connectWorkspace`。它的 Workspace 选择和创建语义由 [Workspace README](../../../../packages/client/ui-workspace/README.zh.md) 定义。
 - 运行时启动时订阅首次完整基线：若已有恢复成功的 current 会话则保持不动，否则自动 `connectWorkspace(recentWorkspaceId)` 并 open 返回的 blank 会话。该策略只结算一次；之后用户主动 clear 不会再次被自动选择覆盖，连接失败则等下一次基线投影重试。
 - blank Hero 中改选 Workspace 也走 `connectWorkspace`；若目标 id 与当前 id 不同，先把当前 input machine 的非空 draft 搬到目标 scope，再 `sessions.open(nextId)`。旧 blank 实体不删除，只因不再 current 而从列表隐藏。
 
@@ -131,6 +131,6 @@ slot scope 是闭集 `root | session-maybe | session`：
 
 - 插件获得与 host 同构的会话上下文：逐会话状态挂 actx、随 scope fiber 一次拆装，泄漏结构性不可能；双会话隔离由 scope filter 结构性保证。
 - client 对象层收敛为 wire 镜像：会话身份、生命周期、能力判别全部以 host 实体为准——输入体系（下一层）面对的永远是「有真 Agent 的会话」，slash/skill 等提供方一律以 sessionId 直接寻址。
-- 空会话治理零专用机制：状态靠一个派生位，可见性靠统一列表投影（仅 current blank 以 `New Session` 展示），回收靠 lazy persistence 的既有约定（重启蒸发），常规上限靠同 Workspace 复用。
+- 空白会话状态使用派生位，统一列表投影只将当前空白会话显示为 `New Session`。同 Workspace 复用避免普通选择中的不必要创建，但不限制显式新会话在每个 Workspace 留下的空白会话数量。
 - 代价：id→ctx 换乘纪律、provide 的 Concurrent 纪律都是约定而非类型强制，靠 review 与测试钉住。单一状态轴仍会在 Session 存在前隐藏 machine face；这段时间内，[常驻会话壳](../../../../packages/client/ui-conversation/README.zh.md)会把激活操作转到 Workspace picker。
 - 已知欠账：approval/question 跨 prune 恢复（TODO）；模型选择以 live-mutation 形状回归（host `selectModel` 三件套现成，其 client 消费方尚未构建）。
