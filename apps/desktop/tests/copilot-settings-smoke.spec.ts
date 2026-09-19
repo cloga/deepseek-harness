@@ -9,6 +9,7 @@ function fixture(): { root: HTMLElement; settings: Locator } {
     <section data-dsh-dual-model-card aria-busy="false">
       <input data-dsh-dual-model-enabled type="checkbox">
       <button data-dsh-dual-model-save>Save</button>
+      <p data-dsh-dual-model-workspace>No workspace selected</p>
       <button data-dsh-dual-model-create disabled>Create</button>
       <select data-dsh-dual-model-planner><option value="">Choose</option></select>
       <select data-dsh-dual-model-executor><option value="">Choose</option></select>
@@ -47,6 +48,7 @@ describe('read-only packaged Copilot settings acceptance', () => {
     const before = root.innerHTML
     await expect(inspectPackagedCopilotSettings(settings)).resolves.toEqual({
       modelRolesViewLoaded: true,
+      currentWorkspaceReadOnly: true,
       searchProviderCatalogLoaded: true,
       registeredSearchProviders: ['deepseek-official', 'github-copilot-hosted'],
       realSearch: false,
@@ -64,6 +66,16 @@ describe('read-only packaged Copilot settings acceptance', () => {
     root.querySelector('[data-dsh-web-search-routing] [role="status"]')!.textContent = 'A saved provider is no longer registered.'
     expect((await inspectPackagedCopilotSettings(settings)).registeredSearchProviders)
       .toEqual(['another-provider', 'deepseek-official', 'github-copilot-hosted'])
+  })
+
+  it.each(['missing', 'empty', 'select', 'editable', 'editable-empty'] as const)('rejects a %s current-workspace display', async (damage) => {
+    const { root, settings } = fixture()
+    const workspace = root.querySelector('[data-dsh-dual-model-workspace]')!
+    if (damage === 'missing') workspace.remove()
+    else if (damage === 'empty') workspace.textContent = ' '
+    else if (damage === 'editable' || damage === 'editable-empty') workspace.setAttribute('contenteditable', damage === 'editable' ? 'true' : '')
+    else workspace.outerHTML = '<select data-dsh-dual-model-workspace><option>Workspace</option></select>'
+    await expect(inspectPackagedCopilotSettings(settings)).rejects.toThrow()
   })
 
   it.each([

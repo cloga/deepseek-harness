@@ -18,7 +18,11 @@ const harness = await vi.hoisted(async () => {
   const managerRuntimes: unknown[] = []
   const managedMessages: unknown[] = []
   const managedHandoffs: Array<(selection: DesktopManagedUpdateSelection) => Promise<void>> = []
-  const handlers = new Map<string, (event: { senderFrame: { url: string } }) => unknown>()
+  const handlers = new Map<string, (event: { senderFrame: { url: string } }, ...args: unknown[]) => unknown>()
+  const ipcEvents = new EventEmitter()
+  const mutations: unknown[] = []
+  let beforeMutation = async (): Promise<void> => {}
+  let rendererImpacts: unknown[] = [{ hasDraft: false, attachmentCount: 0, submitting: false }]
   let pluginsEnabled = false
   let preparing = deferred()
   let prepared = deferred()
@@ -29,7 +33,9 @@ const harness = await vi.hoisted(async () => {
   let managedUpdates = false
   let updatePublisher = (state: DesktopUpdateState): DesktopUpdateState => state
   let beforeNativeRestart = async (): Promise<void> => {}
-  let hostImpacts = [{ runningSessions: 0, queuedMessages: 0, runningJobs: 0 }]
+  let hostImpacts: Array<{ runningSessions: number; queuedMessages: number; runningJobs: number } | Error> = [
+    { runningSessions: 0, queuedMessages: 0, runningJobs: 0 },
+  ]
   class FakeWindow extends EventEmitter {
     destroyed = false
     readonly urls: string[] = []
@@ -37,8 +43,16 @@ const harness = await vi.hoisted(async () => {
       setWindowOpenHandler: vi.fn(),
       openDevTools: vi.fn(),
       getURL: () => this.urls.at(-1) ?? '',
-      send: vi.fn((channel: string, state: { phase?: string }) => {
-        if (channel === 'dsh-desktop:backend-state' && state.phase === 'error') errorPublished.resolve()
+      mainFrame: { url: '' },
+      isDestroyed: () => this.destroyed,
+      send: vi.fn((channel: string, state: unknown) => {
+        if (channel === 'dsh-desktop:backend-state' && (state as { phase?: string }).phase === 'error') errorPublished.resolve()
+        if (channel === 'dsh-desktop:plugin-impact-request') {
+          const impact = rendererImpacts.length > 1 ? rendererImpacts.shift() : rendererImpacts[0]
+          queueMicrotask(() => ipcEvents.emit('dsh-desktop:plugin-impact-response', {
+            sender: this.webContents, senderFrame: this.webContents.mainFrame,
+          }, state, impact))
+        }
       }),
     })
     readonly show = vi.fn()
@@ -48,6 +62,8 @@ const harness = await vi.hoisted(async () => {
     isDestroyed() { return this.destroyed }
     isMinimized() { return false }
     async loadURL(url: string) {
+      this.webContents.emit('did-start-loading')
+      this.webContents.mainFrame = { url }
       this.urls.push(url)
       if (url === 'dsh-app://app/index.html') navigated.resolve()
     }
@@ -65,8 +81,11 @@ const harness = await vi.hoisted(async () => {
       this.ready.reject(new Error('child stopped'))
       return this.exited.promise
     })
-    readonly updateImpact = vi.fn(async () => hostImpacts.shift()
-      ?? { runningSessions: 0, queuedMessages: 0, runningJobs: 0 })
+    readonly updateImpact = vi.fn(async () => {
+      const next = hostImpacts.shift() ?? { runningSessions: 0, queuedMessages: 0, runningJobs: 0 }
+      if (next instanceof Error) throw next
+      return next
+    })
     constructor(readonly node: string, readonly runtime: string, readonly profile: string) { hosts.push(this) }
   }
   const app = Object.assign(new EventEmitter(), {
@@ -87,7 +106,11 @@ const harness = await vi.hoisted(async () => {
     }),
   })
   return {
-    windows, hosts, managerRuntimes, managedMessages, managedHandoffs, handlers, app, FakeWindow, FakeHost,
+    windows, hosts, managerRuntimes, managedMessages, managedHandoffs, handlers, ipcEvents, mutations, app, FakeWindow, FakeHost,
+    runMutationHealthCheck: false,
+    beforeMutation: () => beforeMutation(),
+    setBeforeMutation(value: typeof beforeMutation) { beforeMutation = value },
+    setRendererImpacts(value: unknown[]) { rendererImpacts = [...value] },
     launchUpdate: vi.fn(async (_options: DesktopManagedUpdateLaunch) => { throw new Error('helper fixture stopped') }),
     dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn() },
     menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn() },
@@ -120,7 +143,9 @@ const harness = await vi.hoisted(async () => {
     setHostImpacts(value: typeof hostImpacts) { hostImpacts = [...value] },
     reset() {
       windows.length = 0; hosts.length = 0; managerRuntimes.length = 0; managedMessages.length = 0; managedHandoffs.length = 0
-      handlers.clear(); app.removeAllListeners()
+      handlers.clear(); app.removeAllListeners(); ipcEvents.removeAllListeners(); mutations.length = 0
+      beforeMutation = async () => {}
+      rendererImpacts = [{ hasDraft: false, attachmentCount: 0, submitting: false }]
       app.isPackaged = true
       pluginsEnabled = false
       managedUpdates = false
@@ -136,8 +161,11 @@ vi.mock('electron', () => ({
   BrowserWindow: harness.FakeWindow,
   dialog: harness.dialog,
   ipcMain: {
-    handle: (channel: string, handler: (event: { senderFrame: { url: string } }) => unknown) => { harness.handlers.set(channel, handler) },
-    on: vi.fn(),
+    handle: (channel: string, handler: (event: { senderFrame: { url: string } }, ...args: unknown[]) => unknown) => {
+      harness.handlers.set(channel, handler)
+    },
+    on: (channel: string, handler: (...args: unknown[]) => void) => { harness.ipcEvents.on(channel, handler) },
+    removeListener: (channel: string, handler: (...args: unknown[]) => void) => { harness.ipcEvents.removeListener(channel, handler) },
   },
   Menu: harness.menu,
   protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn() },
@@ -159,8 +187,17 @@ vi.mock('../src/project-manager.ts', () => ({
     canRecoverProfile = harness.canRecoverProfile
     constructor(_paths: unknown, runtime: unknown) { harness.managerRuntimes.push(runtime) }
     async reconcileProvisioning() {}
-    async mutate(_mutation: unknown, hooks: { beforeChange(): Promise<void>; afterChange(): Promise<void> }) {
+    async mutate(mutation: unknown, hooks: {
+      beforeChange(): Promise<void>
+      afterChange(): Promise<void>
+      healthCheck?(path: string): Promise<void>
+    }) {
+      harness.mutations.push(mutation)
+      await harness.beforeMutation()
       await hooks.beforeChange()
+      if (harness.runMutationHealthCheck) {
+        try { await hooks.healthCheck?.('staged-test-profile') } catch (error) { await hooks.afterChange(); throw error }
+      }
       harness.pluginsEnabled = false
       await hooks.afterChange()
     }
@@ -231,10 +268,10 @@ vi.mock('../src/managed-update-coordinator.ts', () => ({
   },
 }))
 
-function invoke(channel: string, url = 'dsh-app://shell/startup.html'): unknown {
+function invoke(channel: string, url = 'dsh-app://shell/startup.html', ...args: unknown[]): unknown {
   const handler = harness.handlers.get(channel)
   if (handler === undefined) throw new Error(`missing handler ${channel}`)
-  return handler({ senderFrame: { url } })
+  return handler({ senderFrame: { url } }, ...args)
 }
 
 async function startApplication(): Promise<void> {
@@ -252,6 +289,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.useFakeTimers()
   harness.reset()
+  harness.runMutationHealthCheck = false
   harness.dialog.showMessageBox.mockReset()
   harness.managedCheck.mockReset().mockResolvedValue({ phase: 'available', mode: 'github-release-managed', version: '1.2.3' })
   harness.managedInstall.mockReset().mockResolvedValue({ phase: 'installing', mode: 'github-release-managed', version: '1.2.3' })
@@ -273,6 +311,204 @@ afterEach(async () => {
   vi.useRealTimers()
   vi.unstubAllEnvs()
   vi.unstubAllGlobals()
+})
+
+describe('desktop plugin interruption boundary', () => {
+  const shell = 'dsh-app://shell/plugin-manager.html'
+  it('validates sender before parsing the install source and rejects malformed descriptors before staging', async () => {
+    await startApplication()
+    expect(() => invoke(DESKTOP_IPC.pluginsInstall, 'https://evil.invalid/', null)).toThrow('rejected IPC')
+    expect(() => invoke(DESKTOP_IPC.pluginsInstall, shell, { type: 'githubRelease' })).toThrow()
+    expect(harness.mutations).toEqual([])
+    expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
+  })
+  it('waits for staging, rejects overlapping recovery/update/mutation, then cancels without stopping or navigating', async () => {
+    await startApplication()
+    const staged = Promise.withResolvers<undefined>()
+    harness.setBeforeMutation(() => staged.promise)
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
+    const before = [...harness.windows[0]!.urls]
+    const mutation = Promise.resolve(invoke(DESKTOP_IPC.pluginsDisableAll, shell))
+    const canceled = expect(mutation).rejects.toThrow('Cancelled')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    for (const channel of [
+      DESKTOP_IPC.backendRetry, DESKTOP_IPC.applicationRestart, DESKTOP_IPC.updatesInstall, DESKTOP_IPC.pluginsDisableAll,
+    ]) {
+      await expect(Promise.resolve(invoke(channel, shell))).rejects.toThrow('in progress')
+    }
+    expect(harness.windows[0]!.urls).toEqual(before)
+    staged.resolve(undefined); await canceled
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
+    expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
+    expect(harness.windows[0]!.urls).toEqual(before)
+  })
+  it('reads fresh Host and renderer impact after preparation and re-prompts changed work before interruption', async () => {
+    await startApplication()
+    const staged = Promise.withResolvers<undefined>()
+    harness.setBeforeMutation(() => staged.promise)
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 }).mockResolvedValueOnce({ response: 1 })
+    const mutation = expect(Promise.resolve(invoke(DESKTOP_IPC.pluginsDisableAll, shell))).rejects.toThrow('Cancelled')
+    await vi.advanceTimersByTimeAsync(0)
+    harness.setHostImpacts([
+      { runningSessions: 2, queuedMessages: 3, runningJobs: 4 }, { runningSessions: 2, queuedMessages: 3, runningJobs: 4 },
+    ])
+    harness.setRendererImpacts([
+      { hasDraft: true, attachmentCount: 5, submitting: true }, { hasDraft: false, attachmentCount: 0, submitting: false },
+    ])
+    staged.resolve(undefined); await mutation
+    expect(harness.dialog.showMessageBox.mock.calls[0]?.[1]).toMatchObject({ defaultId: 1, cancelId: 1 })
+    expect(harness.dialog.showMessageBox.mock.calls[0]?.[1]).toHaveProperty('detail', expect.stringContaining('Draft attachments: 5'))
+    expect(harness.dialog.showMessageBox.mock.calls[1]?.[1]).toHaveProperty('detail', expect.stringContaining('Draft attachments: 0'))
+    expect(harness.hosts[0]!.updateImpact).toHaveBeenCalledTimes(2)
+    expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
+  })
+  it.each(['host', 'renderer'])('fails closed on unavailable %s impact without navigation or Host stop', async (source) => {
+    await startApplication()
+    const before = [...harness.windows[0]!.urls]
+    if (source === 'host') harness.setHostImpacts([new Error('private transport error')])
+    else harness.setRendererImpacts([null])
+    await expect(Promise.resolve(invoke(DESKTOP_IPC.pluginsDisableAll, shell))).rejects.toThrow('current work')
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
+    expect(harness.windows[0]!.urls).toEqual(before)
+  })
+  it.each([true, false])('reads the retained app document after failed emergency navigation: impactAvailable=%s', async (available) => {
+    await startApplication()
+    const window = harness.windows[0]!
+    const before = [...window.urls]
+    const failure = new Error('emergency navigation failed')
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const load = vi.spyOn(window, 'loadURL').mockRejectedValueOnce(failure)
+    window.webContents.emit('preload-error', {}, 'preload-app.cjs', new Error('preload unavailable'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(load).toHaveBeenCalledWith(expect.stringMatching(/^data:text\/html/u))
+    expect(diagnostic).toHaveBeenCalledWith(failure)
+    expect(window.webContents.getURL()).toBe('dsh-app://app/index.html')
+    harness.setRendererImpacts([available ? { hasDraft: true, attachmentCount: 3, submitting: true } : null])
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
+    await expect(Promise.resolve(invoke(DESKTOP_IPC.pluginsDisableAll, shell)))
+      .rejects.toThrow(available ? 'Cancelled' : 'current work')
+    expect(window.webContents.send).toHaveBeenCalledWith(DESKTOP_IPC.pluginImpactRequest, expect.any(String))
+    if (available) {
+      expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
+      const options = harness.dialog.showMessageBox.mock.calls[0]?.[1] as { detail: string }
+      expect(options.detail).toContain('Unsaved draft: Yes\nDraft attachments: 3\nSubmission in progress: Yes')
+    } else expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
+    expect(window.urls).toEqual(before)
+  })
+  it('aborts a pending native dialog on quit and prevents repeated quit until cleanup completes', async () => {
+    await startApplication()
+    harness.dialog.showMessageBox.mockImplementation((_window: unknown, options: { signal: AbortSignal }) => new Promise((resolve) => {
+      options.signal.addEventListener('abort', () => { resolve({ response: 1 }) }, { once: true })
+    }))
+    const mutation = expect(Promise.resolve(invoke(DESKTOP_IPC.pluginsDisableAll, shell))).rejects.toThrow('Cancelled')
+    await vi.advanceTimersByTimeAsync(0)
+    const first = { preventDefault: vi.fn() }, second = { preventDefault: vi.fn() }
+    harness.app.emit('before-quit', first); harness.app.emit('before-quit', second)
+    expect(first.preventDefault).toHaveBeenCalledOnce(); expect(second.preventDefault).toHaveBeenCalledOnce()
+    await mutation
+    await harness.hosts[0]!.stopping.promise
+    expect(harness.hosts[0]!.stop).toHaveBeenCalledOnce()
+    harness.app.emit('before-quit', second)
+    expect(second.preventDefault).toHaveBeenCalledTimes(2)
+    expect(harness.app.quit).not.toHaveBeenCalled()
+    harness.hosts[0]!.exited.resolve(); await harness.quitCompleted.promise
+    expect(harness.app.quit).toHaveBeenCalledOnce()
+  })
+  it('drains accepted mutation before closing the replacement Host on repeated quit', async () => {
+    await startApplication()
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 0 })
+    const mutation = Promise.resolve(invoke(DESKTOP_IPC.pluginsDisableAll, shell))
+    await harness.hosts[0]!.stopping.promise
+    harness.app.quit(); harness.app.quit()
+    expect(harness.hosts[0]!.stop).toHaveBeenCalledOnce()
+    const next = harness.nextHostStart()
+    harness.hosts[0]!.exited.resolve(); await next
+    const replacement = harness.hosts[1]!
+    expect(replacement.stop).not.toHaveBeenCalled()
+    replacement.ready.resolve(); await mutation
+    await replacement.stopping.promise
+    replacement.exited.resolve(); await harness.quitCompleted.promise
+    expect(replacement.stop).toHaveBeenCalledOnce()
+  })
+  it.each(['mutation', 'quit'])('rejects emergency recovery through its Promise chain during %s without replacing the document', async (busy) => {
+    await startApplication()
+    const window = harness.windows[0]!
+    window.webContents.emit('preload-error', {}, 'preload-app.cjs', new Error('preload unavailable'))
+    await vi.advanceTimersByTimeAsync(0)
+    const before = [...window.urls]
+    const staged = Promise.withResolvers<undefined>()
+    harness.setBeforeMutation(() => staged.promise)
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
+    const canceled = busy === 'mutation'
+      ? expect(Promise.resolve(invoke(DESKTOP_IPC.pluginsDisableAll, shell))).rejects.toThrow('Cancelled') : undefined
+    if (busy === 'quit') harness.app.quit()
+    await vi.advanceTimersByTimeAsync(0)
+    const navigate = (): void => { window.webContents.emit('will-navigate', { preventDefault: vi.fn() }, 'dsh-recovery://restart/?') }
+    expect(navigate).not.toThrow()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(window.urls).toEqual(before)
+    expect(harness.app.relaunch).not.toHaveBeenCalled()
+    if (busy === 'mutation') {
+      staged.resolve(undefined); await canceled
+      // The rejected chain's finally must release the emergency-page busy latch.
+      navigate()
+      await harness.hosts[0]!.stopping.promise
+      harness.hosts[0]!.exited.resolve()
+      await harness.quitCompleted.promise
+      expect(harness.app.relaunch).toHaveBeenCalledOnce()
+    } else {
+      harness.hosts[0]!.exited.resolve(); await harness.quitCompleted.promise
+    }
+  })
+  it('keeps navigation failure inside the transaction Host-restoration hook', async () => {
+    await startApplication()
+    harness.runMutationHealthCheck = true
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 0 })
+    vi.spyOn(harness.windows[0]!, 'loadURL').mockRejectedValueOnce(new Error('startup navigation failed'))
+    const mutation = expect(Promise.resolve(invoke(DESKTOP_IPC.pluginsDisableAll, shell))).rejects.toThrow('startup navigation failed')
+    await harness.hosts[0]!.stopping.promise
+    const next = harness.nextHostStart()
+    harness.hosts[0]!.exited.resolve(); await next
+    harness.hosts[1]!.ready.resolve(); await mutation
+    expect(harness.hosts[1]!.stop).not.toHaveBeenCalled()
+    expect(harness.hosts).toHaveLength(2)
+  })
+  it('drains staging on quit, then rejects before consent or activation', async () => {
+    await startApplication()
+    const staged = Promise.withResolvers<undefined>()
+    harness.setBeforeMutation(() => staged.promise)
+    const mutation = expect(Promise.resolve(invoke(DESKTOP_IPC.pluginsDisableAll, shell))).rejects.toThrow('Cancelled')
+    await vi.advanceTimersByTimeAsync(0)
+    harness.app.quit(); harness.app.quit()
+    expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
+    staged.resolve(undefined); await mutation
+    await harness.hosts[0]!.stopping.promise
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(harness.hosts).toHaveLength(1)
+    harness.hosts[0]!.exited.resolve(); await harness.quitCompleted.promise
+  })
+  it('routes a parsed verified-release descriptor to manager.install without falling back to a package spec', async () => {
+    await startApplication()
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
+    const source = { schemaVersion: 1, type: 'githubRelease', owner: 'example', repo: 'release-plugin', tag: 'v1.0.0', asset: 'plugin.tgz', assetId: 1, packageName: 'example-plugin', version: '1.0.0', size: 100, sha256: 'a'.repeat(64), targetCommit: 'b'.repeat(40) }
+    await expect(Promise.resolve(invoke(DESKTOP_IPC.pluginsInstall, shell, source))).rejects.toThrow('Cancelled')
+    expect(harness.mutations).toEqual([{ type: 'plugin-install', source }])
+    expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
+  })
+  it('excludes mutation and updates during recovery and drains recovery before final quit', async () => {
+    await startApplication()
+    const restart = Promise.resolve(invoke(DESKTOP_IPC.applicationRestart, shell))
+    await harness.hosts[0]!.stopping.promise
+    await expect(Promise.resolve(invoke(DESKTOP_IPC.pluginsDisableAll, shell))).rejects.toThrow('in progress')
+    await expect(Promise.resolve(invoke(DESKTOP_IPC.updatesInstall, shell))).rejects.toThrow('in progress')
+    harness.app.quit(); harness.app.quit()
+    expect(harness.app.relaunch).not.toHaveBeenCalled()
+    harness.hosts[0]!.exited.resolve(); await restart; await harness.quitCompleted.promise
+    expect(harness.hosts[0]!.stop).toHaveBeenCalledOnce()
+  })
 })
 
 describe('desktop main startup', () => {
@@ -744,6 +980,7 @@ describe('desktop main startup', () => {
     await harness.errorPublished.promise
     expect(invoke(DESKTOP_IPC.backendStatus)).toMatchObject({ phase: 'error', profileRecovery: true })
     const nextStarted = harness.nextHostStart()
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 0 })
     const recovery = Promise.resolve(invoke(DESKTOP_IPC.pluginsDisableAll))
     await nextStarted
     expect(harness.pluginsEnabled).toBe(false)
@@ -777,7 +1014,7 @@ describe('desktop main startup', () => {
     expect(window.urls).toEqual(['dsh-app://shell/startup.html'])
     expect(harness.hosts).toHaveLength(0)
     const retry = invoke(DESKTOP_IPC.backendRetry)
-    const secondRetry = invoke(DESKTOP_IPC.backendRetry)
+    const secondRetry = expect(Promise.resolve(invoke(DESKTOP_IPC.backendRetry))).rejects.toThrow('in progress')
     harness.prepared.resolve()
     await harness.hostStarted.promise
     expect(harness.hosts).toHaveLength(1)

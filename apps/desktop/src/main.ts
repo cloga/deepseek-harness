@@ -40,8 +40,11 @@ import { loadDesktopManagedUpdateConfiguration } from './managed-update-state.ts
 import { completeDesktopManagedUpdate } from './managed-update-completion.ts'
 import { desktopErrorState } from './startup-error.ts'
 import { startupFailureDocument } from './startup-document.ts'
+import { confirmDesktopPluginMutation } from './plugin-mutation-confirmation.ts'
+import { requestDesktopRendererImpact } from './renderer-impact.ts'
 
 const SCHEME = 'dsh-app'
+class DesktopOperationBusy extends Error {}
 let focusPrimaryWindow = (): void => {}
 type RecoveryAction = 'restart' | 'plugins' | 'reset'
 let profileRecoveryAvailable = (): boolean => false
@@ -146,7 +149,7 @@ function createWindow(preload: string, show = false): BrowserWindow {
     if (action.hostname !== 'restart' && !profileRecoveryAvailable()) return
     page.busy = true
     void recoverApplication(action.hostname as RecoveryAction).catch(async (error: unknown) => {
-      if (!window.isDestroyed()) await showEmergencyDocument(window, `${page.message}\n${desktopErrorState(error).message}`)
+      if (!(error instanceof DesktopOperationBusy) && !window.isDestroyed()) await showEmergencyDocument(window, `${page.message}\n${desktopErrorState(error).message}`)
     }).catch((error: unknown) => { console.error(error) }).finally(() => { page.busy = false })
   })
   return window
@@ -215,6 +218,12 @@ async function main(): Promise<void> {
   }
   let rendererUpdateImpact = { hasDraft: false, attachmentCount: 0, submitting: false }
   let updateConfirmation: Promise<DesktopUpdateState | undefined> | undefined
+  let quitDrainComplete = false
+  let pluginMutationBusy = false
+  let mutationPending: ReturnType<DesktopProjectManager['mutate']> | undefined
+  let mutationAbort: AbortController | undefined
+  let recoveryPending: Promise<void> | undefined
+  let rendererImpactGeneration = 0
   let managedCompletionChecked = false
   const locale = resolveDesktopLocale(app.getLocale())
   const messages = locale.messages
@@ -265,7 +274,7 @@ async function main(): Promise<void> {
       stop: () => host.stop(),
       fetch: (request: Request) => host.fetch(request),
       get pid() { return host.pid },
-      updateImpact: () => host.updateImpact(),
+      updateImpact: (signal?: AbortSignal) => host.updateImpact(signal),
     }
   }, (state) => {
     if (state.phase === 'starting' && !emergencyDocument) pageError = undefined
@@ -311,7 +320,17 @@ async function main(): Promise<void> {
     },
     afterChange: () => backend.start(async () => {}),
   }
-  recoverApplication = async (action): Promise<void> => {
+  const assertRecoveryAvailable = (): void => {
+    if (pluginMutationBusy || recoveryPending !== undefined || updateConfirmation !== undefined || hasQuitStarted()
+      || updateState.phase === 'installing' || updateState.phase === 'ready') throw new DesktopOperationBusy(messages.pluginMutationBusy)
+  }
+  const runRecovery = async (operation: () => Promise<void>): Promise<void> => {
+    assertRecoveryAvailable()
+    const pending = Promise.resolve().then(operation)
+    recoveryPending = pending
+    try { await pending } finally { if (recoveryPending === pending) recoveryPending = undefined }
+  }
+  recoverApplication = (action): Promise<void> => runRecovery(async () => {
     await startup?.catch(() => undefined)
     await backend.stop()
     if (action === 'restart') {
@@ -326,7 +345,7 @@ async function main(): Promise<void> {
     pageError = undefined
     navigation = undefined
     await navigateMain(applicationUrl)
-  }
+  })
 
   const showStartupError = async (error: unknown): Promise<void> => {
     if (quitting) return
@@ -461,16 +480,73 @@ async function main(): Promise<void> {
     if (development !== undefined) {
       throw new Error('dsh desktop: plugin package changes require a packaged application')
     }
-    await startup?.catch(() => undefined)
-    pageError = undefined
-    await navigateMain(startupUrl)
-    try {
-      const receipt = await manager.mutate(mutation, hooks)
-      await navigateMain(applicationUrl)
-      return receipt
-    } catch (error) {
-      await showStartupError(error)
-      throw error
+    if (pluginMutationBusy || recoveryPending !== undefined || updateConfirmation !== undefined || hasQuitStarted()
+      || updateState.phase === 'installing' || updateState.phase === 'ready') throw new Error(messages.pluginMutationBusy)
+    pluginMutationBusy = true
+    const cancellation = new AbortController()
+    mutationAbort = cancellation
+    let interrupted = false
+    const hasStartedInterruption = (): boolean => interrupted
+    const pending = (async () => {
+      try {
+        await startup?.catch(() => undefined)
+        const receipt = await manager.mutate(mutation, {
+          ...hooks,
+          beforeChange: async () => {
+            // This hook runs under the transaction lock after staging; rollback must not ask again.
+            if (!hasStartedInterruption()) {
+              await confirmDesktopPluginMutation({
+                messages, signal: cancellation.signal, cancelled: hasQuitStarted,
+                readImpact: async (signal) => {
+                  const active = backend.host
+                  const window = mainWindow
+                  const generation = rendererImpactGeneration
+                  if (active === undefined && backend.state.phase !== 'error') throw new Error('Host impact unavailable')
+                  const host = active === undefined
+                    ? { runningSessions: 0, queuedMessages: 0, runningJobs: 0 } : await active.updateImpact(signal)
+                  const url = window?.webContents.getURL()
+                  const isEmergencyPage = window !== undefined && url === emergencyPages.get(window)?.url
+                  const renderer = url === startupUrl || isEmergencyPage
+                    ? { hasDraft: false, attachmentCount: 0, submitting: false }
+                    : window === undefined ? undefined : await requestDesktopRendererImpact(window.webContents, ipcMain, signal)
+                  if (renderer === undefined) throw new Error('Application impact unavailable')
+                  if (active !== backend.host || window !== mainWindow || generation !== rendererImpactGeneration) {
+                    throw new Error('Desktop changed during impact read')
+                  }
+                  return { host, renderer, hostIdentity: active, rendererIdentity: generation }
+                },
+                confirm: async (detail) => {
+                  const window = mainWindow
+                  if (window === undefined || window.isDestroyed()) throw new Error(messages.pluginImpactUnavailable)
+                  return (await dialog.showMessageBox(window, {
+                    type: 'warning', title: messages.pluginMutationTitle, message: messages.pluginMutationPrompt,
+                    detail, buttons: [messages.applyPluginChange, messages.cancel], defaultId: 1, cancelId: 1,
+                    signal: cancellation.signal,
+                  })).response === 0
+                },
+              })
+              interrupted = true
+            }
+            await hooks.beforeChange()
+          },
+          healthCheck: async (projectDir) => {
+            // Navigation failure stays inside the transaction's active-Host restoration path.
+            pageError = undefined
+            await navigateMain(startupUrl)
+            await hooks.healthCheck(projectDir)
+          },
+        })
+        await navigateMain(applicationUrl)
+        return receipt
+      } catch (error) {
+        if (hasStartedInterruption()) await showStartupError(error)
+        throw error
+      }
+    })()
+    mutationPending = pending
+    try { return await pending } finally {
+      pluginMutationBusy = false
+      if (mutationPending === pending) { mutationPending = undefined; mutationAbort = undefined }
     }
   }
   ipcMain.handle(DESKTOP_IPC.localeGet, (event) => {
@@ -486,9 +562,10 @@ async function main(): Promise<void> {
     if (typeof spec !== 'string') throw new Error('dsh desktop: plugin spec must be a string')
     return mutate(event, { type: 'plugin-add', spec })
   })
-  ipcMain.handle(DESKTOP_IPC.pluginsInstall, (event, source: unknown) => (
-    mutate(event, { type: 'plugin-install', source: parseDesktopPluginSource(source) })
-  ))
+  ipcMain.handle(DESKTOP_IPC.pluginsInstall, (event, source: unknown) => {
+    assertDesktopSender(event, ['shell'])
+    return mutate(event, { type: 'plugin-install', source: parseDesktopPluginSource(source) })
+  })
   ipcMain.handle(DESKTOP_IPC.capabilitiesGet, (event) => {
     assertDesktopSender(event, ['shell'])
     return [DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY] as const
@@ -514,11 +591,14 @@ async function main(): Promise<void> {
   })
   ipcMain.handle(DESKTOP_IPC.backendRetry, async (event) => {
     assertDesktopSender(event, ['shell'])
-    await reconcileBackend()
-    focusPrimaryWindow()
+    await runRecovery(async () => {
+      await reconcileBackend()
+      focusPrimaryWindow()
+    })
   })
   ipcMain.handle(DESKTOP_IPC.applicationRestart, async (event) => {
     assertDesktopSender(event, ['shell'])
+    assertRecoveryAvailable()
     try {
       await recoverApplication('restart')
     } catch (error) {
@@ -532,7 +612,7 @@ async function main(): Promise<void> {
     if (failure.phase !== 'error') {
       throw new Error('Desktop profile reset requires a startup failure')
     }
-    await startup?.catch(() => undefined)
+    assertRecoveryAvailable()
     try {
       await recoverApplication('reset')
     } catch (error) {
@@ -562,6 +642,7 @@ async function main(): Promise<void> {
   })
 
   const confirmAndInstallUpdate = (): Promise<DesktopUpdateState | undefined> => {
+    if (pluginMutationBusy || recoveryPending !== undefined) return Promise.reject(new Error(messages.pluginMutationBusy))
     if (updateConfirmation !== undefined) return updateConfirmation
     updateConfirmation = (async () => {
       await updateCheck
@@ -633,7 +714,7 @@ async function main(): Promise<void> {
   }
 
   const checkAndPrompt = async (): Promise<void> => {
-    if (hasQuitStarted() || updateConfirmation !== undefined
+    if (hasQuitStarted() || pluginMutationBusy || recoveryPending !== undefined || updateConfirmation !== undefined
       || updateState.phase === 'installing' || updateState.phase === 'ready') return
     const state = await checkUpdates()
     if (hasQuitStarted()) return
@@ -698,11 +779,16 @@ async function main(): Promise<void> {
   const createMainWindow = (): BrowserWindow => {
     const window = createWindow(appPreload, true)
     mainWindow = window
-    window.on('closed', () => { if (mainWindow === window) mainWindow = undefined })
+    rendererImpactGeneration++
+    window.on('closed', () => {
+      if (mainWindow === window) { mainWindow = undefined; rendererImpactGeneration++ }
+    })
+    window.webContents.on('did-start-loading', () => { rendererImpactGeneration++ })
     window.webContents.on('preload-error', (_event, _path, error) => {
       void showEmergencyError(error).catch((failure: unknown) => { console.error(failure) })
     })
     window.webContents.on('render-process-gone', (_event, details) => {
+      rendererImpactGeneration++
       rendererUpdateImpact = { hasDraft: false, attachmentCount: 0, submitting: false }
       navigation = undefined
       emergencyDocument = false
@@ -736,14 +822,19 @@ async function main(): Promise<void> {
       quitting = true
       return
     }
-    if (quitting) return
+    if (quitDrainComplete) return
     event.preventDefault()
+    if (quitting) return
     quitting = true
-    void Promise.allSettled([backend.close(), startup]).then((results) => {
+    mutationAbort?.abort()
+    const drain = mutationPending !== undefined || recoveryPending !== undefined
+      ? Promise.allSettled([mutationPending, recoveryPending]).then(() => backend.close())
+      : backend.close()
+    void Promise.allSettled([drain, startup]).then((results) => {
       for (const result of results) {
         if (result.status === 'rejected') console.error(result.reason)
       }
-    }).finally(() => { app.quit() })
+    }).finally(() => { quitDrainComplete = true; app.quit() })
   })
 
   mainWindow = createMainWindow()

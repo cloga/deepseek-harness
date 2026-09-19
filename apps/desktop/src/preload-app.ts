@@ -3,6 +3,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import {
   DESKTOP_IPC,
+  parseDesktopRendererUpdateImpact,
   type DesktopRendererUpdateImpact,
   type DesktopUpdateState,
   type DshDesktopApplicationApi,
@@ -26,6 +27,14 @@ const startup: DshDesktopStartupApi = {
   resetConfiguration: () => ipcRenderer.invoke(DESKTOP_IPC.configurationReset) as Promise<void>,
 }
 
+let currentImpact: DesktopRendererUpdateImpact | undefined
+if (location.protocol === 'dsh-app:' && location.hostname === 'app') {
+  ipcRenderer.on(DESKTOP_IPC.pluginImpactRequest, (_event, requestId: unknown) => {
+    if (typeof requestId !== 'string' || !/^plugin-impact-[0-9]+$/u.test(requestId)) return
+    ipcRenderer.send(DESKTOP_IPC.pluginImpactResponse, requestId, currentImpact ?? null)
+  })
+}
+
 const application: DshDesktopApplicationApi = {
   protocolVersion: 2,
   updates: {
@@ -40,7 +49,8 @@ const application: DshDesktopApplicationApi = {
     },
     review: () => ipcRenderer.invoke(DESKTOP_IPC.updatesInstall) as Promise<void>,
     reportImpact(impact: DesktopRendererUpdateImpact): void {
-      ipcRenderer.send(DESKTOP_IPC.updatesImpactReport, impact)
+      currentImpact = parseDesktopRendererUpdateImpact(impact)
+      ipcRenderer.send(DESKTOP_IPC.updatesImpactReport, currentImpact)
     },
   },
 }

@@ -5,6 +5,7 @@ import type { Locator } from 'playwright'
 /** Read-only settings evidence; registration does not imply provider availability or a search call. */
 export interface CopilotSettingsEvidence {
   readonly modelRolesViewLoaded: true
+  readonly currentWorkspaceReadOnly: true
   readonly searchProviderCatalogLoaded: true
   readonly registeredSearchProviders: readonly string[]
   readonly realSearch: false
@@ -31,6 +32,17 @@ export async function inspectPackagedCopilotSettings(settings: Locator): Promise
     assert.deepEqual(values, [''])
   }
 
+  const workspaces = await roles.locator('[data-dsh-dual-model-workspace]')
+    .evaluateAll(elements => elements.map(element => ({
+      tag: element.tagName,
+      label: element.textContent?.trim(),
+      editable: element.getAttribute('contenteditable'),
+    })))
+  assert.equal(workspaces.length, 1, 'Model roles must show the current workspace')
+  assert.equal(workspaces[0]!.tag, 'P', 'The current workspace is read-only, not a workspace selector')
+  assert(workspaces[0]!.label, 'The current workspace must have a visible label or unavailable explanation')
+  assert(workspaces[0]!.editable === null || workspaces[0]!.editable === 'false')
+
   const search = settings.locator('[data-dsh-web-search-routing]')
   const primarySelector = '[data-dsh-web-search-mode]'
   const fallbackSelector = '[data-dsh-web-search-provider]'
@@ -52,5 +64,8 @@ export async function inspectPackagedCopilotSettings(settings: Locator): Promise
   assert.equal(new Set(fallbackIds).size, fallbackIds.length)
   assert(primaryIds.includes('github-copilot-hosted'), 'The signed-out Copilot provider must still be registered')
   assert.deepEqual(primaryIds, fallbackIds, 'Both selectors must project the same registered provider catalog')
-  return { modelRolesViewLoaded: true, searchProviderCatalogLoaded: true, registeredSearchProviders: primaryIds, realSearch: false }
+  return {
+    modelRolesViewLoaded: true, currentWorkspaceReadOnly: true, searchProviderCatalogLoaded: true,
+    registeredSearchProviders: primaryIds, realSearch: false,
+  }
 }

@@ -31,6 +31,18 @@
         <p id="source-help" class="source-help"></p>
         <p id="source-build-notice" class="source-help"></p>
       </form>
+      <details id="verified-install">
+        <summary id="verified-heading"></summary>
+        <form id="verified-install-form">
+          <label id="verified-label" for="verified-source"></label>
+          <textarea id="verified-source" name="verified-source" rows="7" spellcheck="false" autocomplete="off" aria-describedby="verified-help verified-ownership verified-interrupt verified-error" required></textarea>
+          <p id="verified-help" class="source-help"></p>
+          <p id="verified-ownership" class="source-help"></p>
+          <p id="verified-interrupt" class="source-help"></p>
+          <p id="verified-error" class="input-error" role="alert" hidden></p>
+          <button id="verified-submit" type="submit"></button>
+        </form>
+      </details>
       <p id="status" role="status" aria-live="polite"></p>
       <section aria-labelledby="installed-heading">
         <h2 id="installed-heading"></h2>

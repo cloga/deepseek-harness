@@ -101,6 +101,33 @@ afterEach(() => {
 })
 
 describe('desktop host process', () => {
+  it('cancels a stalled impact request through the actual Host transport without leaving it pending', async () => {
+    const runtime = projectWithHost(`
+process.send({ type: 'ready', protocolVersion: 3, dshVersion: 'impact-cancel' })
+let canceled = 0
+function onRequestFrame(frame) {
+  if (frame.type === 4) { canceled++; return }
+  if (frame.type !== 1) return
+  const request = JSON.parse(frame.payload.toString())
+  if (request.url.endsWith('/.dsh/update-impact')) return
+  responseStart(frame.streamId)
+  responseData(frame.streamId, JSON.stringify({ canceled }))
+  responseEnd(frame.streamId)
+}
+`)
+    const host = new DesktopHostProcess(process.execPath, runtime, runtime)
+    try {
+      await host.start()
+      const controller = new AbortController()
+      const pending = host.updateImpact(controller.signal)
+      const failure = expect(pending).rejects.toThrow()
+      await host.fetch(new Request('dsh-app://app/status')).then(response => response.json())
+      controller.abort(); await failure
+      const response = await host.fetch(new Request('dsh-app://app/status'))
+      expect(await response.json()).toEqual({ canceled: 1 })
+    } finally { await host.stop() }
+  })
+
   it('reports a fatal event after readiness once and stops the child', async () => {
     const runtime = projectWithHost(`
 process.send({ type: 'ready', protocolVersion: 3, dshVersion: '1.0.0' })

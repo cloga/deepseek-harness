@@ -5,7 +5,7 @@ const electron = vi.hoisted(() => ({
   contextBridge: { exposeInMainWorld: vi.fn() },
   ipcRenderer: {
     invoke: vi.fn(),
-    on: vi.fn<(channel: string, handler: (event: unknown, state: unknown) => void) => void>(),
+    on: vi.fn<(channel: string, handler: (event: unknown, ...payload: unknown[]) => void) => void>(),
     off: vi.fn(),
     send: vi.fn(),
   },
@@ -33,7 +33,8 @@ it.each(['dsh-app://app/index.html', 'https://shell/startup.html'])('exposes onl
   ])
   const listener = vi.fn()
   const dispose = api.updates.subscribe(listener)
-  const handler = electron.ipcRenderer.on.mock.calls[0]?.[1] as (event: unknown, state: unknown) => void
+  const handler = electron.ipcRenderer.on.mock.calls.find(([channel]) => channel === DESKTOP_IPC.updatesState)?.[1] as
+    (event: unknown, state: unknown) => void
   handler({ sender: 'not exposed' }, available)
   expect(listener).toHaveBeenCalledExactlyOnceWith(available)
   dispose()
@@ -44,6 +45,39 @@ it.each(['dsh-app://app/index.html', 'https://shell/startup.html'])('exposes onl
     attachmentCount: 2,
     submitting: false,
   })
+})
+
+it('answers internal impact requests from the latest reported document snapshot without exposing a new page method', async () => {
+  vi.stubGlobal('location', new URL('dsh-app://app/index.html'))
+  await import('../src/preload-app.ts')
+  const api = electron.contextBridge.exposeInMainWorld.mock.calls[0]?.[1] as DshDesktopApplicationApi
+  const request = electron.ipcRenderer.on.mock.calls.find(([channel]) => channel === DESKTOP_IPC.pluginImpactRequest)?.[1]
+  expect(request).toBeDefined()
+  request!({}, 'plugin-impact-1')
+  expect(electron.ipcRenderer.send).toHaveBeenLastCalledWith(DESKTOP_IPC.pluginImpactResponse, 'plugin-impact-1', null)
+  const first = { hasDraft: true, attachmentCount: 2, submitting: false }
+  api.updates.reportImpact(first)
+  first.attachmentCount = 99
+  request!({}, 'plugin-impact-2')
+  expect(electron.ipcRenderer.send).toHaveBeenLastCalledWith(DESKTOP_IPC.pluginImpactResponse, 'plugin-impact-2', {
+    hasDraft: true, attachmentCount: 2, submitting: false,
+  })
+  api.updates.reportImpact({ hasDraft: false, attachmentCount: 0, submitting: true })
+  request!({}, 'plugin-impact-3')
+  expect(electron.ipcRenderer.send).toHaveBeenLastCalledWith(DESKTOP_IPC.pluginImpactResponse, 'plugin-impact-3', {
+    hasDraft: false, attachmentCount: 0, submitting: true,
+  })
+  const count = electron.ipcRenderer.send.mock.calls.length
+  request!({}, 'invalid')
+  request!({}, 1)
+  expect(electron.ipcRenderer.send).toHaveBeenCalledTimes(count)
+  expect(Object.keys(api.updates).sort()).toEqual(['reportImpact', 'review', 'status', 'subscribe'])
+})
+
+it.each(['dsh-app://shell/startup.html', 'https://example.invalid/'])('does not register fresh-impact requests in %s', async (url) => {
+  vi.stubGlobal('location', new URL(url))
+  await import('../src/preload-app.ts')
+  expect(electron.ipcRenderer.on.mock.calls.some(([channel]) => channel === DESKTOP_IPC.pluginImpactRequest)).toBe(false)
 })
 
 it('contains update subscriber failures without starving another subscriber', async () => {
