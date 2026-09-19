@@ -351,7 +351,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'startSession(workspaceId?: WorkspaceId): void',
-        description: 'Start a New Session flow and navigate to its Session.',
+        description: 'Create a fresh Session and open it unless a later navigation supersedes it. Concurrent starts in one Workspace share only their pending creation. With no Workspace available, show the no-session view.',
         parameters: [{ name: 'workspaceId', description: 'explicit target; absent inherits the current or most recent Workspace.' }],
       },
       {

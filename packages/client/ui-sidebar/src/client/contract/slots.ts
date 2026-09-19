@@ -113,7 +113,7 @@ export interface SidebarFooterActionOwnerProps {
  */
 export type SidebarRootInjected = {
   /**
-   * Start a New Session: with a workspace, reuse-or-create its blank session
+   * Start a New Session: with a workspace, create a fresh blank session
    * and open it; without one, inherit the current Session Workspace, then the
    * recent Workspace, or clear into the New Session pure view when none exist.
    */

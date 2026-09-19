@@ -235,14 +235,14 @@ Session 导航状态和 composer takeover 必须读取同一个 effective object
 - Workspace 与 Session 两条 baseline 是否同时 ready；
 - 根据 Session 更新时间推导的最近 Workspace；
 - 当前 Session 是否因归档而清除；
-- New Session 应复用哪个 blank Session；
+- 普通 Workspace 选择可以复用哪个 blank Session；
 - 首次启动应选择哪个 Session。
 
 ### UI Workspace 的组合职责
 
 `client/ui-workspace` 把 Workspace list source 注册为 root 标准 source `workspaces`，renderer 由此提供 `useWorkspaces`。
 
-初始选择、blank Session 复用、新建导航、并发创建合并和归档后导航属于 UI navigation policy。该 policy 可以在决定时同时读取 `ctx.workspaces` 与 `ctx.sessions`，但只调用 Controller command 和 selection action，不发布联合 snapshot。
+初始选择、blank Session 复用、新建导航、并发创建合并和归档后导航属于 UI navigation policy。该 policy 可以在决定时同时读取 `ctx.workspaces` 与 `ctx.sessions`，但只调用 Controller command 和 selection action，不发布联合 snapshot。[显式新会话创建新的身份](../bug-fix/2026-09-19-explicit-new-session-fresh-identity.zh.md)；普通 Workspace 选择保留复用，不改变这些所有权分层。
 
 目录 picker、目录浏览和 `openPath` 属于独立目录能力，不进入 Workspace Controller。
 
