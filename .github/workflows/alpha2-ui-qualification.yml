@@ -22,8 +22,6 @@ jobs:
     timeout-minutes: 45
     env:
       EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
-      NODE_COMPILE_CACHE: ${{ runner.temp }}/alpha2-node-cache
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/alpha2-browsers
       DSH_OXLINT_THREADS: '2'
     steps:
       - uses: actions/checkout@v6
@@ -33,6 +31,10 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
+      - name: Use runner-owned scratch environment
+        run: |
+          echo "NODE_COMPILE_CACHE=$RUNNER_TEMP/alpha2-node-cache" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/alpha2-browsers" >> "$GITHUB_ENV"
       - name: Validate capture controls and exact source
         run: |
           node scripts/alpha2-ui-qualification.mjs self-test
