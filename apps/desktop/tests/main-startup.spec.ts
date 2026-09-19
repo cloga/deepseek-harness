@@ -1157,7 +1157,10 @@ describe('desktop main startup', () => {
     if (failure === 'preload') sender.emit('preload-error', {}, 'preload-app.cjs', new Error('fixture preload failure'))
     if (failure === 'renderer') sender.emit('render-process-gone', {}, { reason: 'clean-exit' })
     reportInput({ hasDraft: false, attachmentCount: 0, submitting: false })
-    await expect(harness.prepareUpdate()).rejects.toThrow('unsent or unconfirmed input')
+    // Load/preload failures reserve fatal recovery; a clean renderer exit only invalidates input evidence.
+    const expectedReason = failure === 'renderer' ? 'unsent or unconfirmed input'
+      : 'Desktop shutdown or recovery already owns restart admission'
+    await expect(harness.prepareUpdate()).rejects.toThrow(expectedReason)
     expect(host.stop).not.toHaveBeenCalled()
     expect(host.updateTasks).not.toHaveBeenCalled()
   })
@@ -1869,7 +1872,11 @@ describe('desktop main startup', () => {
     await harness.dialogShown.promise
     expect(harness.dialog.showMessageBox.mock.calls.some(call =>
       (call.at(-1) as MessageBoxOptions).detail?.includes('replacement startup failed'))).toBe(true)
-    await expect(harness.prepareUpdate()).rejects.toThrow('replacement startup failed')
+    const taskChecks = harness.hosts.map(current => current.updateTasks.mock.calls.length)
+    const stops = harness.hosts.map(current => current.stop.mock.calls.length)
+    await expect(harness.prepareUpdate()).rejects.toThrow('Desktop shutdown or recovery already owns restart admission')
+    expect(harness.hosts.map(current => current.updateTasks.mock.calls.length)).toEqual(taskChecks)
+    expect(harness.hosts.map(current => current.stop.mock.calls.length)).toEqual(stops)
     expect(harness.hosts).toHaveLength(2)
   })
 
