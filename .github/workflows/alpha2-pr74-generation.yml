@@ -1,0 +1,186 @@
+name: Scoped PR74 client catalog and Creator generation
+
+# Nonpublishing Ubuntu Web capture for platform-neutral Client/ARIA changes.
+# Windows CI and actual Desktop installed-upgrade acceptance remain separate gates.
+on:
+  push:
+    branches:
+      - cloga-alpha2-pr74-generation-r4
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloga-alpha2-pr74-generation-r4
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    if: github.repository == 'cloga/deepseek-harness' && github.ref == 'refs/heads/cloga-alpha2-pr74-generation-r4' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Final business merge independently reviewed before the sole-parent tooling commit T.
+      EXPECTED_BUSINESS_SHA: '4b09b1d9248745b6506fcb5b47491ed33fd22599'
+      EXPECTED_BUSINESS_TREE: '0a8163e611d7cbbec0934bb1e5f4f1fc94475ac7'
+      EXPECTED_SOURCE_SHA: ${{ github.sha }}
+      EXPECTED_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      EXPECTED_WORKFLOW_REF: ${{ github.workflow_ref }}
+      EXPECTED_PUSH_AFTER: ${{ github.event.after }}
+      DSH_OXLINT_THREADS: '2'
+      DSH_TELEMETRY_DISABLED: '1'
+    steps:
+      - name: Require the reviewed branch push and first attempt
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'cloga/deepseek-harness'
+          test "$GITHUB_REF" = 'refs/heads/cloga-alpha2-pr74-generation-r4'
+          test "$GITHUB_EVENT_NAME" = 'push'
+          test "$GITHUB_RUN_ATTEMPT" = '1'
+          test "$RUNNER_ENVIRONMENT" = 'github-hosted'
+          test "$RUNNER_OS" = 'Linux'
+          [[ "$EXPECTED_BUSINESS_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_BUSINESS_TREE" =~ ^[0-9a-f]{40}$ ]]
+          test "$EXPECTED_SOURCE_SHA" = "$GITHUB_SHA"
+          test "$EXPECTED_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$EXPECTED_PUSH_AFTER" = "$GITHUB_SHA"
+          test "$EXPECTED_WORKFLOW_REF" = 'cloga/deepseek-harness/.github/workflows/alpha2-pr74-generation.yml@refs/heads/cloga-alpha2-pr74-generation-r4'
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+          clean: true
+
+      - name: Bind tooling commit to the reviewed business source
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          parents="$(git rev-list --parents -n 1 HEAD)"
+          business_tree="$(git rev-parse "${EXPECTED_BUSINESS_SHA}^{tree}")"
+          test "$head" = "$EXPECTED_SOURCE_SHA"
+          test "$parents" = "$EXPECTED_SOURCE_SHA $EXPECTED_BUSINESS_SHA"
+          test "$business_tree" = "$EXPECTED_BUSINESS_TREE"
+          printf 'Capture source %s; business source %s; business tree %s; run %s attempt %s\n' "$head" "$EXPECTED_BUSINESS_SHA" "$business_tree" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Use runner-owned scratch environment
+        run: |
+          set -euo pipefail
+          printf 'NODE_COMPILE_CACHE=%s/alpha2-pr74-node-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'PLAYWRIGHT_BROWSERS_PATH=%s/alpha2-pr74-browsers\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: Validate transport controls and bind original inputs
+        run: |
+          set -euo pipefail
+          node --check scripts/alpha2-pr74-generation.mjs
+          node scripts/alpha2-pr74-generation.mjs self-test
+          node scripts/alpha2-pr74-generation.mjs before "$RUNNER_TEMP/alpha2-pr74-generation"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.7.0'
+          dest: ${{ runner.temp }}/alpha2-pr74-pnpm
+          run_install: false
+
+      - name: Verify ordinary toolchain versions
+        run: |
+          set -euo pipefail
+          node_version="$(node --version)"
+          pnpm_version="$(pnpm --version)"
+          [[ "$node_version" =~ ^v24\.[0-9]+\.[0-9]+$ ]]
+          test "$pnpm_version" = '11.7.0'
+          printf 'Node %s; pnpm %s\n' "$node_version" "$pnpm_version"
+
+      - name: Install normal frozen dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate the Client inspect catalog with its real owner
+        run: pnpm run gen-cordis-inspect-catalog
+
+      - name: Require Client inspect catalog freshness
+        run: pnpm run verify-cordis-inspect-catalog
+
+      - name: Require companion catalogs unchanged and fresh
+        run: |
+          set -euo pipefail
+          pnpm run verify-client-catalog
+          pnpm run verify-cordis-catalog
+          # Any additional drift stops this four-output scope; never invoke broad generators here.
+
+      - name: Build normal source and all Client artifacts
+        run: pnpm run build
+
+      - name: Check owning Client forwarding navigation Creator Sidebar and incoming harness regressions
+        run: >-
+          pnpm exec vitest run
+          packages/api/session-controller/tests/sessions-service.client.spec.ts
+          packages/api/session-controller/tests/manager.client.spec.ts
+          packages/client/ui-workspace/tests
+          packages/client/ui-agent-preset/tests
+          packages/client/ui-sidebar/tests
+          packages/extensions/cordis-client-runner/tests/api-catalog.client.spec.ts
+          packages/test-support/session-snapshot/tests/harness.spec.ts
+          --reporter=verbose
+
+      - name: Check full normal typed lint
+        run: pnpm run lint:contracts-ready
+
+      - name: Install isolated Chromium and its system prerequisites
+        run: pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install --with-deps chromium
+
+      - name: Refresh the whole stateful Creator authoring file in actual Chromium
+        env:
+          DSH_SNAPSHOT: refresh
+        run: >-
+          pnpm exec vitest run --config vitest.web.config.ts
+          apps/web/tests/agent-preset-authoring.e2e.ts
+          --reporter=verbose
+
+      - name: Replay Creator and the incoming Workspace and image fixture users
+        env:
+          DSH_SNAPSHOT: replay
+        run: >-
+          pnpm exec vitest run --config vitest.web.config.ts
+          apps/web/tests/agent-preset-authoring.e2e.ts
+          apps/web/tests/workspace-new-session-folding.e2e.ts
+          apps/web/tests/command-image-envelope.expected.e2e.ts
+          apps/web/tests/image-display.expected.e2e.ts
+          apps/web/tests/submission-echo.e2e.ts
+          --reporter=verbose
+
+      - name: Recheck catalog freshness after Browser execution
+        run: |
+          set -euo pipefail
+          pnpm run verify-cordis-inspect-catalog
+          pnpm run verify-client-catalog
+          pnpm run verify-cordis-catalog
+
+      - name: Verify input preservation and capture only four generated outputs
+        id: capture
+        run: node scripts/alpha2-pr74-generation.mjs after "$RUNNER_TEMP/alpha2-pr74-generation"
+
+      - name: Preserve exactly six bounded generation evidence files
+        if: success() && steps.capture.outcome == 'success'
+        uses: actions/upload-artifact@v6
+        with:
+          name: alpha2-pr74-generation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/alpha2-pr74-generation/before.json
+            ${{ runner.temp }}/alpha2-pr74-generation/qualified.json
+            ${{ runner.temp }}/alpha2-pr74-generation/generated/packages/extensions/cordis-client-runner/src/client/api-catalog.ts
+            ${{ runner.temp }}/alpha2-pr74-generation/generated/apps/web/tests/expected/agent-preset-authoring/section.expected.md
+            ${{ runner.temp }}/alpha2-pr74-generation/generated/apps/web/tests/expected/agent-preset-authoring/created.expected.md
+            ${{ runner.temp }}/alpha2-pr74-generation/generated/apps/web/tests/expected/agent-preset-authoring/damaged.expected.md
+          if-no-files-found: error
+          retention-days: 7
+          # Receipts declare prerequisites, not observed pass/skip counts. Audit logs/steps independently.
+          # No catalog semantics, historical-image identity or Desktop release qualification follows from upload alone.
