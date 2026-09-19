@@ -364,9 +364,10 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'a Session already addressable through the Session Controller.',
       },
       {
-        signature: 'startSession(workspaceId?: WorkspaceId): void',
-        description: 'Start a New Session flow and navigate to its Session.',
-        parameters: [{ name: 'workspaceId', description: 'explicit target; absent inherits the current or most recent Workspace.' }],
+        signature: 'startSession(workspaceId?: WorkspaceId, options?: { readonly agentPreset?: string }): Promise<SessionId | undefined>',
+        description: 'Create a fresh Session and open it unless a later navigation supersedes it. Pending starts coalesce only for the same Workspace and requested preset; ordinary Workspace connection retains blank reuse.',
+        parameters: [{ name: 'workspaceId', description: 'explicit target; absent inherits the current or most recent Workspace.' }, { name: 'options', description: 'optional create-time preset, validated and selected by the Host.' }],
+        returns: 'the committed main Session identity, or undefined after no Workspace, supersession, disposal, or a reported failure.',
       },
       {
         signature: 'archiveSession(sessionId: SessionId): Promise<void>',
