@@ -4,6 +4,7 @@ import {
   managedUpdateTransferPolicy,
   readManagedUpdateMetadata,
   withManagedUpdateResponse,
+  type ManagedUpdateNetworkOperations,
 } from '../src/managed-update-network.ts'
 
 const url = 'https://github.com/cloga/deepseek-harness/releases/download/v1.2.3/release.json'
@@ -29,7 +30,7 @@ describe('managed update bounded transfers', () => {
 
   it.each(['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET', 'ETIMEDOUT', 'UND_ERR_BODY_TIMEOUT'])('retries classified nested %s transport errors', async (code) => {
     const operations = {
-      fetch: vi.fn().mockRejectedValueOnce(new TypeError('unsafe transport message', { cause: { code } }))
+      fetch: vi.fn<ManagedUpdateNetworkOperations['fetch']>().mockRejectedValueOnce(new TypeError('unsafe transport message', { cause: { code } }))
         .mockResolvedValueOnce(new Response('ok')),
       sleep: vi.fn(async () => {}),
     }
@@ -53,7 +54,7 @@ describe('managed update bounded transfers', () => {
   it('follows only allowed redirects without forwarding credentials or authorization', async () => {
     const redirected = 'https://release-assets.githubusercontent.com/github-production-release-asset/file?sig=private'
     const operations = {
-      fetch: vi.fn().mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: redirected } }))
+      fetch: vi.fn<ManagedUpdateNetworkOperations['fetch']>().mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: redirected } }))
         .mockResolvedValueOnce(new Response('ok')),
       sleep: vi.fn(async () => {}),
     }

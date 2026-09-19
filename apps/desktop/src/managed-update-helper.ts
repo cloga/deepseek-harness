@@ -62,11 +62,12 @@ export type DesktopManagedUpdateHelperResult =
 
 /** Injectable operating-system and network operations used by helper tests. */
 export interface DesktopManagedUpdateHelperOperations {
-  fetch(url: string, init: RequestInit): Promise<Response>
+  fetch(this: void, url: string, init: RequestInit): Promise<Response>
   processRunning(pid: number): boolean
   sleep(milliseconds: number): Promise<void>
   now(): number
   verifyAndStartInstaller(
+    this: void,
     path: string,
     expected: { readonly bytes: number; readonly sha256: string; readonly sha512: string; readonly signature: 'NotSigned' },
   ): Promise<number>

@@ -321,7 +321,9 @@ async function classifyOperation(
     failure: {
       sequence: manifest.sequence,
       manifestSha256: manifest.manifestSha256,
-      message: String(rootResult?.reason ?? result?.reason ?? 'The managed update was interrupted before the installer result was recorded.'),
+      message: typeof rootResult?.reason === 'string' ? rootResult.reason
+        : typeof result?.reason === 'string' ? result.reason
+          : 'The managed update was interrupted before the installer result was recorded.',
     },
   }
 }

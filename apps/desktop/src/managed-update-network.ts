@@ -70,7 +70,7 @@ export async function withManagedUpdateResponse<T>(
   const policy = managedUpdateTransferPolicy[kind]
   for (let attempt = 1; ; attempt++) {
     const controller = new AbortController()
-    const timeout = () => controller.abort(new ManagedUpdateTransferError('timeout', true))
+    const timeout = () => { controller.abort(new ManagedUpdateTransferError('timeout', true)) }
     const total = setTimeout(timeout, policy.totalMs)
     let inactivity = setTimeout(timeout, policy.inactivityMs)
     const progress = () => {
