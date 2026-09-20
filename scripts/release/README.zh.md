@@ -6,7 +6,7 @@
 
 ## 范围与前提
 
-可选写入器仅接受 `cloga/deepseek-harness`、目标分支为 `review/issue-72-official-base` 的 PR（Pull Request）80，以及版本 `0.1.6-alpha.5`。它要求已获批准且已经存在的 `dsh-v<version>` 标签。它绝不会在持有写入令牌时执行 npm 发布、标签或引用写入、构建、安装或包生命周期脚本。后续版本需要经过审查的源码修改，而不是传入另一个未经校验的值。
+可选写入器仅接受 `cloga/deepseek-harness`、目标分支为 `review/issue-72-official-base` 的 PR（Pull Request）81，以及版本 `0.1.6-alpha.5`。它要求已获批准且已经存在的 `dsh-v<version>` 标签。它绝不会在持有写入令牌时执行 npm 发布、标签或引用写入、构建、安装或包生命周期脚本。后续版本需要经过审查的源码修改，而不是传入另一个未经校验的值。
 
 原始 dsh 系列压缩包是 Core/Web 包产物，不是 Desktop 发行版、npm 发布或离线安装器。打包安装验证还使用此产物集合未包含的 vendored 框架和 Landlock 入口压缩包。这些配套包、可选原生平台包及其他注册表依赖仍属于外部安装依赖闭包。
 
