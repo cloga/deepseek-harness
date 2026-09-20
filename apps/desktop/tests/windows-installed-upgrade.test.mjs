@@ -9,7 +9,9 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { runInNewContext } from 'node:vm'
 import { inspectInstalledDesktopIdentity, readInstalledDesktopRuntimeDescriptor } from './fixtures/windows-installed-runtime.mjs'
+import { inspectInstalledPageDiagnostic } from './fixtures/windows-installed-upgrade-smoke.mjs'
 import { assertUpgradeRunner, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeAssetPath, upgradeFileHash, verifyUpgradeRelease } from './fixtures/windows-installed-upgrade-contract.mjs'
+import { retainPrimaryFailure } from './fixtures/windows-packaged-package-acceptance.mjs'
 
 const hosted = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: 'C:\\runner-temp' }
 const digest = (bytes, algorithm = 'sha256', encoding = 'hex') => createHash(algorithm).update(bytes).digest(encoding)
@@ -80,6 +82,106 @@ test('installed identity callback serializes without an import loader or lexical
     executable: 'owned application', resourcesPath: 'owned resources', userData: 'isolated user data', version: 'synthetic version', packaged: true,
   })
   assert.deepEqual(calls, ['userData'])
+})
+
+function observeInstalledPage(options = {}) {
+  const main = options.main === false ? null : {
+    hasAttribute(name) { return name === 'aria-busy' && options.ariaBusy !== undefined },
+    getAttribute() { return options.ariaBusy },
+  }
+  const error = options.error === false ? null : {
+    hidden: options.hidden ?? false,
+    textContent: options.text ?? '',
+    getBoundingClientRect() { return { width: options.width ?? 10, height: options.height ?? 5 } },
+    getClientRects() { return { length: options.rects ?? 1 } },
+  }
+  return JSON.parse(JSON.stringify(runInNewContext(`(${inspectInstalledPageDiagnostic.toString()})()`, {
+    URL,
+    location: { href: options.url ?? 'dsh-app://shell/startup.html' },
+    document: {
+      readyState: options.readyState ?? 'complete',
+      querySelector(selector) { return selector === 'main' ? main : selector === '#error' ? error : null },
+    },
+    getComputedStyle() { return { display: options.display ?? 'block', visibility: options.visibility ?? 'visible' } },
+  })))
+}
+
+test('actual installed page diagnostic is source-safe and returns only bounded scalar observations', () => {
+  const callback = inspectInstalledPageDiagnostic.toString()
+  assert.doesNotMatch(callback, /__name|\bimport\s*\(|\brequire\s*\(/u)
+  const observed = observeInstalledPage({ main: false, error: false, readyState: 'invented' })
+  assert.deepEqual(observed, {
+    url: 'dsh-app://shell/startup.html', urlRawBytes: 28, urlRedacted: false, urlTruncated: false, readyState: 'unknown',
+    mainPresent: false, mainAriaBusyPresent: false, mainAriaBusyValue: null,
+    errorPresent: false, errorHidden: null, errorDisplay: null, errorVisibility: null,
+    errorWidth: null, errorHeight: null, errorClientRectCount: null, errorRendered: false,
+    errorText: '', errorTextRawBytes: 0, errorTextRedacted: false, errorTextTruncated: false,
+  })
+  for (const value of Object.values(observed)) assert.ok(value === null || ['string', 'number', 'boolean'].includes(typeof value))
+})
+
+test('actual installed page diagnostic distinguishes hidden, CSS-hidden, visible and invalid boxes', () => {
+  const hidden = observeInstalledPage({ hidden: true, text: '' })
+  assert.equal(hidden.errorPresent, true)
+  assert.equal(hidden.errorHidden, true)
+  assert.equal(hidden.errorRendered, false)
+  assert.equal(hidden.errorText, '')
+  assert.equal(observeInstalledPage({ text: 'backend failed' }).errorRendered, true)
+  assert.equal(observeInstalledPage({ display: 'none' }).errorRendered, false)
+  assert.equal(observeInstalledPage({ visibility: 'hidden' }).errorRendered, false)
+  const invalid = observeInstalledPage({ width: Number.POSITIVE_INFINITY, height: Number.NaN, rects: Number.POSITIVE_INFINITY })
+  assert.equal(invalid.errorWidth, null)
+  assert.equal(invalid.errorHeight, null)
+  assert.equal(invalid.errorClientRectCount, null)
+  assert.equal(invalid.errorRendered, false)
+  const busy = observeInstalledPage({ ariaBusy: 'true' })
+  assert.equal(busy.mainAriaBusyPresent, true)
+  assert.equal(busy.mainAriaBusyValue, 'true')
+})
+
+test('actual installed page diagnostic redacts URL credentials and error secrets before byte-bounded retention', () => {
+  const url = 'https://alice:secret@example.test/path?token=query-secret#password=fragment-secret'
+  const text = 'Authorization: Bearer bearer-secret; "password" : "secret words"; api-key = key-secret; client secret: client-secret-value; github-token=ghp_1234567890; github_pat_abcdef_123456; fetch failed https://alice:secret@example.test/pkg?sig=signed-secret&code=oauth-secret#fragment-secret'
+  const observed = observeInstalledPage({ url, text })
+  assert.equal(observed.url, 'https://example.test/path')
+  assert.equal(observed.urlRawBytes, Buffer.byteLength(url))
+  assert.equal(observed.urlRedacted, true)
+  assert.equal(observed.urlTruncated, false)
+  assert.equal(observed.errorTextRawBytes, Buffer.byteLength(text))
+  assert.equal(observed.errorTextRedacted, true)
+  for (const secret of ['alice', 'query-secret', 'fragment-secret', 'signed-secret', 'oauth-secret', 'bearer-secret', 'secret words', 'key-secret', 'client-secret-value', 'ghp_1234567890', 'github_pat_abcdef_123456']) {
+    assert.equal(observed.url.includes(secret) || observed.errorText.includes(secret), false, `Retained credential: ${secret}`)
+  }
+  assert.match(observed.errorText, /https:\/\/example\.test\/pkg\?\[redacted\]/u)
+  assert.doesNotMatch(observed.errorText, /[?&](?:sig|code)=/u)
+  assert.match(observed.errorText, /\[redacted\]/u)
+})
+
+test('actual installed page diagnostic truncates only at UTF-8 character boundaries', () => {
+  const url = 'x'.repeat(2047) + '🙂'
+  const text = '界'.repeat(2730) + '🙂'
+  const observed = observeInstalledPage({ url, text })
+  assert.equal(observed.urlRawBytes, 2051)
+  assert.equal(Buffer.byteLength(observed.url), 2047)
+  assert.equal(observed.urlTruncated, true)
+  assert.equal(observed.errorTextRawBytes, 8194)
+  assert.equal(Buffer.byteLength(observed.errorText), 8190)
+  assert.equal(observed.errorText.endsWith('界'), true)
+  assert.equal(observed.errorText.includes('\uFFFD'), false)
+  assert.equal(observed.errorTextTruncated, true)
+})
+
+test('installed failure diagnostic is captured before close and retained without replacing the primary', () => {
+  const source = readFileSync(new URL('./fixtures/windows-installed-upgrade-smoke.mjs', import.meta.url), 'utf8')
+  const capture = source.indexOf('failureSnapshot = await page.evaluate(inspectInstalledPageDiagnostic)')
+  const close = source.indexOf('try { await app?.close() }', capture)
+  const receipt = source.indexOf('snapshot: failureSnapshot', close)
+  assert.ok(capture >= 0 && close > capture && receipt > close)
+  assert.match(source.slice(capture, close), /retainPrimaryFailure\(roundFailure, new Error\('DOM diagnostic capture failed'\), 'round-failure-dom-diagnostic', secondaryErrors\)/u)
+  const primary = new Error('primary assertion')
+  const secondary = []
+  assert.equal(retainPrimaryFailure(primary, new Error('DOM diagnostic capture failed'), 'round-failure-dom-diagnostic', secondary), primary)
+  assert.deepEqual(secondary, [{ stage: 'round-failure-dom-diagnostic', error: 'Error: DOM diagnostic capture failed' }])
 })
 
 test('installed descriptor reader binds fresh executable bytes and observed resources before inspection', t => {

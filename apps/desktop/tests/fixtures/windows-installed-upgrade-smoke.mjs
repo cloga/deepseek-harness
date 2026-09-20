@@ -16,6 +16,78 @@ const save = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2)
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const safeError = error => String(error).replace(/(https?:\/\/[^?\s"'<>]+)\?[^\s"'<>]*/gu, '$1?[redacted]')
 
+export function inspectInstalledPageDiagnostic() {
+  const codec = {
+    utf8Bytes(value) {
+      let bytes = 0
+      for (const character of value) {
+        const point = character.codePointAt(0)
+        bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4
+      }
+      return bytes
+    },
+    redact(value) {
+      return value
+        .replace(/\b((?:https?|wss?|dsh-app):\/\/)[^/@\s?#]+@/giu, '$1')
+        .replace(/\b((?:https?|wss?|dsh-app):\/\/[^?\s#]+)[?#][^\s]*/giu, '$1?[redacted]')
+        .replace(/(["']?(?:authorization|token|password|api[-_ ]?key|client[-_ ]?secret|github[-_ ]?token)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:bearer|basic)\s+[^\s,;&}]+|[^\s,;&}]+)/giu, '$1[redacted]')
+        .replace(/\b(?:github_pat_[a-z0-9_]+|gh[pousr]_[a-z0-9]+)\b/giu, '[redacted]')
+    },
+    retain(value, limit) {
+      const redacted = codec.redact(value)
+      let text = ''
+      let bytes = 0
+      for (const character of redacted) {
+        const point = character.codePointAt(0)
+        const size = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4
+        if (bytes + size > limit) break
+        text += character
+        bytes += size
+      }
+      return { text, redacted: redacted !== value, truncated: bytes < codec.utf8Bytes(redacted) }
+    },
+  }
+
+  const rawUrl = String(location.href)
+  let sanitizedUrl
+  try {
+    const parsed = new URL(rawUrl)
+    parsed.username = ''
+    parsed.password = ''
+    parsed.search = ''
+    parsed.hash = ''
+    sanitizedUrl = parsed.toString()
+  } catch {
+    sanitizedUrl = rawUrl.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/iu, '$1[redacted]@').split(/[?#]/u, 1)[0]
+  }
+  const retainedUrl = codec.retain(sanitizedUrl, 2048)
+  const main = document.querySelector('main')
+  const error = document.querySelector('#error')
+  const style = error === null ? null : getComputedStyle(error)
+  const box = error === null ? null : error.getBoundingClientRect()
+  const width = box !== null && Number.isFinite(box.width) ? box.width : null
+  const height = box !== null && Number.isFinite(box.height) ? box.height : null
+  const rectCountValue = error === null ? null : error.getClientRects().length
+  const rectCount = Number.isSafeInteger(rectCountValue) && rectCountValue >= 0 ? rectCountValue : null
+  const rawText = error === null ? '' : String(error.textContent ?? '')
+  const retainedText = codec.retain(rawText, 8192)
+  const readyState = ['loading', 'interactive', 'complete'].includes(document.readyState) ? document.readyState : 'unknown'
+  const errorHidden = error === null ? null : Boolean(error.hidden)
+  const display = style === null || typeof style.display !== 'string' ? null : style.display.slice(0, 64)
+  const visibility = style === null || typeof style.visibility !== 'string' ? null : style.visibility.slice(0, 64)
+  const ariaBusyPresent = main !== null && main.hasAttribute('aria-busy')
+  const ariaBusy = ariaBusyPresent ? codec.retain(String(main.getAttribute('aria-busy')), 256) : null
+  return {
+    url: retainedUrl.text, urlRawBytes: codec.utf8Bytes(rawUrl), urlRedacted: sanitizedUrl !== rawUrl || retainedUrl.redacted, urlTruncated: retainedUrl.truncated,
+    readyState,
+    mainPresent: main !== null, mainAriaBusyPresent: ariaBusyPresent, mainAriaBusyValue: ariaBusy?.text ?? null,
+    errorPresent: error !== null, errorHidden, errorDisplay: display, errorVisibility: visibility,
+    errorWidth: width, errorHeight: height, errorClientRectCount: rectCount,
+    errorRendered: error !== null && !errorHidden && display !== 'none' && visibility !== 'hidden' && visibility !== 'collapse' && width !== null && width > 0 && height !== null && height > 0 && rectCount !== null && rectCount > 0,
+    errorText: retainedText.text, errorTextRawBytes: codec.utf8Bytes(rawText), errorTextRedacted: retainedText.redacted, errorTextTruncated: retainedText.truncated,
+  }
+}
+
 async function main() {
   assertUpgradeRunner(process.env)
   const { values } = parseArgs({ options: Object.fromEntries(['phase', 'run-root', 'baseline-directory', 'candidate-directory', 'expected-source'].map(name => [name, { type: 'string' }])) })
@@ -94,6 +166,7 @@ async function main() {
     let app
     let page
     let roundFailure
+    let failureSnapshot = null
     const errors = []
     const secondaryErrors = []
     try {
@@ -147,10 +220,14 @@ async function main() {
     } catch (error) {
       roundFailure = error
     } finally {
+      if (roundFailure !== undefined && page !== undefined) {
+        try { failureSnapshot = await page.evaluate(inspectInstalledPageDiagnostic) }
+        catch { roundFailure = retainPrimaryFailure(roundFailure, new Error('DOM diagnostic capture failed'), 'round-failure-dom-diagnostic', secondaryErrors) }
+      }
       try { await app?.close() }
       catch (error) { roundFailure = retainPrimaryFailure(roundFailure, error, 'round-owned-close', secondaryErrors) }
       if (roundFailure !== undefined) {
-        try { save(join(evidence, `${round}-failure.json`), { error: safeError(roundFailure), pageErrors: errors, secondaryErrors }) }
+        try { save(join(evidence, `${round}-failure.json`), { error: safeError(roundFailure), pageErrors: errors, secondaryErrors, snapshot: failureSnapshot }) }
         catch (error) {
           roundFailure = retainPrimaryFailure(roundFailure, error, 'round-failure-evidence-write', secondaryErrors)
           console.error('Installed acceptance secondary failures:', secondaryErrors)
