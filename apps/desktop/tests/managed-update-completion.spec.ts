@@ -273,6 +273,7 @@ it('verifies manual-install evidence through the production bundler without star
   await build({
     entry: join(import.meta.dirname, '..', 'src', 'managed-update-completion.ts'),
     outDir: root, config: false, platform: 'node', format: 'esm', target: 'es2024',
+    dts: false, // Runtime verification cannot depend on prebuilt project-reference declarations.
     deps: { alwaysBundle: [/.*/u], onlyBundle: false },
     outExtensions: () => ({ js: '.mjs' }), logLevel: 'silent',
   })
