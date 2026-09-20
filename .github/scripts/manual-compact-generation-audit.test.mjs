@@ -99,10 +99,14 @@ function artifactBytes(evidence) {
 function rejectsWithoutLeak(f) {
   const result = f.run('after')
   assert.equal(result.status, 1)
-  assert.match(result.stderr, /^MANUAL_COMPACT_AUDIT_REJECTED:[A-Z_]+\r?\n$/u)
+  const lines = result.stderr.trimEnd().split(/\r?\n/u)
+  assert.equal(lines.length, 2)
+  assert.match(lines[0], /^MANUAL_COMPACT_DIAGNOSTICS=/u)
+  assert.match(lines[1], /^MANUAL_COMPACT_AUDIT_REJECTED:[A-Z_]+$/u)
   assert.equal((result.stdout + result.stderr).includes(SENTINEL), false)
   assert.equal(artifactBytes(f.evidence).includes(SENTINEL), false)
   assert.equal(artifactBytes(f.evidence), '')
+  return { result, diagnostics: JSON.parse(lines[0].slice('MANUAL_COMPACT_DIAGNOSTICS='.length)) }
 }
 
 test('publishes only four candidate outputs and source-bound receipts', t => {
@@ -151,6 +155,58 @@ test('rejects a failed step without uploading captured private reports', t => {
   put(f.evidence, 'private-refresh.json', encode({ success: false, private: SENTINEL }))
   rejectsWithoutLeak(f)
 })
+test('diagnoses failed refresh separately from missing output aftermath without revealing assertions', t => {
+  const f = fixture(t)
+  f.env.REFRESH_OUTCOME = 'failure'
+  for (const phase of ['REPLAY', 'CORPUS', 'SEMANTIC']) f.env[`${phase}_OUTCOME`] = 'skipped'
+  for (const path of OUTPUT_PATHS.slice(1)) unlinkSync(join(f.root, path))
+  const failed = report()
+  Object.assign(failed, { success: false, numPassedTests: 0, numFailedTests: 1, numFailedTestSuites: 1 })
+  failed.testResults[0].status = 'failed'
+  const assertion = failed.testResults[0].assertionResults[0]
+  assertion.status = 'failed'
+  assertion.failureMessages = [`Error: snapshot-harness: scenario failed: ACP connection closed ENOENT\nexpected: ${SENTINEL}\nreceived: ${SENTINEL}\n at hiddenFunction (${f.root.replaceAll('\\', '/')}/packages/test-support/session-snapshot/src/harness.ts:371:13)\n ❯ packages/test-support/session-snapshot/src/suite.ts:1294:24\n at /unapproved/${SENTINEL}/private.ts:4:2`]
+  put(f.evidence, 'private-refresh.json', encode(failed))
+  const { result, diagnostics } = rejectsWithoutLeak(f)
+  assert.match(result.stderr, /MANUAL_COMPACT_AUDIT_REJECTED:FAILED_STEP/u)
+  assert.equal(result.stderr.includes('UNTRACKED_DRIFT'), false)
+  assert.equal(result.stderr.includes('hiddenFunction'), false)
+  assert.equal(result.stderr.includes('expected:'), false)
+  assert.equal(result.stderr.includes('received:'), false)
+  assert.equal(result.stderr.includes('/unapproved/'), false)
+  assert.equal(result.stderr.includes(f.root), false)
+  assert.deepEqual(diagnostics.phases[0].counts, { total: 1, passed: 0, failed: 1, failedSuites: 1 })
+  assert.deepEqual(diagnostics.phases[0].categories, ['MISSING_FILE', 'HARNESS_FAILURE', 'ACP_CONNECTION_CLOSED'])
+  assert.deepEqual(diagnostics.phases[0].positions, [
+    { source: 'packages/test-support/session-snapshot/src/harness.ts', line: 371, column: 13 },
+    { source: 'packages/test-support/session-snapshot/src/suite.ts', line: 1294, column: 24 },
+  ])
+  assert.equal(diagnostics.targets[0].state, 'file')
+  assert.equal(diagnostics.targets[0].bytes > 0, true)
+  assert.equal(diagnostics.targets.slice(1).every(target => target.state === 'absent' && target.bytes === null), true)
+})
+test('classifies non-report startup stderr without exposing module or unfamiliar path text', t => {
+  const f = fixture(t); f.env.REFRESH_OUTCOME = 'failure'
+  put(f.evidence, 'private-refresh.json', SENTINEL)
+  put(f.evidence, 'private-refresh.stderr', `Error [ERR_MODULE_NOT_FOUND]: Cannot find package '${SENTINEL}'\n at /foreign/${SENTINEL}.js:4:2\n at file://${f.root.replaceAll('\\', '/')}/apps/cli/lib/bin.js:22:4\n`)
+  const { diagnostics } = rejectsWithoutLeak(f)
+  assert.equal(diagnostics.phases[0].report, 'invalid-json')
+  assert.deepEqual(diagnostics.phases[0].categories, ['MODULE_NOT_FOUND'])
+  assert.deepEqual(diagnostics.phases[0].positions, [{ source: 'apps/cli/lib/bin.js', line: 22, column: 4 }])
+})
+test('does not project unknown counter values or paths that only resemble allowlisted source paths', t => {
+  const f = fixture(t); f.env.REFRESH_OUTCOME = 'failure'
+  const failed = report()
+  failed.numPassedTests = SENTINEL
+  failed.numFailedTests = -1
+  failed.testResults[0].message = `at /foreign/${SENTINEL}/packages/test-support/session-snapshot/src/harness.ts:99:7`
+  put(f.evidence, 'private-refresh.json', encode(failed))
+  const { diagnostics } = rejectsWithoutLeak(f)
+  assert.equal(diagnostics.phases[0].counts.passed, null)
+  assert.equal(diagnostics.phases[0].counts.failed, null)
+  assert.deepEqual(diagnostics.phases[0].positions, [])
+})
+
 test('rejects a report for another scenario, including its private assertion text', t => {
   const f = fixture(t)
   const wrong = report('wrong scenario')

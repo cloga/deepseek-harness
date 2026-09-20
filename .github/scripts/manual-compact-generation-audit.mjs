@@ -114,6 +114,106 @@ function report(evidence, name, exactScenario) {
     && equal(passed[0].ancestorTitles, ['snapshot scenarios']), 'WRONG_SCENARIO')
   return { passed: passed.length, total: assertions.length }
 }
+const DIAGNOSTIC_SOURCES = [
+  'snapshots/acp/acp.snapshot.ts', 'scripts/session-snapshot-corpus.corpus.ts',
+  'packages/test-support/session-snapshot/src/harness.ts', 'packages/test-support/session-snapshot/src/suite.ts',
+  'packages/test-support/session-snapshot/src/launcher.ts', 'packages/test-support/llm-replay/src/index.ts',
+  'packages/test-support/llm-replay/lib/index.js', 'packages/acp/acp/src/index.ts',
+  'packages/acp/acp/src/session.ts', 'packages/acp/acp/src/model-control.ts', 'packages/acp/acp/lib/index.js',
+  'packages/compaction/compaction-basic/src/index.ts', 'packages/compaction/compaction-basic/src/region.ts',
+  'packages/compaction/compaction-basic/src/summarizer.ts', 'packages/compaction/compaction-basic/lib/index.js',
+  'packages/core/agent-loop/src/index.ts', 'packages/core/agent-loop/lib/index.js',
+  'packages/core/session/src/index.ts', 'packages/core/session/lib/index.js',
+  'packages/boot/app-boot/src/profile-resolution/resolver.ts', 'packages/boot/app-boot/src/profile.ts',
+  'packages/boot/app-boot/lib/index.js', 'apps/cli/src/bin.ts', 'apps/cli/src/profile-boot.ts',
+  'apps/cli/lib/bin.js', '.github/scripts/manual-compact-generation-semantic.mjs',
+]
+const FAILURE_MARKERS = [
+  ['MISSING_FILE', /\bENOENT\b/u],
+  ['MODULE_NOT_FOUND', /\bERR_MODULE_NOT_FOUND\b|Cannot find (?:package|module)/u],
+  ['HARNESS_FAILURE', /snapshot-harness: scenario failed/u],
+  ['ACP_CONNECTION_CLOSED', /ACP connection closed/u],
+  ['UNKNOWN_MODEL_OPTION', /unknown model option:/u],
+  ['UNKNOWN_CONFIG_OPTION', /unknown session config option:/u],
+  ['REPLAY_EXHAUSTED', /llm-replay: script exhausted/u],
+  ['REPLAY_NOT_CONSUMED', /llm-replay: fixture not fully consumed/u],
+  ['REPLAY_FIXTURE_MISSING', /llm-replay: (?:child )?fixture not found:/u],
+  ['SESSION_DECODE_FAILURE', /session snapshot line [0-9]+|session snapshot must start with a session header/u],
+  ['SUMMARY_TRUNCATED', /summarization truncated at the token cap/u],
+  ['SUMMARY_NOT_SMALLER', /summary is not smaller than the shadowed content/u],
+  ['SUMMARY_EMPTY', /summarization produced no text summary content/u],
+  ['SNAPSHOT_ASSERTION', /AssertionError|mismatch|unexpected request\/header count/u],
+  ['SEMANTIC_REJECTED', /MANUAL_COMPACT_SEMANTIC_REJECTED:/u],
+]
+const diagnosticCount = value => Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000 ? value : null
+const escapePattern = value => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+function diagnosticFile(root, path) {
+  try {
+    const file = regular(root, path)
+    const bytes = lstatSync(file).size
+    if (bytes > 4 * 1024 * 1024) return { state: 'too-large', bytes }
+    return { state: 'present', bytes, text: readFileSync(file, 'utf8') }
+  } catch { return { state: 'unavailable', bytes: null } }
+}
+
+/** Project private failure data onto fixed labels, numeric counts, and known source positions only. */
+export function failureDiagnostics(env = process.env) {
+  const root = resolve(env.GITHUB_WORKSPACE), evidence = resolve(env.SNAPSHOT_EVIDENCE)
+  directory(root); directory(evidence)
+  const phases = ['refresh', 'replay', 'corpus', 'semantic'].map(phase => {
+    const outcome = env[`${phase.toUpperCase()}_OUTCOME`]
+    const file = diagnosticFile(evidence, `private-${phase}.json`)
+    const texts = []
+    let counts = null, reportState = file.state
+    if (file.text !== undefined) {
+      try {
+        const parsed = JSON.parse(file.text)
+        counts = { total: diagnosticCount(parsed.numTotalTests), passed: diagnosticCount(parsed.numPassedTests),
+          failed: diagnosticCount(parsed.numFailedTests), failedSuites: diagnosticCount(parsed.numFailedTestSuites) }
+        for (const suite of Array.isArray(parsed.testResults) ? parsed.testResults : []) {
+          if (typeof suite.message === 'string') texts.push(suite.message)
+          for (const assertion of Array.isArray(suite.assertionResults) ? suite.assertionResults : []) {
+            for (const message of Array.isArray(assertion.failureMessages) ? assertion.failureMessages : []) {
+              if (typeof message === 'string') texts.push(message)
+            }
+          }
+        }
+      } catch { reportState = 'invalid-json' }
+    }
+    for (const suffix of ['stdout', 'stderr']) {
+      const capture = diagnosticFile(evidence, `private-${phase}.${suffix}`)
+      if (capture.text !== undefined) texts.push(capture.text)
+    }
+    const text = texts.join('\n').replace(/\u001b\[[0-9;]*m/gu, '').replaceAll('\\', '/')
+    const categories = FAILURE_MARKERS.filter(([, pattern]) => pattern.test(text)).map(([code]) => code)
+    const positions = []
+    const prefix = escapePattern(root.replaceAll('\\', '/'))
+    for (const source of DIAGNOSTIC_SOURCES) {
+      const path = escapePattern(source)
+      const pattern = new RegExp(`(?:${prefix}/|^\\s*(?:at|❯)\\s+)${path}:([0-9]{1,6})(?::([0-9]{1,6}))?(?=[\\s)]|$)`, 'u')
+      for (const line of text.split('\n')) {
+        if (!/^\s*(?:at\b|❯)/u.test(line)) continue
+        const match = pattern.exec(line)
+        if (match !== null) {
+          const position = { source, line: Number(match[1]), column: match[2] === undefined ? null : Number(match[2]) }
+          if (position.line > 0 && !positions.some(item => equal(item, position))) positions.push(position)
+        }
+        if (positions.length >= 20) break
+      }
+      if (positions.length >= 20) break
+    }
+    return { phase, outcome: ['success', 'failure', 'cancelled', 'skipped'].includes(outcome) ? outcome : 'unknown',
+      report: reportState, counts, categories, positions }
+  })
+  const targets = OUTPUT_PATHS.map(path => {
+    try {
+      const absolute = pathIn(root, path), stat = lstatSync(absolute)
+      return { path, state: stat.isFile() && !stat.isSymbolicLink() ? 'file' : 'unsafe', bytes: stat.isFile() && !stat.isSymbolicLink() ? stat.size : null }
+    } catch (error) { return { path, state: error?.code === 'ENOENT' ? 'absent' : 'unavailable', bytes: null } }
+  })
+  return { schemaVersion: 1, phases, targets }
+}
+
 function purgeUpload(evidence) {
   const upload = join(evidence, 'upload')
   if (existsSync(upload)) {
@@ -170,6 +270,8 @@ export function audit(mode, env = process.env) {
     requireFact(state.schemaVersion === 1 && state.head === head && state.tree === tree && state.root === root
       && state.node === process.version && state.platform === process.platform
       && equal(state.inputs.map(({ path, mode, blob }) => ({ path, mode, blob })), rows), 'BASELINE_CHANGED')
+    // Failed generation is primary; absent sidecars are not reported as input drift.
+    requireFact(['REFRESH_OUTCOME', 'REPLAY_OUTCOME', 'CORPUS_OUTCOME', 'SEMANTIC_OUTCOME'].every(key => env[key] === 'success'), 'FAILED_STEP')
     const initialUntracked = state.outputs.filter(item => !item.existed).map(item => item.path).sort()
     requireFact(equal(untracked(root).sort(), initialUntracked), 'UNTRACKED_DRIFT')
     for (const input of state.inputs) {
@@ -177,7 +279,6 @@ export function audit(mode, env = process.env) {
       requireFact(now.kind === input.kind && now.fsMode === input.fsMode, 'INPUT_TYPE_CHANGED')
       if (!OUTPUT_PATHS.includes(input.path)) requireFact(now.sha256 === input.sha256 && now.bytes === input.bytes, 'INPUT_CHANGED')
     }
-    requireFact(['REFRESH_OUTCOME', 'REPLAY_OUTCOME', 'CORPUS_OUTCOME', 'SEMANTIC_OUTCOME'].every(key => env[key] === 'success'), 'FAILED_STEP')
     const checks = { refresh: report(evidence, 'private-refresh.json', true), replay: report(evidence, 'private-replay.json', true), corpus: report(evidence, 'private-corpus.json', false) }
     const seed = readFileSync(regular(evidence, 'private-seed.jsonl'))
     requireFact(digest(seed) === state.inputs.find(row => row.path === OUTPUT_PATHS[0]).sha256, 'BASELINE_CHANGED')
@@ -238,6 +339,11 @@ export function audit(mode, env = process.env) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { console.log(audit(process.argv[2])) }
   catch (error) {
+    if (process.argv[2] === 'after') {
+      let diagnostics = { schemaVersion: 1, state: 'unavailable' }
+      try { diagnostics = failureDiagnostics() } catch { /* Only fixed unavailable status is public. */ }
+      console.error(`MANUAL_COMPACT_DIAGNOSTICS=${JSON.stringify(diagnostics)}`)
+    }
     const code = /^[A-Z_]+$/u.test(error?.auditCode ?? '') ? error.auditCode : 'AUDIT_FAILED'
     console.error(`MANUAL_COMPACT_AUDIT_REJECTED:${code}`)
     process.exitCode = 1
