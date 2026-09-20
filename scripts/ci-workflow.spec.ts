@@ -906,13 +906,13 @@ describe('Python release workflows', () => {
     expect(authorize.run).toContain('[ "$REPOSITORY" = "$PYPI_PUBLISHER_REPOSITORY" ]')
     expect(validateSteps).toContain('100000000')
     expect(publishRuntime).toMatchObject({
-      if: "github.event_name == 'workflow_dispatch' && inputs.publish",
+      if: "github.repository != 'cloga/deepseek-harness' && github.event_name == 'workflow_dispatch' && inputs.publish",
       needs: 'validate',
       environment: 'pypi-runtime',
       permissions: { contents: 'read', 'id-token': 'write' },
     })
     expect(publishSdk).toMatchObject({
-      if: "github.event_name == 'workflow_dispatch' && inputs.publish",
+      if: "github.repository != 'cloga/deepseek-harness' && github.event_name == 'workflow_dispatch' && inputs.publish",
       needs: ['validate', 'publish-runtime'],
       environment: 'pypi',
       permissions: { contents: 'read', 'id-token': 'write' },

@@ -68,7 +68,23 @@ The manual Windows workflow requires the reviewed plan version and source commit
 
 A publication run requires current `master`. The protected release job is the only job with `contents: write`. It downloads the build artifact, cross-checks the complete asset set, creates the exact source commit tag as a draft, uploads every asset, and publishes only after the asset set is complete. It then requires GitHub to report the release immutable, the tag and release target to resolve to the build commit, and every remote asset digest to match the local bytes. A final read-only job uses the build-only metadata adapter to run the shipped discovery against GitHub and requires it to select the reviewed version, sequence, commit, and tree.
 
+## Workflow publication policy
+
+The [fork publication policy](../../../../.github/AGENTS.md#fork-publication-policy) makes Desktop the default public deliverable, including Core/Web changes. Issue #90 exposed that checksum-valid package tarballs can still violate the approved product and channel. Release titles and asset counts cannot establish installer delivery.
+
+`verify-release-policy` uses the existing YAML parser to discover every `.yml` and `.yaml` workflow. The blocking `ci-static` aggregate checks explicit permission defaults, reserves `contents: write` for the existing Desktop release job, rejects unreviewed package/OIDC writers and recognized publication commands/actions, and fixes the rehearsal job/event inventory to CI artifact output. The existing npm, Python, and native publication jobs carry exact fork-excluding conditions; dispatch inputs and repository variables cannot override them. Non-fork behavior, including the configured private Python publisher, remains unchanged. Pages OIDC is a narrowly named non-release exception.
+
+Desktop admits exactly one publisher step using either the reviewed legacy one-line command or the five-line PowerShell template that compares checkout HEAD with the build source SHA and propagates failures. Both checks use the same exact-script classifier, normalizing only CRLF and trailing newlines. The publisher retains `pwsh`, its output id, exact token/tag/version/source bindings, and one preceding clean checkout of the build SHA without persisted credentials. Extra statements, duplicate publishers, step conditions, error suppression, and working-directory overrides are rejected; supporting the stronger template does not replace its source check or change the production publisher.
+
+The script allowlist is not a security boundary against arbitrary code. This check validates declared workflow authority and known entry points, not the meaning of arbitrary shell programs, local actions, external actions, or credential use. It does not inspect remote settings or stop an authorized source editor from changing policy. Review remains responsible for new code and any separately authorized channel. Desktop's existing publisher verifies the exact installer and companion asset inventory before any remote call; valid checksums, a Desktop title, or a Desktop tag cannot substitute for that inventory. Actual installer qualification remains with the packaging and acceptance checks, not filename inspection.
+
+The source-policy mutation tests cover added writers, inherited permissions, recognized publication steps, input/variable overrides, and the current source. Offline publisher regressions reject a checksum-consistent set of 293 Core/Web tarballs, an installer replaced by a tarball, and an extra tarball beside the installer. These tests complement the existing positive publication and receipt checks without changing packaging or versions.
+
 ## Alternatives considered
+
+**Approve a release by title or checksum alone.** Neither identifies an installable Desktop product. The workflow permission inventory and the publisher's exact asset inventory check different obligations; neither replaces packaged acceptance.
+
+**Disable upstream workflows or add a dispatch override.** Disabling them discards valid upstream distribution and artifact-only CI rehearsals. A dispatch override would turn an operator input into authorization for a new fork channel. Fixed repository exclusions preserve upstream behavior without permitting that override.
 
 **Confirm only the version and current branch.** A branch can advance to an unreviewed commit without changing the plan version between controller review and workflow dispatch. Pinning the expected source commit inside the workflow closes that gap while retaining current-branch and version checks.
 

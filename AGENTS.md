@@ -8,7 +8,7 @@ Public APIs are pre-stable: update all consumers and [acknowledge persistence-ty
 
 **Application launch.** Only `dsh` profiles launch supported Node apps; package bins, demos, and public SDK argv escapes are forbidden ([rule](docs/architecture.md#application-launch)).
 
-**Desktop updates and releases:** Follow [apps/desktop/AGENTS.md](apps/desktop/AGENTS.md).
+**Desktop updates and releases:** Follow [apps/desktop/AGENTS.md](apps/desktop/AGENTS.md). The cloga fork's default public release is Windows Desktop, not Core/Web tarballs; follow the [fork publication policy](.github/AGENTS.md#fork-publication-policy).
 
 ## Repository layout
 

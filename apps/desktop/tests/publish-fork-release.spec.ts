@@ -268,6 +268,31 @@ describe('fail-closed fork publication', () => {
     expect(state.calls).toEqual([])
   })
 
+  it.each(['293 Core/Web tarballs', 'tarball substituted for installer', 'tarball added beside installer'])(
+    'rejects %s even with matching checksums and a Desktop tag, before networking', async (kind) => {
+      const { state, options, directory, files } = await fixture()
+      const installer = `cloga-deepseek-harness-${version}-win-x64.exe`
+      if (kind === '293 Core/Web tarballs') {
+        for (const name of Object.keys(files)) await rm(join(directory, name))
+        for (const name of Object.keys(files)) Reflect.deleteProperty(files, name)
+        for (let index = 0; index < 293; index += 1) files[`core-web-${index}.tgz`] = `package ${index}`
+      } else {
+        if (kind === 'tarball substituted for installer') {
+          await rm(join(directory, installer))
+          Reflect.deleteProperty(files, installer)
+        }
+        files['core-web.tgz'] = 'raw package bytes'
+      }
+      const payload = Object.entries(files).filter(([name]) => name !== 'SHA256SUMS' && name !== 'SHA512SUMS')
+      for (const [name, algorithm] of [['SHA256SUMS', 'sha256'], ['SHA512SUMS', 'sha512']] as const) {
+        files[name] = `${payload.map(([file, bytes]) => `${digest(bytes, algorithm)}  ${file}`).join('\n')}\n`
+      }
+      await Promise.all(Object.entries(files).map(([name, bytes]) => writeFile(join(directory, name), bytes)))
+      await expect(publishForkRelease(options)).rejects.toThrow('Unexpected local asset set')
+      expect(state.calls).toEqual([])
+    },
+  )
+
   it('rejects changed local payload bytes before any remote call', async () => {
     const { state, options, directory } = await fixture()
     await writeFile(join(directory, 'desktop-provisioning.json'), 'changed')
