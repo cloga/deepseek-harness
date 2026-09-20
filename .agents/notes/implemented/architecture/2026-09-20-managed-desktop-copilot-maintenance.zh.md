@@ -8,7 +8,7 @@
 
 托管 Windows Desktop 需要升级其 release-owned Copilot 包，但不能悄然提升 Core 基线，也不能在官方 Core 已提供完整等价能力后继续无条件保留 companion 行为。插件发布、Core 兼容性、打包 Desktop 行为和已安装机器激活是彼此独立的证据。
 
-当前发布计划保留 Core `0.1.6-alpha.1`，并固定不可变的 [Copilot `0.4.0-alpha.30`](https://github.com/cloga/dsh-github-copilot/releases/tag/v0.4.0-alpha.30)。Copilot alpha.30 同时支持 Core alpha.1 与 alpha.2，但这种兼容性并不能验收由其他负责人维护的 Core alpha.2 Desktop 适配。
+当前发布计划保留 Core `0.1.6-alpha.1`，并固定不可变的 [Copilot `0.4.0-alpha.32`](https://github.com/cloga/dsh-github-copilot/releases/tag/v0.4.0-alpha.32)。Copilot alpha.32 同时支持 Core alpha.1 与 alpha.2，但这种兼容性并不能验收由其他负责人维护的 Core alpha.2 Desktop 适配。
 
 ## 决策
 
@@ -16,15 +16,17 @@
 
 打包验收保持登出且只读。它检查真实账户与 Manage 界面、已移除 compatibility disclosure 不再出现、只读 Model roles 视图、仅提供方级别的 **Search provider** 与 **Fallback provider** 控件、已注册提供方目录、精确 provisioning 清单以及重启后稳定的 receipt。它绝不保存设置、发起 OAuth、打开验证地址、调用模型或搜索提供方，也不修改 profile。Copilot 自己的合成 Client 测试覆盖 Desktop 同窗口验证导航、Web 新标签页行为以及可选择的手动 URL 交接；Desktop 验收不会在操作者浏览器上重复这些动作。
 
-Alpha.28 保留插件拥有的独立 prompt 与 input/output 组合准入，同时向官方有界 compaction 路径发出信号。Alpha.29 保留仅提供方路由、一次 routing namespace compare-and-swap、一个不同的最终回退，以及无需模型前置条件的 Copilot 账户拥有搜索模型解析。Alpha.30 保留现有 Desktop 外部导航交接与可选择的手动验证地址。在官方 Core 尚未提供等价策略之处，这些行为继续由插件拥有。
+Alpha.28 保留插件拥有的独立 prompt 与 input/output 组合准入，同时向官方有界 compaction 路径发出信号。Alpha.29 保留仅提供方路由、一次 routing namespace compare-and-swap、一个不同的最终回退，以及无需模型前置条件的 Copilot 账户拥有搜索模型解析。Alpha.30 保留现有 Desktop 外部导航交接与可选择的手动验证地址。Alpha.31 将 OAuth renewal 与 credential persistence 交给原生实现，同时保留有界 managed-route HTTP 401 proof retirement。Alpha.32 增加规范化账户额度快照和可选 Session 级 composer 呈现，不替换原生 Context meter，也不虚构 Session credits。在官方 Core 尚未提供等价策略之处，这些行为继续由插件拥有。
 
 ## 官方优先比较
 
-精确官方评审目标是 [Core `0.1.6-alpha.2`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.6-alpha.2)。插件的 [alpha.2 比较](https://github.com/cloga/dsh-github-copilot/blob/v0.4.0-alpha.30/docs/official-first-016-alpha2.md)与 [compaction 决策](https://github.com/cloga/dsh-github-copilot/blob/v0.4.0-alpha.30/docs/copilot-compaction.md)提供源码级证据。
+精确官方评审目标是 [Core `0.1.6-alpha.2`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.6-alpha.2)。插件的 [alpha.2 比较](https://github.com/cloga/dsh-github-copilot/blob/v0.4.0-alpha.32/docs/official-first-016-alpha2.md)、[compaction 决策](https://github.com/cloga/dsh-github-copilot/blob/v0.4.0-alpha.32/docs/copilot-compaction.md)与[账户用量约定](https://github.com/cloga/dsh-github-copilot/blob/v0.4.0-alpha.32/docs/copilot-usage.md)提供源码级证据。
 
 | 领域 | 官方 alpha.2 支持 | 决策与迁移条件 |
 |---|---|---|
-| OAuth、常规 Copilot transport、严格 Remote factory、service tracing、串行初始化、原生 subagent descriptor | Alpha.30 已使用完整原语 | 继续使用官方原语。只有在受支持 Core 下限提升且打包 alpha.2 验收通过后，才移除 alpha.1 compatibility bridge。 |
+| OAuth、常规 Copilot transport、严格 Remote factory、service tracing、串行初始化、原生 subagent descriptor | Alpha.32 已使用完整原语 | 继续使用官方原语。只有在受支持 Core 下限提升且打包 alpha.2 验收通过后，才移除 alpha.1 compatibility bridge。 |
+| Managed HTTP 401 recovery | 原生 `Models.getAuth()` 与 canonical credentials 拥有 renewal 和 persistence；Core 不拥有 Copilot route proof、同 token 拒绝、cooldown 或 generation race | 仅保留有界 managed-route rejection policy。官方 provider transport 提供等价 provider-scoped rejected-token renewal 并通过 Desktop 验收后移除。 |
+| 账户额度与 composer 用量 | Public Remote codec 与原生 Context meter 是官方原语；Core 不暴露完整 Copilot provider quota、credits 或 Session attribution | 保留规范化账户快照与可选 Copilot Session UI。官方 API 提供等价账户语义和受支持 Session-scoped composer seam 后移除。 |
 | 账户拥有的模型发现 | 部分支持；官方 catalog 不能替代经过认证的 Copilot 账户刷新与 ownership proof | 保留 discovery、proof、cache、cooldown 与 route 处理，直到官方账户与 entitlement discovery 能保留受支持 endpoint、capability、route、Session 和 profile 状态。 |
 | 跨提供方搜索路由 | 部分支持；官方提供方选择没有提供完整的 initiating-Chat、显式 primary、单一最终 fallback、cancellation、account invalidation、disclosure 与 legacy migration 策略 | 保留仅提供方 companion 策略，直到官方 settings 与 runtime 提供等价行为及迁移测试。 |
 | Compaction 与恢复 | 部分支持；官方有界 compaction 是权威实现，但 Copilot 特定独立准入与 summary-purpose 默认值不是官方策略 | 复用官方恢复。只有官方行为执行等价 provider budget 并通过 oversized-history 验收后，才移除 companion 准入与默认值。 |
@@ -35,7 +37,7 @@ Alpha.28 保留插件拥有的独立 prompt 与 input/output 组合准入，同�
 
 ## 发布证据边界
 
-Copilot alpha.30 PR CI 在 [run 35509010326](https://github.com/cloga/dsh-github-copilot/actions/runs/35509010326) 中完成 alpha.1/alpha.2 与操作系统矩阵并全部成功。合并后的 [run 35509515713](https://github.com/cloga/dsh-github-copilot/actions/runs/35509515713) 在不可变 GitHub 发布与 npm 步骤之后报告失败。独立只读 verifier [run 35509895667，第 2 次尝试](https://github.com/cloga/dsh-github-copilot/actions/runs/35509895667/attempts/2)通过，并在 artifact `10604789589` 中记录发布验证以及 GitHub/npm 字节一致性。Desktop 使用已经发布的不可变 GitHub 字节；它既不重新发布，也不改写插件 Release。
+Copilot alpha.32 合并后的 [run 35513684342](https://github.com/cloga/dsh-github-copilot/actions/runs/35513684342) 中 compatibility、alpha.1/alpha.2 Windows/Ubuntu、verification 与 pack job 全部成功；只有 npm publication 在不可变 GitHub Release 已存在后失败。独立只读 verifier [run 35514292657，第 2 次尝试](https://github.com/cloga/dsh-github-copilot/actions/runs/35514292657/attempts/2)通过 published-byte verification。Desktop 使用已经发布的不可变 GitHub 字节；它既不重新发布，也不改写插件 Release。
 
 这些证据不证明实时 OAuth、模型推理、托管搜索、fallback 费用、本地安装或激活。这些操作需要单独授权，不能从 CI、包哈希或打包的登出验收推断。
 
