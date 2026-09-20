@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-09-20-desktop-plugin-slash-command.md
+2026-09-20-desktop-plugin-slash-command.md: 63060dcd7903f54f1621e097207dcd4eec83bd1c
+2026-09-20-desktop-plugin-slash-command.zh.md: 69deb23ed9909a5ce05f20c19212bae4acccba14

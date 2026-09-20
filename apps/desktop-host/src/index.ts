@@ -27,6 +27,7 @@ import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-commands'
+import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-api-gateway'
 import type { ConnectionFetchHandler } from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-client-modules'
@@ -374,7 +375,7 @@ export async function runDesktopHost(
   options: {
     allowLinkedPackages?: boolean
     pluginCommandRequest?: DesktopPluginCommandRequestHandler
-    pluginCommandSettled?: (commandId: string) => void
+    pluginCommandSettled?: (commandId: string, persisted: boolean) => void
   } = {},
 ): Promise<DesktopHostController> {
   const absoluteRuntime = resolve(runtimeDir)
@@ -410,9 +411,13 @@ export async function runDesktopHost(
       commands,
       effect: (register) => { ctx.effect(register) },
       onSessionEvent: (listener) => {
-        ctx.on('session/event', (_session, event) => { listener({ type: event.type, data: event.data }) })
+        ctx.on('session/event', (session, event) => {
+          if (event.type === 'command/done') {
+            listener({ type: event.type, data: event.data }, () => ctx.sessions.flush(session))
+          }
+        })
       },
-    }, options.pluginCommandRequest, (commandId) => { options.pluginCommandSettled?.(commandId) })
+    }, options.pluginCommandRequest, (commandId, persisted) => { options.pluginCommandSettled?.(commandId, persisted) })
   }
   const api = connection.createSharedFetchHandler('/api')
   const assets = assetHandler(ctx, absoluteRuntime)
@@ -552,11 +557,12 @@ async function main(): Promise<void> {
       send({ type: 'plugin-command-request', requestId, commandId, operation })
     })
   }
-  const settlePluginCommand = (commandId: string): void => {
+  const settlePluginCommand = (commandId: string, persisted: boolean): void => {
     const requestId = preparedPluginCommands.get(commandId)
     if (requestId === undefined) return
     preparedPluginCommands.delete(commandId)
-    send({ type: 'plugin-command-settled', requestId, commandId })
+    if (persisted) send({ type: 'plugin-command-settled', requestId, commandId })
+    else send({ type: 'plugin-command-cancel', requestId })
   }
   const controller = await runDesktopHost(runtimeDir, projectDir, writeResponse, {
     allowLinkedPackages: option !== undefined,

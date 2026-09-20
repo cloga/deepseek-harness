@@ -43,7 +43,7 @@ import { completeDesktopManagedUpdate } from './managed-update-completion.ts'
 import { MANAGED_UPDATE_RECOVERY_ARGUMENT } from './managed-update-recovery.ts'
 import { desktopErrorState } from './startup-error.ts'
 import { startupFailureDocument } from './startup-document.ts'
-import { confirmDesktopPluginMutation } from './plugin-mutation-confirmation.ts'
+import { confirmDesktopPluginMutation, DesktopPluginMutationCancelled } from './plugin-mutation-confirmation.ts'
 import { requestDesktopRendererImpact } from './renderer-impact.ts'
 
 const SCHEME = 'dsh-app'
@@ -242,6 +242,7 @@ async function main(): Promise<void> {
   let currentHostProcess: DesktopHostProcess | undefined
   let lastHostPluginCommandRequestId = 0
   let handleHostPluginCommand: (host: DesktopHostProcess, event: DesktopPluginCommandEvent) => void = () => {}
+  let cancelHostPluginCommands: (host: DesktopHostProcess, reason: Error) => void = () => {}
 
   const showEmergencyError = async (error: unknown): Promise<void> => {
     if (quitting || emergencyDocument) return
@@ -277,7 +278,14 @@ async function main(): Promise<void> {
     if (development === undefined) manager.assertProfileRuntime(activeProject)
     const hostInspectPort = developmentHostInspectPort(development !== undefined)
     const host = new DesktopHostProcess(resources.hostExecutable, development ?? resources.dsh, activeProject,
-      hostInspectPort, process.env, onFailure, (source, event) => { handleHostPluginCommand(source, event) })
+      hostInspectPort, process.env, (error) => {
+        cancelHostPluginCommands(host, error)
+        if (currentHostProcess === host) currentHostProcess = undefined
+        onFailure(error)
+      }, (source, event) => { handleHostPluginCommand(source, event) })
+    if (currentHostProcess !== undefined) {
+      cancelHostPluginCommands(currentHostProcess, new Error('desktop plugin command: Host replaced'))
+    }
     currentHostProcess = host
     lastHostPluginCommandRequestId = 0
     return {
@@ -516,8 +524,9 @@ async function main(): Promise<void> {
 
   const mutate = async (
     mutation: Parameters<DesktopProjectManager['mutate']>[0],
-    prepared?: () => Promise<void>,
+    prepared?: (signal: AbortSignal) => Promise<void>,
     externalSignal?: AbortSignal,
+    onInterruption?: () => void,
   ): ReturnType<DesktopProjectManager['mutate']> => {
     if (development !== undefined) {
       throw new Error('dsh desktop: plugin package changes require a packaged application')
@@ -540,7 +549,7 @@ async function main(): Promise<void> {
           beforeChange: async () => {
             // This hook runs under the transaction lock after staging; rollback must not ask again.
             if (!hasStartedInterruption()) {
-              await prepared?.()
+              await prepared?.(cancellation.signal)
               await confirmDesktopPluginMutation({
                 messages, signal: cancellation.signal, cancelled: hasQuitStarted,
                 readImpact: async (signal) => {
@@ -572,6 +581,7 @@ async function main(): Promise<void> {
                 },
               })
               interrupted = true
+              onInterruption?.()
             }
             await hooks.beforeChange()
           },
@@ -604,6 +614,11 @@ async function main(): Promise<void> {
     prepared: boolean
   }
   const hostPluginCommands = new Map<number, HostPluginCommandState>()
+  cancelHostPluginCommands = (host, reason): void => {
+    for (const state of hostPluginCommands.values()) {
+      if (state.host === host) state.cancellation.abort(reason)
+    }
+  }
   const hostMutation = (request: DesktopPluginCommandRequest): DesktopProjectMutation => {
     switch (request.operation.type) {
       case 'install': {
@@ -635,20 +650,20 @@ async function main(): Promise<void> {
     }
     throw new Error('desktop plugin command: unsupported operation')
   }
-  const waitForCommandSettlement = async (state: HostPluginCommandState): Promise<void> => {
+  const waitForCommandSettlement = async (state: HostPluginCommandState, signal: AbortSignal): Promise<void> => {
     let timer: ReturnType<typeof setTimeout> | undefined
     let rejectAbort: ((error: Error) => void) | undefined
     const onAbort = (): void => {
-      rejectAbort?.(state.cancellation.signal.reason instanceof Error
-        ? state.cancellation.signal.reason : new Error('desktop plugin command cancelled'))
+      rejectAbort?.(signal.reason instanceof Error
+        ? signal.reason : new Error('desktop plugin command cancelled'))
     }
     try {
       await Promise.race([
         state.settled.promise,
         new Promise<never>((_resolve, reject) => {
           rejectAbort = reject
-          state.cancellation.signal.addEventListener('abort', onAbort, { once: true })
-          if (state.cancellation.signal.aborted) onAbort()
+          signal.addEventListener('abort', onAbort, { once: true })
+          if (signal.aborted) onAbort()
         }),
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => { reject(new Error('desktop plugin command: command lifecycle settlement timed out')) }, 10_000)
@@ -657,52 +672,61 @@ async function main(): Promise<void> {
       ])
     } finally {
       if (timer !== undefined) clearTimeout(timer)
-      state.cancellation.signal.removeEventListener('abort', onAbort)
+      signal.removeEventListener('abort', onAbort)
     }
   }
   const executeHostPluginCommand = async (host: DesktopHostProcess, request: DesktopPluginCommandRequest): Promise<void> => {
-    if (development !== undefined) {
-      await host.pluginCommandResponse(request.requestId, {
-        kind: 'error', code: 'unavailable',
-      })
-      return
+    const state: HostPluginCommandState = {
+      host, commandId: request.commandId, cancellation: new AbortController(), settled: Promise.withResolvers(),
+      prepared: false,
     }
-    if (request.operation.type === 'list') {
-      if (pluginMutationBusy || recoveryPending !== undefined || updateConfirmation !== undefined || hasQuitStarted()) {
+    try {
+      if (development !== undefined) {
+        await host.pluginCommandResponse(request.requestId, { kind: 'error', code: 'unavailable' })
+        return
+      }
+      if (pluginMutationBusy || recoveryPending !== undefined || updateConfirmation !== undefined || hasQuitStarted()
+        || updateState.phase === 'installing' || updateState.phase === 'ready') {
         await host.pluginCommandResponse(request.requestId, { kind: 'error', code: 'busy' })
         return
       }
-      const plugins = manager.listPlugins().map(plugin => ({
-        name: plugin.name,
-        version: plugin.version,
-        enabled: plugin.enabled,
-      }))
-      await host.pluginCommandResponse(request.requestId, { kind: 'list', plugins })
-      return
-    }
-    const state: HostPluginCommandState = {
-      host, commandId: request.commandId, cancellation: new AbortController(), settled: Promise.withResolvers(), prepared: false,
-    }
-    hostPluginCommands.set(request.requestId, state)
-    try {
+      if (request.operation.type === 'list') {
+        const plugins = manager.listPlugins().map(plugin => ({
+          name: plugin.name,
+          version: plugin.version,
+          enabled: plugin.enabled,
+        }))
+        await host.pluginCommandResponse(request.requestId, { kind: 'list', plugins })
+        return
+      }
+      hostPluginCommands.set(request.requestId, state)
       const mutation = hostMutation(request)
-      await mutate(mutation, async () => {
-        if (state.cancellation.signal.aborted) {
-          throw state.cancellation.signal.reason instanceof Error
-            ? state.cancellation.signal.reason : new Error('desktop plugin command cancelled')
+      await mutate(mutation, async (signal) => {
+        const assertCurrent = (): void => {
+          signal.throwIfAborted()
+          if (hasQuitStarted() || currentHostProcess !== host || backend.host === undefined) {
+            throw new Error('desktop plugin command: requesting Host is no longer active')
+          }
         }
+        assertCurrent()
         state.prepared = true
         await host.pluginCommandResponse(request.requestId, { kind: 'prepared' })
-        await waitForCommandSettlement(state)
+        await waitForCommandSettlement(state, signal)
+        assertCurrent()
+      }, state.cancellation.signal, () => {
+        // Keep cancellation routable throughout consent, but not across the intentional restart.
         if (hostPluginCommands.get(request.requestId) === state) hostPluginCommands.delete(request.requestId)
-      }, state.cancellation.signal)
+      })
     } catch (error: unknown) {
-      if (!state.prepared && !state.cancellation.signal.aborted && currentHostProcess === host) {
+      // mutate alone owns navigation after actual interruption. Preparation and declined
+      // consent must leave the healthy application document (including drafts) intact.
+      if (!state.cancellation.signal.aborted && !hasQuitStarted() && !(error instanceof DesktopPluginMutationCancelled)) {
+        console.error('desktop plugin command failed', error)
+      }
+      if (!state.prepared && !state.cancellation.signal.aborted && currentHostProcess === host && !hasQuitStarted()) {
         await host.pluginCommandResponse(request.requestId, {
           kind: 'error', code: 'failed',
-        }).catch(() => undefined)
-      } else if (state.prepared && !state.cancellation.signal.aborted) {
-        await showStartupError(error).catch((failure: unknown) => { console.error(failure) })
+        }).catch((failure: unknown) => { console.error('desktop plugin command response failed', failure) })
       }
     } finally {
       if (hostPluginCommands.get(request.requestId) === state) hostPluginCommands.delete(request.requestId)
@@ -714,6 +738,7 @@ async function main(): Promise<void> {
       case 'plugin-command-request':
         if (event.requestId <= lastHostPluginCommandRequestId || hostPluginCommands.has(event.requestId)) {
           void host.pluginCommandResponse(event.requestId, { kind: 'error', code: 'stale' })
+            .catch((error: unknown) => { console.error('desktop plugin command response failed', error) })
           return
         }
         lastHostPluginCommandRequestId = event.requestId

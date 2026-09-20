@@ -6,6 +6,7 @@ import {
   registerDesktopPluginCommand,
   registerDesktopPluginCommandRuntime,
   type DesktopPluginCommandDefinition,
+  type DesktopPluginCommandRuntime,
 } from '../src/desktop-plugin-command.ts'
 
 describe('parseDesktopPluginCommand', () => {
@@ -166,7 +167,7 @@ describe('desktop plugin command definition', () => {
 
   it('binds command registration to the matching command/done settlement event', async () => {
     let definition: DesktopPluginCommandDefinition | undefined
-    let listener: ((event: { type: string; data: Record<string, unknown> }) => void) | undefined
+    let listener: Parameters<DesktopPluginCommandRuntime['onSessionEvent']>[0] | undefined
     const settled = vi.fn()
     const signal = new AbortController().signal
     const request = vi.fn(async () => ({ type: 'prepared' as const }))
@@ -180,9 +181,48 @@ describe('desktop plugin command definition', () => {
       .resolves.toMatchObject({ kind: 'success' })
     expect(request).toHaveBeenCalledWith({ type: 'disable', name: 'example-plugin' }, 'command-1', signal)
     expect(settled).not.toHaveBeenCalled()
-    listener?.({ type: 'command/done', data: { commandId: 'command-1' } })
-    expect(settled).toHaveBeenCalledWith('command-1')
-    listener?.({ type: 'message/create', data: {} })
+    let resolvePersisted!: (value: boolean) => void
+    const persisted = new Promise<boolean>((resolve) => { resolvePersisted = resolve })
+    const flush = vi.fn(() => persisted)
+    listener?.({ type: 'command/done', data: { commandId: 'unrelated', kind: 'success' } }, flush)
+    expect(flush).not.toHaveBeenCalled()
+    listener?.({ type: 'command/done', data: { commandId: 'command-1', kind: 'success' } }, flush)
+    await Promise.resolve()
+    expect(flush).toHaveBeenCalledOnce()
+    expect(settled).not.toHaveBeenCalled()
+    resolvePersisted(true)
+    await vi.waitFor(() => { expect(settled).toHaveBeenCalledWith('command-1', true) })
+    listener?.({ type: 'message/create', data: {} }, flush)
     expect(settled).toHaveBeenCalledTimes(1)
   })
+
+  it.each(['command-error', 'flush-error', 'no-persistence', 'disposed'] as const)(
+    'never acknowledges prepared success when %s', async (mode) => {
+      let definition: DesktopPluginCommandDefinition | undefined
+      let listener: Parameters<DesktopPluginCommandRuntime['onSessionEvent']>[0] | undefined
+      let dispose: (() => void) | undefined
+      const settled = vi.fn()
+      registerDesktopPluginCommandRuntime({
+        commands: { register(value) { definition = value; return vi.fn() } },
+        effect(register) { dispose = register() },
+        onSessionEvent(value) { listener = value },
+      }, async () => ({ type: 'prepared' }), settled)
+      await definition?.handler({ commandId: 'command-1', rawInput: 'disable example-plugin', signal: new AbortController().signal })
+      const flush = vi.fn(async () => {
+        if (mode === 'flush-error') throw new Error('private-storage-error')
+        return mode !== 'no-persistence'
+      })
+      listener?.({ type: 'command/done', data: { commandId: 'command-1', kind: mode === 'command-error' ? 'error' : 'success' } }, flush)
+      if (mode === 'disposed') dispose?.()
+      if (mode !== 'disposed') await vi.waitFor(() => { expect(settled).toHaveBeenCalledWith('command-1', false) })
+      else {
+        await Promise.resolve()
+        await Promise.resolve()
+        await Promise.resolve()
+        expect(settled).not.toHaveBeenCalled()
+      }
+      expect(settled).not.toHaveBeenCalledWith('command-1', true)
+      if (mode === 'command-error') expect(flush).not.toHaveBeenCalled()
+    },
+  )
 })

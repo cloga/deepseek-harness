@@ -619,6 +619,9 @@ importers:
       '@deepseek-ai/dsh-launch-environment':
         specifier: workspace:^
         version: link:../../packages/util/launch-environment
+      '@deepseek-ai/dsh-session':
+        specifier: workspace:^
+        version: link:../../packages/core/session
       '@deepseek-ai/dsh-web-frontend':
         specifier: workspace:^
         version: link:../web

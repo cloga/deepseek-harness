@@ -94,7 +94,7 @@ const harness = await vi.hoisted(async () => {
       readonly profile: string,
       _inspectPort?: number,
       _environment?: NodeJS.ProcessEnv,
-      _onFailure?: (error: Error) => void,
+      readonly onFailure?: (error: Error) => void,
       readonly onPluginCommand?: (host: FakeHost, event: { type: string; [key: string]: unknown }) => void,
     ) { hosts.push(this) }
     emitPluginCommand(event: { type: string; [key: string]: unknown }) { this.onPluginCommand?.(this, event) }
@@ -142,6 +142,7 @@ const harness = await vi.hoisted(async () => {
     applyRelease: vi.fn(() => { preparing.resolve(); return prepared.promise }),
     completeUpdate: vi.fn(async (..._args: unknown[]): Promise<DesktopManagedUpdateCompletion> => ({ status: 'none' })),
     assertProfileRuntime: vi.fn(),
+    listPlugins: vi.fn(() => []),
     canRecoverProfile: vi.fn(() => true),
     get preparing() { return preparing }, get prepared() { return prepared },
     get hostStarted() { return hostStarted }, get navigated() { return navigated },
@@ -195,7 +196,7 @@ vi.mock('../src/project-manager.ts', () => ({
     readonly paths = { profile: 'desktop-test-profile' }
     readonly applyRelease = harness.applyRelease
     readonly assertProfileRuntime = harness.assertProfileRuntime
-    readonly listPlugins = vi.fn(() => [])
+    readonly listPlugins = harness.listPlugins
     canRecoverProfile = harness.canRecoverProfile
     constructor(_paths: unknown, runtime: unknown) { harness.managerRuntimes.push(runtime) }
     async reconcileProvisioning() {}
@@ -304,6 +305,7 @@ beforeEach(() => {
   harness.runMutationHealthCheck = false
   harness.completeUpdate.mockReset().mockResolvedValue({ status: 'none' })
   harness.dialog.showMessageBox.mockReset()
+  harness.listPlugins.mockReset().mockReturnValue([])
   harness.managedCheck.mockReset().mockResolvedValue({ phase: 'available', mode: 'github-release-managed', version: '1.2.3' })
   harness.managedInstall.mockReset().mockResolvedValue({ phase: 'installing', mode: 'github-release-managed', version: '1.2.3' })
   vi.stubEnv('DSH_DESKTOP_NODE_BINARY', 'test-node')
@@ -582,9 +584,50 @@ describe('desktop plugin interruption boundary', () => {
     expect(harness.mutations).toEqual([])
   })
 
-  it('settles the slash-command lifecycle before native confirmation can stop the Host', async () => {
+  it('settles a failed inventory read with a safe error and leaves the healthy app intact', async () => {
     await startApplication()
     const host = harness.hosts[0]!
+    const before = [...harness.windows[0]!.urls]
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    harness.listPlugins.mockImplementationOnce(() => { throw new Error('private receipt path and token') })
+    host.emitPluginCommand({ type: 'plugin-command-request', requestId: 1, commandId: 'command-list', operation: { type: 'list' } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.pluginCommandResponse).toHaveBeenCalledExactlyOnceWith(1, { kind: 'error', code: 'failed' })
+    expect(harness.windows[0]!.urls).toEqual(before)
+    expect(host.stop).not.toHaveBeenCalled()
+  })
+
+  it('sends a safe failure if the inventory reply cannot be delivered', async () => {
+    await startApplication()
+    const host = harness.hosts[0]!
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    host.pluginCommandResponse.mockRejectedValueOnce(new Error('IPC send failed'))
+    host.emitPluginCommand({ type: 'plugin-command-request', requestId: 1, commandId: 'command-list', operation: { type: 'list' } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.pluginCommandResponse.mock.calls).toEqual([
+      [1, { kind: 'list', plugins: [] }], [1, { kind: 'error', code: 'failed' }],
+    ])
+  })
+
+  it('contains unavailable reply channels for both normal and stale requests', async () => {
+    await startApplication()
+    const host = harness.hosts[0]!
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
+    host.pluginCommandResponse.mockRejectedValue(new Error('IPC disconnected'))
+    const request = { type: 'plugin-command-request', requestId: 1, commandId: 'command-list', operation: { type: 'list' } }
+    host.emitPluginCommand(request)
+    await vi.advanceTimersByTimeAsync(0)
+    host.emitPluginCommand(request)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.pluginCommandResponse).toHaveBeenCalledTimes(3)
+    expect(diagnostic).toHaveBeenCalledWith('desktop plugin command response failed', expect.any(Error))
+    expect(host.stop).not.toHaveBeenCalled()
+  })
+
+  it('settles the slash-command lifecycle before consent and preserves the app when consent is declined', async () => {
+    await startApplication()
+    const host = harness.hosts[0]!
+    const before = [...harness.windows[0]!.urls]
     const staged = Promise.withResolvers<undefined>()
     harness.setBeforeMutation(() => staged.promise)
     harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
@@ -602,7 +645,10 @@ describe('desktop plugin interruption boundary', () => {
     host.emitPluginCommand({ type: 'plugin-command-settled', requestId: 1, commandId: 'command-disable' })
     await vi.waitFor(() => { expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce() })
     expect(harness.mutations).toEqual([{ type: 'plugin-toggle', name: 'example-plugin', enabled: false }])
+    await vi.advanceTimersByTimeAsync(0)
     expect(host.stop).not.toHaveBeenCalled()
+    expect(harness.windows[0]!.urls).toEqual(before)
+    expect(invoke(DESKTOP_IPC.backendStatus, shell)).toEqual({ phase: 'ready' })
   })
 
   it.each([
@@ -699,9 +745,11 @@ describe('desktop plugin interruption boundary', () => {
     expect(host.stop).not.toHaveBeenCalled()
   })
 
-  it('fails closed when command settlement does not arrive before the bound', async () => {
+  it('fails closed without replacing the app when command settlement does not arrive before the bound', async () => {
     await startApplication()
     const host = harness.hosts[0]!
+    const before = [...harness.windows[0]!.urls]
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     host.emitPluginCommand({
       type: 'plugin-command-request', requestId: 1, commandId: 'command-timeout',
       operation: { type: 'disable', name: 'example-plugin' },
@@ -710,6 +758,175 @@ describe('desktop plugin interruption boundary', () => {
     await vi.advanceTimersByTimeAsync(10_000)
     expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
     expect(host.stop).not.toHaveBeenCalled()
+    expect(harness.windows[0]!.urls).toEqual(before)
+    expect(invoke(DESKTOP_IPC.backendStatus, shell)).toEqual({ phase: 'ready' })
+  })
+
+  it.each(['host', 'renderer'])('keeps the app intact when prepared command %s impact is unavailable', async (source) => {
+    await startApplication()
+    const host = harness.hosts[0]!
+    const before = [...harness.windows[0]!.urls]
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    if (source === 'host') harness.setHostImpacts([new Error('impact unavailable')])
+    else harness.setRendererImpacts([null])
+    host.emitPluginCommand({
+      type: 'plugin-command-request', requestId: 1, commandId: 'command-impact',
+      operation: { type: 'disable', name: 'example-plugin' },
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    host.emitPluginCommand({ type: 'plugin-command-settled', requestId: 1, commandId: 'command-impact' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(host.stop).not.toHaveBeenCalled()
+    expect(harness.windows[0]!.urls).toEqual(before)
+    expect(invoke(DESKTOP_IPC.backendStatus, shell)).toEqual({ phase: 'ready' })
+  })
+
+  it('reports busy for both inventory and mutation requests while another command is staging', async () => {
+    await startApplication()
+    const host = harness.hosts[0]!
+    const staged = Promise.withResolvers<undefined>()
+    harness.setBeforeMutation(() => staged.promise)
+    host.emitPluginCommand({
+      type: 'plugin-command-request', requestId: 1, commandId: 'command-first',
+      operation: { type: 'disable', name: 'example-plugin' },
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    host.emitPluginCommand({ type: 'plugin-command-request', requestId: 2, commandId: 'command-list', operation: { type: 'list' } })
+    host.emitPluginCommand({ type: 'plugin-command-request', requestId: 3, commandId: 'command-second', operation: { type: 'disable-all' } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.pluginCommandResponse).toHaveBeenCalledWith(2, { kind: 'error', code: 'busy' })
+    expect(host.pluginCommandResponse).toHaveBeenCalledWith(3, { kind: 'error', code: 'busy' })
+    expect(harness.mutations).toHaveLength(1)
+    host.emitPluginCommand({ type: 'plugin-command-cancel', requestId: 1 })
+    staged.resolve(undefined)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(host.stop).not.toHaveBeenCalled()
+  })
+
+  it('aborts the prepared settlement wait immediately on quit without waiting for its deadline', async () => {
+    await startApplication()
+    const host = harness.hosts[0]!
+    host.emitPluginCommand({
+      type: 'plugin-command-request', requestId: 1, commandId: 'command-quit',
+      operation: { type: 'disable', name: 'example-plugin' },
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.pluginCommandResponse).toHaveBeenCalledWith(1, { kind: 'prepared' })
+    harness.app.quit()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.stop).toHaveBeenCalledOnce()
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    host.exited.resolve()
+    await harness.quitCompleted.promise
+  })
+
+  it('does not send prepared after quit during command staging', async () => {
+    await startApplication()
+    const host = harness.hosts[0]!
+    const staged = Promise.withResolvers<undefined>()
+    harness.setBeforeMutation(() => staged.promise)
+    host.emitPluginCommand({
+      type: 'plugin-command-request', requestId: 1, commandId: 'command-quit-staging',
+      operation: { type: 'disable', name: 'example-plugin' },
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    harness.app.quit()
+    staged.resolve(undefined)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.pluginCommandResponse).not.toHaveBeenCalled()
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(host.stop).toHaveBeenCalledOnce()
+    host.exited.resolve()
+    await harness.quitCompleted.promise
+  })
+
+  it('keeps command cancellation routable while native consent is pending', async () => {
+    await startApplication()
+    const host = harness.hosts[0]!
+    const before = [...harness.windows[0]!.urls]
+    harness.dialog.showMessageBox.mockImplementation((_window: unknown, options: { signal: AbortSignal }) => new Promise((resolve) => {
+      options.signal.addEventListener('abort', () => { resolve({ response: 1 }) }, { once: true })
+    }))
+    host.emitPluginCommand({
+      type: 'plugin-command-request', requestId: 1, commandId: 'command-cancel-consent',
+      operation: { type: 'disable', name: 'example-plugin' },
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    host.emitPluginCommand({ type: 'plugin-command-settled', requestId: 1, commandId: 'command-cancel-consent' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
+    host.emitPluginCommand({ type: 'plugin-command-cancel', requestId: 1 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.stop).not.toHaveBeenCalled()
+    expect(harness.windows[0]!.urls).toEqual(before)
+    expect(invoke(DESKTOP_IPC.backendStatus, shell)).toEqual({ phase: 'ready' })
+    host.emitPluginCommand({ type: 'plugin-command-request', requestId: 2, commandId: 'command-list', operation: { type: 'list' } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.pluginCommandResponse).toHaveBeenCalledWith(2, { kind: 'list', plugins: [] })
+  })
+
+  it.each(['staging', 'settlement'])('cancels a failed Host during %s and rejects its late events after recovery', async (phase) => {
+    await startApplication()
+    const host = harness.hosts[0]!
+    const staged = Promise.withResolvers<undefined>()
+    if (phase === 'staging') harness.setBeforeMutation(() => staged.promise)
+    host.emitPluginCommand({
+      type: 'plugin-command-request', requestId: 1, commandId: 'command-old',
+      operation: { type: 'disable', name: 'example-plugin' },
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    if (phase === 'settlement') expect(host.pluginCommandResponse).toHaveBeenCalledWith(1, { kind: 'prepared' })
+    host.onFailure?.(new Error('Host disconnected'))
+    await vi.advanceTimersByTimeAsync(0)
+    host.exited.resolve()
+    if (phase === 'staging') {
+      await expect(Promise.resolve(invoke(DESKTOP_IPC.backendRetry, shell))).rejects.toThrow('in progress')
+      staged.resolve(undefined)
+    }
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    if (phase === 'staging') expect(host.pluginCommandResponse).not.toHaveBeenCalled()
+    const next = harness.nextHostStart()
+    const recovery = Promise.resolve(invoke(DESKTOP_IPC.backendRetry, shell))
+    await next
+    const replacement = harness.hosts[1]!
+    replacement.ready.resolve()
+    await recovery
+    const before = [...harness.windows[0]!.urls]
+    host.emitPluginCommand({ type: 'plugin-command-settled', requestId: 1, commandId: 'command-old' })
+    host.emitPluginCommand({ type: 'plugin-command-cancel', requestId: 1 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(replacement.stop).not.toHaveBeenCalled()
+    expect(harness.windows[0]!.urls).toEqual(before)
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    replacement.emitPluginCommand({ type: 'plugin-command-request', requestId: 1, commandId: 'command-new', operation: { type: 'list' } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(replacement.pluginCommandResponse).toHaveBeenCalledWith(1, { kind: 'list', plugins: [] })
+  })
+
+  it('does not cancel an accepted command transaction when its intentional Host stop reports exit', async () => {
+    await startApplication()
+    const host = harness.hosts[0]!
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 0 })
+    host.emitPluginCommand({
+      type: 'plugin-command-request', requestId: 1, commandId: 'command-accepted',
+      operation: { type: 'disable', name: 'example-plugin' },
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    host.emitPluginCommand({ type: 'plugin-command-settled', requestId: 1, commandId: 'command-accepted' })
+    await host.stopping.promise
+    host.onFailure?.(new Error('Host stopped'))
+    const next = harness.nextHostStart()
+    host.exited.resolve()
+    await next
+    const replacement = harness.hosts[1]!
+    replacement.ready.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(invoke(DESKTOP_IPC.backendStatus, shell)).toEqual({ phase: 'ready' })
+    expect(replacement.stop).not.toHaveBeenCalled()
+    expect(harness.windows[0]!.urls.at(-1)).toBe('dsh-app://app/index.html')
   })
 
   it('ignores plugin events from a non-current Host instance', async () => {

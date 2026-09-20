@@ -222,23 +222,52 @@ export function createDesktopPluginCommandDefinition(request: DesktopPluginComma
 export interface DesktopPluginCommandRuntime {
   readonly commands: DesktopPluginCommandRegistry
   effect(register: () => () => void): void
-  onSessionEvent(listener: (event: { readonly type: string; readonly data: Record<string, unknown> }) => void): void
+  onSessionEvent(listener: (
+    event: { readonly type: string; readonly data: Record<string, unknown> },
+    flush: () => Promise<boolean>,
+  ) => void): void
 }
 
 /**
  * Register the built-in command and bind its durable lifecycle acknowledgement.
  * @param runtime - Active Desktop Host command registry and Session event adapter.
  * @param request - Exact-parent IPC request callback.
- * @param settled - Acknowledge the matching `command/done` event.
+ * @param settled - Acknowledge only a successfully persisted completion, or cancel failed settlement.
  */
 export function registerDesktopPluginCommandRuntime(
   runtime: DesktopPluginCommandRuntime,
   request: DesktopPluginCommandRequest,
-  settled: (commandId: string) => void,
+  settled: (commandId: string, persisted: boolean) => void,
 ): void {
-  runtime.effect(() => registerDesktopPluginCommand(runtime.commands, request))
-  runtime.onSessionEvent((event) => {
-    if (event.type === 'command/done' && typeof event.data.commandId === 'string') settled(event.data.commandId)
+  const prepared = new Set<string>()
+  let disposed = false
+  runtime.effect(() => {
+    const unregister = registerDesktopPluginCommand(runtime.commands, async (operation, commandId, signal) => {
+      const response = await request(operation, commandId, signal)
+      if (!disposed && response.type === 'prepared') prepared.add(commandId)
+      return response
+    })
+    return () => {
+      disposed = true
+      prepared.clear()
+      unregister()
+    }
+  })
+  runtime.onSessionEvent((event, flush) => {
+    if (event.type !== 'command/done' || typeof event.data.commandId !== 'string') return
+    const commandId = event.data.commandId
+    if (!prepared.delete(commandId)) return
+    if (event.data.kind !== 'success') {
+      settled(commandId, false)
+      return
+    }
+    // Session observers run inside append; leave that stack before awaiting its persistence checkpoint.
+    void Promise.resolve().then(flush).then((persisted) => {
+      if (!disposed) settled(commandId, persisted)
+    }).catch((_error: unknown) => {
+      // Storage failure cancels preparation; diagnostics must not enter the command transcript.
+      if (!disposed) settled(commandId, false)
+    })
   })
 }
 
