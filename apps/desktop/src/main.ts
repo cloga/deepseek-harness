@@ -404,7 +404,7 @@ async function main(): Promise<void> {
     }
     publishBackend(backendState())
   }
-  const checkManagedCompletion = async (): Promise<void> => {
+  const checkManagedCompletion = async (manualRecovery = false): Promise<void> => {
     if (managedUpdate === undefined || managedCompletionChecked) return
     if (resources.provisioning === undefined) {
       throw new Error('desktop managed update: packaged plugin provisioning plan is missing')
@@ -418,6 +418,11 @@ async function main(): Promise<void> {
       join(resources.dsh, 'desktop-runtime.json'),
       resources.provisioning,
       manager.paths.profile,
+      undefined,
+      manualRecovery ? {
+        version: app.getVersion(),
+        capabilityPath: join(process.resourcesPath, 'managed-update', 'capability.json'),
+      } : undefined,
     )
     if (completion.status === 'recovery-required') {
       throw new Error(`${completion.message}\n\nRecovery: ${completion.command}`)
@@ -966,7 +971,7 @@ async function main(): Promise<void> {
       await runRecovery(async () => {
         // Completion needs the existing ready Host's inventory; never restart it for a recheck.
         if (backend.state.phase !== 'ready') throw new Error(messages.startupReinstallAdvice)
-        await checkManagedCompletion()
+        await checkManagedCompletion(true)
         pageError = undefined
         emergencyDocument = false
         await navigateMain(applicationUrl)

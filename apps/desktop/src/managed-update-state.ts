@@ -42,6 +42,15 @@ function parseCompletedSequence(value: unknown): number {
 }
 
 /**
+ * Read the strict durable receipt without applying the packaged discovery floor.
+ * @param path - Desktop-owned completion receipt.
+ * @returns Verified sequence, or zero when absent; malformed receipts reject.
+ */
+export async function readDesktopManagedCompletedSequence(path: string): Promise<number> {
+  return parseCompletedSequence(await readJsonIfPresent(path))
+}
+
+/**
  * Select managed mode only when a packaged Windows build carries its immutable capability.
  * Native app-update configuration and managed mode are mutually exclusive.
  */
@@ -62,7 +71,7 @@ export async function loadDesktopManagedUpdateConfiguration(
     throw new Error('desktop managed update: packaged capability requires the updater helper')
   }
   const stateRoot = join(userDataPath, 'managed-update')
-  const completedSequence = parseCompletedSequence(await readJsonIfPresent(join(stateRoot, 'completion.json')))
+  const completedSequence = await readDesktopManagedCompletedSequence(join(stateRoot, 'completion.json'))
   return {
     capability,
     installedSequence: Math.max(capability.currentSequence, completedSequence),

@@ -2,9 +2,11 @@ import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, expect, it, vi } from 'vitest'
 import { completeDesktopManagedUpdate } from '../src/managed-update-completion.ts'
-import { parseDesktopManagedUpdateHandoff } from '../src/managed-update-protocol.ts'
+import { managedUpdateJsonSha256, parseDesktopManagedUpdateHandoff } from '../src/managed-update-protocol.ts'
+import type { DesktopManualInstallRecovery } from '../src/manual-install-evidence.ts'
 import { loadDesktopManagedUpdateConfiguration } from '../src/managed-update-state.ts'
 import { createPluginProfile } from '../src/project-manager.ts'
 import {
@@ -28,7 +30,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true })))
 })
 
-async function completionFixture(sequence = 2) {
+async function completionFixture(sequence = 2, reconcile = completeDesktopManagedUpdate) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-managed-reconciliation-'))
   roots.push(root)
   const operationsRoot = join(root, 'operations')
@@ -58,8 +60,8 @@ async function completionFixture(sequence = 2) {
     schemaVersion: 1, capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
     planSha256, composition: 'active', plugins: [], removed: [], rolledBack: false, verified: true,
   }))
-  const complete = (completedSequence = 0) => completeDesktopManagedUpdate(
-    operationsRoot, completionPath, capability, completedSequence, executable, runtime, planPath, profile, () => false,
+  const complete = (completedSequence = 0, recovery?: DesktopManualInstallRecovery) => reconcile(
+    operationsRoot, completionPath, capability, completedSequence, executable, runtime, planPath, profile, () => false, recovery,
   )
   const operation = async (
     character: string,
@@ -125,6 +127,184 @@ function historicalCapability(
   }
   return value
 }
+
+async function manualRecoveryFixture(reconcile = completeDesktopManagedUpdate) {
+  const fixture = await completionFixture(19, reconcile)
+  const capabilityPath = join(fixture.root, 'capability.json')
+  await writeFile(capabilityPath, JSON.stringify(fixture.capability))
+  const old = managedManifest({ sequence: 11 })
+  const completed = await fixture.operation('a', 'success', old)
+  const failed = await fixture.operation('b', 'blocked', managedManifest({ sequence: 18 }))
+  await patchRecord(join(completed, 'handoff.json'), {
+    capability: historicalCapability(managedCapability({ currentSequence: 11 }), true, 3),
+  })
+  await patchRecord(join(failed, 'handoff.json'), {
+    capability: historicalCapability(managedCapability({ currentSequence: 18 }), true, 3),
+  })
+  await patchRecord(join(failed, 'stage', 'helper-result.json'), {
+    reason: 'installer-exit--805306369', installerExitCode: -805306369,
+  })
+  await writeFile(fixture.completionPath, JSON.stringify({
+    schemaVersion: 1, status: 'complete', sequence: 11, manifestSha256: old.manifestSha256,
+  }))
+  const payload = {
+    schemaVersion: 1, action: 'desktop-fork-release', status: 'complete',
+    source: { ...fixture.manifest.source, version: fixture.manifest.version },
+    identity: { sequence: 19 },
+    artifacts: {
+      ...fixture.manifest.installedEvidence,
+      capabilitySha256: sha256(await readFile(capabilityPath)),
+      provisioning: { sha256: sha256(await readFile(fixture.planPath)), planSha256: fixture.capability.provisioning.planSha256 },
+    },
+  }
+  const receipt = { ...payload, receiptSha256: managedUpdateJsonSha256(payload) }
+  const body = JSON.stringify(receipt)
+  const receiptResponse = { body }
+  const manifest = managedManifest({
+    sequence: 19, installedEvidence: fixture.manifest.installedEvidence,
+    buildReceipt: { file: 'build-receipt.json', sha256: sha256(Buffer.from(body)), receiptSha256: receipt.receiptSha256 },
+  })
+  const releases = [manifest]
+  const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+    const url = input instanceof URL ? input.href : typeof input === 'string' ? input : input.url
+    if (url.includes('/releases?')) return new Response(JSON.stringify(releases.map(release => ({
+      tag_name: release.source.tag, target_commitish: release.source.commit, immutable: true, draft: false,
+      assets: [{ name: 'release.json', state: 'uploaded', digest: `sha256:${sha256(Buffer.from(JSON.stringify(release)))}` }],
+    }))))
+    if (url.includes('/git/ref/tags/')) return new Response(JSON.stringify({ object: { type: 'commit', sha: MANAGED_COMMIT } }))
+    if (url.endsWith('/build-receipt.json')) return new Response(receiptResponse.body)
+    const release = releases.find(item => url.endsWith(`/${item.source.tag}/release.json`))
+    if (release !== undefined) return new Response(JSON.stringify(release))
+    throw new Error(`unexpected recovery request ${url}`)
+  })
+  const recovery = { version: manifest.version, capabilityPath, operations: { fetch } }
+  const history = async () => {
+    const paths = await readdir(fixture.operationsRoot, { recursive: true, withFileTypes: true })
+    return Promise.all(paths.filter(path => path.isFile()).map(async path => [
+      path.name, (await readFile(join(path.parentPath, path.name))).toString('base64'),
+    ]))
+  }
+  return { ...fixture, manifest, receipt, receiptResponse, releases, fetch, recovery, history, failed }
+}
+
+it('recovers completed sequence11 and failed sequence18 from independent installed sequence19 evidence', async () => {
+  const fixture = await manualRecoveryFixture()
+  const history = await fixture.history()
+  const blocked = await fixture.complete(11)
+  expect(blocked).toMatchObject({
+    status: 'recovery-required', message: 'installer-exit--805306369',
+  })
+  expect(fixture.fetch).not.toHaveBeenCalled()
+  const recovered = await fixture.complete(11, fixture.recovery)
+  expect(recovered).toMatchObject({ status: 'complete', sequence: 19 })
+  await expect(`${JSON.stringify({
+    startup: blocked.status === 'recovery-required' ? { status: blocked.status, message: blocked.message } : blocked,
+    explicitRecovery: recovered,
+  }, undefined, 2)}\n`).toMatchFileSnapshot(join(import.meta.dirname, 'expected', 'manual-install-recovery.json'))
+  expect(await fixture.history()).toEqual(history)
+  expect(JSON.parse(await readFile(fixture.completionPath, 'utf8'))).toEqual({
+    schemaVersion: 1, status: 'complete', sequence: 19, manifestSha256: fixture.manifest.manifestSha256,
+  })
+  fixture.fetch.mockClear()
+  await expect(fixture.complete(19, fixture.recovery)).resolves.toEqual({ status: 'none' })
+  expect(fixture.fetch).not.toHaveBeenCalled()
+})
+
+it.each([
+  'executable', 'runtime', 'plan', 'capability', 'inventory', 'newer-failure', 'conflicting-failure',
+  'malformed-operation', 'offline', 'mutable', 'tag', 'manifest-digest', 'receipt-digest', 'missing-release', 'wrong-version',
+  'concurrent-failure', 'concurrent-completion',
+] as const)('preserves retained bytes and completion when manual recovery rejects %s', async (damage) => {
+  const fixture = await manualRecoveryFixture()
+  if (damage === 'executable') await writeFile(fixture.executable, 'wrong executable')
+  if (damage === 'runtime') await writeFile(fixture.runtime, 'wrong runtime')
+  if (damage === 'plan') await writeFile(fixture.planPath, '{}')
+  if (damage === 'capability') await writeFile(fixture.recovery.capabilityPath, '{}')
+  if (damage === 'inventory') await rm(join(fixture.profile, 'desktop-plugin-provisioning-state.json'))
+  if (damage === 'newer-failure') await fixture.operation('c', 'blocked', managedManifest({ sequence: 20 }))
+  if (damage === 'conflicting-failure') await fixture.operation('c', 'blocked', managedManifest({ sequence: 19 }))
+  if (damage === 'malformed-operation') await patchRecord(join(fixture.failed, 'handoff.json'), { unknown: true })
+  if (damage === 'wrong-version') fixture.recovery.version = '9.9.9'
+  const normal = fixture.fetch.getMockImplementation()!
+  fixture.fetch.mockImplementation(async (input, init) => {
+    const url = input instanceof URL ? input.href : typeof input === 'string' ? input : input.url
+    if (damage === 'offline') throw new TypeError('fetch failed')
+    if (url.includes('/releases?') && damage === 'missing-release') return new Response('[]')
+    if (url.includes('/releases?') && damage === 'mutable') {
+      const response = await normal(input, init)
+      return new Response((await response.text()).replace('"immutable":true', '"immutable":false'))
+    }
+    if (url.includes('/git/ref/tags/') && damage === 'tag') {
+      return new Response(JSON.stringify({ object: { type: 'commit', sha: 'f'.repeat(40) } }))
+    }
+    if (url.endsWith('/release.json') && damage === 'manifest-digest') return new Response('{}')
+    if (url.endsWith('/build-receipt.json')) {
+      if (damage === 'receipt-digest') return new Response('{}')
+      if (damage === 'concurrent-failure') await fixture.operation('c', 'blocked', managedManifest({ sequence: 20 }))
+      if (damage === 'concurrent-completion') await writeFile(fixture.completionPath, JSON.stringify({
+        schemaVersion: 1, status: 'complete', sequence: 20, manifestSha256: 'f'.repeat(64),
+      }))
+    }
+    return normal(input, init)
+  })
+  const before = await readFile(fixture.completionPath, 'utf8')
+  const history = await fixture.history()
+  await expect(fixture.complete(11, fixture.recovery)).resolves.toMatchObject({ status: 'recovery-required' })
+  if (damage === 'concurrent-completion') {
+    expect(JSON.parse(await readFile(fixture.completionPath, 'utf8'))).toHaveProperty('sequence', 20)
+  } else expect(await readFile(fixture.completionPath, 'utf8')).toBe(before)
+  expect(await fixture.history()).toEqual(expect.arrayContaining(history))
+})
+
+it('recovers the installed release when a later immutable release is also published', async () => {
+  const fixture = await manualRecoveryFixture()
+  fixture.releases.unshift(managedManifest({
+    sequence: 20, version: '1.2.4',
+    source: { ...fixture.manifest.source, tag: 'dsh-desktop-v1.2.4' },
+    installer: { ...fixture.manifest.installer, file: 'cloga-deepseek-harness-1.2.4-win-x64.exe' },
+  }))
+  await expect(fixture.complete(11, fixture.recovery)).resolves.toMatchObject({ status: 'complete', sequence: 19 })
+})
+
+it('verifies manual-install evidence through the production bundler without starting Desktop', { timeout: 120_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-manual-recovery-bundle-'))
+  roots.push(root)
+  const { build } = await import('tsdown')
+  await build({
+    entry: join(import.meta.dirname, '..', 'src', 'managed-update-completion.ts'),
+    outDir: root, config: false, platform: 'node', format: 'esm', target: 'es2024',
+    dts: false, // Runtime verification cannot depend on prebuilt project-reference declarations.
+    deps: { alwaysBundle: [/.*/u], onlyBundle: false },
+    outExtensions: () => ({ js: '.mjs' }), logLevel: 'silent',
+  })
+  const bundled = await import(pathToFileURL(join(root, 'managed-update-completion.mjs')).href) as typeof import('../src/managed-update-completion.ts')
+  const fixture = await manualRecoveryFixture(bundled.completeDesktopManagedUpdate)
+  await expect(fixture.complete(11)).resolves.toMatchObject({ status: 'recovery-required' })
+  await expect(fixture.complete(11, fixture.recovery)).resolves.toMatchObject({ status: 'complete', sequence: 19 })
+})
+
+it.each(['schema', 'self-hash', 'source', 'sequence', 'plan', 'capability', 'runtime', 'artifacts'] as const)(
+  'rejects authenticated but inconsistent published receipt %s', async (damage) => {
+    const fixture = await manualRecoveryFixture()
+    const { receiptSha256: originalHash, ...payload } = fixture.receipt
+    if (damage === 'schema') payload.schemaVersion = 2
+    if (damage === 'source') payload.source.commit = 'f'.repeat(40)
+    if (damage === 'sequence') payload.identity.sequence = 20
+    if (damage === 'plan') payload.artifacts.provisioning.planSha256 = 'f'.repeat(64)
+    if (damage === 'capability') payload.artifacts.capabilitySha256 = 'f'.repeat(64)
+    if (damage === 'runtime') payload.artifacts.runtimeSha256 = 'f'.repeat(64)
+    const published = { ...payload, ...(damage === 'artifacts' ? { artifacts: null } : {}) }
+    const hash = damage === 'self-hash' ? originalHash.replace(/^./u, '0') : managedUpdateJsonSha256(published)
+    fixture.receiptResponse.body = JSON.stringify({ ...published, receiptSha256: hash })
+    fixture.releases[0] = managedManifest({
+      sequence: 19, installedEvidence: fixture.manifest.installedEvidence,
+      buildReceipt: { file: 'build-receipt.json', sha256: sha256(Buffer.from(fixture.receiptResponse.body)), receiptSha256: hash },
+    })
+    const before = await readFile(fixture.completionPath, 'utf8')
+    await expect(fixture.complete(11, fixture.recovery)).resolves.toMatchObject({ status: 'recovery-required' })
+    expect(await readFile(fixture.completionPath, 'utf8')).toBe(before)
+  },
+)
 
 it.each([false, true])('reads a cancelled historical schema2 handoff without launch eligibility (migration %s)', async (migration) => {
   const fixture = await completionFixture()
