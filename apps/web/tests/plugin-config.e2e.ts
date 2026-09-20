@@ -221,13 +221,15 @@ describe('web e2e: plugin configuration pages', () => {
       const { modelRules: _rules, ...limits } = subagent ?? {}
       return { namespaces, limits }
     }
+    // These native selects sit inside their labels alongside option text;
+    // match the combobox accessible name, not exact enclosing-label text.
     const selectRoute = async (group: Locator, route: Route): Promise<void> => {
-      await group.getByLabel('提供方', { exact: true }).selectOption(route.provider)
-      await group.getByLabel('模型', { exact: true }).selectOption(route.model)
+      await group.getByRole('combobox', { name: '提供方', exact: true }).selectOption(route.provider)
+      await group.getByRole('combobox', { name: '模型', exact: true }).selectOption(route.model)
     }
     const assertRoute = async (group: Locator, route: Route): Promise<void> => {
-      await expect.poll(() => group.getByLabel('提供方', { exact: true }).inputValue()).toBe(route.provider)
-      await expect.poll(() => group.getByLabel('模型', { exact: true }).inputValue()).toBe(route.model)
+      await expect.poll(() => group.getByRole('combobox', { name: '提供方', exact: true }).inputValue()).toBe(route.provider)
+      await expect.poll(() => group.getByRole('combobox', { name: '模型', exact: true }).inputValue()).toBe(route.model)
     }
     const mainId = SessionId('plugin-config-model-rules-main')
     await scaffold.ctx.sessionController.create({ sessionId: mainId, cwd: scaffold.workspaceCwd })
@@ -292,14 +294,14 @@ describe('web e2e: plugin configuration pages', () => {
 
       // Read exact IDs from the live catalog-backed controls. The scaffold's
       // route-only adapter supplies choices and rejects every model stream.
-      const provider = parents.first().getByLabel('提供方', { exact: true })
+      const provider = parents.first().getByRole('combobox', { name: '提供方', exact: true })
       await expect.poll(() => provider.locator('option').count()).toBeGreaterThan(1)
       const providers = await provider.locator('option').evaluateAll(options => options
         .map(option => (option as HTMLOptionElement).value).filter(Boolean))
       const routes: Route[] = []
       for (const id of providers) {
         await provider.selectOption(id)
-        const models = parents.first().getByLabel('模型', { exact: true })
+        const models = parents.first().getByRole('combobox', { name: '模型', exact: true })
         await expect.poll(() => models.locator('option').count()).toBeGreaterThan(1)
         const ids = await models.locator('option').evaluateAll(options => options
           .map(option => (option as HTMLOptionElement).value).filter(Boolean))
