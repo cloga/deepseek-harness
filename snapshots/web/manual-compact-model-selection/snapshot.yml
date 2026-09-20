@@ -6,4 +6,3 @@ recording: authored
 header:
   class: web-manual-compact-model-selection
   pin: true
-permission: danger-full-access
