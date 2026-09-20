@@ -8,6 +8,10 @@
 
 依赖状态的用例使用 Workspace、接纳、附件和模型流屏障，区分可见中间状态与已完成操作。详情关闭等待框架过渡结束；归档验证为 seed Session 设置显式标题，并跨重载跟踪该身份。参见 [CI fixture 同步决策](../../../.agents/notes/implemented/testing/2026-09-08-ci-completion-observations.zh.md)。
 
+## 滚动启动阶段的失败证据
+
+[`chat-scroll-contract.e2e.ts`](chat-scroll-contract.e2e.ts) 中的实时工具用例记录启动阶段的几何数据、焦点类别、回到底部按钮是否存在，以及输入、滚动和尺寸变化的顺序，直到首次贴底断言。启动阶段失败时向测试 stderr 输出 `[chat-scroll-startup-trace]`，最多保留最近 128 条事件和八个检查点；诊断失败仅报告固定类别，不输出原始错误。启动成功后丢弃几何记录。记录不包含对话文本、URL 或产品私有状态。观察器在 wheel 输入或失败清理之前释放。诊断保留原始错误、工具放行清理、截图和既有断言。几何读取和等待检查点可能影响时序：这只是证据采集，不是原因修复，带诊断的测试通过也不能确定此前失败的原因。
+
 ## 这些是 Host 面的测试
 
 它们在根 `tsconfig.host.json` 中做类型检查，而不在 Client aggregate 中，因为它们直接读取 Host 服务：`ctx.connection`、Host 侧 `SessionStore` 与 `ctx.sessionProjectionCache`。运行时驱动浏览器并不使一个文件成为 Client 程序的一部分——两个 face 在相同的键上以不同服务合并 Cordis `Context`，因此单个程序无法同时看见两者。把这些文件挪进 Client aggregate 会让每一处 Host 服务访问都无法编译。

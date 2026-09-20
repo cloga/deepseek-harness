@@ -677,14 +677,136 @@ describe('web e2e: long Chat scroll contract', () => {
       let released = false
       try {
         const composer = world.page.locator('[data-composer-input][contenteditable="true"]').last()
-        await composer.fill(LIVE_TOOL_PROMPT)
-        await world.page.getByRole('button', { name: 'Send message', exact: true }).click()
-        await expect.poll(() => fileExists(readyPath), { timeout: 15_000 }).toBe(true)
-        const liveRow = world.page.locator(`[data-chat-call-id="${LIVE_TOOL_CALL_ID}"] [data-sample="bash"]`)
-        await liveRow.waitFor({ timeout: 15_000 })
-        expect(await liveRow.getAttribute('data-state')).toBe('running')
-        await expectBottom(world.page)
-        expect(await world.page.getByRole('button', { name: 'Back to bottom', exact: true }).count()).toBe(0)
+        // Startup-only evidence: no scroll writes, user content, or product state.
+        const diagnosticFailures: string[] = []
+        const noteFailure = (category: string): void => {
+          if (diagnosticFailures.length < 8 && !diagnosticFailures.includes(category)) diagnosticFailures.push(category)
+        }
+        const trace = await world.page.evaluateHandle(() => {
+          const host = document.querySelector<HTMLElement>('[data-conversation-scroll]')
+          const column = host?.querySelector<HTMLElement>('[data-chat-flow]')
+          const seat = host?.querySelector<HTMLElement>('[data-composer-seat]')
+          if (host === null || column == null || seat == null) throw new Error('scroll trace geometry unavailable')
+          const controller = new AbortController()
+          let observer: ResizeObserver | undefined
+          let stopped = false
+          let sequence = 0
+          let dropped = 0
+          let errors = 0
+          let phase = 'before-fill'
+          const start = performance.now()
+          const finite = (value: number): number | null => Number.isFinite(value) ? value : null
+          const sample = (event: string) => {
+            const viewport = host.getBoundingClientRect()
+            const flow = column.getBoundingClientRect()
+            const composerBox = seat.getBoundingClientRect()
+            const active = document.activeElement
+            const tag = active?.tagName ?? 'NONE'
+            return {
+              seq: ++sequence, ms: finite(performance.now() - start), phase, event,
+              top: finite(host.scrollTop), height: finite(host.scrollHeight), client: finite(host.clientHeight),
+              bottom: finite(host.scrollHeight - host.clientHeight - host.scrollTop),
+              columnTop: finite(flow.top - viewport.top), columnHeight: finite(flow.height),
+              composerTop: finite(composerBox.top - viewport.top), composerHeight: finite(composerBox.height),
+              backToBottom: Number(host.querySelector('button[aria-label="Back to bottom"]') !== null),
+              focusTag: ['DIV', 'BUTTON', 'TEXTAREA', 'INPUT', 'BODY', 'NONE'].includes(tag) ? tag : 'OTHER',
+              focusInHost: Number(host.contains(active)), focusInComposer: Number(seat.contains(active)),
+            }
+          }
+          const events: ReturnType<typeof sample>[] = []
+          const checkpoints: ReturnType<typeof sample>[] = []
+          const capture = (event: string, checkpoint = false): void => {
+            if (stopped) return
+            try {
+              const entry = sample(event)
+              const buffer = checkpoint ? checkpoints : events
+              if (buffer.length === (checkpoint ? 8 : 128)) { buffer.shift(); dropped += 1 }
+              buffer.push(entry)
+            } catch {
+              // Observer/listener failures must not become browser page errors.
+              errors += 1
+            }
+          }
+          const cleanupFailures: string[] = []
+          const dispose = (): string[] => {
+            if (!stopped) {
+              stopped = true
+              if (errors > 0) cleanupFailures.push('sample')
+              try { controller.abort() } catch { cleanupFailures.push('listener-dispose') }
+              try { observer?.disconnect() } catch { cleanupFailures.push('observer-dispose') }
+            }
+            return cleanupFailures
+          }
+          try {
+            for (const type of ['scroll', 'scrollend', 'wheel', 'pointerdown', 'click', 'keydown',
+              'focusin', 'focusout', 'beforeinput', 'input']) {
+              host.addEventListener(type, (event) => {
+                if ((type === 'scroll' || type === 'scrollend') && event.target !== host) return
+                capture(type)
+              }, { capture: true, passive: true, signal: controller.signal })
+            }
+            observer = new ResizeObserver(() => { capture('resize') })
+            for (const element of [host, column, seat]) observer.observe(element)
+            capture('checkpoint', true)
+          } catch {
+            cleanupFailures.push('install')
+            dispose()
+          }
+          return {
+            mark(label: string) { phase = label; capture('checkpoint', true) },
+            finish() {
+              capture('failure', true)
+              dispose()
+              return { events, checkpoints, dropped, sampleFailures: errors, cleanupFailures }
+            },
+            dispose,
+          }
+        }).catch(() => {
+          noteFailure('install')
+          return undefined
+        })
+        const checkpoint = async (label: string): Promise<void> => {
+          await trace?.evaluate((probe, value) => { probe.mark(value) }, label)
+            .catch(() => { noteFailure('checkpoint') })
+        }
+        let startupFailed = false
+        let failureTrace: unknown
+        try {
+          await composer.fill(LIVE_TOOL_PROMPT)
+          await checkpoint('after-fill-before-send')
+          await world.page.getByRole('button', { name: 'Send message', exact: true }).click()
+          await checkpoint('after-send')
+          await expect.poll(() => fileExists(readyPath), { timeout: 15_000 }).toBe(true)
+          await checkpoint('tool-ready')
+          const liveRow = world.page.locator(`[data-chat-call-id="${LIVE_TOOL_CALL_ID}"] [data-sample="bash"]`)
+          await liveRow.waitFor({ timeout: 15_000 })
+          expect(await liveRow.getAttribute('data-state')).toBe('running')
+          await checkpoint('tool-running')
+          await expectBottom(world.page)
+          expect(await world.page.getByRole('button', { name: 'Back to bottom', exact: true }).count()).toBe(0)
+        } catch (error) {
+          startupFailed = true
+          failureTrace = await trace?.evaluate(probe => probe.finish()).catch(() => { noteFailure('read') })
+          throw error
+        } finally {
+          const cleanupFailures = await trace?.evaluate(probe => probe.dispose())
+            .catch(() => {
+              noteFailure('dispose')
+              return undefined
+            })
+          for (const category of cleanupFailures ?? []) noteFailure(category)
+          await trace?.dispose().catch(() => { noteFailure('handle-dispose') })
+          if (startupFailed || diagnosticFailures.length > 0) {
+            try {
+              console.error('[chat-scroll-startup-trace]', JSON.stringify({
+                trace: failureTrace ?? null, diagnosticFailures,
+              }))
+            } catch {
+              // A broken stderr cannot report itself, but must not replace the assertion.
+              noteFailure('output')
+            }
+          }
+        }
 
         await wheelTranscript(world.page, -1_200)
         await world.page.getByRole('button', { name: 'Back to bottom', exact: true }).waitFor({ timeout: 10_000 })
