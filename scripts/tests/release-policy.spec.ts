@@ -41,7 +41,7 @@ describe('fork Desktop publication policy', () => {
 
   it('runs as a blocking leaf of the static CI job', ({ onTestFinished }) => {
     vi.stubEnv('npm_execpath', resolve(root, 'node_modules/pnpm/bin/pnpm.cjs'))
-    onTestFinished(() => vi.unstubAllEnvs())
+    onTestFinished(() => { vi.unstubAllEnvs() })
     const leaf = gatesForMode('ci-static').find(gate => gate.id === 'release-policy')
     expect(leaf).toMatchObject({ displayCommand: 'pnpm run verify-release-policy' })
     expect(leaf?.allowFailure).not.toBe(true)
@@ -140,7 +140,10 @@ describe('fork Desktop publication policy', () => {
 
   it.each(upstreamJobs)('rejects removal and input/variable overrides of %s/%s exclusion', (file, id) => {
     for (const condition of [undefined, 'inputs.publish', "github.repository != 'cloga/deepseek-harness' || inputs.publish", "github.repository != 'cloga/deepseek-harness' || vars.ALLOW_PUBLICATION == 'true'"]) {
-      expect(() => verifyReleasePolicy(mutate(file, (workflow) => { workflow.jobs[id]!.if = condition }))).toThrow('fixed fork exclusion')
+      expect(() => verifyReleasePolicy(mutate(file, (workflow) => {
+        if (condition === undefined) delete workflow.jobs[id]!.if
+        else workflow.jobs[id]!.if = condition
+      }))).toThrow('fixed fork exclusion')
     }
   })
 
