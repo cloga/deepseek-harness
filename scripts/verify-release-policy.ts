@@ -16,6 +16,23 @@ const publishers = new Map([
   ['python-release.yml/publish-sdk', `${forkExcluded} && github.event_name == 'workflow_dispatch' && inputs.publish`],
 ])
 const desktop = 'desktop-fork-release.yml/release'
+const desktopPublishCommand = 'node apps/desktop/scripts/publish-fork-release.mjs release-assets'
+const desktopPublishRuns = new Set([
+  desktopPublishCommand,
+  [
+    "$ErrorActionPreference = 'Stop'",
+    '$head = git rev-parse HEAD',
+    'if ($LASTEXITCODE -ne 0 -or $head -cne $env:SOURCE_SHA)'
+      + " { throw 'Publisher checkout differs from the reviewed build source' }",
+    desktopPublishCommand,
+    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+  ].join('\n'),
+])
+
+// Admit only reviewed complete scripts; normalize line endings, never shell statements or comments.
+function isApprovedDesktopRun(run: unknown): boolean {
+  return typeof run === 'string' && desktopPublishRuns.has(run.replaceAll('\r\n', '\n').replace(/\n+$/u, ''))
+}
 const rehearsals = new Map([
   ['release.yml', ['dependencies', 'pack']],
   ['release-vendor.yml', ['pack']],
@@ -33,6 +50,35 @@ function permissions(value: unknown, label: string): Record<string, unknown> {
     assert(['read', 'write', 'none'].includes(String(permission)), `${label}: unsupported permission expression`)
   }
   return result
+}
+
+/** Keep both reviewed run forms bound to the same single publisher and build checkout. */
+function verifyDesktopPublisher(rawSteps: unknown[], key: string): void {
+  const steps = rawSteps.map(step => object(step, `${key} step`))
+  const approved = steps.filter(step => step.uses === undefined && isApprovedDesktopRun(step.run))
+  assert.equal(approved.length, 1, `${key}: exactly one checked Desktop publisher required`)
+  const publisher = object(approved[0], `${key} publisher`)
+  assert.equal(publisher.id, 'publish', `${key}: publisher output identity differs`)
+  assert.equal(publisher.shell, 'pwsh', `${key}: publisher must use pwsh`)
+  assert.deepEqual(publisher.env, {
+    GH_TOKEN: '${{ github.token }}',
+    RELEASE_TAG: '${{ needs.build.outputs.tag }}',
+    RELEASE_VERSION: '${{ needs.build.outputs.version }}',
+    SOURCE_SHA: '${{ needs.build.outputs.source_sha }}',
+  }, `${key}: publisher credentials and release identity must come from the reviewed build`)
+  const checkouts = steps.filter(step => typeof step.uses === 'string' && step.uses.startsWith('actions/checkout@'))
+  assert.equal(checkouts.length, 1, `${key}: exactly one build checkout required`)
+  const checkout = object(checkouts[0], `${key} checkout`)
+  assert.equal(checkout.uses, 'actions/checkout@v6', `${key}: unreviewed checkout action`)
+  assert.deepEqual(checkout.with, {
+    ref: '${{ needs.build.outputs.source_sha }}', 'persist-credentials': false, clean: true,
+  }, `${key}: checkout must bind the exact reviewed build source`)
+  assert(steps.indexOf(checkout) < steps.indexOf(publisher), `${key}: checkout must precede publication`)
+  for (const step of [checkout, publisher]) {
+    for (const field of ['if', 'continue-on-error', 'working-directory']) {
+      assert(step[field] === undefined, `${key}: checkout/publisher must not override ${field}`)
+    }
+  }
 }
 
 /** Read every Actions workflow, including .yaml additions, without consulting Git or remote state.
@@ -91,8 +137,7 @@ export function verifyReleasePolicy(sources: ReadonlyMap<string, string>): numbe
           || /\b(?:release:publish|publish-(?:fork-)?release\.mjs)\b/u.test(command)
           || /^(?:softprops\/action-gh-release|ncipollo\/release-action|pypa\/gh-action-pypi-publish|JS-DevTools\/npm-publish)@/iu
             .test(action)
-        const desktopPublisher = key === desktop && action === ''
-          && command === 'node apps/desktop/scripts/publish-fork-release.mjs release-assets'
+        const desktopPublisher = key === desktop && step.uses === undefined && isApprovedDesktopRun(step.run)
         assert(!writes || desktopPublisher || publishers.has(key), `${key}: unreviewed publication entry point`)
       }
       if (rehearsal) {
@@ -111,7 +156,7 @@ export function verifyReleasePolicy(sources: ReadonlyMap<string, string>): numbe
         assert.equal(job.environment, 'desktop-fork-release', `${key}: protected environment required`)
         assert.equal(job.needs, 'build', `${key}: verified build required`)
         assert.equal(job.if, "${{ !inputs.rehearsal && github.ref == 'refs/heads/master' }}", `${key}: rehearsal cannot publish`)
-        assert(steps.some(rawStep => object(rawStep, key).run === 'node apps/desktop/scripts/publish-fork-release.mjs release-assets'), `${key}: checked Desktop publisher required`)
+        verifyDesktopPublisher(steps, key)
       }
     }
     if (file === 'desktop-fork-release.yml') assert('release' in jobs, `${file}: Desktop release job required`)

@@ -66,7 +66,9 @@ Publication run 必须使用当前 `master`。受保护 release job 是唯一具
 
 `verify-release-policy` 使用现有 YAML parser 发现每个 `.yml` 和 `.yaml` workflow。阻塞式 `ci-static` 检查显式权限默认值，仅允许现有 Desktop release job 使用 `contents: write`，拒绝未经评审的 package/OIDC writer 及已识别的发布命令/action，并将 rehearsal job/event 清单固定为 CI artifact 输出。现有 npm、Python 和 native publication job 使用精确的 fork 排除条件；dispatch 输入与 repository variable 无法覆盖这些条件。非 fork 行为保持不变，包括已配置的私有 Python publisher。Pages OIDC 是按确切 job 命名的非 release 例外。
 
-该检查验证声明的 workflow 权限与已知入口，不解释任意 shell 程序、local action、external action 或凭据使用。它不检查远端设置，也不能阻止获授权的源码编辑者修改策略。评审仍负责新代码与另行获授权的通道。Desktop 现有 publisher 在任何远端调用之前验证精确的 installer 与配套资产清单；有效 checksum、Desktop 标题或 Desktop tag 都不能替代该清单。实际 installer 资格仍由 packaging 与 acceptance 检查负责，而不是文件名检查。
+Desktop 只允许一个 publisher step，使用经过评审的旧版单行命令，或比较检出 HEAD 与 build source SHA 并传递失败的五行 PowerShell 模板。两处检查复用同一个完整脚本精确分类器，仅规范 CRLF 和末尾换行。Publisher 保留 `pwsh`、输出 id、精确 token/tag/version/source 绑定，以及在其之前执行的一次 build SHA 干净检出，且不持久化凭据。额外语句、重复 publisher、步骤条件、错误抑制和工作目录覆盖均被拒绝；支持更强模板不会替换其源码检查或改变生产 publisher。
+
+脚本白名单不是防御任意代码的安全边界。该检查验证声明的 workflow 权限与已知入口，不解释任意 shell 程序、local action、external action 或凭据使用。它不检查远端设置，也不能阻止获授权的源码编辑者修改策略。评审仍负责新代码与另行获授权的通道。Desktop 现有 publisher 在任何远端调用之前验证精确的 installer 与配套资产清单；有效 checksum、Desktop 标题或 Desktop tag 都不能替代该清单。实际 installer 资格仍由 packaging 与 acceptance 检查负责，而不是文件名检查。
 
 源码策略变异测试覆盖新增 writer、继承权限、已识别的发布步骤、输入/变量覆盖及当前源码。离线 publisher 回归拒绝 checksum 一致的 293 个 Core/Web tarball、用 tarball 替换 installer，以及在 installer 旁额外加入 tarball。这些测试补充现有发布成功路径与 receipt 检查，不改变 packaging 或版本。
 

@@ -9,7 +9,15 @@ import { gatesForMode } from '../run-gates.ts'
 import { readReleaseWorkflows, verifyReleasePolicy } from '../verify-release-policy.ts'
 
 const root = resolve(import.meta.dirname, '../..')
-interface Step { uses?: string; run?: string; with?: Record<string, unknown> }
+interface Step {
+  uses?: string
+  run?: string
+  with?: Record<string, unknown>
+  env?: Record<string, unknown>
+  id?: string
+  shell?: string
+  [key: string]: unknown
+}
 interface Job { if?: string; permissions?: unknown; uses?: string; secrets?: unknown; steps?: Step[]; [key: string]: unknown }
 interface Workflow { name?: string; on?: unknown; permissions?: unknown; jobs: Record<string, Job> }
 function mutate(file: string, edit: (workflow: Workflow) => void): Map<string, string> {
@@ -18,6 +26,27 @@ function mutate(file: string, edit: (workflow: Workflow) => void): Map<string, s
   edit(workflow)
   sources.set(file, dump(workflow))
   return sources
+}
+const legacyPublisherRun = 'node apps/desktop/scripts/publish-fork-release.mjs release-assets'
+// The source-checked producer uses YAML `|`, including its final newline.
+const sourceCheckedPublisherRun = [
+  "$ErrorActionPreference = 'Stop'",
+  '$head = git rev-parse HEAD',
+  'if ($LASTEXITCODE -ne 0 -or $head -cne $env:SOURCE_SHA)'
+    + " { throw 'Publisher checkout differs from the reviewed build source' }",
+  'node apps/desktop/scripts/publish-fork-release.mjs release-assets',
+  'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+  '',
+].join('\n')
+const publisherForms = [['legacy', legacyPublisherRun], ['source-checked', sourceCheckedPublisherRun]] as const
+function mutatePublisher(run: string, change?: (step: Step, job: Job) => void): Map<string, string> {
+  return mutate('desktop-fork-release.yml', (workflow) => {
+    const job = workflow.jobs.release!
+    const step = job.steps!.find(candidate => candidate.id === 'publish')
+    if (step === undefined) throw new Error('Publisher fixture is missing')
+    step.run = run
+    change?.(step, job)
+  })
 }
 const writer = { 'runs-on': 'ubuntu-latest', permissions: { contents: 'write' }, steps: [{ run: 'node scripts/core-release.mjs' }] }
 const upstreamJobs = [
@@ -103,6 +132,91 @@ describe('fork Desktop publication policy', () => {
     expect(() => verifyReleasePolicy(mutate('desktop-fork-release.yml', (workflow) => {
       workflow.jobs.release!.steps!.push({ run: 'gh release create raw-core dist/npm/*.tgz' })
     }))).toThrow('unreviewed publication entry point')
+  })
+
+  describe.each(publisherForms)('%s Desktop publisher', (_name, run) => {
+    it.each(['authored', 'CRLF', 'trailing newlines'])('accepts only the reviewed full run with %s line endings', (format) => {
+      const script = format === 'CRLF' ? run.replaceAll('\n', '\r\n') + '\r\n' : format === 'trailing newlines' ? run + '\n\n' : run
+      expect(() => verifyReleasePolicy(mutatePublisher(script))).not.toThrow()
+    })
+
+    it.each([
+      ['second node', (script: string) => script + '\n' + legacyPublisherRun],
+      ['second gh writer', (script: string) => script + '\ngh release create raw dist/npm/*.tgz'],
+      ['second npm writer', (script: string) => script + '\nnpm publish package.tgz'],
+      ['prepended statement', (script: string) => 'Write-Output unreviewed\n' + script],
+      ['unknown wrapper', (script: string) => 'if ($true) {\n' + script + '\n}'],
+      ['comment suffix', (script: string) => script + '\n# unreviewed wrapper'],
+      ['different assets', (script: string) => script.replace(' release-assets', ' dist/npm')],
+      ['leading newline', (script: string) => '\n' + script],
+      ['horizontal whitespace', (script: string) => script + ' '],
+    ] as const)('rejects an altered command block: %s', (_case, alter) => {
+      expect(() => verifyReleasePolicy(mutatePublisher(alter(run)))).toThrow('unreviewed publication entry point')
+    })
+
+    it.each([legacyPublisherRun, sourceCheckedPublisherRun, 'gh release upload raw dist/npm/*.tgz'])('rejects a second publisher step: %s', (second) => {
+      expect(() => verifyReleasePolicy(mutatePublisher(run, (step, job) => {
+        job.steps!.push({ ...step, run: second })
+      }))).toThrow(/exactly one checked Desktop publisher|unreviewed publication entry point/u)
+    })
+
+    it.each(['GH_TOKEN', 'RELEASE_TAG', 'RELEASE_VERSION', 'SOURCE_SHA'])('rejects changed or missing %s binding', (field) => {
+      for (const absent of [false, true]) {
+        expect(() => verifyReleasePolicy(mutatePublisher(run, (step) => {
+          if (absent) Reflect.deleteProperty(step.env!, field)
+          else step.env![field] = '${{ inputs.unreviewed }}'
+        }))).toThrow('publisher credentials and release identity')
+      }
+    })
+
+    it.each(['extra env', 'shell', 'missing shell', 'id', 'if', 'continue-on-error', 'working-directory', 'action'])(
+      'rejects publisher invocation changes: %s', (field) => {
+        expect(() => verifyReleasePolicy(mutatePublisher(run, (step) => {
+          if (field === 'extra env') step.env!.PATH = 'unreviewed'
+          else if (field === 'missing shell') delete step.shell
+          else if (field === 'action') step.uses = 'actions/github-script@v7'
+          else if (field === 'continue-on-error') step[field] = true
+          else if (field === 'if') step[field] = '${{ always() }}'
+          else step[field] = field === 'shell' ? 'bash' : 'other'
+        }))).toThrow(/publisher|publication entry point/u)
+      },
+    )
+
+    it.each(['ref', 'persist-credentials', 'clean', 'path', 'repository', 'if', 'continue-on-error', 'working-directory', 'action', 'missing', 'duplicate', 'late'])(
+      'rejects checkout changes: %s', (field) => {
+        expect(() => verifyReleasePolicy(mutatePublisher(run, (_step, job) => {
+          const checkout = job.steps![0]!
+          if (field === 'missing') job.steps!.shift()
+          else if (field === 'duplicate') job.steps!.push({ ...checkout })
+          else if (field === 'late') { job.steps!.shift(); job.steps!.push(checkout) }
+          else if (field === 'action') checkout.uses = 'actions/checkout@v5'
+          else if (field === 'if') checkout[field] = '${{ always() }}'
+          else if (field === 'continue-on-error') checkout[field] = true
+          else if (field === 'working-directory') checkout[field] = 'other'
+          else if (field === 'path') checkout.with!.path = 'other'
+          else if (field === 'repository') checkout.with!.repository = 'outsider/repository'
+          else checkout.with![field] = field === 'persist-credentials' ? true : field === 'clean' ? false : '${{ github.sha }}'
+        }))).toThrow(/checkout/u)
+      },
+    )
+  })
+
+  it.each([0, 1, 2, 3, 4])('rejects a source-check wrapper missing line %s', (line) => {
+    const script = sourceCheckedPublisherRun.split('\n').filter((_value, index) => index !== line).join('\n')
+    expect(() => verifyReleasePolicy(mutatePublisher(script))).toThrow(/publication entry point|checked Desktop publisher/u)
+  })
+
+  it.each([
+    ["$ErrorActionPreference = 'Stop'", "$ErrorActionPreference = 'Continue'"],
+    ['git rev-parse HEAD', 'git rev-parse master'],
+    ['$LASTEXITCODE -ne 0 -or', '$LASTEXITCODE -ne 0 -and'],
+    ['$head -cne', '$head -ne'],
+    ['$env:SOURCE_SHA', '$env:EXPECTED_SOURCE_SHA'],
+    ['exit $LASTEXITCODE', 'exit 0'],
+    ["throw 'Publisher checkout", "Write-Output 'Publisher checkout"],
+  ])('rejects weakened source-check wrapper text: %s', (before, after) => {
+    expect(() => verifyReleasePolicy(mutatePublisher(sourceCheckedPublisherRun.replace(before, after))))
+      .toThrow('unreviewed publication entry point')
   })
 
   it('accepts release inspection, packaging commands and arbitrary display titles', () => {
