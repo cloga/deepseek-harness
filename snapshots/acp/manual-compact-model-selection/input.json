@@ -1,0 +1,17 @@
+{
+  "steps": [
+    { "op": "initialize" },
+    { "op": "newSession" },
+    {
+      "op": "prompt",
+      "text": "Record this migration plan for later work. Preserve the existing database schema until the copy has been verified. Keep the old installation available for rollback. Use a separate worktree and do not overwrite the running application. Verify every checksum before selecting an installer. Keep pending jobs and release decisions in the checkpoint. Do not restart active sessions. Compare the exact official release with retained custom behavior. Use the established issue, branch, review, and release process. Do not commit private session data, credentials, or local paths. Recheck concurrent release activity before allocating a version. A failed verification must leave the previous installation available. Report implementation, publication, and activation separately. A successful build is not proof of a working user interaction. Retain the audit trail for both failures and successful attempts. These constraints apply to every remaining migration step; acknowledge them without running tools."
+    },
+    { "op": "prompt", "text": "Next we will verify the release artifacts. Acknowledge briefly without using tools." },
+    {
+      "op": "setConfigOption",
+      "configId": "model",
+      "value": "[\"deepseek-official\",\"deepseek-v4-pro\"]"
+    },
+    { "op": "prompt", "text": "/compact" }
+  ]
+}

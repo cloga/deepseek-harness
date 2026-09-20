@@ -3483,6 +3483,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'options', description: 'the full request. A LOOP-built request carries the process-local {@link markAgentLoopRequest} identity and arrives deep-frozen (mutation throws): its content is a pure function of the session log (the reconstructability Agent Note), so listeners read it, never rewrite it. Hand-built calls do not carry that marker; their messages already obey the immutable creation contract.' }],
   },
   {
+    name: 'model-selection/query',
+    mode: 'waterfall',
+    signature: '\'model-selection/query\'(this: Scoped<ModelSelectionQuery>, payload: ModelSelectionQuery, next: () => ModelSelection | undefined): ModelSelection | undefined',
+    summary: 'Read a detached snapshot without assembling a prompt or consuming a selection.',
+    description: 'Read a detached snapshot without assembling a prompt or consuming a selection. Scope-filtered dispatch uses payload.owner as the routing key.',
+    parameters: [{ name: 'payload', description: '.owner - exact identity whose current selection is queried.' }, { name: 'next', description: 'delegate when this listener owns no current selection.' }],
+  },
+  {
     name: 'permission-presets/catalog-changed',
     mode: 'emit',
     signature: '\'permission-presets/catalog-changed\'(): void',
@@ -4736,7 +4744,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ManualCompactAgentContext',
-    declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
+    declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    readonly ctx: Context;\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
   },
   {
     name: 'McpResourceProvider',
@@ -4873,6 +4881,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ModelReasoningEffort',
     declaration: 'export interface ModelReasoningEffort {\n    readonly id: string;\n    readonly name: string;\n    readonly description?: string;\n}',
+  },
+  {
+    name: 'ModelSelectionQuery',
+    declaration: 'export interface ModelSelectionQuery {\n    readonly owner: object;\n}',
   },
   {
     name: 'ObjectJsonSchema',

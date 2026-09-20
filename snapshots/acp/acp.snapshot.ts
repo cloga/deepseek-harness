@@ -36,6 +36,11 @@ const controllerCases: readonly {
   { name: 'escalation-rejected', hasModelTurn: true },
   { name: 'fs-escalation-approved', hasModelTurn: true },
   {
+    name: 'manual-compact-model-selection',
+    hasModelTurn: true,
+    configPath: join(corpusDir, 'manual-compact-model-selection', 'cordis.yml'),
+  },
+  {
     name: 'image-compaction',
     hasModelTurn: true,
     configPath: join(corpusDir, 'image-compaction', 'cordis.yml'),

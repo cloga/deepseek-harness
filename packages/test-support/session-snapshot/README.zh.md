@@ -76,6 +76,10 @@ spill 场景通过真实本地提供方保存到私有临时根目录。fixture 
 
 保留历史输入的场景保持规范 Session 文件不变，并继续选择它们进行回放；固定历史版本的目录中没有更新的规范同角色文件。其精确的规范化原生当前格式输出单独记录在父会话的 `writer.expected.jsonl` 和子会话的 `writer.<ordinal>.expected.jsonl` 中；这些是输出比较基准，而非 replay 代际。保留历史输入的 SDK 场景使用 `notifications.current.expected.jsonl` 记录当前协议输出。比较既不将当前事件反向投影为历史格式，也不剥除结构差异。独立迁移测试验证正式转换，而不把原生 writer 布局当作其预期事件序列。
 
+### ACP 配置输入
+
+ACP 输入脚本可以在 `newSession` 之后使用 `{ "op": "setConfigOption", "configId": "model", "value": "<advertised model value>" }` 选择已公布的会话配置值。harness 通过 `session/set_config_option` 发送捕获的会话 id、`configId` 和 `value`，并在执行下一条输入步骤前等待响应。会话不存在或更新被拒绝都会使场景失败；harness 不会替换为其他值。这样，场景可以在后续提示或命令之前更改所选模型，而不必虚构模型轮次。
+
 ### 录制、回放与刷新
 
 `pnpm run test:snapshot:record` 调用在线 LLM（大语言模型），并在规范具名版本文件下写入收集到的当前 generation。record 与 refresh 绝不重命名或删除已完成的 generation，即使后续运行不再产生某个 child 角色也一样；受审阅的源树整理只有在同角色存在已验证的当前替代文件后才移除前代。显式声明 `sessionFormat` 的场景在录制模式下保持只读。`pnpm run test:snapshot:refresh` 保持无密钥，运行选定的最高 replay 输入，并写入 stdout、各 pin 自有的提示词与工具 schema 伴随文件，以及新鲜当前 generation 的可比较 Session 输出；保留历史输入的场景写入单独的 writer 输出比较基准，而非规范当前格式 replay 代际。每个组合 owner 把 replay patch 放在 live patch 旁；顶层 `snapshots/` 拥有 Session 驱动场景，其他预期输出留在其 package owner 旁。[`dsh-llm-replay`](../llm-replay/README.zh.md) 提供通过 `DSH_SNAPSHOT_*` 环境值选择的已记录流。

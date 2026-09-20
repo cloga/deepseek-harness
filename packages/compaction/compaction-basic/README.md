@@ -66,8 +66,8 @@ All settings are optional. The defaults start condensing at 80% of the routed mo
 | `thresholdRatio` | `0.8` | Start condensing at `floor(routedContextWindow × ratio)`. |
 | `retainRatio` | `0.16` | Recent conversation kept verbatim as a fraction of the routed context window; mutually exclusive with `retainTokens`. |
 | `retainTokens` | — | Absolute recent-conversation budget kept verbatim; mutually exclusive with `retainRatio` and must be below the resolved threshold. |
-| `summarizationProvider` | `''` | Set together with `summarizationModel`; an empty pair uses the latest routed request target, then the `AgentOptions` pair. |
-| `summarizationModel` | `''` | Set together with `summarizationProvider`; an empty pair uses the latest routed request target, then the `AgentOptions` pair. |
+| `summarizationProvider` | `''` | Set together with `summarizationModel`; an empty pair uses the model selected when manual condensation starts, otherwise the latest routed request target, then the `AgentOptions` pair. |
+| `summarizationModel` | `''` | Set together with `summarizationProvider`; an empty pair uses the model selected when manual condensation starts, otherwise the latest routed request target, then the `AgentOptions` pair. |
 | `maxTokens` | `8192` | Output cap for the summarization request; may include reasoning tokens. |
 | `compactionRetries` | `1` | Extra condensation attempts after the first when pressure remains above threshold. |
 | `maxOverflowRetries` | `1` | Maximum retries after a confirmed context-window overflow; `0` disables recovery only. |
@@ -83,6 +83,10 @@ The oldest balanced span is replaced by one summary message and the recent tail 
 ### On-demand condensation with /compact
 
 With `dsh-command-compact` mounted, type `/compact` in a chat UI to condense immediately, even below the pressure threshold. The command reports how many history items were condensed and the estimated tokens saved. While the agent is mid-turn or condensation is already running, `/compact` reports that condensation is unavailable; prompts you send while it runs are accepted and start after it finishes.
+
+Manual condensation snapshots the current model selection when idle maintenance starts, so changing the selected model does not require another conversation turn before `/compact`. The same snapshot selects `modelPolicies`; an explicit summarization provider/model still overrides the summary route. A selection made while the summary runs applies to later work, and condensation does not consume the pending conversation selection. Automatic pressure and overflow recovery keep using the durable request route. Selecting a different summary model can forgo prefix-cache reuse; the selected history is still replayed intact.
+
+A summary that reaches its output cap is rejected without committing an incomplete checkpoint. `/compact` distinguishes this failure from other summary errors. Neither retry setting retries a truncated summary; choose another model or review the configured summary budget rather than repeating unchanged requests. A larger output cap also needs sufficient input/output context headroom.
 
 ### Trimming oversized tool outputs
 
@@ -115,7 +119,7 @@ Pressure policy resolves capacity from the adapter that owns the durable route. 
 
 ### Summarization mechanics
 
-A direct `ctx.llm.stream()` call uses the configured provider/model pair and cap, falling back to the latest logged request target and then the `AgentOptions` pair, without running the loop-only `agent/request` extension point. The call replays the derived `system/message` at surface node 0 as the leading entry of `messages`, followed by the shadowed-region messages (including a shadowed in-history `system/message` in its surface position), and carries the header's tools verbatim — including image references, which the selected adapter must resolve or explicitly reject — and appends the compaction instruction as the final user message, so it reuses the provider's warm prefix cache instead of invalidating it. An empty-content system head contributes no message but remains outside the compacted range. The call sets `GenerateOptions.purpose` to `compaction`; only returned text enters the checkpoint, excluding reasoning and tool calls. Image output fails with `UNSUPPORTED_CONTENT` rather than disappearing. The replacement user message frames the summary with `<compacted-summary>` tags; the raw summary remains on the `compaction/summary` event.
+A direct `ctx.llm.stream()` call uses the configured provider/model pair and cap, falling back to the manual operation's captured target, the latest logged request target, and then the `AgentOptions` pair. Manual entry reads the Agent-scoped `model-selection/query` query without running prompt assembly or the loop-only `agent/request` extension point. The call replays the derived `system/message` at surface node 0 as the leading entry of `messages`, followed by the shadowed-region messages (including a shadowed in-history `system/message` in its surface position), and carries the header's tools verbatim — including image references, which the selected adapter must resolve or explicitly reject — and appends the compaction instruction as the final user message, so it reuses the provider's warm prefix cache instead of invalidating it. An empty-content system head contributes no message but remains outside the compacted range. The call sets `GenerateOptions.purpose` to `compaction`; only returned text enters the checkpoint, excluding reasoning and tool calls. Image output fails with `UNSUPPORTED_CONTENT` rather than disappearing. The replacement user message frames the summary with `<compacted-summary>` tags; the raw summary remains on the `compaction/summary` event.
 
 ### The region transaction
 

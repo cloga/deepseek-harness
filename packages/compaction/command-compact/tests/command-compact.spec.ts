@@ -210,6 +210,7 @@ describe('/compact human command', () => {
     ['cancelled', 'Compaction cancelled.'],
     ['changed', 'The history selected for compaction changed before it could be replaced. The attempt is recorded in the session log.'],
     ['summary', 'Compaction could not produce a useful summary. The attempt is recorded in the session log.'],
+    ['summary-truncated', 'The compaction summary reached its output token cap. No incomplete checkpoint was committed. Try a different selected model or adjust the configured summary budget.'],
     ['commit', 'Compaction did not finish cleanly; some session history may have changed. Inspect the current session state before retrying.'],
     ['persistence', 'Compaction finished, but the session could not be saved.'],
   ] as const)('maps expected %s failures to direct errors', async (code, text) => {

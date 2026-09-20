@@ -43,6 +43,8 @@ interface Behavior {
   rejectNewSession?: boolean
   /** Reject `session/new` only when `additionalDirectories` is non-empty (the real bridge's rule). */
   rejectExtraDirs?: boolean
+  /** Reject `session/set_config_option` so the harness must propagate its JSON-RPC error. */
+  rejectConfigOption?: boolean
   /** How `session/prompt` settles: a clean response, a JSON-RPC error, or a hang until `session/cancel`. */
   prompt?: 'respond' | 'error' | 'hang-until-cancel'
   /** Persist the scripted logs while handling cancellation, before stdin EOF. */
@@ -215,6 +217,14 @@ function handleFrame(frame: Record<string, unknown>): void {
       respond(id as number | string, { sessionId })
       return
     }
+    case 'session/set_config_option':
+      chunk(`config:${JSON.stringify(params)}`)
+      if (behavior.rejectConfigOption === true) {
+        respondError(id as number | string, 'configuration rejected')
+      } else {
+        respond(id as number | string, { configOptions: [] })
+      }
+      return
     case 'session/prompt':
       void handlePrompt(id as number | string)
       return

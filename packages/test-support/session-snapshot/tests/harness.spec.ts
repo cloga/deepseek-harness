@@ -563,6 +563,53 @@ describe('runScenario', () => {
     expect(result.rawStdout).toContain('"stopReason":"end_turn"')
   })
 
+  it('drives setConfigOption steps with exact session, config id, and value over ACP', async () => {
+    const { fixtureFile } = await scenario({})
+    const result = await runScenario(
+      {
+        steps: [
+          ...boot,
+          { op: 'setConfigOption', configId: 'model', value: 'selected-provider/selected-model' },
+          { op: 'setConfigOption', configId: 'reasoning_effort', value: 'high' },
+          { op: 'prompt', text: 'go' },
+        ],
+      },
+      { agent: AGENT, mode: 'replay', fixtureFile },
+    )
+    const frames = result.rawStdout.trim().split('\n')
+      .map(line => JSON.parse(line) as { params?: { update?: { content?: { text?: string } } }; result?: unknown })
+    const received = frames.flatMap((frame) => {
+      const text = frame.params?.update?.content?.text
+      return text?.startsWith('config:') === true ? [JSON.parse(text.slice('config:'.length)) as unknown] : []
+    })
+    expect(result.sessionId).toBeDefined()
+    expect(received).toEqual([
+      { sessionId: result.sessionId, configId: 'model', value: 'selected-provider/selected-model' },
+      { sessionId: result.sessionId, configId: 'reasoning_effort', value: 'high' },
+    ])
+    expect(frames.map(frame => frame.result).filter(value => value !== undefined)).toEqual([
+      { protocolVersion: 1, agentCapabilities: { loadSession: false } },
+      { sessionId: result.sessionId },
+      { configOptions: [] },
+      { configOptions: [] },
+      { stopReason: 'end_turn' },
+    ])
+  })
+
+  it('propagates a rejected setConfigOption request instead of continuing the script', async () => {
+    const { fixtureFile } = await scenario({ rejectConfigOption: true })
+    await expect(runScenario(
+      {
+        steps: [
+          ...boot,
+          { op: 'setConfigOption', configId: 'model', value: 'unavailable' },
+          { op: 'prompt', text: 'must not run' },
+        ],
+      },
+      { agent: AGENT, mode: 'replay', fixtureFile },
+    )).rejects.toMatchObject({ code: -32603, message: 'configuration rejected' })
+  })
+
   it('forwards override/child fixture paths into the child env and captures stderr', { timeout: 20_000 }, async () => {
     const { dir, fixtureFile } = await scenario({ echoEnv: true, stderrNote: 'fake bin booted' })
     const childFiles = [join(dir, 'session.1.jsonl'), join(dir, 'session.2.jsonl')]
@@ -1307,6 +1354,7 @@ describe('runScenario', () => {
   })
 
   it.each([
+    [{ op: 'setConfigOption', configId: 'model', value: 'selected' }, /setConfigOption before newSession/],
     [{ op: 'prompt', text: 'x' }, /prompt before newSession/],
     [{ op: 'promptContent', content: [{ type: 'text', text: 'x' }] }, /promptContent before newSession/],
     [{ op: 'promptAndWaitForAgentMessage', text: 'x', waitForText: 'later' }, /promptAndWaitForAgentMessage before newSession/],
