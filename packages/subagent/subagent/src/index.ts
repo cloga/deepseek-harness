@@ -78,6 +78,11 @@ import { snapshotSubagentDescriptor } from './descriptor.ts'
 import { subagentIdentityProjectionDefinition, subagentTimingProjectionDefinition } from './projection.ts'
 import { establishCatalogChild, subagentCatalogProjectionDefinition } from './catalog.ts'
 import { deliverSubagentPrompt } from './internal.ts'
+import { captureDelegatedPolicyOverrides } from './child-agent.ts'
+import { assertSubagentModelRules, captureSubagentModelRule, SubagentModelRuleSchema } from './model-rules.ts'
+import type { SubagentModelRule } from './model-rules.ts'
+
+export type { SubagentModelRule } from './model-rules.ts'
 
 export type {} from './catalog.ts'
 export * from './out-of-process.ts'
@@ -186,12 +191,14 @@ interface BrowserPromptSource {
   readonly clientTimeZone?: string
 }
 
-/** Host configuration for continuable subagent capacity. */
+/** Host configuration for subagent capacity, depth, and creation-time model rules. */
 export interface Config {
   /** Maximum live children sharing uninterrupted continuable parent links; defaults to 8. */
   maxActiveSubagents?: number
   /** Default delegation depth for tools without an explicit limit; defaults to 1. */
   maxDepth?: number
+  /** Exact direct-parent to child routes for new implicit delegations; defaults to none. */
+  modelRules?: SubagentModelRule[]
 }
 
 /** Named provider registry with one-shot runs, durable discovery, and continuable-child operations. */
@@ -199,6 +206,7 @@ export class SubagentRuntime extends TypertRemoteService {
   static Config: z<Config> = z.object({
     maxDepth: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(1),
     maxActiveSubagents: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(8),
+    modelRules: z.array(SubagentModelRuleSchema).default([]),
   })
   private settingsSource: () => Config
   private providers = new Map<string, SubagentProvider>()
@@ -213,10 +221,14 @@ export class SubagentRuntime extends TypertRemoteService {
   constructor(ctx: Context, config: Config) {
     super(ctx, 'subagents')
     assertSubagentMaxDepth(config.maxDepth)
+    assertSubagentModelRules(config.modelRules)
     this.settingsSource = () => config
     ctx.inject(['settings'], (settingsCtx) => {
       settingsCtx.settings.installSection(ctx, 'subagent', SubagentRuntime.Config, config, {
-        validate: (value) => { assertSubagentMaxDepth(value.maxDepth) },
+        validate: (value) => {
+          assertSubagentMaxDepth(value.maxDepth)
+          assertSubagentModelRules(value.modelRules)
+        },
         setSource: (source) => { this.settingsSource = source },
         onChange: () => {},
       })
@@ -254,13 +266,29 @@ export class SubagentRuntime extends TypertRemoteService {
    * Establish one durable continuable child and deliver its initial prompt.
    * Resolves when the child's inbox accepts that prompt, without waiting for the
    * turn to start or for the message to reach the Session log; any earlier
-   * failure rejects with no ids and rolls back the child entirely.
+   * failure rejects with no ids and rolls back the child entirely. An implicit
+   * child route may match a Host model rule; its options are captured and the
+   * target validated before creation, then persisted for unchanged cold resume.
    * @param spec - provider, delegation request, and caller cancellation.
    * @returns the durable child id and the accepted prompt's message id.
    * @throws when continuation services are unavailable or materialization fails.
    */
   async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart> {
-    return this.requireContinuations().startContinuable(spec)
+    const manager = this.requireContinuations()
+    const provider = this.providers.get(spec.provider)
+    const captured = provider !== undefined && provider.agentRouteDefaults === undefined
+      ? captureSubagentModelRule(this.ctx, this.settingsSource().modelRules, spec.request.parent, spec.request.agentOptions)
+      : undefined
+    return manager.startContinuable(spec, captured === undefined ? undefined : {
+      agentOptions: captured.agentOptions,
+      preflight: async (signal) => {
+        await captured.preflight(signal)
+        signal.throwIfAborted()
+        if (this.expectProvider(spec.provider) !== provider) {
+          throw new Error('subagent provider changed during model rule preflight; retry delegation')
+        }
+      },
+    })
   }
 
   /**
@@ -580,7 +608,11 @@ export class SubagentRuntime extends TypertRemoteService {
    * Establish a published child on the named provider. Capability and semantic
    * checks run before delegation. Provider ownership lasts until its promise
    * fulfills; a rejection therefore has no run for the caller to dispose and
-   * emits no run lifecycle events. Post-publication turn and infrastructure
+   * emits no run lifecycle events. Providers supporting agentOptions may match
+   * an implicit child route to a Host model rule; externally model-managed
+   * providers remain unchanged. Explicit provider, model, or reasoning-effort options and
+   * provider-owned route defaults take precedence. Matched targets are validated
+   * before dispatch with no fallback. Post-publication turn and infrastructure
    * failures settle through the returned run.
    * A catalog append failure disposes the run and handles its result rejection;
    * the caller receives the catalog error even if disposal also fails.
@@ -598,7 +630,25 @@ export class SubagentRuntime extends TypertRemoteService {
       provider: name,
       ...request.label !== undefined ? { label: request.label } : {},
     })
-    const resolved: ResolvedSubagentStartRequest = { ...request, descriptor }
+    const captured = provider.capabilities.agentOptions && provider.agentRouteDefaults === undefined
+      ? captureSubagentModelRule(this.ctx, this.settingsSource().modelRules, request.parent, request.agentOptions)
+      : undefined
+    const resolved: ResolvedSubagentStartRequest = captured === undefined
+      ? { ...request, descriptor }
+      : {
+        ...request,
+        descriptor,
+        agentOptions: captured.agentOptions,
+        resolvedAgentOptions: captured.agentOptions,
+        resolvedDelegatedPolicies: captureDelegatedPolicyOverrides(request.parent),
+      }
+    if (captured !== undefined) {
+      await captured.preflight(request.signal)
+      request.signal.throwIfAborted()
+      if (this.expectProvider(name) !== provider) {
+        throw new Error('subagent provider changed during model rule preflight; retry delegation')
+      }
+    }
     const run = await provider.start(resolved)
     const child = run.localAgent?.session
     if (child !== undefined) {

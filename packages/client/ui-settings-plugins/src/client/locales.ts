@@ -19,6 +19,11 @@ export type PluginsSettingsLocaleKey =
   | 'subagentCapacityHelpLabel' | 'subagentCapacityHelp'
   | 'subagentDepthInvalid'
   | 'subagentCapacityInvalid'
+  | 'subagentRulesTitle' | 'subagentRulesHint' | 'subagentRulesPriority' | 'subagentRulesEmpty' | 'subagentRulesForkHint'
+  | 'subagentRulesAdd' | 'subagentRulesRemove' | 'subagentRulesParent' | 'subagentRulesChild'
+  | 'subagentRulesProvider' | 'subagentRulesModel' | 'subagentRulesChoose'
+  | 'subagentRulesIncomplete' | 'subagentRulesDuplicate' | 'subagentRulesUnsupported'
+  | 'subagentRulesUnsaved' | 'subagentRulesSaved' | 'subagentRulesUnavailable'
   | 'subagentModelSelectionTitle'
   | 'subagentModelSelectionToggle' | 'subagentModelSelectionChoose' | 'subagentModelSelectionAllowed'
   | 'subagentModelSelectionLoading' | 'subagentModelSelectionLoadFailed' | 'subagentModelSelectionRetry'
@@ -75,6 +80,24 @@ export const en: Record<PluginsSettingsLocaleKey, string> = {
   subagentCapacityHelp: 'Total live Subagents under the same main Agent, across all recursion levels. The main Agent is excluded. New start requests are rejected when the limit is reached.',
   subagentDepthInvalid: 'Enter a whole number of 0 or more.',
   subagentCapacityInvalid: 'Enter a whole number of 1 or more.',
+  subagentRulesTitle: 'Default model rules',
+  subagentRulesHint: 'For future Subagents that support model configuration and otherwise inherit their parent’s model, match the direct parent’s exact provider and model to choose a default. Each creation matches once; rules do not chain or change existing or resumed agents.',
+  subagentRulesPriority: 'Explicit authorized model and effort choices and caller-configured LLM options take priority. Providers with fixed defaults or their own model controls are unchanged. These defaults do not grant agents permission to choose models. The main model remains Session-owned.',
+  subagentRulesEmpty: 'No rules: model-configurable Subagents inherit their direct parent’s model unless an explicit or configured choice takes priority. Other providers keep their own model controls.',
+  subagentRulesForkHint: 'Rules also apply to compatible forks. Changing a fork’s model may forfeit inherited-prefix cache reuse and require reprocessing history; lower cost is not guaranteed. This human-authored default does not enable AI model choice for forks.',
+  subagentRulesAdd: 'Add rule',
+  subagentRulesRemove: 'Remove rule',
+  subagentRulesParent: 'When the parent uses',
+  subagentRulesChild: 'Default for the child',
+  subagentRulesProvider: 'Provider',
+  subagentRulesModel: 'Model',
+  subagentRulesChoose: 'Choose…',
+  subagentRulesIncomplete: 'Choose a provider and model for both sides of every rule, or remove the incomplete row.',
+  subagentRulesDuplicate: 'Each parent provider and model pair can have only one rule. Remove or edit duplicate rows.',
+  subagentRulesUnsupported: 'This Host does not advertise model-rule settings. Defaults cannot be edited here.',
+  subagentRulesUnsaved: 'Unsaved rule changes',
+  subagentRulesSaved: 'Rules match saved settings; model availability is not verified by saving.',
+  subagentRulesUnavailable: 'This route is not in the current catalog. Its exact IDs are retained; choose another route or remove the rule.',
   subagentModelSelectionTitle: 'Model selection',
   subagentModelSelectionToggle: 'Allow agents to choose models for Subagents',
   subagentModelSelectionChoose: 'When enabled, agents can choose a provider, model, and reasoning effort for each Subagent from the authorized models below. Applies only to new sessions.',
@@ -140,6 +163,24 @@ export const zh: Record<PluginsSettingsLocaleKey, string> = {
   subagentCapacityHelp: '同一主 Agent 下，所有递归层级同时存活的 Subagent 总数，主 Agent 不计入。达到上限时，新的启动请求会被拒绝。',
   subagentDepthInvalid: '请输入不小于 0 的整数。',
   subagentCapacityInvalid: '请输入不小于 1 的整数。',
+  subagentRulesTitle: '默认模型规则',
+  subagentRulesHint: '规则适用于未来创建、支持模型配置且原本会继承父模型的 Subagent，按直接父 Agent 的精确提供方和模型匹配默认模型。每次创建只匹配一次，不连续套用规则，也不改变已有或恢复的 Agent。',
+  subagentRulesPriority: '已授权的显式模型与推理强度选择，以及调用方配置的 LLM 选项优先。提供方的固定默认模型或自有模型控制保持不变。这些默认规则不会授予 Agent 选择模型的权限。主模型仍由 Session 管理。',
+  subagentRulesEmpty: '没有规则：支持模型配置的 Subagent 继承直接父 Agent 的模型，除非存在优先的显式选择或配置。其他提供方保留自有模型控制。',
+  subagentRulesForkHint: '规则也适用于兼容的分叉。更换分叉子 Agent 的模型可能失去继承前缀的缓存复用，需要重新处理历史，并不保证降低成本。此用户设定的默认规则不会开启 AI 为分叉选择模型的权限。',
+  subagentRulesAdd: '添加规则',
+  subagentRulesRemove: '移除规则',
+  subagentRulesParent: '当父 Agent 使用',
+  subagentRulesChild: '子 Agent 默认使用',
+  subagentRulesProvider: '提供方',
+  subagentRulesModel: '模型',
+  subagentRulesChoose: '请选择…',
+  subagentRulesIncomplete: '请为每条规则的两端选择提供方和模型，或移除未完成的行。',
+  subagentRulesDuplicate: '每个父 Agent 提供方和模型组合只能有一条规则。请移除或修改重复行。',
+  subagentRulesUnsupported: '此 Host 未声明支持模型规则设置，无法在此编辑默认规则。',
+  subagentRulesUnsaved: '规则修改尚未保存',
+  subagentRulesSaved: '规则与已保存设置一致；保存不代表模型已验证可用。',
+  subagentRulesUnavailable: '当前目录中没有此路由。精确 ID 已保留；可选择其他路由或移除规则。',
   subagentModelSelectionTitle: '模型选择',
   subagentModelSelectionToggle: '允许 Agent 为 Subagent 选择模型',
   subagentModelSelectionChoose: '开启后，Agent 可以从下方授权模型中，为每个 Subagent 选择提供方、模型和推理强度。仅影响新会话。',

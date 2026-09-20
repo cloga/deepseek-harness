@@ -33,6 +33,9 @@ function acceptWrites<T>(host: StubSettingsScope<T>): void {
       if (op.op === 'set') {
         value[field] = op.value
         user[field] = op.value
+      } else if (op.op === 'unset') {
+        Reflect.deleteProperty(user, field)
+        value[field] = (host.scope.getSnapshot().base as Record<string, unknown> | undefined)?.[field]
       }
     }
     host.publish({ value: value as T, user })
@@ -1050,7 +1053,9 @@ describe('shared Subagent card actions', () => {
   function card() {
     const limits = stubSettingsScope<SubagentLimitsSettings>()
     const models = stubSettingsScope<SubagentModelSelectionSettings>()
-    const limitFace = new SubagentLimitsCardController(limits.scope).inject()
+    const limitController = new SubagentLimitsCardController(limits.scope)
+    limitController.setRulesSupported(true)
+    const limitFace = limitController.inject()
     const modelFace = new SubagentModelSelectionCardController(models.scope, modelsApi().ctx).inject()
     limits.publish({
       status: 'ready', writable: true, revision: 2,
@@ -1077,11 +1082,28 @@ describe('shared Subagent card actions', () => {
     face.toggleEnabled()
     face.save()
     await vi.waitFor(() => { expect(state()).toMatchObject({ saving: false, dirty: false, failed: false }) })
-    expect(limits.set).toHaveBeenCalledWith('maxDepth', 2)
+    expect(limits.mutate).toHaveBeenCalledWith([{ op: 'set', path: ['maxDepth'], value: 2 }], 2)
     expect(models.mutate).toHaveBeenCalledWith([
       { op: 'set', path: ['enabled'], value: true },
       { op: 'set', path: ['allowedModels'], value: [{ provider: 'alpha', model: 'fast' }] },
     ], 5)
+  })
+
+  it('saves rules without rewriting either limits or model authorization', async () => {
+    const { limits, models, face, state } = card()
+    face.addRule()
+    face.editRule(0, 'parent', 'provider', 'alpha')
+    face.editRule(0, 'parent', 'model', 'large')
+    face.editRule(0, 'child', 'provider', 'beta')
+    face.editRule(0, 'child', 'model', 'small')
+    face.save()
+    await vi.waitFor(() => { expect(state()).toMatchObject({ saving: false, dirty: false, failed: false }) })
+    expect(limits.mutate).toHaveBeenCalledWith([{ op: 'set', path: ['modelRules'], value: [{
+      parent: { provider: 'alpha', model: 'large' }, child: { provider: 'beta', model: 'small' },
+    }] }], 2)
+    expect(limits.scope.getSnapshot().value).toMatchObject({ maxDepth: 3, maxActiveSubagents: 8 })
+    expect(models.mutate).not.toHaveBeenCalled()
+    expect(models.scope.getSnapshot().value).toEqual({ enabled: false, allowedModels: [{ provider: 'alpha', model: 'fast' }] })
   })
 
   it('saves a limit-only draft without rewriting model authorization', async () => {
@@ -1097,7 +1119,7 @@ describe('shared Subagent card actions', () => {
   it('retains the pending draft when discard is requested before both writes finish', async () => {
     const { limits, face, state } = card()
     const pending = deferred<undefined>()
-    const set = vi.spyOn(limits.scope, 'set').mockImplementationOnce(async () => {
+    const mutate = vi.spyOn(limits.scope, 'mutate').mockImplementationOnce(async () => {
       await pending.promise
       limits.publish({ value: { maxDepth: 2, maxActiveSubagents: 8 }, user: { maxDepth: 2 } })
     })
@@ -1109,7 +1131,7 @@ describe('shared Subagent card actions', () => {
         expect(face.hooks.subagentModelSelectionCard.getSnapshot()).toMatchObject({ saving: false, dirty: false })
       })
       expect(state().saving).toBe(true)
-      expect(set).toHaveBeenCalledWith('maxDepth', 2)
+      expect(mutate).toHaveBeenCalledWith([{ op: 'set', path: ['maxDepth'], value: 2 }], 2)
       face.discard()
       expect(face.hooks.subagentLimitsCard.getSnapshot()).toMatchObject({ dirty: true, maxDepth: { text: '2' } })
     } finally {
@@ -1144,7 +1166,7 @@ describe('shared Subagent card actions', () => {
     expect(face.hooks.subagentModelSelectionCard.getSnapshot()).toMatchObject({ enabled: true, dirty: true })
     face.save()
     await vi.waitFor(() => { expect(state()).toMatchObject({ saving: false, dirty: false, failed: false }) })
-    expect(limits.set).toHaveBeenCalledOnce()
+    expect(limits.mutate).toHaveBeenCalledOnce()
     expect(models.mutate).toHaveBeenCalledTimes(2)
   })
 })

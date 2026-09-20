@@ -21,6 +21,14 @@
   - textbox "Subagent 并行数量上限":
     - /placeholder: ""
     - text: "12"
+- region "默认模型规则":
+  - heading "默认模型规则" [level=3]
+  - paragraph: 规则适用于未来创建、支持模型配置且原本会继承父模型的 Subagent，按直接父 Agent 的精确提供方和模型匹配默认模型。每次创建只匹配一次，不连续套用规则，也不改变已有或恢复的 Agent。
+  - paragraph: 已授权的显式模型与推理强度选择，以及调用方配置的 LLM 选项优先。提供方的固定默认模型或自有模型控制保持不变。这些默认规则不会授予 Agent 选择模型的权限。主模型仍由 Session 管理。
+  - paragraph: 规则也适用于兼容的分叉。更换分叉子 Agent 的模型可能失去继承前缀的缓存复用，需要重新处理历史，并不保证降低成本。此用户设定的默认规则不会开启 AI 为分叉选择模型的权限。
+  - paragraph: 没有规则：支持模型配置的 Subagent 继承直接父 Agent 的模型，除非存在优先的显式选择或配置。其他提供方保留自有模型控制。
+  - button "添加规则"
+  - status: 规则与已保存设置一致；保存不代表模型已验证可用。
 - region "模型选择":
   - heading "模型选择" [level=3]
   - text: 允许 Agent 为 Subagent 选择模型

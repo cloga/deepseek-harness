@@ -3,12 +3,14 @@
 // through the real wire down to `$DSH_HOME/settings.yaml`, the override badge
 // and reset that layering produces, and a community bundle's row configuration
 // registered by its own browser half. Zero model calls: everything is client
-// state plus the settings document and the profile on a blank frame, so there
-// is no fixture and a stray stream would fail loud on the open llm seam.
+// state, the settings document and an idle main Session, so there is no model
+// fixture and a stray stream would fail loud on the route-only adapter.
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import type { Browser, Locator, Page } from 'playwright'
+import type { Browser, Locator, Page, Request } from 'playwright'
 import { chromium } from 'playwright'
+import * as yaml from 'js-yaml'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import { join } from 'node:path'
 import {
@@ -119,7 +121,6 @@ describe('web e2e: plugin configuration pages', () => {
     await openPlugins()
     await openPage(panel, 'Subagent')
     const snapshot = await captureStableAria(page, '[data-plugin-panel]', scaffold.workspaceCwd)
-    await compareOrRefreshGolden(join(SNAPSHOT_DIR, 'subagent.expected.md'), snapshot, MODE)
     const controlHeight = await depth.evaluate(element => element.getBoundingClientRect().height)
     await depth.fill('1.5')
     expect(await depth.evaluate(element => element.getBoundingClientRect().height)).toBe(controlHeight)
@@ -133,13 +134,22 @@ describe('web e2e: plugin configuration pages', () => {
     await openPage(panel, 'Subagent')
     expect(await depth.inputValue()).toBe('1')
     expect(await capacity.inputValue()).toBe('8')
+    await expect.poll(settingsDocument).not.toContain('maxDepth: 2')
+    await expect.poll(settingsDocument).not.toContain('maxActiveSubagents: 12')
     await panel.getByRole('button', { name: '返回插件列表', exact: true }).click()
+    // A golden mismatch must not leave persisted overrides for the next case.
+    await compareOrRefreshGolden(join(SNAPSHOT_DIR, 'subagent.expected.md'), snapshot, MODE)
   })
 
-  it('opens field explanations with the keyboard and retains unsaved edits', async () => {
+  it('retains unsaved edits while opening keyboard help and discards them on leaving', async () => {
     const panel = await openPlugins()
     await openPage(panel, 'Subagent')
     const depth = panel.getByLabel('最大递归深度', { exact: true })
+    expect(await depth.inputValue()).toBe('1')
+    await expect.poll(() => panel.getByRole('button', { name: '保存', exact: true }).isDisabled()).toBe(true)
+    await expect.poll(settingsDocument).not.toContain('maxDepth: 2')
+    const before = await settingsDocument()
+    expect(before).not.toContain('maxDepth: 2')
     await depth.fill('2')
     const depthHelp = panel.getByRole('button', { name: '最大递归深度说明', exact: true })
     expect(await panel.getByRole('region', { name: '最大递归深度说明', exact: true }).count()).toBe(0)
@@ -154,12 +164,16 @@ describe('web e2e: plugin configuration pages', () => {
     await depthHelp.press('Enter')
     expect(await depthRules.count()).toBe(0)
     expect(await depth.inputValue()).toBe('2')
+    expect(await settingsDocument()).toBe(before)
+    expect(await settingsDocument()).not.toContain('maxDepth: 2')
     await panel.getByRole('button', { name: 'Subagent 并行数量上限说明', exact: true }).click()
     const capacityRules = panel.getByRole('region', { name: 'Subagent 并行数量上限说明', exact: true })
     expect(await capacityRules.getByText('同一主 Agent 下，所有递归层级同时存活的 Subagent 总数，主 Agent 不计入。达到上限时，新的启动请求会被拒绝。', { exact: true }).count()).toBe(1)
     await panel.getByRole('button', { name: '返回插件列表', exact: true }).click()
     await openPage(panel, 'Subagent')
-    expect(await depth.inputValue()).toBe('1')
+    await expect.poll(() => depth.inputValue()).toBe('1')
+    expect(await settingsDocument()).toBe(before)
+    expect(await settingsDocument()).not.toContain('maxDepth: 2')
   })
 
   it('saves limits and the model allowlist together from the shared card', async () => {
@@ -195,6 +209,160 @@ describe('web e2e: plugin configuration pages', () => {
     await expect.poll(() => toggle.getAttribute('aria-checked'), { timeout: 5_000 }).toBe('false')
     expect(tripwire.pageErrors).toEqual([])
   }, 60_000)
+
+  it('persists exact model rules across reloads without changing authorization or the main model', async () => {
+    onTestFailed(() => saveFailureShot(page, 'web-e2e-plugin-config-model-rules'))
+    type Route = { provider: string; model: string }
+    type Rule = { parent: Route; child: Route }
+    type Document = Record<string, unknown> & { subagent?: Record<string, unknown> }
+    const document = async (): Promise<Document> => (yaml.load(await settingsDocument()) ?? {}) as Document
+    const outsideRules = (value: Document) => {
+      const { subagent, ...namespaces } = value
+      const { modelRules: _rules, ...limits } = subagent ?? {}
+      return { namespaces, limits }
+    }
+    const selectRoute = async (group: Locator, route: Route): Promise<void> => {
+      await group.getByLabel('提供方', { exact: true }).selectOption(route.provider)
+      await group.getByLabel('模型', { exact: true }).selectOption(route.model)
+    }
+    const assertRoute = async (group: Locator, route: Route): Promise<void> => {
+      await expect.poll(() => group.getByLabel('提供方', { exact: true }).inputValue()).toBe(route.provider)
+      await expect.poll(() => group.getByLabel('模型', { exact: true }).inputValue()).toBe(route.model)
+    }
+    const mainId = SessionId('plugin-config-model-rules-main')
+    await scaffold.ctx.sessionController.create({ sessionId: mainId, cwd: scaffold.workspaceCwd })
+    const main = scaffold.ctx.sessions.get(mainId)
+    if (main === undefined) throw new Error('Rule settings scenario must own a live main Session')
+    // Read the actual Session projection and Host default, not a label inferred
+    // from the rule selectors. Creating this idle Session makes no model call.
+    const mainSelection = () => {
+      const fallback = scaffold.ctx.agentDefaultModel.currentSelection()
+      const selected = scaffold.ctx.sessionProjections.snapshot(main).values.modelSelection?.next ?? fallback
+      return { session: { provider: selected.provider, model: selected.model },
+        defaults: { provider: fallback.provider, model: fallback.model } }
+    }
+    const mainBefore = mainSelection()
+    expect(mainBefore.session.provider).toBeTruthy()
+    expect(mainBefore.session.model).toBeTruthy()
+    const before = await document()
+    const independent = outsideRules(before)
+    const mutations: string[] = []
+    const observeMutation = (request: Request): void => {
+      if (request.method() !== 'POST' || new URL(request.url()).pathname !== '/api/settings/mutate') return
+      const { payload: { args } } = request.postDataJSON() as { payload: { args: { ns: string } } }
+      mutations.push(args.ns)
+    }
+    page.on('request', observeMutation)
+    try {
+      const panel = await openPlugins()
+      await openPage(panel, 'Subagent')
+      const rules = panel.getByRole('region', { name: '默认模型规则', exact: true })
+      const parents = rules.getByRole('group', { name: '当父 Agent 使用', exact: true })
+      const children = rules.getByRole('group', { name: '子 Agent 默认使用', exact: true })
+      const save = panel.getByRole('button', { name: '保存', exact: true })
+      const assertIsolation = async (): Promise<void> => {
+        const actual = await document()
+        expect(outsideRules(actual)).toEqual(independent)
+        expect(actual['subagent-model-selection']).toEqual(before['subagent-model-selection'])
+        expect(mainSelection()).toEqual(mainBefore)
+      }
+      const saveRules = async (expected: Rule[]): Promise<void> => {
+        const [response] = await Promise.all([
+          page.waitForResponse(candidate => candidate.request().method() === 'POST'
+            && new URL(candidate.url()).pathname === '/api/settings/mutate'),
+          save.click(),
+        ])
+        expect(response.ok()).toBe(true)
+        const { payload: { args } } = response.request().postDataJSON() as {
+          payload: { args: { ns: string; ops: unknown[] } }
+        }
+        expect(args.ns).toBe('subagent')
+        expect(args.ops).toEqual([{ op: 'set', path: ['modelRules'], value: expected }])
+        expect(await response.json()).toMatchObject({ result: { ok: true } })
+        await expect.poll(async () => (await document()).subagent?.modelRules).toEqual(expected)
+        await expect.poll(() => save.isDisabled()).toBe(true)
+        await assertIsolation()
+      }
+      expect(await parents.count()).toBe(0)
+      const unchanged = await settingsDocument()
+      await rules.getByRole('button', { name: '添加规则', exact: true }).click()
+      await expect.poll(() => save.isDisabled()).toBe(true)
+      await rules.getByRole('alert').getByText('请为每条规则的两端选择提供方和模型，或移除未完成的行。', { exact: true }).waitFor()
+      expect(await settingsDocument()).toBe(unchanged)
+
+      // Read exact IDs from the live catalog-backed controls. The scaffold's
+      // route-only adapter supplies choices and rejects every model stream.
+      const provider = parents.first().getByLabel('提供方', { exact: true })
+      await expect.poll(() => provider.locator('option').count()).toBeGreaterThan(1)
+      const providers = await provider.locator('option').evaluateAll(options => options
+        .map(option => (option as HTMLOptionElement).value).filter(Boolean))
+      const routes: Route[] = []
+      for (const id of providers) {
+        await provider.selectOption(id)
+        const models = parents.first().getByLabel('模型', { exact: true })
+        await expect.poll(() => models.locator('option').count()).toBeGreaterThan(1)
+        const ids = await models.locator('option').evaluateAll(options => options
+          .map(option => (option as HTMLOptionElement).value).filter(Boolean))
+        routes.push(...ids.map(model => ({ provider: id, model })))
+        if (routes.length >= 2) break
+      }
+      const [parent, child] = routes
+      if (parent === undefined || child === undefined) throw new Error('Rule editing requires two live catalog routes')
+      const original: Rule = { parent, child }
+      await selectRoute(parents.first(), parent)
+      await selectRoute(children.first(), child)
+      await expect.poll(() => save.isEnabled()).toBe(true)
+      expect(await settingsDocument()).toBe(unchanged)
+      expect(mutations).toEqual([])
+      await saveRules([original])
+      await panel.getByRole('button', { name: '返回插件列表', exact: true }).click()
+      await openPage(panel, 'Subagent')
+      await assertRoute(parents.first(), parent)
+      await assertRoute(children.first(), child)
+
+      await page.reload({ waitUntil: 'load' })
+      await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
+      await openPlugins()
+      await openPage(panel, 'Subagent')
+      await assertRoute(parents.first(), parent)
+      await assertRoute(children.first(), child)
+      await assertIsolation()
+      const edited: Rule = { parent, child: parent }
+      await selectRoute(children.first(), parent)
+      await saveRules([edited])
+      const saved = await settingsDocument()
+
+      // A changed existing row and an incomplete new row both disappear on
+      // navigation; neither is a settings write or a main-model selection.
+      await selectRoute(children.first(), child)
+      await rules.getByRole('button', { name: '添加规则', exact: true }).click()
+      await expect.poll(() => save.isDisabled()).toBe(true)
+      await panel.getByRole('button', { name: '返回插件列表', exact: true }).click()
+      await openPage(panel, 'Subagent')
+      await expect.poll(() => parents.count()).toBe(1)
+      await assertRoute(children.first(), parent)
+      expect(await settingsDocument()).toBe(saved)
+      expect(mutations).toEqual(['subagent', 'subagent'])
+
+      await rules.getByRole('button', { name: '添加规则', exact: true }).click()
+      await selectRoute(parents.nth(1), parent)
+      await selectRoute(children.nth(1), child)
+      await rules.getByRole('alert').getByText('每个父 Agent 提供方和模型组合只能有一条规则。请移除或修改重复行。', { exact: true }).waitFor()
+      await expect.poll(() => save.isDisabled()).toBe(true)
+      expect(await settingsDocument()).toBe(saved)
+      await assertIsolation()
+      await panel.getByRole('button', { name: '返回插件列表', exact: true }).click()
+      await openPage(panel, 'Subagent')
+      await expect.poll(() => parents.count()).toBe(1)
+      await rules.getByRole('button', { name: '移除规则', exact: true }).click()
+      await saveRules([])
+      expect(mutations).toEqual(['subagent', 'subagent', 'subagent'])
+      expect(main.snapshotEvents().filter(event => event.type === 'request/header')).toEqual([])
+      expect(tripwire.pageErrors).toEqual([])
+    } finally {
+      page.off('request', observeMutation)
+    }
+  }, 90_000)
 
   it('stages an edit and writes it only when saved', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-plugin-config-write'))
