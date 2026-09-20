@@ -146,6 +146,16 @@ async function main() {
       })
     } catch (error) {
       roundFailure = error
+      try {
+        const { collectInstalledStartupDiagnostics } = await import('./installed-startup-diagnostics.ts')
+        const startup = await collectInstalledStartupDiagnostics(app, page)
+        save(join(evidence, `${round}-startup.json`), {
+          schemaVersion: 1, round, sourceCommit: expected.manifest.source.commit,
+          candidateSourceCommit: process.env.GITHUB_SHA, ...startup,
+        })
+      } catch {
+        secondaryErrors.push('startup-diagnostic-unavailable')
+      }
     } finally {
       try { await app?.close() }
       catch (error) { roundFailure = retainPrimaryFailure(roundFailure, error, 'round-owned-close', secondaryErrors) }

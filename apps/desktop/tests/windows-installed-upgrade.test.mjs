@@ -11,6 +11,7 @@ import { runInNewContext } from 'node:vm'
 import { inspectInstalledDesktopIdentity, readInstalledDesktopRuntimeDescriptor } from './fixtures/windows-installed-runtime.mjs'
 import { assertUpgradeRunner, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeAssetPath, upgradeFileHash, verifyUpgradeRelease } from './fixtures/windows-installed-upgrade-contract.mjs'
 
+const uninstallObservationSource = readFileSync(new URL('./fixtures/windows-uninstall-observation.ps1', import.meta.url), 'utf8')
 const hosted = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: 'C:\\runner-temp' }
 const digest = (bytes, algorithm = 'sha256', encoding = 'hex') => createHash(algorithm).update(bytes).digest(encoding)
 const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(',')}]` : value !== null && typeof value === 'object'
@@ -168,6 +169,7 @@ if (('InstallerCapture' -as [type]) -ne $helperType) { throw 'Repeated loading r
     for (const member of ['Initialize', 'Find', 'FindText', 'FindButton', 'Progress', 'Save', 'SaveStock', 'StockRun', 'DiagnosticText', 'SaveWithShadow', 'SendMessage']) {
       assert.ok(observed.members.includes(member), `Actual helper is missing ${member}`)
     }
+    for (const member of ['DiagnosticSummary', 'ProjectDiagnosticControl']) assert.equal(observed.members.includes(member), false)
     t.diagnostic(`Compilation only: PowerShell ${observed.edition} ${observed.version}`)
   })
 
@@ -652,11 +654,178 @@ Write-InstallerFailureDiagnostics @() $errors
   assert.match(observed.messages[1], /Installer registration observation failed:/u)
 })
 
+test('relocated uninstall worker observation binds process incarnation ancestry and parent', { skip: process.platform !== 'win32' }, t => {
+  const registration = readFileSync(new URL('./fixtures/windows-installer-registration.ps1', import.meta.url), 'utf8')
+  const observed = powershellUnit(t, `
+${registration}
+${uninstallObservationSource}
+$root = $PSScriptRoot
+$uninstaller = Join-Path $root 'Installed App/Uninstall cloga-deepseek-harness.exe'
+$executable = Join-Path $root 'process-temp/ns-owned/worker.exe'
+$start = [datetime]'2026-09-20T22:00:00Z'
+$fixtureCreated = $start.AddSeconds(1)
+function Get-Item($LiteralPath) {
+    $attributes = [IO.FileAttributes]::Directory
+    if ($LiteralPath -ieq $executable) { $attributes = [IO.FileAttributes]::Normal }
+    if (($mode -eq 'reparse' -or ($mode -eq 'post-reparse' -and $script:queries -gt 1)) -and
+        $LiteralPath -ieq (Join-Path $root 'process-temp')) { $attributes = [IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Directory }
+    if ($mode -eq 'unreadable-path') { throw 'SECRET-path-observation' }
+    if ($mode -eq 'directory-executable' -and $LiteralPath -ieq $executable) { $attributes = [IO.FileAttributes]::Directory }
+    [pscustomobject]@{ Attributes = $attributes; PSIsContainer = [bool]($attributes -band [IO.FileAttributes]::Directory) }
+}
+function Get-CimInstance { throw 'Real CIM query forbidden in pure worker tests' }
+function New-UninstallObservationClock {
+    [pscustomobject]@{ ElapsedMilliseconds = $(if ($mode -eq 'budget') { 2000 } else { 0 }) }
+}
+function Open-UninstallObservationProcess($ProcessId) {
+    $script:opens++
+    if ($mode -eq 'open-denied') { throw 'SECRET-process-access' }
+    $handle = [pscustomobject]@{
+        Id = $ProcessId; Handle = [IntPtr]1; HasExited = ($mode -eq 'exited-valid'); ExitCode = 7
+        StartTime = $(if ($mode -eq 'pid-reuse') { $fixtureCreated.AddSeconds(1) } else { $fixtureCreated })
+        MainModule = [pscustomobject]@{ FileName = $(if ($mode -eq 'module-mismatch') { 'C:\\foreign\\worker.exe' } else { $executable }) }
+    }
+    if ($mode -eq 'missing-handle') { $handle.Handle = $null }
+    if ($mode -eq 'unreadable-start') { $handle.StartTime = $null }
+    $handle | Add-Member ScriptMethod Dispose { $script:disposals++; if ($mode -eq 'dispose-denied') { throw 'SECRET-dispose' } }
+    return $handle
+}
+function Read-UninstallObservationProcess($ProcessId, $Seconds) {
+    if ($Seconds -ne 1) { throw 'Unexpected query timeout' }
+    $script:queries++
+    if ($mode -eq 'query-denied') { throw 'SECRET-query-access' }
+    [pscustomobject]@{
+        ProcessId = $ProcessId; ParentProcessId = $(if ($mode -eq 'query-parent') { 99 } else { 20 })
+        CreationDate = $(if ($mode -eq 'post-pid-reuse' -and $script:queries -gt 1) { $fixtureCreated.AddSeconds(1) } else { $fixtureCreated })
+        ExecutablePath = $executable; CommandLine = 'SECRET-not-evidence'
+    }
+}
+$cases = @()
+foreach ($mode in @('valid', 'wrong-parent', 'parent-pid-reuse', 'before-launcher', 'outside', 'prefix-escape', 'dot-escape', 'non-executable',
+    'reparse', 'unreadable-path', 'directory-executable', 'pid-reuse', 'module-mismatch', 'exited-valid', 'missing-handle', 'unreadable-start',
+    'open-denied', 'query-denied', 'query-parent', 'post-pid-reuse', 'post-reparse', 'dispose-denied', 'missing-creation',
+    'launcher-mismatch', 'launcher-unreadable', 'budget', 'capped')) {
+    $script:opens = 0; $script:disposals = 0; $script:queries = 0
+    $launcher = [pscustomobject]@{ Id = 20; Handle = [IntPtr]2; StartTime = $start; HasExited = $true; ExitTime = $start.AddSeconds(2)
+        StartInfo = [pscustomobject]@{ FileName = $uninstaller } }
+    if ($mode -eq 'launcher-mismatch') { $launcher.StartInfo.FileName = 'C:\\foreign\\uninstall.exe' }
+    if ($mode -eq 'launcher-unreadable') { $launcher.StartTime = $null }
+    $path = $executable
+    if ($mode -eq 'outside') { $path = 'C:\\foreign\\worker.exe' }
+    if ($mode -eq 'prefix-escape') { $path = Join-Path $root 'process-temp-foreign/worker.exe' }
+    if ($mode -eq 'dot-escape') { $path = Join-Path $root 'process-temp/../foreign/worker.exe' }
+    if ($mode -eq 'non-executable') { $path = Join-Path $root 'process-temp/worker.txt' }
+    $time = $fixtureCreated
+    if ($mode -eq 'parent-pid-reuse') { $time = $start.AddSeconds(3) }
+    if ($mode -eq 'before-launcher') { $time = $start.AddSeconds(-1) }
+    if ($mode -eq 'missing-creation') { $time = $null }
+    $snapshot = @([pscustomobject]@{ ProcessId = 30; ParentProcessId = $(if ($mode -eq 'wrong-parent') { 99 } else { 20 })
+        CreationDate = $time; ExecutablePath = $path; CommandLine = 'SECRET-commandline' })
+    if ($mode -eq 'capped') { $snapshot = @(1..9 | ForEach-Object { [pscustomobject]@{ ProcessId = (30 + $_); ParentProcessId = 20; CreationDate = $fixtureCreated; ExecutablePath = $executable } }) }
+    $data = Get-UninstallWorkerObservation $launcher $snapshot $root $uninstaller
+    $cases += [pscustomobject]@{ mode = $mode; data = $data; opens = $script:opens; disposals = $script:disposals; queries = $script:queries }
+}
+ConvertTo-Json -InputObject $cases -Depth 9 -Compress
+`)
+  const cases = Object.fromEntries(observed.map(value => [value.mode, value]))
+  assert.equal(cases.valid.data.workers[0].state, 'observed', JSON.stringify(cases.valid))
+  assert.equal(cases.valid.data.workers[0].category, 'identity-bound')
+  assert.equal(cases.valid.queries, 2)
+  assert.equal(cases.valid.disposals, 1)
+  assert.equal(cases.valid.data.admittedQuerySeconds, 2)
+  assert.equal(cases.valid.data.workers[0].ownershipVerified, true)
+  assert.equal(cases.valid.data.workers[0].exited, false)
+  assert.equal(cases.valid.data.workers[0].exitCode, null)
+  assert.match(cases.valid.data.workers[0].creationTimeUtc, /^2026-09-20T22:00:01/u)
+  assert.equal(cases['exited-valid'].data.workers[0].state, 'observed')
+  assert.equal(cases['exited-valid'].data.workers[0].exited, true)
+  assert.equal(cases['exited-valid'].data.workers[0].exitCode, 7)
+  for (const [mode, result] of Object.entries(cases)) {
+    if (mode === 'valid' || mode === 'exited-valid' || mode === 'capped') continue
+    for (const worker of result.data.workers) {
+      assert.equal(worker.state, 'unknown', mode)
+      for (const field of ['creationTimeUtc', 'ownershipVerified', 'elapsedMilliseconds', 'exited', 'exitCode']) assert.equal(worker[field], null, `${mode}:${field}`)
+      assert.equal(Object.hasOwn(worker, 'windows'), false)
+    }
+    if (result.opens > 0 && mode !== 'open-denied') assert.equal(result.disposals, 1, mode)
+  }
+  assert.equal(cases.capped.data.candidateCount, 9)
+  assert.equal(cases.capped.data.truncated, true)
+  assert.equal(cases.capped.data.workers.length, 4)
+  assert.equal(cases.capped.queries, 2)
+  assert.equal(cases.capped.disposals, 1)
+  assert.equal(cases.capped.data.workers.filter(worker => worker.state === 'observed').length, 1)
+  assert.equal(cases.budget.data.category, 'soft-observation-budget')
+  assert.equal(cases.budget.opens, 0)
+  assert.doesNotMatch(JSON.stringify(observed), /SECRET|foreign|ExecutablePath|CommandLine|process-temp|Installed App/u)
+})
+
+test('relocated uninstall queries share advancing soft admission and finite timeout allowances', { skip: process.platform !== 'win32' }, t => {
+  const observed = powershellUnit(t, `
+${uninstallObservationSource}
+function Read-UninstallObservationProcess($ProcessId, $Seconds) {
+    if ($ProcessId -ne 30 -or $Seconds -ne 1) { throw 'Unexpected bounded query' }
+    $script:queryCount++; $script:querySeconds += $Seconds
+    $script:clockMs += $script:step
+    return 'synthetic identity'
+}
+$cases = @()
+foreach ($case in @(
+    @('advancing', 0, 250), @('zero-remainder', 2000, 0), @('negative-remainder', 2001, 0),
+    @('invalid-clock', -1, 0), @('below-minimum', 1001, 0), @('last-moment', 1999, 0),
+    @('second-below-minimum', 0, 1001), @('deadline', 0, 1000), @('overrun', 0, 2200)
+)) {
+    $script:clockMs = [int]$case[1]; $script:step = [int]$case[2]
+    $script:queryCount = 0; $script:querySeconds = 0
+    $clock = [pscustomobject]@{}
+    $clock | Add-Member ScriptProperty ElapsedMilliseconds { return $script:clockMs }
+    $budget = @{ Clock = $clock; QuerySeconds = 2; Expired = $false }
+    $accepted = 0
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        try { [void](Read-UninstallWorkerSample 30 $budget); $accepted++ }
+        catch { break }
+    }
+    $cases += [pscustomobject]@{ name = $case[0]; queries = $script:queryCount; seconds = $script:querySeconds
+        accepted = $accepted; elapsed = $script:clockMs; expired = $budget.Expired }
+}
+ConvertTo-Json -InputObject $cases -Compress
+`)
+  const cases = Object.fromEntries(observed.map(row => [row.name, row]))
+  for (const row of observed) assert.ok(row.seconds <= 2, row.name)
+  assert.deepEqual(cases.advancing, { name: 'advancing', queries: 2, seconds: 2, accepted: 2, elapsed: 500, expired: true })
+  for (const name of ['zero-remainder', 'negative-remainder', 'invalid-clock', 'below-minimum', 'last-moment']) {
+    assert.equal(cases[name].queries, 0, name)
+    assert.equal(cases[name].accepted, 0, name)
+  }
+  assert.equal(cases['second-below-minimum'].queries, 1)
+  assert.equal(cases.deadline.queries, 2)
+  assert.equal(cases.deadline.accepted, 1)
+  assert.equal(cases.overrun.queries, 1)
+  assert.equal(cases.overrun.accepted, 0)
+  assert.equal(cases.overrun.elapsed, 2200, 'An overrun is discarded, not misreported as a hard deadline')
+})
+
+test('relocated uninstall diagnostics remain failure-only bounded reads with no action authority', () => {
+  const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  assert.ok(uninstallObservationSource.includes('Select-Object -First 4'))
+  assert.ok(uninstallObservationSource.includes('$elapsed -ge 2000'))
+  assert.ok(uninstallObservationSource.includes('-OperationTimeoutSec $Seconds'))
+  assert.ok(uninstallObservationSource.includes('$Budget.QuerySeconds -= $seconds'))
+  assert.doesNotMatch(uninstallObservationSource, /InstallerCapture|HWND|DiagnosticSummary|ProjectDiagnosticControl|DiagnosticText|Read-UninstallObservationWindows|EnumWindows|WM_GETTEXT/u)
+  assert.equal(uninstallObservationSource.match(/Assert-UninstallWorkerIdentity \$current/gu)?.length, 2)
+  assert.doesNotMatch(uninstallObservationSource, /Stop-Process|\.Kill\(|Remove-Item|Click\(|DiagnosticText|CommandLine/u)
+  assert.ok(driver.includes("$ownedUninstaller = Start-Owned $uninstaller '/currentuser /S'"))
+  assert.ok(driver.includes('Wait-Exit $ownedUninstaller 120'))
+  assert.ok(driver.includes("$timer.Elapsed.TotalSeconds -gt 30) { throw 'Owned uninstaller did not remove executable, registration and product processes'"))
+  assert.ok(driver.includes('if ($uninstallAttempted) {\n                try { Write-UninstallFailureDiagnostics'))
+})
+
 test('post-uninstall diagnostics distinguish remaining predicates and bound private observations', { skip: process.platform !== 'win32' }, t => {
   const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
   const diagnostic = source.match(/function Write-UninstallFailureDiagnostics[^]*?\r?\n\}/u)?.[0]
   assert.ok(diagnostic)
   const observed = powershellUnit(t, `
+${uninstallObservationSource}
 ${diagnostic}
 $root = $PSScriptRoot
 $ExpectedSourceCommit = 'a' * 40
@@ -749,6 +918,7 @@ test('post-uninstall observation failures retain partial evidence without exposi
   const diagnostic = source.match(/function Write-UninstallFailureDiagnostics[^]*?\r?\n\}/u)?.[0]
   assert.ok(diagnostic)
   const observed = powershellUnit(t, `
+${uninstallObservationSource}
 ${diagnostic}
 $root = $PSScriptRoot
 $ExpectedSourceCommit = 'a' * 40

@@ -51,6 +51,7 @@ $installationAttempted = $false
 $registrationIdentities = @()
 $installerProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
 . (Join-Path $PSScriptRoot 'fixtures/windows-installer-registration.ps1')
+. (Join-Path $PSScriptRoot 'fixtures/windows-uninstall-observation.ps1')
 function Product-Registrations { Get-InstallerRegistrationEntries }
 function Product-Processes {
     @(Get-CimInstance Win32_Process | Where-Object {
@@ -259,7 +260,7 @@ function Write-UninstallFailureDiagnostics($UninstallerProcess, $Errors) {
         executablePresent = $null; uninstallerPresent = $null
         registrationCount = $null; registrations = @(); registrationsTruncated = $false
         productProcessCount = $null; ownedTemporaryProcessCount = $null; processes = @(); processesTruncated = $false
-        observationErrors = @()
+        relocatedWorkers = $null; observationErrors = @()
     }
     $observationErrors = [Collections.Generic.List[string]]::new()
     try {
@@ -292,7 +293,8 @@ function Write-UninstallFailureDiagnostics($UninstallerProcess, $Errors) {
     } catch { $observationErrors.Add('registration-state-unavailable') }
     try {
         $temporaryRoot = (Join-Path $root 'process-temp') + '\'
-        $observed = @(Get-CimInstance Win32_Process -OperationTimeoutSec 5 | Where-Object {
+        $processSnapshot = @(Get-CimInstance Win32_Process -OperationTimeoutSec 5)
+        $observed = @($processSnapshot | Where-Object {
             $_.Name -eq 'cloga-deepseek-harness.exe' -or ($_.ExecutablePath -and (
                 $_.ExecutablePath.StartsWith($installPath + '\', [StringComparison]::OrdinalIgnoreCase) -or
                 $_.ExecutablePath.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase)))
@@ -310,11 +312,14 @@ function Write-UninstallFailureDiagnostics($UninstallerProcess, $Errors) {
                 inOwnedTemporaryRoot = [bool]($_.ExecutablePath -and $_.ExecutablePath.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase))
             }
         })
+        try {
+            $observation.relocatedWorkers = Get-UninstallWorkerObservation $UninstallerProcess $processSnapshot $root $uninstaller
+        } catch { $observationErrors.Add('worker-observation-unavailable') }
     } catch { $observationErrors.Add('process-state-unavailable') }
     $observation.observationErrors = @($observationErrors)
     foreach ($issue in $observationErrors) { $Errors.Add('Post-uninstall observation failed: ' + $issue) }
     try {
-        $observation | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $root 'evidence/installer-uninstall-failure.json') -Encoding utf8NoBOM
+        $observation | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $root 'evidence/installer-uninstall-failure.json') -Encoding utf8NoBOM
     } catch { $Errors.Add('Post-uninstall diagnostic write failed') }
 }
 function Installation-Inventory {

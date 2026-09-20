@@ -68,9 +68,13 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 不可变的 `0.1.6-alpha.1.cloga.2` 基线使用 sequence 12 和 Copilot alpha.24；只有验证该安装的锁定身份后，才使用其[基线设置检查器](fixtures/baseline-copilot-settings-smoke.ts)。它保留该版本原有的只读模型角色与提供方目录检查，不要求后续版本的工作区或仅提供方 UI。候选及其重启仍使用针对 Copilot alpha.30 的严格[当前设置检查器](fixtures/copilot-settings-smoke.ts)。基线检查不能作为候选检查失败时的回退；两种检查器都不发起认证、保存设置或执行模型／搜索调用。
 
+安装轮次失败后，[启动诊断](fixtures/installed-startup-diagnostics.ts)在关闭自有应用之前运行，写入独立的 round-startup 记录。自包含回调只读取已识别的文档类别、DOM 状态标志和现有只读 backend status。消息前缀最多检查 4096 个字符，转换为固定类别；未知仍记为未知。不保留原始后端文本、URL、私有路径、profile 或 stdout。桥接与外层传输观察分别采用一秒和两秒预算，不改变就绪、恢复或原始失败。这项隐私规则适用于新增记录，不代表旧版通用错误格式化器具备同样保证。
+
 注册验证和清理绑定自有目录中的确切 `Uninstall cloga-deepseek-harness.exe`：原版 NSIS 根据已验证的 `executableName` 派生这个文件名，而不是使用显示名称或安装目录名称。注册表命令必须是带引号的自有路径，随后为 `/currentuser`；`QuietUninstallString` 只能再追加确切的 ` /S`。其他可执行文件名、模式或尾随参数仍被拒绝；一致的 HKCU 注册表视图别名不会放宽源码、版本、可执行文件哈希或文件系统祖先检查。
 
 清理使用与 `QuietUninstallString` 匹配的固定 `/currentuser /S` 参数调用已验证的自有可执行文件，绝不执行注册表提供的命令文本。卸载后失败会保留有界的启动器状态、剩余文件、注册信息与进程状态标量观察；这些观察不证明超时原因。退出／删除时限、清理断言和主要失败保留规则均不变。纯注册 fixture 验证该命名规则，不读取注册表，也不启动卸载器；托管环境中的真实安装升级验收仍须单独执行。
+
+仅在失败后执行的[迁移进程观察](fixtures/windows-uninstall-observation.ps1)最多检查四个候选，在采样前后验证保留的启动器生命周期、进程具体实例、父进程、模块路径与自有临时目录的普通祖先。不确定或变化的身份记为未知，并丢弃状态叶字段。不读取或枚举迁移子进程的 HWND、窗口文本、类或控件。两秒软准入预算在观察前检查剩余时间，总共最多准入两次各一秒的定向 CIM 查询；预算耗尽或剩余不足一秒时不发起下一次查询。本地元数据读取不可取消，因此这不是严格的墙钟截止时间。这些纯进程观察不改变启动器 120 秒／实际删除 30 秒门禁，也不证明清理成功或此前停滞的原因。
 
 [打包 skill canary](fixtures/packaged-skills-smoke.mjs) 从指定产物挂载最小 Cordis 服务，并读取其中真实的 ASAR preset 与 skill。其子进程仅接收明确的操作系统环境白名单，用户状态目录全部私有；它自己的清理保留主要失败，只有清理失败时也会判定失败。这些保证仅适用于该 canary，不适用于其他 runtime-smoke 子进程。它通过四次真实 skill 工具调用检查随附 skill 与合成用户 skill，不代表生产 Host 或 profile 验证。[纯 helper 回归](packaged-skills-smoke.test.mjs) 在产物构建前执行，不证明打包行为已通过。
 
