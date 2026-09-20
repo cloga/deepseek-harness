@@ -184,7 +184,7 @@ jobs:
 
   publish-runtime:
     name: Publish runtime wheels to public PyPI
-    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    if: github.repository != 'cloga/deepseek-harness' && github.event_name == 'workflow_dispatch' && inputs.publish
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -219,7 +219,7 @@ jobs:
   # to overwrite the runtime release.
   publish-sdk:
     name: Publish SDK wheel to public PyPI
-    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    if: github.repository != 'cloga/deepseek-harness' && github.event_name == 'workflow_dispatch' && inputs.publish
     needs: [validate, publish-runtime]
     runs-on: ubuntu-latest
     timeout-minutes: 10

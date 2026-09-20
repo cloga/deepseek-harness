@@ -12,7 +12,7 @@ import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
-import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
+import { readModelSelection, type Agent, type PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 // Type-only: makes the optional sibling service available to `ctx.get()`.
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
@@ -235,7 +235,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     agent: Agent,
     signal?: AbortSignal,
   ): Promise<SummaryResult> {
-    const target = conversationTarget(agent)
+    const target = input.conversationTarget ?? conversationTarget(agent)
     const config = target === undefined
       ? this.config
       : resolveTargetPolicy(this.config, target)
@@ -379,8 +379,12 @@ export class BasicCompactionEngine extends CompactionEngine {
             0,
           )
           if (range === null) return null
+          const selected = readModelSelection(agent.ctx, agent)
+          const target = selected === undefined
+            ? conversationTarget(agent)
+            : { provider: selected.provider, model: selected.model }
           return await compactSurfaceRegion(
-            this.regionDependencies(),
+            this.regionDependencies(target),
             agent.session,
             range.start,
             range.end,
@@ -417,10 +421,12 @@ export class BasicCompactionEngine extends CompactionEngine {
   }
 
   /** Bind the effective token meter and dynamically dispatched summarizer hook. */
-  private regionDependencies(): Parameters<typeof compactSurfaceRegion>[0] {
+  private regionDependencies(target?: SummarizationInput['conversationTarget']): Parameters<typeof compactSurfaceRegion>[0] {
     return {
       meter: this.ctx.tokenMeter,
-      summarize: (input, owner, abort) => this.summarize(input, owner, abort),
+      summarize: (input, owner, abort) => this.summarize(
+        target === undefined ? input : { ...input, conversationTarget: target }, owner, abort,
+      ),
       recover: (error, agent, sourceEventSeqs, signal) => this.ctx.waterfall('compaction/summary-error', {
         session: agent.session,
         sourceEventSeqs,

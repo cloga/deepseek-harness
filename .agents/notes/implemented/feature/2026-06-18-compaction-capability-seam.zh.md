@@ -33,7 +33,11 @@ Status: implemented
 
 将完整算法（保留遍历、token 求和、文本提取）作为接口上的具体方法，会将约定重新耦合到一种策略：想要不同保留策略或事件排序的后端必须与继承来的具体代码对抗。将三个操作都设为抽象，把所有*怎么做*的决策放在后端，并让接口保持为*做什么*的声明。token 测量根本不是压缩钩子；单例服务使多个消费方能够共享逐会话的回放折叠。
 
-`compactIfNeeded(agent, trigger, signal)` 接受显式的 `'pressure' | 'context-overflow'` 触发原因与取消信号。它只读取最新的持久化已路由请求；没有 header 就不执行工作，任何已路由的提供方/模型目标都使用单例估算器。`compactNow(agent, signal)` 要求 agent 处于 idle，即使未达到压力也进行一次有效的平衡缩减；不存在这种范围时返回 `null`，且不写入任何内容。`compactRegion(start, end, agent, signal?)` 将 `agent.session` 作为唯一会话身份，并为显式调用方保留可选 signal。默认摘要器依次从显式配置、最新记录的已路由目标和 agent 选项解析目标，并在任何 `llm/stream` 路由后记录提供方/模型对。它回放已路由请求的前缀，并将压缩指令追加为尾部 user 消息，从而复用提供方的热 KV Cache；见[`dsh-compaction-basic` README](../../../../packages/compaction/compaction-basic/README.zh.md)。该结果携带 `llmStreamCall: true`，因为生成它时恰好通过此上下文的 LLM 服务发起了一次调用；只有满足相同条件时，子类才设置该标记，因为单有保留的 `rawOutput` 并不能判定调用路径。该调用将提供方无关的 `GenerateOptions.purpose` 设为 `compaction`；适配器可以将此用途映射为对模型隐藏的传输元数据，DeepSeek 适配器会发送 `x-deepseek-harness-compact: 1`。
+`compactIfNeeded(agent, trigger, signal)` 接受显式的 `'pressure' | 'context-overflow'` 触发原因与取消信号。它只读取最新的持久化已路由请求；没有 header 就不执行工作，任何已路由的提供方/模型目标都使用单例估算器。`compactNow(agent, signal)` 要求 agent 处于 idle，即使未达到压力也进行一次有效的平衡缩减；不存在这种范围时返回 `null`，且不写入任何内容。`compactRegion(start, end, agent, signal?)` 将 `agent.session` 作为唯一会话身份，并为显式调用方保留可选 signal。默认摘要器依次从显式配置、手动操作捕获的对话目标、最新记录的已路由目标和 agent 选项解析目标，并在任何 `llm/stream` 路由后记录提供方/模型对。它回放已路由请求的前缀，并将压缩指令追加为尾部 user 消息，从而复用提供方的热 KV Cache；见[`dsh-compaction-basic` README](../../../../packages/compaction/compaction-basic/README.zh.md)。该结果携带 `llmStreamCall: true`，因为生成它时恰好通过此上下文的 LLM 服务发起了一次调用；只有满足相同条件时，子类才设置该标记，因为单有保留的 `rawOutput` 并不能判定调用路径。该调用将提供方无关的 `GenerateOptions.purpose` 设为 `compaction`；适配器可以将此用途映射为对模型隐藏的传输元数据，DeepSeek 适配器会发送 `x-deepseek-harness-compact: 1`。
+
+手动压缩在维护操作获接纳后、等待摘要之前，通过 Agent 作用域的 `model-selection/query` 查询捕获所选路由。选择的所有者提供此只读查询，使压缩后端不依赖 Web 控制器。同一个分离的目标决定策略覆盖和默认摘要路由；之后的新选择保持待应用状态，供后续工作使用。摘要既不消费该待应用选择，也不写入对话请求 header。自动恢复则保持实际的持久请求路由：新的选择不得重定向已经发送的请求的恢复。这一区别允许用户在 compact 失败后选择另一摘要模型，而不必先发送一条可能同样溢出的对话请求。
+
+输出截断具有独立的手动失败代码。后端仍拒绝不完整检查点，保留事务清理及取消优先级，不隐藏重试，也不提高输出预算。成功调用的回放仍保持每次模型调用对应一条摘要记录；恢复截断输出需要单独记录失败尝试，不能在摘要器内部静默循环。
 
 ### 成功的持久步骤工作完成后运行自动压力检查
 

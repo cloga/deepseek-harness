@@ -104,7 +104,9 @@ const harness = await vi.hoisted(async () => {
     name: 'Desktop test',
     whenReady: () => Promise.resolve(),
     getLocale: (): string => 'en-US',
-    getVersion: () => '1.0.0',
+    getVersion: (): string => '1.0.0',
+    setAboutPanelOptions: vi.fn(),
+    showAboutPanel: vi.fn(),
     getAppPath: () => 'desktop-test-app',
     getPath: () => 'desktop-test-user-data',
     requestSingleInstanceLock: () => true,
@@ -326,6 +328,36 @@ afterEach(async () => {
   vi.useRealTimers()
   vi.unstubAllEnvs()
   vi.unstubAllGlobals()
+})
+
+describe('Desktop version menu', () => {
+  it.each([
+    ['en-US', 'Application', 'About Desktop 0.1.6-alpha.1.cloga.10…', 'DeepSeek Harness Desktop'],
+    ['zh-CN', '应用', '关于 Desktop 0.1.6-alpha.1.cloga.10…', 'DeepSeek Harness 桌面端'],
+    ['fr-FR', 'Application', 'About Desktop 0.1.6-alpha.1.cloga.10…', 'DeepSeek Harness Desktop'],
+  ])('shows the full running version before Host readiness in %s', async (locale, application, label, title) => {
+    vi.spyOn(harness.app, 'getLocale').mockReturnValue(locale)
+    vi.spyOn(harness.app, 'getVersion').mockReturnValue('0.1.6-alpha.1.cloga.10')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    const template = harness.menu.buildFromTemplate.mock.calls[0]?.[0] as {
+      label: string
+      submenu: { label?: string; type?: string; click?: () => void }[]
+    }[]
+    expect(template[0]!.label).toBe(process.platform === 'darwin' ? harness.app.name : application)
+    const about = template[0]!.submenu[0]!
+    expect(about.label).toBe(label)
+    expect(template[0]!.submenu[1]).toEqual({ type: 'separator' })
+    expect(harness.app.setAboutPanelOptions).toHaveBeenCalledExactlyOnceWith({
+      applicationName: title, applicationVersion: '0.1.6-alpha.1.cloga.10',
+    })
+    expect(harness.app.showAboutPanel).not.toHaveBeenCalled()
+    about.click!()
+    expect(harness.app.showAboutPanel).toHaveBeenCalledOnce()
+    expect(harness.managedCheck).not.toHaveBeenCalled()
+    expect(harness.managedInstall).not.toHaveBeenCalled()
+    expect(harness.app.quit).not.toHaveBeenCalled()
+  })
 })
 
 describe('native managed-update recovery entry', () => {
@@ -1133,10 +1165,10 @@ describe('desktop main startup', () => {
   it('continues to show the manual menu installation error in a native dialog', async () => {
     harness.managedUpdates = true
     await startApplication()
-    const template = harness.menu.buildFromTemplate.mock.calls[0]?.[0] as { submenu: { click?: () => void }[] }[]
+    const template = harness.menu.buildFromTemplate.mock.calls[0]?.[0] as { submenu: { label?: string; click?: () => void }[] }[]
     harness.managedInstall.mockResolvedValueOnce({ phase: 'error', message: 'installer unavailable', mode: 'github-release-managed' })
     harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 }).mockResolvedValueOnce({ response: 1 })
-    template[0]!.submenu[1]!.click!()
+    template[0]!.submenu.find(item => item.label === 'Check for Updates…')!.click!()
     await vi.advanceTimersByTimeAsync(0)
     expect(harness.dialog.showMessageBox).toHaveBeenCalledTimes(2)
     expect(harness.dialog.showMessageBox).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'error', message: 'installer unavailable' }))
@@ -1263,8 +1295,7 @@ describe('desktop main startup', () => {
     harness.managedUpdates = true
     await startApplication()
     const template = harness.menu.buildFromTemplate.mock.calls[0]?.[0] as { submenu: { label?: string; click?: () => void }[] }[]
-    const check = template[0]!.submenu.find(item => item.label === 'Check for updates…')
-      ?? template[0]!.submenu[1]!
+    const check = template[0]!.submenu.find(item => item.label === 'Check for Updates…')!
     harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 1 })
     check.click!()
     await vi.advanceTimersByTimeAsync(0)

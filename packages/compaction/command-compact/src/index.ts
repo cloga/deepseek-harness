@@ -40,6 +40,11 @@ function expectedFailure(error: ManualCompactionError): CommandResult {
         kind: 'error',
         text: 'Compaction could not produce a useful summary. The attempt is recorded in the session log.',
       }
+    case 'summary-truncated':
+      return {
+        kind: 'error',
+        text: 'The compaction summary reached its output token cap. No incomplete checkpoint was committed. Try a different selected model or adjust the configured summary budget.',
+      }
     case 'commit':
       return {
         kind: 'error',

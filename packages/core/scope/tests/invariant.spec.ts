@@ -76,6 +76,7 @@ describe('scoped-dispatch invariants', () => {
     } satisfies { [K in AgentEventName]: EventArgs<K> }
     const rows: Array<[string, unknown[]]> = [
       ...Object.entries(agentRows),
+      ['model-selection/query', [{ owner: agent }, () => undefined]],
       ['approval/request', [{ agent, toolName: 'echo' }, () => Promise.resolve('unavailable')]],
       ['goal/changed', [{ agent, change: { operation: 'create', ref: { id: 'goal-a', revision: 1 } } }]],
       ['system-prompt/assemble', [[], { scope: agent }]],
