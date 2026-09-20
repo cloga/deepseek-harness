@@ -3,7 +3,7 @@ import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import type * as TypeScript from 'typescript'
+import process from 'node:process'
 import { expect, it, onTestFinished } from 'vitest'
 
 const desktopRequire = createRequire(new URL('../package.json', import.meta.url))
@@ -50,7 +50,7 @@ async function bounded<T>(operation: Promise<T>, milliseconds: number, message: 
     return await Promise.race([
       operation,
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), milliseconds)
+        timer = setTimeout(() => { reject(new Error(message)) }, milliseconds)
       }),
     ])
   } finally {
@@ -131,7 +131,7 @@ it.skipIf(process.platform !== 'win32')('dispatches real Electron navigation thr
       await mkdir(join(root, directory), { mode: 0o700 })
     }
     // Source-plane fixture: transpile ONLY the current registration helper, never build/load Core or main.ts.
-    const ts: typeof TypeScript = desktopRequire('typescript')
+    const { default: ts } = await import('typescript')
     const source = await readFile(new URL('../src/window-navigation.ts', import.meta.url), 'utf8')
     const transformed = ts.transpileModule(source, {
       fileName: 'window-navigation.ts',
@@ -147,8 +147,8 @@ it.skipIf(process.platform !== 'win32')('dispatches real Electron navigation thr
       cwd: root, env: isolatedEnvironment(root), stdio: 'ignore', windowsHide: true,
     })
     closed = new Promise<Exit>((resolve) => {
-      child!.once('error', error => resolve({ code: null, signal: null, error }))
-      child!.once('close', (code, signal) => resolve({ code, signal }))
+      child!.once('error', (error) => { resolve({ code: null, signal: null, error }) })
+      child!.once('close', (code, signal) => { resolve({ code, signal }) })
     })
     // A deadline rejects separately, before any exit-status assertion; finally kills and awaits the owned tree.
     const exit = await bounded(closed, 60_000, 'Electron navigation fixture exceeded its process deadline')
