@@ -336,6 +336,10 @@ describe('native managed-update recovery entry', () => {
     harness.app.emit('second-instance', {}, ['Desktop.exe', '--recover-managed-update'])
     await harness.navigated.promise
     expect(harness.completeUpdate).toHaveBeenCalledTimes(2)
+    expect(harness.completeUpdate.mock.calls[0]?.[9]).toBeUndefined()
+    expect(harness.completeUpdate.mock.calls[1]?.[9]).toEqual({
+      version: '1.0.0', capabilityPath: join(process.resourcesPath, 'managed-update', 'capability.json'),
+    })
     expect(harness.applyRelease).toHaveBeenCalledOnce()
     expect(harness.hosts).toHaveLength(1)
     expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
@@ -912,7 +916,7 @@ describe('desktop main startup', () => {
       await harness.navigated.promise
       expect(harness.completeUpdate).toHaveBeenCalledOnce()
       expect(harness.completeUpdate.mock.calls[0]?.[3]).toBe(1)
-      expect(harness.completeUpdate.mock.calls[0]?.at(-1)).toBe('desktop-test-profile')
+      expect(harness.completeUpdate.mock.calls[0]?.[7]).toBe('desktop-test-profile')
     }
   })
 

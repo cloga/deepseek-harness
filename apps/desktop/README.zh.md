@@ -115,7 +115,9 @@ Desktop 在启动十秒后静默检查更新，此后运行期间每六小时检
 
 下一个 Desktop process 将打包的插件 plan 与运行时一起暂存，启动最终位置的 Host，并且仅在 helper 结果、已安装文件、capability、plan、实际插件清单、receipt 与 sequence 一致时接受 completion。Completion 使用持久完成 receipt 中的 sequence，而非 discovery 为防止选择自身所用的打包 sequence。新打包版本不证明其待处理安装已经完成。保留的 schema-2 和 schema-3 handoff 可能包含基于 commit 的迁移源记录；completion 验证这些记录，不改写历史，也不使其具备新安装资格。身份验证通过且发生在 stage 提升前的失败属于终态，不阻止启动，也不推进 completion receipt；operation 元数据完整保留。已经暂存或可能启动 installer 的事务仍需恢复，除非独立的完成候选通过锁定的 manifest、executable/runtime hash、打包 capability 与插件清单，核验同一或更高版本的实际安装。冲突、格式错误、中断或不匹配的证据不会仅凭版本比较变为成功。Helper 失败记录阶段、资产文件名、错误类别及安装是否可能已开始，不持久化原始网络错误或签名 URL。
 
-恢复命令通过 `--recover-managed-update` 调用已安装 executable。它转交给持有单实例锁的 Electron，使用已就绪 Host 重新核验 completion，不重置插件或重启 Host；如果证据仍未通过，则提供现有 **Check for updates** 流程。替换安装保留活动工作确认；取消不会改变安装和数据。恢复不会重跑旧 handoff 或绕过 hash 检查。如果已安装应用无法启动 Host，或没有较新的已验证 release，则需在此流程之外取得经过验证的交互式 installer，并且只有在审查、确认活动工作后才关闭精确的 Electron/Host 进程；缺失的旧脚本不再是原生恢复的依赖。
+恢复命令通过 `--recover-managed-update` 调用已安装 executable。它转交给持有单实例锁的 Electron，并要求最终位置的 Host 已就绪。手动重装后，即使该版本没有 managed helper operation，此显式操作也能从已安装版本的不可变 GitHub Release 获取独立 completion 证据。它核验 tag 与源码身份、manifest 和 build-receipt hash、已安装 executable/runtime 字节、打包 capability 与 provisioning plan，以及实际插件清单。它原样保留历史 operation，拒绝格式错误、仍在运行、更新序号或冲突的安装证据。普通启动仍为离线核验；发布元数据不可用或无法验证时，恢复保持阻塞，原 completion receipt 保持不变。
+
+恢复成功会打开应用，不重置插件或重启 Host。证据仍不通过时，操作提供现有 **Check for updates** 流程，并在替换安装前保留活动工作确认。恢复绝不重跑旧 handoff 或绕过 hash 检查。如果 Host 无法就绪，仍需在此流程之外进行经过验证的交互式重装；单独重装不会完成旧 managed operation。手动启动修复后的应用后，运行其显示的恢复命令。本地安装与启动验证由操作者负责。
 
 Windows Ops 每次选择并锁定一个受支持的 upstream baseline。`cloga/deepseek-harness` 在经过评审的 release plan 中记录该选择，并拥有 installer、manifest、receipt、checksums、不可变 tag 与 capability 注入。随后 Windows Ops 锁定、验证并部署这些由源码拥有的资产，不维护另一份 release 定义。旧 `dsh-local-0.1.5-rc.2.local.1` manifest 只能通过显式 migration 条目接受，不能成为第二个持续通道。当 fork 改用带发布者验证的已签名原生产物时，省略 capability 即可删除托管模式，而无需改变原生更新器。
 

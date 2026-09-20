@@ -12,6 +12,8 @@ import {
   type DesktopManagedUpdateManifest,
 } from './managed-update-protocol.ts'
 import { managedUpdateRecoveryCommand } from './managed-update-recovery.ts'
+import { verifyDesktopManualInstallEvidence, type DesktopManualInstallRecovery } from './manual-install-evidence.ts'
+import { readDesktopManagedCompletedSequence } from './managed-update-state.ts'
 import {
   desktopPluginProvisioningPlanSha256,
   parseDesktopPluginProvisioningPlan,
@@ -345,6 +347,7 @@ async function classifyOperation(
  * @param provisioningPlan - Installed release-owned Desktop plugin plan.
  * @param activeProfile - Final-location profile, after its Host has reached readiness.
  * @param helperRunning - Read-only liveness probe for acknowledged helpers without terminal results.
+ * @param manualRecovery - Explicit current-install verification; absent during ordinary offline startup.
  * @returns Verified completion, no pending installation, or actionable recovery diagnostics.
  */
 export async function completeDesktopManagedUpdate(
@@ -357,6 +360,7 @@ export async function completeDesktopManagedUpdate(
   provisioningPlan: string,
   activeProfile: string,
   helperRunning: (pid: number) => boolean = helperProcessRunning,
+  manualRecovery?: DesktopManualInstallRecovery,
 ): Promise<DesktopManagedUpdateCompletion> {
   const recovery = (error: unknown): DesktopManagedUpdateCompletion => ({
     status: 'recovery-required',
@@ -371,13 +375,24 @@ export async function completeDesktopManagedUpdate(
     return recovery(error)
   }
   try {
-    const operations: OperationClassification[] = []
-    for (const name of operationNames.sort()) {
-      if (!/^[a-f0-9]{64}$/u.test(name)) continue
-      operations.push(await classifyOperation(join(operationsRoot, name), name, capability, completedSequence, helperRunning))
+    completedSequence = Math.max(completedSequence, await readDesktopManagedCompletedSequence(completionPath))
+    const classify = async (names: string[]): Promise<OperationClassification[]> => {
+      const classified: OperationClassification[] = []
+      for (const name of names.sort()) {
+        if (!/^[a-f0-9]{64}$/u.test(name)) continue
+        classified.push(await classifyOperation(join(operationsRoot, name), name, capability, completedSequence, helperRunning))
+      }
+      return classified
     }
+    let operations = await classify(operationNames)
     if (!operations.some(operation => operation.status === 'pending')) return { status: 'none' }
+    let independent: DesktopManagedUpdateManifest | undefined
+    if (manualRecovery !== undefined && capability.currentSequence > completedSequence) {
+      independent = await verifyDesktopManualInstallEvidence(capability, provisioningPlan, manualRecovery)
+      operations = await classify(await readdir(operationsRoot))
+    }
     const candidates = operations.flatMap(operation => operation.candidate === undefined ? [] : [operation.candidate])
+    if (independent !== undefined) candidates.push(independent)
     const failures = operations.flatMap(operation => operation.failure === undefined ? [] : [operation.failure])
     if (candidates.length === 0) {
       throw new Error(failures[0]?.message ?? 'The managed update has no verified completion candidate.')
@@ -404,6 +419,9 @@ export async function completeDesktopManagedUpdate(
       throw new Error('desktop managed update: installed plugin provisioning plan does not match the release')
     }
     assertDesktopProvisioningInventory(activeProfile, installedPlan)
+    if (await readDesktopManagedCompletedSequence(completionPath) > completedSequence) {
+      throw new Error('desktop managed update: completion advanced during verification; recheck the installed release')
+    }
     await writeJsonAtomic(completionPath, {
       schemaVersion: 1,
       status: 'complete',

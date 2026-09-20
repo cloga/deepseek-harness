@@ -52,7 +52,7 @@ Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须�
 
 传输时限涵盖响应头、重定向及响应体读取，元数据与 installer 使用不同预算。有界重试仅适用于已分类的临时传输/HTTP 失败，不适用于身份或完整性校验。Installer 取消会先关闭由 Node 包装的 Web stream 与输出，再删除其私有部分文件。持久诊断保留阶段、已验证资产文件名、错误类别及安装是否可能开始，不保留远程消息、凭据、签名 URL 参数或 operation token。
 
-已安装 executable 提供 `--recover-managed-update`。后续启动将恢复请求转交单实例持有者；重新核验证据不停止 Host 或重置 profile。结果仍阻塞时，提供保留活动工作确认的现有更新流程。此入口无法修复不能启动的 Host，也不能凭空生成缺失的独立完成候选；此时仍需要经过验证的流程外安装。[Desktop README](../../../../apps/desktop/README.zh.md) 说明恢复用法与传输限制。
+已安装 executable 提供 `--recover-managed-update`。后续启动将恢复请求转交单实例持有者；重新核验证据不停止 Host 或重置 profile。显式恢复可通过不可变发现与 manifest 验证的 build receipt，独立于历史 handoff 验证当前安装的 release。精确 version 和 sequence 选择允许在更新 release 已发布时恢复，而不安装它。Receipt 绑定源码身份、executable/runtime hash、打包 capability 字节，以及 provisioning-plan 字节与规范 hash。Completion 仍要求最终位置 Host 就绪及实际清单，在网络访问后重新读取历史 operation，并拒绝并发推进的 completion。历史 operation 保持不变。普通启动只使用本地证据；离线或无法验证的发布元数据不能授权手动安装恢复。此入口不能修复无法启动的 Host。结果仍阻塞时，提供保留活动工作确认的现有更新流程。[Desktop README](../../../../apps/desktop/README.zh.md) 说明恢复用法与传输限制。
 
 ## 发布
 
