@@ -1,6 +1,7 @@
 /** Manual compact follows the accepted composer selection without another model turn. */
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium, type Browser, type Page } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
@@ -23,6 +24,7 @@ const PROVIDER = 'deepseek-official'
 const FLASH = 'deepseek-v4-flash'
 const PRO = 'deepseek-v4-pro'
 const PRO_NAME = 'DeepSeek-V4-Pro'
+const PRESET_ID = 'manual-compact-selection-fixture'
 
 // This authored model script never enables the real adapter, including record mode.
 describe.skipIf(MODE === 'record')('web e2e: manual compact model selection', () => {
@@ -31,12 +33,16 @@ describe.skipIf(MODE === 'record')('web e2e: manual compact model selection', ()
   let page: Page
   let tripwire: ReturnType<typeof watchConsole>
   let fixtureText: string
+  let presetRoot: string | undefined
 
   beforeAll(async () => {
+    presetRoot = await mkdtemp(join(tmpdir(), 'dsh-web-e2e-compact-presets-'))
+    presetRoot = await realpath(presetRoot)
     const fixture = await selectedSessionFixture(FIXTURE)
     fixtureText = await readFile(fixture, 'utf8')
     scaffold = await launchWebScaffold({
       extraOverlayPath: OVERLAY,
+      agentPresets: { roots: [{ path: presetRoot, trust: 'user' }], default: 'standard' },
       replayFixture: fixture,
       compareReplaySession: true,
       paceMs: 5,
@@ -49,6 +55,42 @@ describe.skipIf(MODE === 'record')('web e2e: manual compact model selection', ()
         ],
       }],
     })
+    const presets = scaffold.ctx.agentPresets
+    const original = await presets.read('standard')
+    await presets.copy('standard', PRESET_ID, 'Manual compact selection fixture')
+    const authored = await presets.resolve(PRESET_ID)
+    expect(authored.trust).toBe('user')
+    expect(await realpath(dirname(authored.path))).toBe(join(presetRoot, PRESET_ID))
+    const composition = await presets.read(PRESET_ID)
+    expect(composition).toBe(original)
+    const newline = composition.includes('\r\n') ? '\r\n' : '\n'
+    const anchor = [
+      '    - id: compaction-basic',
+      "      name: '@deepseek-ai/dsh-compaction-basic'",
+      '', '',
+    ].join(newline)
+    expect(composition.split(anchor)).toHaveLength(2)
+    // Patch only the copied preset's private compaction realm; keep its other rows/assets.
+    const configured = [
+      '    - id: compaction-basic',
+      "      name: '@deepseek-ai/dsh-compaction-basic'",
+      '      config:',
+      '        auto: false',
+      '        maxTokens: 128',
+      '        modelPolicies:',
+      `          - provider: ${PROVIDER}`,
+      `            model: ${PRO}`,
+      '            maxTokens: 256',
+      '', '',
+    ].join(newline)
+    await writeFile(authored.path, composition.replace(anchor, configured), 'utf8')
+    expect(await presets.read('standard')).toBe(original)
+    await presets.standingKeyFor(PRESET_ID)
+    await scaffold.ctx.settings.mutate('agent-presets', [
+      { op: 'set', path: ['default'], value: PRESET_ID },
+      { op: 'set', path: ['modeSelectionEnabled'], value: true },
+    ])
+    expect(presets.defaultId).toBe(PRESET_ID)
     browser = await chromium.launch()
     page = await newEnglishPage(browser)
     tripwire = watchConsole(page)
@@ -58,7 +100,13 @@ describe.skipIf(MODE === 'record')('web e2e: manual compact model selection', ()
   })
 
   afterAll(async () => {
-    try { await browser?.close() } finally { await scaffold?.close() }
+    const failures: unknown[] = []
+    try { await browser?.close() } catch (error) { failures.push(error) }
+    try { await scaffold?.close() } catch (error) { failures.push(error) }
+    if (presetRoot !== undefined) {
+      try { await rm(presetRoot, { recursive: true, force: true }) } catch (error) { failures.push(error) }
+    }
+    if (failures.length > 0) throw new AggregateError(failures, 'manual compact Web fixture cleanup failed')
     // close() owns Session/prompt/schema refresh; inventory is checked only afterwards.
     if (scaffold !== undefined) {
       await assertFixtureInventory(SNAPSHOT_DIR, [
@@ -92,6 +140,7 @@ describe.skipIf(MODE === 'record')('web e2e: manual compact model selection', ()
     const agent = scaffold.ctx.agents.get(sessionId)
     if (agent === undefined) throw new Error('the browser-created Agent must remain live')
     const session = agent.session
+    expect(scaffold.ctx.agentPresets.composedPreset(agent.ctx)).toBe(PRESET_ID)
     const originalHeader = session.requestHeader()
     expect(originalHeader?.config).toMatchObject({ provider: PROVIDER, model: FLASH })
     expect(session.snapshotEvents().filter(event => event.type === 'request/header')).toHaveLength(1)
@@ -135,7 +184,10 @@ describe.skipIf(MODE === 'record')('web e2e: manual compact model selection', ()
     expect(summaries).toHaveLength(1)
     const summary = summaries[0]
     if (summary === undefined) throw new Error('the real command must commit its summary')
-    expect(summary.data).toMatchObject({ provider: PROVIDER, model: PRO, maxTokens: 256, llmStreamCall: true })
+    expect(summary.data.provider).toBe(PROVIDER)
+    expect(summary.data.model).toBe(PRO)
+    expect(summary.data.maxTokens).toBe(256)
+    expect(summary.data.llmStreamCall).toBe(true)
     expect(summary.data.summary).toEqual(seedSummary.data.summary)
     expect(summary.data.rawOutput).toEqual(seedSummary.data.rawOutput)
     const starts = events.filter(event => event.type === 'compaction/start')
