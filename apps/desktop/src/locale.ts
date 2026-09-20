@@ -2,6 +2,8 @@
 
 export const en = {
   application: 'Application',
+  aboutDesktopMenu: 'About Desktop {version}…',
+  aboutDesktopTitle: 'DeepSeek Harness Desktop',
   startupFailed: 'DeepSeek Harness could not start',
   startupLoading: 'Starting DeepSeek Harness…',
   startupLoadingDescription: 'Your workspace will open when it is ready.',
@@ -114,6 +116,8 @@ export type DesktopMessages = { readonly [Key in keyof typeof en]: string }
 
 export const zh = {
   application: '应用',
+  aboutDesktopMenu: '关于 Desktop {version}…',
+  aboutDesktopTitle: 'DeepSeek Harness 桌面端',
   startupFailed: 'DeepSeek Harness 无法启动',
   startupLoading: '正在启动 DeepSeek Harness…',
   startupLoadingDescription: '准备就绪后将自动打开工作区。',
