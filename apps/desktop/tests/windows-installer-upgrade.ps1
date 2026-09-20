@@ -14,7 +14,10 @@ if ($env:GITHUB_RUN_ID -notmatch '^\d+$' -or $env:GITHUB_RUN_ATTEMPT -notmatch '
     throw 'Qualification requires the exact workflow commit and run identity'
 }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path
-$node = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+$nodeCommands = @(Get-Command node -CommandType Application -ErrorAction Stop)
+if ($nodeCommands.Count -lt 1) { throw 'No Node application is available for the owned fixture' }
+$node = $nodeCommands[0].Source
+if (-not [IO.File]::Exists($node)) { throw 'Selected Node application does not exist' }
 $fixture = Join-Path $PSScriptRoot 'fixtures/windows-installed-upgrade-smoke.mjs'
 $temp = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
 $root = [IO.Path]::GetFullPath($RunRoot).TrimEnd('\')

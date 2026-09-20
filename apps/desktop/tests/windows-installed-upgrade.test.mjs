@@ -164,6 +164,9 @@ test('native driver requires hosted runner before mutation and never silently in
   const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
   assert.ok(source.indexOf("$env:RUNNER_ENVIRONMENT -ne 'github-hosted'") < source.indexOf('New-Item -ItemType Directory'))
   assert.ok(source.includes('$info.Environment.Clear()'))
+  assert.ok(source.includes('$nodeCommands = @(Get-Command node -CommandType Application -ErrorAction Stop)'))
+  assert.ok(source.includes('$node = $nodeCommands[0].Source'))
+  assert.doesNotMatch(source, /\(Get-Command node[^\n]+\)\.Source/u)
   const install = source.split('function Start-Installer')[1].split('function Finish-Installer')[0]
   assert.ok(install.includes("$arguments = '/THEME=light'"))
   assert.ok(install.includes("$arguments += ' /D=' + $installPath"))
