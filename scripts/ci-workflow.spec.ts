@@ -1175,10 +1175,9 @@ describe('Issue lifecycle workflow', () => {
     expect(preflightStep?.run).toContain('node .github/issue-management/policy.mjs pr-preflight')
     expect(preflightStep?.if).toBeUndefined()
     expect(policyJob.if).toBeUndefined()
-    const projectGate =
-      "github.repository == 'deepseek-ai/deepseek-harness' && steps.preflight.outputs.needs-project == 'true'"
-    const validationGate =
-      "github.repository == 'deepseek-ai/deepseek-harness' && steps.preflight.outputs.legacy-automated != 'true'"
+    const repositoryGate = "(github.repository == 'deepseek-ai/deepseek-harness' || github.repository == 'cloga/deepseek-harness')"
+    const projectGate = `${repositoryGate} && steps.preflight.outputs.needs-project == 'true'`
+    const validationGate = `${repositoryGate} && steps.preflight.outputs.legacy-automated != 'true'`
 
     expect(tokenStep).toMatchObject({
       id: 'app-token',
