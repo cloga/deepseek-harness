@@ -165,6 +165,7 @@ function Start-LegacyInstaller($Release) {
     $window = Wait-StockWindow $process
     $directory = Wait-StockControl $process $window 1019
     if ([IO.Path]::GetFullPath([InstallerCapture]::Text($directory)).TrimEnd('\') -cne $installPath) { throw 'Baseline installer custom path changed before installation' }
+    [void](Wait-StockControl $process $window 1)
     [void][InstallerCapture]::SaveStock($process.Id, $window, 1019, (Join-Path $root ('evidence/baseline-directory-' + $process.Id + '.png')))
     [InstallerCapture]::Click((Wait-StockControl $process $window 1))
     return $process
@@ -179,6 +180,7 @@ function Finish-LegacyInstaller([Diagnostics.Process]$Process) {
         if ($timer.Elapsed.TotalSeconds -gt 5) { throw 'Could not disable baseline automatic launch' }
         Start-Sleep -Milliseconds 25
     }
+    [void](Wait-StockControl $Process $window 1)
     [void][InstallerCapture]::SaveStock($Process.Id, $window, 1204, (Join-Path $root ('evidence/baseline-finish-' + $Process.Id + '.png')))
     [InstallerCapture]::Click((Wait-StockControl $Process $window 1))
     Wait-Exit $Process 30

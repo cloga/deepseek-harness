@@ -362,6 +362,13 @@ test('stock baseline captures are separate from strict custom-page readiness', (
   assert.match(legacy, /::SaveStock\(\$process\.Id, \$window, 1019, /u)
   assert.match(legacy, /::SaveStock\(\$Process\.Id, \$window, 1204, /u)
   assert.doesNotMatch(legacy, /::Save\(/u)
+  for (const [name, process] of [['Start-LegacyInstaller', 'process'], ['Finish-LegacyInstaller', 'Process']]) {
+    const section = driver.split(`function ${name}`)[1].split('\nfunction ')[0]
+    const capture = section.indexOf('::SaveStock(')
+    const ready = section.indexOf(`[void](Wait-StockControl $${process} $window 1)`)
+    assert.ok(ready >= 0 && ready < capture, `${name} must await the capture's action-control prerequisite`)
+    assert.ok(section.indexOf(`::Click((Wait-StockControl $${process} $window 1))`, capture) > capture)
+  }
   const custom = driver.split('function Start-Installer')[1].split('function Wait-NoProductProcesses')[0]
   assert.equal(custom.match(/::Save\(/gu)?.length, 2)
   assert.doesNotMatch(custom, /::SaveStock\(/u)
