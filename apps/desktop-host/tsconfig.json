@@ -15,6 +15,7 @@
     { "path": "../../packages/client/modules" },
     { "path": "../../packages/core/agent" },
     { "path": "../../packages/host/webserver" },
+    { "path": "../../packages/interaction/commands" },
     { "path": "../../packages/jobs/jobs" },
     { "path": "../../packages/util/launch-environment" }
   ]

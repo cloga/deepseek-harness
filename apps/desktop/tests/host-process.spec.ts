@@ -101,9 +101,34 @@ afterEach(() => {
 })
 
 describe('desktop host process', () => {
+  it('validates plugin command requests and replies on the exact child IPC channel', async () => {
+    const runtime = projectWithHost(`
+process.send({ type: 'ready', protocolVersion: 4, dshVersion: 'plugin-command' })
+process.send({ type: 'plugin-command-request', requestId: 1, commandId: 'command-list', operation: { type: 'list' } })
+process.on('message', message => {
+  if (message.type === 'plugin-command-response' && message.requestId === 1 && message.result.kind === 'list') {
+    process.send({ type: 'plugin-command-settled', requestId: 1, commandId: 'command-list' })
+  }
+})
+function onRequestFrame() {}
+`)
+    const events: string[] = []
+    const settled = Promise.withResolvers<undefined>()
+    const host = new DesktopHostProcess(process.execPath, runtime, runtime, undefined, process.env, undefined, (_source, event) => {
+      events.push(event.type)
+      if (event.type === 'plugin-command-request') {
+        void host.pluginCommandResponse(event.requestId, { kind: 'list', plugins: [] })
+      } else if (event.type === 'plugin-command-settled') settled.resolve(undefined)
+    })
+    await host.start()
+    await settled.promise
+    expect(events).toEqual(['plugin-command-request', 'plugin-command-settled'])
+    await host.stop()
+  })
+
   it('cancels a stalled impact request through the actual Host transport without leaving it pending', async () => {
     const runtime = projectWithHost(`
-process.send({ type: 'ready', protocolVersion: 3, dshVersion: 'impact-cancel' })
+process.send({ type: 'ready', protocolVersion: 4, dshVersion: 'impact-cancel' })
 let canceled = 0
 function onRequestFrame(frame) {
   if (frame.type === 4) { canceled++; return }
@@ -130,7 +155,7 @@ function onRequestFrame(frame) {
 
   it('reports a fatal event after readiness once and stops the child', async () => {
     const runtime = projectWithHost(`
-process.send({ type: 'ready', protocolVersion: 3, dshVersion: '1.0.0' })
+process.send({ type: 'ready', protocolVersion: 4, dshVersion: '1.0.0' })
 function onRequestFrame(frame) {
   if (frame.type === 1) process.send({ type: 'fatal', message: 'plugin unavailable' })
 }
@@ -154,7 +179,7 @@ function onRequestFrame(frame) {
 
   it('loads the resource entry with a separate profile and scrubs Node resolution overrides', async () => {
     const runtime = projectWithHost(`
-process.send({ type: 'ready', protocolVersion: 3, dshVersion: 'split-runtime' })
+process.send({ type: 'ready', protocolVersion: 4, dshVersion: 'split-runtime' })
 function onRequestFrame(frame) {
   if (frame.type !== 1) return
   responseStart(frame.streamId)
@@ -214,7 +239,7 @@ const builtin = await import(pathToFileURL(join(plugin, 'builtin.mjs')).href)
 const shared = await import(pathToFileURL(join(plugin, 'shared.mjs')).href)
 const loader = await import(pathToFileURL(join(plugin, 'workspace.mjs')).href)
 const workspace = await loader.load(${JSON.stringify(pathToFileURL(workspace).href)})
-process.send({ type: 'ready', protocolVersion: 3, dshVersion: 'isolated-resolution' })
+process.send({ type: 'ready', protocolVersion: 4, dshVersion: 'isolated-resolution' })
 function onRequestFrame(frame) {
   if (frame.type !== 1) return
   responseStart(frame.streamId)
@@ -417,7 +442,7 @@ console.log(JSON.stringify(results))
   it('carries raw request and response bytes and shuts the child down cleanly', async () => {
     const project = projectWithHost(`
 const bodies = new Map()
-process.send({ type: 'ready', protocolVersion: 3, dshVersion: process.env.NODE_OPTIONS ?? 'clean' })
+process.send({ type: 'ready', protocolVersion: 4, dshVersion: process.env.NODE_OPTIONS ?? 'clean' })
 function onRequestFrame(frame) {
   if (frame.type === 1) {
     const request = JSON.parse(frame.payload)
@@ -454,7 +479,7 @@ function answer(streamId) {
   it('streams a large binary response in bounded raw frames', async () => {
     const size = 2 * 1024 * 1024
     const project = projectWithHost(`
-process.send({ type: 'ready', protocolVersion: 3, dshVersion: 'large-response' })
+process.send({ type: 'ready', protocolVersion: 4, dshVersion: 'large-response' })
 function onRequestFrame(frame) {
   if (frame.type !== 1) return
   responseStart(frame.streamId)
@@ -477,7 +502,7 @@ function onRequestFrame(frame) {
 
   it('stops an unfinished upload when the Host completes its response early', async () => {
     const project = projectWithHost(`
-process.send({ type: 'ready', protocolVersion: 3, dshVersion: 'early-response' })
+process.send({ type: 'ready', protocolVersion: 4, dshVersion: 'early-response' })
 function onRequestFrame(frame) {
   if (frame.type !== 2) return
   responseStart(frame.streamId)
@@ -507,7 +532,7 @@ function onRequestFrame(frame) {
 
   it('ignores a response end that arrives after the renderer cancels its stream', async () => {
     const project = projectWithHost(`
-process.send({ type: 'ready', protocolVersion: 3, dshVersion: 'cancel-race' })
+process.send({ type: 'ready', protocolVersion: 4, dshVersion: 'cancel-race' })
 const urls = new Map()
 function onRequestFrame(frame) {
   if (frame.type === 1) {
@@ -537,7 +562,7 @@ function onRequestFrame(frame) {
 
   it('rejects invalid response framing and a clean exit before readiness', async () => {
     const invalid = new DesktopHostProcess(process.execPath, projectWithHost(`
-process.send({ type: 'ready', protocolVersion: 3, dshVersion: 'invalid-frame' })
+process.send({ type: 'ready', protocolVersion: 4, dshVersion: 'invalid-frame' })
 function onRequestFrame(frame) {
   if (frame.type === 1) responsePipe.write(Buffer.alloc(13))
 }

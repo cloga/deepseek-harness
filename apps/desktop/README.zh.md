@@ -17,7 +17,7 @@
 | 插件变更 | 包安装和 Host 启动可能失败。 | Desktop 准备并 health-check 私有 staging profile，再把它交换到活动位置。激活失败会恢复先前 profile 与 Host。 |
 | 更新 | 桌面壳与 dsh 独立更新会重新产生版本分裂，而未签名 fork 构建不能削弱原生发布者验证。 | 已签名发布使用原生更新器。cloga fork 发布未签名且由源码仓库拥有的托管通道，并携带独立 helper；两种模式互斥，并且都替换完整 Desktop 发布。 |
 
-[Electron 打包与更新 Agent Note](../../.agents/notes/implemented/architecture/2026-08-25-electron-desktop-packaging-and-updates.zh.md)负责发布验证，[fork 通道 Agent Note](../../.agents/notes/implemented/architecture/2026-09-15-fork-owned-windows-desktop-release-channel.zh.md)负责未签名发布身份与发现，[验证 Release 事务 Agent Note](../../.agents/notes/implemented/architecture/2026-09-15-desktop-verified-release-plugin-transactions.zh.md)负责插件来源验证与激活回滚。
+[Electron 打包与更新 Agent Note](../../.agents/notes/implemented/architecture/2026-08-25-electron-desktop-packaging-and-updates.zh.md)负责发布验证，[fork 通道 Agent Note](../../.agents/notes/implemented/architecture/2026-09-15-fork-owned-windows-desktop-release-channel.zh.md)负责未签名发布身份与发现，[验证 Release 事务 Agent Note](../../.agents/notes/implemented/architecture/2026-09-15-desktop-verified-release-plugin-transactions.zh.md)负责插件来源验证与激活回滚，[插件 slash command Agent Note](../../.agents/notes/implemented/feature/2026-09-20-desktop-plugin-slash-command.zh.md)负责受信 Host 到 Electron 命令桥接。
 
 ## 安装归属
 
@@ -46,6 +46,8 @@ Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.
 ### 插件来源与快照
 
 插件窗口提供独立的 verified-release JSON 表单，以 `githubRelease` 描述符调用带版本的安装 API。使用经过评审的 lock，其中包含精确 Release、资产、commit、包与 checksum 数据；原生解析器和下载器仍负责最终校验。此显式安装记录用户归属。Release-owned 包名在启动时仍遵循打包计划，因此持久更改该基线需要发布 Desktop。把 Release tgz URL 输入普通来源表单只会创建来源快照，不会生成 verified-release receipt。
+
+内置 `/desktop-plugin` 命令复用同一套 Desktop-owned 事务，不扩大 preload，也不允许 CLI 修改保留 profile。可使用 `list`、`install npm <spec>`、`install github <owner/repo[#ref]>`、`install release <verified-release-json>`、`remove`、`update`、`enable`、`disable` 和 `disable-all`。slash 安装有意不接受本地路径或任意 URL，因为 Session 工作目录不是 Electron profile 的包解析基准。准备阶段在 Host 存活时完成；命令生命周期落盘后，Electron 才展示同一个最新影响报告和默认取消的原生确认框，再中断 Host。来源解析、acquisition、归属、health check、激活与 rollback 仍全部由 `DesktopProjectManager` 负责。
 
 普通来源表单接受以下输入。安装要求包具有真实名称、精确版本、`dsh.bundle.patch`，以及声明的预构建 Host 与 Client 文件。仓库名称不决定安装后的包名称。
 
