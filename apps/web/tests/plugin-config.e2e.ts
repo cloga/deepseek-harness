@@ -188,19 +188,64 @@ describe('web e2e: plugin configuration pages', () => {
     await models.waitFor({ timeout: 10_000 })
     const firstModel = models.getByRole('checkbox').first()
     await firstModel.check()
+    const selectedLabel = (await firstModel.locator('..').textContent())?.trim()
+    if (!selectedLabel) throw new Error('Selected model must expose its catalog route label')
+    type Mutation = { ns: string; ops: { op: string; path: string[]; value?: unknown }[] }
+    const mutation = (body: unknown) => (body as { payload: { args: Mutation } }).payload.args
+    const sets = (op: Mutation['ops'][number] | undefined, field: string) =>
+      op?.op === 'set' && op.path.length === 1 && op.path[0] === field
     const save = panel.getByRole('button', { name: '保存', exact: true })
-    await save.click()
-
-    await expect.poll(async () => (await settingsDocument()).includes('subagent-model-selection:'), { timeout: 10_000 })
-      .toBe(true)
-    expect(await settingsDocument()).toContain('maxDepth: 2')
-    expect(await settingsDocument()).toContain('enabled: true')
-    expect(await settingsDocument()).toContain('allowedModels:')
-    expect(await settingsDocument()).toContain('provider:')
-    expect(await settingsDocument()).toContain('model:')
-    // The page stays open once the save landed; a settled form offers no save to repeat.
-    await expect.poll(() => toggle.getAttribute('aria-checked'), { timeout: 5_000 }).toBe('true')
+    // These namespaces commit independently. Install both receipt waiters
+    // before clicking; the first saved section is not a whole-card settlement.
+    const [limitsResponse, modelsResponse] = await Promise.all([
+      page.waitForResponse((response) => {
+        const request = response.request()
+        if (request.method() !== 'POST' || new URL(request.url()).pathname !== '/api/settings/mutate') return false
+        const { ns, ops } = mutation(request.postDataJSON())
+        return ns === 'subagent' && ops.length === 1 && sets(ops[0], 'maxDepth') && ops[0]?.value === 2
+      }, { timeout: 10_000 }),
+      page.waitForResponse((response) => {
+        const request = response.request()
+        if (request.method() !== 'POST' || new URL(request.url()).pathname !== '/api/settings/mutate') return false
+        const { ns, ops } = mutation(request.postDataJSON())
+        const routes = ops[1]?.value
+        if (ns !== 'subagent-model-selection' || ops.length !== 2
+          || !sets(ops[0], 'enabled') || ops[0]?.value !== true || !sets(ops[1], 'allowedModels')
+          || !Array.isArray(routes) || routes.length !== 1) return false
+        const route = routes[0] as { provider?: unknown; model?: unknown } | undefined
+        return typeof route?.provider === 'string' && route.provider !== ''
+          && typeof route.model === 'string' && route.model !== ''
+          && selectedLabel.endsWith(` · ${route.provider}/${route.model}`)
+      }, { timeout: 10_000 }),
+      save.click(),
+    ])
+    expect(limitsResponse.ok()).toBe(true)
+    expect(modelsResponse.ok()).toBe(true)
+    expect(await limitsResponse.json()).toMatchObject({ result: { ok: true, value: {
+      ns: 'subagent', user: { maxDepth: 2 }, value: { maxDepth: 2 },
+    } } })
+    const allowedModels = mutation(modelsResponse.request().postDataJSON()).ops[1]?.value
+    expect(await modelsResponse.json()).toMatchObject({ result: { ok: true, value: {
+      ns: 'subagent-model-selection', user: { enabled: true, allowedModels }, value: { enabled: true, allowedModels },
+    } } })
+    // The exact Save label excludes the disabled Saving state. A failed write
+    // must not be mistaken for settlement just because one receipt succeeded.
     await expect.poll(() => save.isDisabled(), { timeout: 5_000 }).toBe(true)
+    expect(await panel.getByRole('button', { name: '保存中…', exact: true }).count()).toBe(0)
+    expect(await panel.getByText('本部署没有接受这些值，已保留供你修改。', { exact: true }).count()).toBe(0)
+    expect(await panel.getByText('设置已在其他位置更新。请放弃修改后重试。', { exact: true }).count()).toBe(0)
+    const saved = await settingsDocument()
+    expect(saved).toContain('maxDepth: 2')
+    expect(saved).toContain('enabled: true')
+    expect(saved).toContain('allowedModels:')
+    expect(saved).toContain('provider:')
+    expect(saved).toContain('model:')
+    await expect.poll(() => toggle.getAttribute('aria-checked'), { timeout: 5_000 }).toBe('true')
+    await panel.getByRole('button', { name: '返回插件列表', exact: true }).click()
+    await openPage(panel, 'Subagent')
+    expect(await panel.getByLabel('最大递归深度', { exact: true }).inputValue()).toBe('2')
+    expect(await toggle.getAttribute('aria-checked')).toBe('true')
+    expect(await firstModel.isChecked()).toBe(true)
 
     await toggle.click()
     await save.click()
