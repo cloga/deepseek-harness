@@ -2281,6 +2281,10 @@ describe('desktop main startup', () => {
       expect(console.info).not.toHaveBeenCalled()
     }
     expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      buttons: [en.exitApplication, en.restartApplication, en.disableThirdPartyPlugins],
+    }))
+    expect(DESKTOP_IPC).not.toHaveProperty('configurationReset')
     expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/'])
   })
 

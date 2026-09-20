@@ -12,7 +12,7 @@ Windows pnpm 可能用反斜杠记录本地 tarball specifier，而 Desktop 用�
 
 ## Decision
 
-私有 receipt 存储独立于公开 source 与 receipt schema，记录完整的 `user` 或 `release` 归属映射。手动验证安装记录用户归属。Required 与 optional provisioning 在精确来源和产物引用匹配时保留既有用户归属，包括跨运行时或计划变更的重建；真正的计划替换记录发行版归属。当前计划仍决定每个目标包名所要求的来源。精确删除只覆盖计划中已不存在的发行版归属包名，清单复用允许无关用户插件存在。
+私有 receipt 存储独立于公开 source 与 receipt schema，记录完整的 `user` 或 `release` 归属映射。手动验证安装记录用户归属。Required 与 optional provisioning 在精确来源和产物引用匹配时保留既有用户归属，包括跨运行时或计划变更的重建。[用户清单决策](2026-09-19-desktop-user-inventory-guards.zh.md)取代与手动安装发生冲突时的自动 desired 同名优先级与 optional 失败排除规则；本决策继续负责持久归属迁移和锁文件规范化。精确删除只覆盖计划中已不存在的发行版归属包名，清单复用允许无关用户插件存在。
 
 旧归属推断要求先前计划 hash 一致、active 结果包含相同 receipt，且 manifest（元数据清单）产物引用匹配。缺失或不完整证据不能授权删除。无效元数据明确失败。迁移只写暂存副本，并参与既有激活 journal 和回滚。旧 receipt 无法揭示留下完全相同历史数据的手动重装；显式归属消除了后续安装的这一歧义。
 
@@ -30,6 +30,6 @@ Windows pnpm 可能用反斜杠记录本地 tarball specifier，而 Desktop 用�
 
 ## Consequences
 
-Profile 元数据增加私有归属记录，公开 provisioning capability 和 schema 保持不变。空计划保留用户插件；optional 失败仍排除失败的目标条目，required 失败保留先前 profile。忽略归属的旧客户端不提供此保留保证。共享任务、Session 与凭据数据不属于该事务。
+Profile 元数据增加私有归属记录，公开 provisioning capability 和 schema 保持不变。空计划保留用户插件；只有用户清单检查允许目标缺失时，optional 失败才排除该目标条目，required 失败保留先前 profile。忽略归属的旧客户端不提供此保留保证。共享任务、Session 与凭据数据不属于该事务。
 
 所属回归覆盖复用与强制重建、required 和 optional 来源、显式替换、旧证据、错误归属及回滚。运行时模式精确计划升级用例验证旧记录与显式归属记录中的已禁用用户插件均被保留。既有规范化测试覆盖来源快照与验证 receipt、真实 pnpm 重建、有界读取、不安全文件和依赖解析结果保持不变。发布安装包验证仍由隔离 Desktop 发布工作流负责，不修改已安装应用。

@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resolveDesktopPaths } from '../src/paths.ts'
-import { DesktopProjectManager } from '../src/project-manager.ts'
+import { createPluginProfile, DesktopProjectManager } from '../src/project-manager.ts'
 import { profilePackageLeaseTarget, readProfilePlugins } from '@deepseek-ai/dsh-app-boot'
 import { runtimeFixture } from './runtime-fixture.ts'
 
@@ -46,6 +46,69 @@ afterEach(() => {
 })
 
 describe('desktop external plugin profile', () => {
+  it.each([
+    'pnpm-workspace.yaml', 'pnpm-lock.yaml', 'node_modules', 'desktop.cordis.yml',
+    'desktop-runtime-state.json', 'desktop-packages-pending', 'desktop-plugin-package-locks.json',
+    'desktop-plugin-receipts.json', '.desktop-plugin-artifacts', 'desktop-plugin-provisioning-state.json',
+    'desktop-plugin-user-intents.json',
+  ])('retains orphaned %s instead of initializing an empty package inventory', async (name) => {
+    const { manager } = setup()
+    mkdirSync(manager.paths.profile, { recursive: true })
+    const path = join(manager.paths.profile, name)
+    const directory = name === 'node_modules' || name === '.desktop-plugin-artifacts'
+    if (directory) mkdirSync(path)
+    const payload = directory ? join(path, 'sentinel') : path
+    writeFileSync(payload, 'retained inventory bytes')
+    const patch = join(manager.paths.profile, 'cordis.patch.yml')
+    writeFileSync(patch, 'retain this patch')
+    const before = readdirSync(manager.paths.profile).sort()
+    await expect(manager.applyRelease(true)).rejects.toThrow('manifest is missing from existing package inventory')
+    await expect(manager.disableAllPlugins()).rejects.toThrow('manifest is missing from existing package inventory')
+    expect(() => createPluginProfile(manager.paths.profile)).toThrow('manifest is missing from existing package inventory')
+    expect(readdirSync(manager.paths.profile).sort()).toEqual(before)
+    expect(readFileSync(payload, 'utf8')).toBe('retained inventory bytes')
+    expect(readFileSync(patch, 'utf8')).toBe('retain this patch')
+    expect(manager.createdProfile).toBe(false)
+  })
+
+  it.each(['directory', 'link', 'dangling-link'] as const)('refuses a %s package manifest before any profile write', async (kind) => {
+    const { root, manager } = setup()
+    mkdirSync(manager.paths.profile, { recursive: true })
+    const manifest = join(manager.paths.profile, 'package.json')
+    const target = join(root, 'manifest-target.json')
+    if (kind === 'directory') mkdirSync(manifest)
+    else {
+      if (kind === 'link') writeFileSync(target, '{}')
+      symlinkSync(target, manifest, 'file')
+    }
+    await expect(manager.applyRelease(true)).rejects.toThrow('regular unlinked file')
+    await expect(manager.disableAllPlugins()).rejects.toThrow('regular unlinked file')
+    expect(() => createPluginProfile(manager.paths.profile)).toThrow('regular unlinked file')
+    expect(readdirSync(manager.paths.profile)).toEqual(['package.json'])
+    expect(lstatSync(manifest).isSymbolicLink()).toBe(kind !== 'directory')
+    if (kind === 'link') expect(readFileSync(target, 'utf8')).toBe('{}')
+    else expect(existsSync(target)).toBe(false)
+  })
+
+  it('refuses a lost manifest before production cleanup or legacy migration can remove evidence', async () => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    seedPlugin(manager)
+    const residue = join(manager.paths.profile, 'node_modules', '@deepseek-ai', 'dsh-web-app')
+    mkdirSync(residue, { recursive: true })
+    writeFileSync(join(residue, 'sentinel'), 'retain core residue for inspection')
+    const legacy = join(manager.paths.profile, 'desktop-runtime-state.json')
+    writeFileSync(legacy, JSON.stringify({ links: [] }))
+    const workspace = readFileSync(join(manager.paths.profile, 'pnpm-workspace.yaml'), 'utf8')
+    unlinkSync(join(manager.paths.profile, 'package.json'))
+    await expect(manager.applyRelease(true)).rejects.toThrow('manifest is missing from existing package inventory')
+    expect(readFileSync(join(residue, 'sentinel'), 'utf8')).toBe('retain core residue for inspection')
+    expect(readFileSync(legacy, 'utf8')).toBe(JSON.stringify({ links: [] }))
+    expect(readFileSync(join(manager.paths.profile, 'pnpm-workspace.yaml'), 'utf8')).toBe(workspace)
+    expect(existsSync(join(manager.paths.profile, 'node_modules/plugin/package.json'))).toBe(true)
+    expect(existsSync(join(manager.paths.profile, 'package.json'))).toBe(false)
+  })
+
   it('does not recreate or clean a missing active profile while an activation journal owns recovery', async () => {
     const { manager } = setup()
     const transactionId = randomUUID()
@@ -239,16 +302,17 @@ describe('desktop external plugin profile', () => {
     expect(existsSync(manager.paths.profile)).toBe(true)
   })
 
-  it('keeps plugin files and patches through a compatible release and application relocation', async () => {
+  it.each([true, false])('keeps plugin files and patches through release relocation with enabled=%s', async (enabled) => {
     const { root, manager } = setup()
     await manager.applyRelease()
     seedPlugin(manager)
+    if (!enabled) await manager.disableAllPlugins()
     writeFileSync(join(manager.paths.profile, 'cordis.patch.yml'), '[]\n')
     const nextRoot = join(root, 'relocated', 'dsh')
     runtimeFixture(nextRoot, '1.1.0')
     const next = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh: nextRoot })
     await expect(next.applyRelease()).resolves.toBeUndefined()
-    expect(plugins(next)).toEqual(plugins(manager))
+    expect(plugins(next)).toEqual([{ name: 'plugin', version: '1.0.0', enabled }])
     expect(readFileSync(join(manager.paths.profile, 'cordis.patch.yml'), 'utf8')).toBe('[]\n')
     expect(readFileSync(join(manager.paths.profile, 'node_modules/plugin/bundle.yml'), 'utf8')).toBe('[]\n')
   })

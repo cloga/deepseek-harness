@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-17-desktop-plugin-retention-and-lockfiles.md
-2026-09-17-desktop-plugin-retention-and-lockfiles.md: d0bf5fbc7dd591b0e9910aea8db351e78b07b74e
-2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md: 90e38f23e746fe856bf859aac74e274058d962ca
+2026-09-17-desktop-plugin-retention-and-lockfiles.md: acda6ca4c06a0a90971de6001f391c6132e83730
+2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md: beccd54c3cbac86a7c2e0a240d3f772d2cdde83b

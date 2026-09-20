@@ -14,20 +14,22 @@ Waiting for backend readiness leaves users without a window during profile prepa
 
 Electron creates the main window with the packaged Web loading page before profile reconciliation or Host startup. The Web entry draws its boot page before awaiting Host readiness. The owned preload delivers structured boot injections, and the existing document activates its client plugins after they are applied; startup failures display diagnostics and available recovery actions. Closing during loading cancels further startup work and waits for the pending child to exit.
 
-Fatal presentation follows [native Desktop recovery](2026-09-15-desktop-native-fatal-recovery.md). Window timing, direct Host startup, and shutdown ownership remain governed here.
+Fatal presentation follows [native Desktop recovery](2026-09-15-desktop-native-fatal-recovery.md), not the former startup or preload-independent emergency reset pages. The [user-inventory decision](../bug-fix/2026-09-19-desktop-user-inventory-guards.md) owns the retained reset backend's destructive-confirmation and verified-private-copy requirements; those safeguards do not add a reset action to the shared Web wrapper. Shared product data and the Harness-home environment file remain outside profile recovery.
 
-Desktop starts the actual Host through the [shared Web runner](2026-09-10-desktop-web-wrapper.md) after preparing the profile in place. Readiness supplies the authenticated Host URL and boot injections. The shell exchanges the URL for a Host cookie, forwards application HTTP requests, and authenticates direct WebSocket requests only for the owned application origin. This carrier adaptation preserves Web route and stream semantics while allowing static HTML to appear before the Host.
+Desktop starts the actual Host through the [shared Web runner](2026-09-10-desktop-web-wrapper.md). Readiness supplies the authenticated Host URL and boot injections. The shell exchanges the URL for a Host cookie, forwards application HTTP requests, and authenticates direct WebSocket requests only for the owned application origin. This carrier adaptation preserves Web route and stream semantics while allowing static HTML to appear before the Host.
 
-This partially supersedes staged backend probes and waiting to create the main window in the [packaging decision](2026-08-25-electron-desktop-packaging-and-updates.md) and [bundled-runtime decision](2026-09-08-desktop-bundled-runtime-and-external-plugins.md). Those notes retain release, signing, transport, and resource ownership rationale. Full runtime file verification remains a packaging operation.
+The [verified release transaction decision](2026-09-15-desktop-verified-release-plugin-transactions.md) owns staged package preparation, health checks, and recoverable activation; it supersedes this note's earlier in-place preparation and no-rollback behavior. Window timing and shutdown ownership remain governed here. Visible startup progress does not bypass user-inventory checks or authorize profile replacement.
+
+This partially supersedes waiting to create the main window in the [packaging decision](2026-08-25-electron-desktop-packaging-and-updates.md) and [bundled-runtime decision](2026-09-08-desktop-bundled-runtime-and-external-plugins.md). Those notes retain release, signing, transport, and resource ownership rationale. Full runtime file verification remains a packaging operation.
 
 ## Alternatives considered
 
-**Keep a complete staged health check.** It can reject some startup failures before activation, but executes plugin initialization twice and cannot guarantee that the serving process will start. The actual Host result provides the diagnostic needed for explicit recovery.
+**Require a complete staged health check before showing any window.** It can reject some startup failures before activation, but executes plugin initialization twice and cannot guarantee that the serving process will start. Transaction health checks retain their own owner; they need not delay visible startup progress.
 
 **Keep the main window hidden until readiness.** This avoids presenting a loading page but gives users no visible progress or interaction while the backend loads. A shell-owned page can remain available when Host startup fails.
 
 ## Consequences
 
-Users can see startup progress and recover from failures before the product UI is available. A responsive window does not imply that the backend is ready, and startup latency still requires installed-artifact measurement. Profile changes remain in place after activation fails.
+Users can see startup progress and recover from failures before the product UI is available. A responsive window does not imply that the backend is ready, and startup latency still requires installed-artifact measurement. Transaction failures follow inventory validation and rollback rather than granting permission to discard profile changes or user packages.
 
 Verification covers a delayed Host with a visible loading page, one serving startup for a fresh profile, failure and retry in the same window, native recovery, and closing while a child is starting. Installed GUI evidence complements lifecycle tests.

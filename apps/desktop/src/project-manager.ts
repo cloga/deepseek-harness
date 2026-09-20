@@ -48,6 +48,24 @@ function migrateProfileSettings(projectDir: string): void {
   }
 }
 
+/** Refuse to replace lost package declarations while their owned inventory remains. */
+function assertProfileInitialization(projectDir: string): void {
+  const manifest = lstatSync(join(projectDir, 'package.json'), { throwIfNoEntry: false })
+  if (manifest !== undefined) {
+    if (!manifest.isFile() || manifest.isSymbolicLink()) throw new Error('desktop project: package manifest must be a regular unlinked file')
+    return
+  }
+  const inventory = [
+    'pnpm-workspace.yaml', 'pnpm-lock.yaml', 'node_modules', 'desktop.cordis.yml',
+    'desktop-runtime-state.json', 'desktop-packages-pending', 'desktop-plugin-package-locks.json',
+    'desktop-plugin-receipts.json', '.desktop-plugin-artifacts', 'desktop-plugin-provisioning-state.json',
+    'desktop-plugin-user-intents.json',
+  ]
+  if (inventory.some(name => lstatSync(join(projectDir, name), { throwIfNoEntry: false }) !== undefined)) {
+    throw new Error('desktop project: package manifest is missing from existing package inventory; inspect the retained files before recovery')
+  }
+}
+
 /** Initializes the Desktop profile and disables third-party bundles during recovery. */
 export class DesktopProjectManager {
   private createdOnLastInitialization = false
@@ -107,6 +125,7 @@ export class DesktopProjectManager {
         const current = lstatSync(this.paths.profile)
         if (!current.isDirectory() || current.isSymbolicLink()) throw new Error('desktop project: profile must be a real directory')
       }
+      assertProfileInitialization(this.paths.profile)
       return operation(created)
     })
   }
@@ -152,7 +171,8 @@ export function createDevelopmentProjectMetadata(projectDir: string, release: De
   writeFileSync(join(projectDir, 'pnpm-workspace.yaml'), workspaceFile(), { mode: 0o600 })
 }
 
-/** Create the first external plugin profile without running a package manager. */
+/** Initialize missing profile files without replacing an existing package inventory's lost manifest. */
 export function createPluginProfile(projectDir: string): void {
+  assertProfileInitialization(projectDir)
   initProfile(projectDir, WEB_PROFILE.bundles)
 }

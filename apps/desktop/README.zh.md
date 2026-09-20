@@ -64,11 +64,11 @@ Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.
 
 准备与打包共享 `app-builder-lib` 26.15.3 的元数据转换，并显式启用 script/keyword 删除设置。运行时包名、版本、模块入口声明、依赖与 `dsh` 元数据仍与 shell 的 fork 元数据分离。删除包元数据并非在所有情况下都不影响行为：依赖可能在运行时读取被删除的字段，因此小型 ASAR canary 不能替代完整规范化产物的 smoke 与打包发布演练。[内置运行时决策](../../.agents/notes/implemented/architecture/2026-09-08-desktop-bundled-runtime-and-external-plugins.zh.md)负责内部 API 版本耦合与验证范围限制。
 
-1. 主窗口在 profile 准备或后端启动前，从打包静态资源显示共享 Web 加载页。共享 profile 初始化创建缺失的 manifest、空用户 patch 与 pnpm workspace 文件，不覆盖现有文件。
-2. 生产版在启动 Host 前，清理当前运行包清单或已记录 Desktop 包清单中各包的 profile 副本和回退链接，同时删除对应依赖声明与 overrides；清理改变包状态时丢弃锁文件。其他插件文件、配置和版本保留；开发模式跳过此清理，启动时不运行 pnpm。
+1. 主窗口在 profile 准备或后端启动前，从打包静态资源显示共享 Web 加载页。共享 profile 初始化创建缺失的 manifest、空用户 patch 与 pnpm workspace 文件，不覆盖现有文件。缺少运行时元数据不证明 profile 是新的：已有包元数据、孤立用户 receipt、bundle 或来源 lock 会阻止新建初始化并要求检查，而非授权替换。
+2. 生产版在启动 Host 前，清理当前运行包清单或已记录 Desktop 包清单中各包的 profile 副本和回退链接，同时删除对应依赖声明与 overrides；清理改变包状态时丢弃锁文件。其他插件文件、配置和版本保留；开发模式跳过此清理，且该清理步骤本身不运行 pnpm。Fork release-plan 启动可在 Host 启动前通过内置 pnpm 单独重建经过验证的私有依赖。
 3. Electron 的 Node 版本、平台或架构变化时保留已安装插件。原生兼容性问题在加载时报错，可通过 pnpm 修复。
 4. 主应用的“插件”页面通过共享[插件管理器](../../packages/boot/plugin-manager/README.zh.md)操作 Desktop profile。包操作使用内置 pnpm 及正常的用户和 profile 配置。
-5. 共享管理器负责安装错误、激活和重启要求。即使 Host 无法启动，原生恢复仍可禁用第三方 bundle。
+5. 共享管理器负责安装错误和准备结果；Desktop 单独授权激活与重启。即使 Host 无法启动，原生恢复仍可禁用第三方 bundle。Profile 替换保留暂存事务的清单检查与回滚要求。
 
 [Web 插件 UI](../../packages/client/ui-plugin-manager/README.zh.md)负责管理界面。Desktop profile 初始化和恢复保留已安装插件文件。
 
@@ -83,6 +83,23 @@ Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.
 Fork 保留受限来源获取、内容寻址快照、经过验证的 Release receipt、用户与发行版归属区分、冻结锁文件规范化和可恢复 profile 事务，并分别维护其所有权。其理由与限制见[来源快照决策](../../.agents/notes/implemented/feature/2026-09-17-desktop-plugin-source-snapshots.zh.md)、[验证 Release 事务决策](../../.agents/notes/implemented/architecture/2026-09-15-desktop-verified-release-plugin-transactions.zh.md)和[插件保留决策](../../.agents/notes/implemented/bug-fix/2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md)。共享[插件页面](../../packages/client/ui-plugin-manager/README.zh.md)接受锁定的 Release 描述符以安装或升级，并报告已暂存事务，而非已激活。Desktop 负责独立审阅、输入检查、Host 请求准入锁和激活。[官方优先迁移提案](../../.agents/notes/proposed/architecture/2026-09-18-official-first-desktop-safety.zh.md)记录剩余的打包运行验收要求。
 
 未签名托管通道仍与已签名原生更新分离。[发布通道决策](../../.agents/notes/implemented/architecture/2026-09-15-fork-owned-windows-desktop-release-channel.zh.md)负责固定发布发现、不可变资产与校验和验证、独立 helper 确认以及完成证据。暂存 profile 或 helper 确认都不构成安装完成。渲染器更新操作不能选择产物或授权安装。Windows 警告和 UAC 仍由用户决定。
+
+Desktop 在启动时把 release-owned 插件协调到打包 plan，同时保留手动 registry、来源快照与 verified-release 声明，包括已禁用插件。同名手动安装会阻止自动替换，只有已启用、user-owned 且验证来源与计划完全相同的安装例外。其他来源、版本、产物、commit、安装类型或启用状态冲突需要显式用户操作。Required 条目构成经过验证的基线。每个 optional 条目在独立 candidate 中测试；失败会记录阶段与原因，不保留成功 receipt。如果排除 optional 条目会移除已有用户插件，则整次事务失败并保留活动 profile。复用要求 desired/result 成员完全一致，来源、receipt、版本、产物字节与启用状态匹配，且没有额外 release-owned 根包。空 plan 只删除 release-owned 根包。
+
+私有 receipt 存储将用户或发行版归属与来源验证分别记录。显式手动验证安装记录用户归属，包括对同一来源的重装；重建该精确来源时保留用户归属。只有 receipt 产物引用与声明匹配且不存在冲突来源快照时，release ownership 才能把该声明排除在用户保留检查之外。旧数据仅在先前一致的 provisioning state 中存在 active、相同 receipt 且 manifest 引用匹配时推断发行版归属，其他验证插件保留用户归属。旧记录无法区分留下完全相同 receipt 的手动重装。归属迁移与变更随暂存 profile 一起提交或回滚。[插件保留决策](../../.agents/notes/implemented/bug-fix/2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md)负责归属迁移；[用户清单决策](../../.agents/notes/implemented/bug-fix/2026-09-19-desktop-user-inventory-guards.zh.md)负责初始化与冲突检查。
+
+每次包事务在 prune 或包操作前捕获用户依赖 specifier、启用状态、receipt 身份与 owner、来源 lock 身份，以及经过校验的产物摘要。Receipt 和快照引用必须与声明的依赖一致；矛盾或并存的来源需要人工检查。事务冻结准备好的目标声明，在 staged 健康检查后及最终激活后核对保留的声明和产物字节，并在替换前确认活动声明仍匹配。显式 add、install、update 和 remove 只能替换其验证确定的目标名称；toggle 只能改变该目标的启用标记，disable-all 只能改变启用标记。这些检查不能恢复首次捕获前已经被一致清空的清单。带版本的激活证据和保留的私有操作记录支持后续恢复与归因，但不能识别更早且未被记录的操作方。
+
+每次 staged 冻结 pnpm 安装前，Desktop 仅规范化产物 importer specifier 中的 Windows 分隔符差异；候选项必须精确匹配 manifest 中的规范引用，由已验证的来源快照 lock 或 verified-release receipt 支持，且产物 SHA-256 匹配。既有规范化器限制文件读取大小，拒绝不安全的文件和产物目录，并以原子替换方式写入 staged 锁文件。它不改变包解析结果、版本、integrity 或 manifest；无关漂移仍由冻结校验检查。
+
+Windows Ops 验证 `resources/managed-update/capability.json` 中的 `desktopNativePluginProvisioning`、打包和发布的 plan hash、`desktop-plugin-receipts.json` 中的 Release 与 artifact identity，以及 `$DSH_HOME/profiles/desktop/desktop-plugin-provisioning-state.json` 中每个插件的 `active` 或 `optional-failed` 结果和已删除包证据。托管更新 completion 仅在最终位置的 Host ready 后运行，并在记录 sequence 前独立核对实际安装清单、receipt 和打包 plan。仅 staging 健康检查通过不构成 completion 证据。
+
+保留的重置后端在中断 Host 前要求独立的原生破坏性操作确认，默认选择取消。它验证 `$DSH_HOME/desktop/profile-recovery/reset-*` 下的私有配置/产物副本，排除生成的 `node_modules`，并在破坏性写入前发布副本 receipt。配置链接或复制失败会拒绝重置；失败时尝试重新启动未改变的 Host。独立 outcome 记录最终就绪或失败。这些后端保护不重新引入以前的启动/应急重置页，也不向官方原生恢复 UI 添加重置操作。共享产品数据和 Harness-home `.env` 保持不变。恢复副本可能包含私有配置，不会上传或自动恢复，也不得附到公开报告中。
+
+包事务持有 `$DSH_HOME/desktop/profile.lock`，直到 pnpm 退出并完成激活。版本 2 的 `profile-activation.json` 记录操作身份及前后清单指纹。恢复在重命名或清理前核对活动及保留的候选。版本 1 的 journal 不能授权手动清单不同或运行时、workspace、必需 lock 元数据不完整的恢复。孤立 rollback 阻止初始化空活动路径；健康 profile 仍可与孤立 staging 共存。验证失败会保留 journal 和事务目录供检查。不要删除这些副本，也不要在保留 profile 中运行 pnpm。运行时解析不改动旧链接；清理绝不跟随目录链接，原生构建继续使用经过审查的 `allowBuilds` 策略。
+
+`$DSH_HOME/desktop/profile-operations` 下的私有记录在激活 journal 清理后继续保留操作类型、验证确定的目标名称、事务身份、清单 hash/名称及结果。保留上限为 64 组记录，包括部分写入，每条最多 128 KiB；不删除未知文件。来源 URL、原始错误、提示词和配置内容不进入记录。原子发布记录之前同步文件数据，但不保证断电后的目录持久性。提交后审计失败会保留 committed journal 和 rollback，而不是撤销已提交 profile 或宣称成功。
+
 
 ## 开发
 
@@ -209,7 +226,7 @@ pnpm run package:desktop:win:x64:unsigned
 
 ### Fork 拥有的 Windows 发布
 
-当前已发布的不可变基线是 `0.1.6-alpha.1.cloga.7`，sequence 为 17。alpha2 候选版本是 `0.1.6-alpha.2.cloga.1`，暂定 sequence 为 18；候选版本不会预留 sequence，发布前必须重新检查通道。其 plan 不构成发布或已安装升级证据。安装器升级 fixture（测试前置数据）仍锁定 `0.1.6-alpha.1.cloga.2`，sequence 为 12，不证明从 `.cloga.7` 升级已通过验收。
+当前已发布的不可变基线是 `0.1.6-alpha.1.cloga.8`，sequence 为 18（Release 392280775）。alpha2 候选版本是 `0.1.6-alpha.2.cloga.1`，暂定 sequence 为 19；候选版本不会预留 sequence，发布前必须重新检查通道。其 plan 不构成发布或已安装升级证据。安装器升级 fixture（测试前置数据）仍锁定 `0.1.6-alpha.1.cloga.2`，sequence 为 12，不证明从 `.cloga.8` 升级已通过验收。
 
 `release/cloga-windows-x64.json` 中经过评审的 plan 同时推进语义版本与整数 sequence。每次手动触发 `Desktop fork release (Windows x64)` workflow 都必须提供 `confirm_version` 与 `expected_source_sha`。安装依赖之前，源码锁定值必须恰好为 40 个小写十六进制字符，并与检出的 `HEAD` 完全一致；确认未变的版本号不代表授权较新的 commit。Workflow 固定 Node 24.13.0 与 pnpm 11.7.0，从冻结 lockfile 安装，测试 Desktop，打包固定 cloga 身份，并验证独立 helper、capability、未签名 installer、已安装 executable、runtime descriptor 与原生/托管互斥。
 

@@ -22,9 +22,15 @@ Desktop 保留旧 profile，直到 staged 健康检查、激活重命名、最�
 
 经过验证的安装在版本化 receipt 中持久保存锁定来源、GitHub Release 与资产标识、产物 hash、包身份与事务状态，并在 profile 私有目录中保留本地 tgz。保留的 source schema version 1 与 capability `{ id: "desktopNativeVerifiedRelease", schemaVersion: 1 }` 描述经过验证的获取，不代表当前插件管理 preload API。产品 preload 不含插件管理 IPC。共享插件页面通过类型化 Host API 接受尚未验证的描述符 JSON，由启动器验证结构化来源，而不暴露自由格式下载器。成功结果标识已暂存事务，并非已激活 receipt。该表单准备禁用的候选插件，当前插件状态不变；Electron 在 profile 锁内独立审阅，并拒绝未知或未发送的输入。Host 请求准入锁和身份检查先于中断，而非依赖渲染器汇总任务数量的确认。一个事务只接受一种来源路径，因此外部 provisioner 与原生安装器不能同时提供根包。
 
-Desktop release 也可以携带通用的 `desktopNativePluginProvisioning` schema 1 精确状态 plan。启动协调 release-owned 插件，同时保留无关的手动 registry、来源快照与 verified-release 插件和应用拥有的 shared package。Required 条目建立经过验证的基线。Optional 条目在独立 candidate 中测试，因此 download、validation、install、graph 或 health 失败只排除对应条目。其持久结果记录阶段与原因，不包含成功 receipt；required 失败保留先前 profile。
+Desktop release 也可以携带通用的 `desktopNativePluginProvisioning` schema 1 精确状态 plan。启动协调 release-owned 插件，同时保留无关的手动 registry、来源快照与 verified-release 插件和应用拥有的 shared package。Required 条目建立经过验证的基线。Optional 条目在独立 candidate 中测试。只有[用户清单检查](../bug-fix/2026-09-19-desktop-user-inventory-guards.zh.md)允许该条目缺失时，download、validation、install、graph 或 health 失败才排除该条目；已有手动安装不能因 optional 失败而被丢弃。其持久结果记录阶段与原因，不包含成功 receipt；required 失败保留先前 profile。
 
 活动 profile 存储规范 plan hash、逐插件 source 与 receipt、required 标记、组合状态、被删除的 release-owned 包、rollback 状态和 verification 状态。复用要求 desired/result 成员完全一致，已安装版本、启用状态、receipt 与来源、本地 artifact 字节均匹配，且没有多余 release-owned 根包，空 plan 也不例外。托管 completion 在最终位置的 Host ready 后独立验证此清单。Neutral browser 证据证明通用 Models 组合与认证 dispatch，而不是某个外部 provider release。
+
+显式安装仍归用户所有。[用户清单决策](../bug-fix/2026-09-19-desktop-user-inventory-guards.zh.md)拒绝自动接管同名手动来源：只有已启用、user-owned 且验证来源与计划完全相同的安装可以自动重建。禁用状态或不同来源、版本、commit、产物及安装类型都需要显式用户操作。受保护的声明和产物字节在 prune 前捕获，与已准备目标及仍活动的 profile 核对，并在最终激活后、提交前再次核对。
+
+准备与激活保持分离。共享插件页面不会把普通归档 URL 变成经过证明的 Release，也不赋予渲染器安装权限。Electron 的独立审阅在中断获准前保留当前文档；未知或未发送输入会拒绝中断，Host 请求准入锁和身份检查先于关闭。取消准备或审阅不能授权丢失清单。必要回滚遵循恢复所有者，而不是把取消视为放弃恢复的许可。
+
+版本 2 的激活 journal 绑定操作、获取的目标和前后清单指纹。恢复在重命名或清理前验证存留候选；不完整的旧元数据或冲突的手动清单需要人工检查。保留的私有操作记录在 journal 清理后继续存在；提交后审计失败会保留 committed journal 和 rollback，而不是撤销提交或宣称成功。这些记录不能恢复捕获前已被一致清空的清单，也不能识别更早且未记录的操作方。
 
 ## Consumer transition
 
