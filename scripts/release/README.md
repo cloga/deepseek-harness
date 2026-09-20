@@ -6,7 +6,7 @@ This reference owns the controlled Core/Web GitHub-artifact path in [release.yml
 
 ## Scope and prerequisites
 
-The optional writer admits only `cloga/deepseek-harness`, PR 75 targeting `review/issue-72-official-base`, and version `0.1.6-alpha.3`. It requires an already-approved, existing `dsh-v<version>` tag. It never invokes npm publication, tag/ref writes, a build, installation, or package lifecycle under the write token. A future version requires a reviewed source change, not a different unchecked input.
+The optional writer admits only `cloga/deepseek-harness`, PR 79 targeting `review/issue-72-official-base`, and version `0.1.6-alpha.4`. It requires an already-approved, existing `dsh-v<version>` tag. It never invokes npm publication, tag/ref writes, a build, installation, or package lifecycle under the write token. A future version requires a reviewed source change, not a different unchecked input.
 
 The original dsh-family tarballs are Core/Web package artifacts, not a Desktop release, npm publication, or offline installer. Packed-install validation also uses vendored framework and Landlock entry tarballs that this artifact set does not include. Those companions, optional native platform packages, and other registry dependencies remain an external installation closure.
 
@@ -27,7 +27,7 @@ Use the existing workflow's manual event on the exact approved tag, with these i
 | `ci_run_id` | Successful PR-only `ci.yml` run for that final head. |
 | `policy_run_id` | Successful `issue-policy.yml` PR run for that final head. |
 
-Inputs select GitHub records; they do not assert approval or success. The writer reads classic protection and the PR review decision through a read-only GraphQL query, enforced rulesets through REST, and actual reviews/checks/statuses. It enforces the actual approval count, including zero when none is required, without inventing an external-review requirement. Required checks preserve classic/ruleset app bindings; current results on the head and tested commits, including same-named legacy statuses, cannot contradict success. Required checks and policy must succeed; optional skipped jobs are not treated as failures or as test evidence.
+Inputs select GitHub records; they do not assert approval or success. GitHub may clear a run's `pull_requests` array after merge, so an empty array is accepted only with the independently verified merged PR, exact final head, successful workflow identity and actual tested checkout trees. A nonempty array must contain the governing PR with its exact head and base; missing or malformed arrays are refused. The writer reads classic protection and the PR review decision through a read-only GraphQL query, enforced rulesets through REST, and actual reviews/checks/statuses. It enforces the actual approval count, including zero when none is required, without inventing an external-review requirement. Required checks preserve classic/ruleset app bindings; current results on the head and tested commits, including same-named legacy statuses, cannot contradict success. Required checks and policy must succeed; optional skipped jobs are not treated as failures or as test evidence.
 
 ## Source and artifact verification
 

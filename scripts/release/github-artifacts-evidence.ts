@@ -158,7 +158,11 @@ async function successfulRun(api: GitHub, id: string, path: string, selection: S
     || run.path !== path || run.event !== 'pull_request' || run.status !== 'completed' || run.conclusion !== 'success'
     || run.repository.full_name !== REPOSITORY || run.head_repository.full_name !== REPOSITORY
     || run.head_sha !== selection.reviewedHead
-    || !run.pull_requests.some(pr => pr.number === 75 && pr.head.sha === selection.reviewedHead && pr.base.ref === BASE)) {
+    // GitHub can clear run associations after merge; merged PR/head/tree facts
+    // are verified separately. A supplied nonempty list must still match.
+    || !Array.isArray(run.pull_requests)
+    || (run.pull_requests.length > 0
+      && !run.pull_requests.some(pr => pr.number === 79 && pr.head.sha === selection.reviewedHead && pr.base.ref === BASE))) {
     throw new Error('Selected PR workflow is not successful evidence for the reviewed final head')
   }
   return run
@@ -184,15 +188,15 @@ export async function verifyEvidence(api: GitHub, selection: Selection, tree: st
   const tagIdentity = await verifyTag(api, selection, tree)
   await verifyTagProtection(api, selection)
   if ((await commit(api, selection.reviewedHead)).tree.sha !== tree) throw new Error('Reviewed final head full tree differs from release source')
-  const pr = requireValue(await api.json<Pull>('/pulls/75'), 'PR 75')
-  if (pr.number !== 75 || !pr.merged || !pr.merged_at || pr.draft || pr.merge_commit_sha !== selection.mergedCommit
+  const pr = requireValue(await api.json<Pull>('/pulls/79'), 'PR 79')
+  if (pr.number !== 79 || !pr.merged || !pr.merged_at || pr.draft || pr.merge_commit_sha !== selection.mergedCommit
     || pr.head.sha !== selection.reviewedHead || pr.head.repo.full_name !== REPOSITORY
     || pr.base.repo.full_name !== REPOSITORY || pr.base.ref !== BASE) throw new Error('Merged PR or approved final head differs')
 
   // GraphQL reads classic protection without the REST administration permission.
   // REST branch rules supplies enforced rulesets, which classic protection omits.
   const branch = requireValue(await api.json<BranchFacts>('/graphql', 'POST', { query:
-    'query { repository(owner: "cloga", name: "deepseek-harness") { ref(qualifiedName: "refs/heads/review/issue-72-official-base") { branchProtectionRule { requiresApprovingReviews requiredApprovingReviewCount requiresStatusChecks requiredStatusCheckContexts requiredStatusChecks { context app { databaseId } } } } pullRequest(number: 75) { reviewDecision } } }',
+    'query { repository(owner: "cloga", name: "deepseek-harness") { ref(qualifiedName: "refs/heads/review/issue-72-official-base") { branchProtectionRule { requiresApprovingReviews requiredApprovingReviewCount requiresStatusChecks requiredStatusCheckContexts requiredStatusChecks { context app { databaseId } } } } pullRequest(number: 79) { reviewDecision } } }',
   }), 'Branch requirements')
   if (branch.errors?.length || !branch.data?.repository.ref || !branch.data.repository.pullRequest) throw new Error('Required branch/review facts unavailable')
   const classic = classicRequirements(branch.data.repository.ref.branchProtectionRule)
@@ -206,7 +210,7 @@ export async function verifyEvidence(api: GitHub, selection: Selection, tree: st
   const approvalCount = Math.max(classic.approvals,
     ...reviewRules.map(rule => requireValue(rule.parameters?.required_approving_review_count, 'Ruleset review count')))
   if (approvalCount < 0 || (approvalCount > 0 && branch.data.repository.pullRequest.reviewDecision !== 'APPROVED')) throw new Error('GitHub required-review decision is not approved')
-  const reviews = await api.list<Review>('/pulls/75/reviews')
+  const reviews = await api.list<Review>('/pulls/79/reviews')
   const latest = new Map<string, Review>()
   for (const review of [...reviews].sort((left, right) => left.id - right.id)) {
     if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state)) latest.set(review.user.login, review)
