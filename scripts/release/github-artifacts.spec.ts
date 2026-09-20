@@ -139,6 +139,16 @@ describe('bounded HTTP', () => {
     await expect(api.json('/releases', 'POST', {})).rejects.toThrow('uncertain')
     expect(calls).toBe(1)
   })
+  it('uses JSON negotiation for Actions logs and binary negotiation for release assets', async () => {
+    const accept: Array<string | null> = []
+    const api = new GitHub('secret', async (_url, options) => {
+      accept.push(new Headers(options?.headers).get('accept'))
+      return new Response('log', { status: 200 })
+    }, async () => {})
+    expect(await api.bytes('/actions/jobs/10/logs')).toEqual(Buffer.from('log'))
+    expect(await api.bytes('/releases/assets/20')).toEqual(Buffer.from('log'))
+    expect(accept).toEqual(['application/vnd.github+json', 'application/octet-stream'])
+  })
   it('never forwards authorization over a redirect', async () => {
     const auth: Array<string | null> = []
     const api = new GitHub('secret', async (_url, options) => {

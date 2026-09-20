@@ -179,7 +179,7 @@ export class GitHub {
     let response: Response
     try {
       response = await this.fetcher(url, { method, redirect: 'manual', signal: AbortSignal.timeout(60_000),
-        headers: { authorization: `Bearer ${this.token}`, accept: binary ? 'application/octet-stream' : 'application/vnd.github+json',
+        headers: { authorization: `Bearer ${this.token}`, accept: binary && !path.startsWith('/actions/jobs/') ? 'application/octet-stream' : 'application/vnd.github+json',
           'X-GitHub-Api-Version': '2022-11-28', ...(body === undefined ? {} : { 'content-type': upload ? 'application/octet-stream' : 'application/json' }) },
         ...(body === undefined ? {} : { body: typeof body === 'string' ? body : new Uint8Array(body) }) })
     } catch {
