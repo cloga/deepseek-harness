@@ -21,10 +21,10 @@ on:
         description: 'Exact approved version; must match the existing dsh-v tag and manifests'
         type: string
       reviewed_head:
-        description: 'Full approved final PR 80 head SHA (verified through GitHub reviews)'
+        description: 'Full approved final PR 81 head SHA (verified through GitHub reviews)'
         type: string
       merged_commit:
-        description: 'Full PR 80 merged SHA (must equal peeled tag and dispatch SHA)'
+        description: 'Full PR 81 merged SHA (must equal peeled tag and dispatch SHA)'
         type: string
       ci_run_id:
         description: 'Successful final-head PR CI run ID; checkout logs must still exist'
