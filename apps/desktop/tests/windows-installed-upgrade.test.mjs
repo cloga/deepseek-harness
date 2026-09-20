@@ -7,6 +7,8 @@ import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { runInNewContext } from 'node:vm'
+import { inspectInstalledDesktopIdentity, readInstalledDesktopRuntimeDescriptor } from './fixtures/windows-installed-runtime.mjs'
 import { assertUpgradeRunner, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeAssetPath, upgradeFileHash, verifyUpgradeRelease } from './fixtures/windows-installed-upgrade-contract.mjs'
 
 const hosted = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: 'C:\\runner-temp' }
@@ -63,6 +65,77 @@ test('direct fixture invocation refuses a workstation before loading Playwright 
   assert.equal(result.error, undefined)
   assert.equal(result.status, 1)
   assert.match(result.stderr, /Installer qualification (?:requires Windows|is GitHub-only)/)
+})
+
+test('installed identity callback serializes without an import loader or lexical closure', () => {
+  const calls = []
+  const identity = runInNewContext(`(${inspectInstalledDesktopIdentity.toString()})(electron)`, {
+    process: Object.freeze({ execPath: 'owned application', resourcesPath: 'owned resources' }),
+    electron: { app: {
+      getPath(name) { calls.push(name); return 'isolated user data' },
+      getVersion() { return 'synthetic version' }, isPackaged: true,
+    } },
+  })
+  assert.deepEqual(JSON.parse(JSON.stringify(identity)), {
+    executable: 'owned application', resourcesPath: 'owned resources', userData: 'isolated user data', version: 'synthetic version', packaged: true,
+  })
+  assert.deepEqual(calls, ['userData'])
+})
+
+test('installed descriptor reader binds fresh executable bytes and observed resources before inspection', t => {
+  const root = directory(t)
+  const application = join(root, 'cloga-deepseek-harness.exe')
+  const resources = join(root, 'resources')
+  const executable = 'synthetic bytes: never executed'
+  writeFileSync(application, executable)
+  mkdirSync(resources)
+  const descriptor = Buffer.from('{\r\n  "files": [], "label": "运行时"\r\n}\r\n')
+  const calls = []
+  const read = (...args) => { calls.push(args); return descriptor }
+  const result = readInstalledDesktopRuntimeDescriptor(application, resources, digest(executable), read)
+  assert.equal(result, descriptor, 'Original Buffer must survive without UTF-8 conversion or JSON rewriting')
+  assert.notEqual(digest(result), digest(JSON.stringify(JSON.parse(descriptor.toString('utf8')))))
+  assert.deepEqual(calls, [[application, join(resources, 'app.asar', 'dsh')]])
+  calls.length = 0
+  assert.throws(() => readInstalledDesktopRuntimeDescriptor(application, join(root, 'foreign-resources'), digest(executable), read), /Running resources/u)
+  writeFileSync(application, 'changed after app launch')
+  assert.throws(() => readInstalledDesktopRuntimeDescriptor(application, resources, digest(executable), read), /executable changed/u)
+  writeFileSync(application, executable)
+  const failure = new Error('read-only carrier failed')
+  assert.throws(() => readInstalledDesktopRuntimeDescriptor(application, resources, digest(executable), () => { throw failure }), error => error === failure)
+  rmSync(resources, { recursive: true })
+  const other = join(root, 'other-resources')
+  mkdirSync(other)
+  symlinkSync(other, resources, process.platform === 'win32' ? 'junction' : 'dir')
+  assert.throws(() => readInstalledDesktopRuntimeDescriptor(application, resources, digest(executable), read), /link|alias/u)
+  assert.equal(calls.length, 0, 'Invalid ownership or bytes must not start an inspection child')
+})
+
+for (const name of ['windows-installed-upgrade-smoke.mjs', 'windows-packaged-package-acceptance.mjs']) {
+  test(`${name} uses one closure-free identity evaluation and an external raw descriptor read`, () => {
+    const source = readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8')
+    assert.equal(source.match(/app\.evaluate\(/gu)?.length, 1)
+    assert.ok(source.includes('app.evaluate(inspectInstalledDesktopIdentity)'))
+    assert.match(source, /readInstalledDesktopRuntimeDescriptor\(application, identity\.resourcesPath, expected(?:\.manifest)?\.installedEvidence\.executableSha256\)/u)
+    assert.match(source, /assert.equal\(hash\(runtime(?:Bytes)?\), expected(?:\.manifest)?\.installedEvidence\.runtimeSha256\)/u)
+    assert.doesNotMatch(source, /import\('node:(?:fs|path)/u)
+    const predicate = source.match(/page\.waitForFunction\((.*), (?:expectedUrl|undefined), \{ timeout: 300_000 \}\)/u)?.[1]
+    assert.ok(predicate, 'Audit the actual serialized renderer predicate, not a duplicated fixture')
+    const expectedUrl = name === 'windows-installed-upgrade-smoke.mjs' ? 'dsh-app://app/index.html' : 'dsh-app://app/'
+    const observe = (href, error) => runInNewContext(`(${predicate})(url)`, {
+      url: expectedUrl, location: { href }, document: { querySelector: () => error === undefined ? null : { textContent: error } },
+    })
+    assert.equal(observe(expectedUrl), true)
+    assert.equal(observe('loading', 'startup failure'), true)
+    assert.equal(observe('loading'), false)
+  })
+}
+
+test('installed baseline selects only its version-owned settings observer after identity verification', () => {
+  const source = readFileSync(new URL('./fixtures/windows-installed-upgrade-smoke.mjs', import.meta.url), 'utf8')
+  assert.ok(source.indexOf('assert.equal(upgradeFileHash(expected.manifestPath), expected.manifestFileSha256)') < source.indexOf('const inspectSettings'))
+  assert.ok(source.includes("const inspectSettings = values.phase === 'baseline'\n    ? (await import('./baseline-copilot-settings-smoke.ts')).inspectBaselinePackagedCopilotSettings\n    : (await import('./copilot-settings-smoke.ts')).inspectPackagedCopilotSettings"))
+  assert.ok(source.includes('await inspectSettings(settings)'))
 })
 
 for (const [edition, shell] of [
@@ -361,7 +434,7 @@ test('cleanup rejects parent and root junctions before hashing or invoking the u
   const readRegistration = source.match(/function Read-Registration[^]*?\r?\n\}/u)?.[0]
   assert.ok(readRegistration)
   const start = source.indexOf('            $hasRegistration = ')
-  const launch = "                Wait-Exit (Start-Owned $uninstaller '/S') 120"
+  const launch = '                Wait-Exit $ownedUninstaller 120'
   const end = source.indexOf(launch, start)
   assert.ok(start >= 0 && end > start)
   const admission = source.slice(start, end + launch.length) + '\n            }'
@@ -374,7 +447,7 @@ function Resolve-InstallerRegistration { [pscustomobject]@{ ExecutableSha256 = (
 function Get-FileHash { $script:hashCalls++; [pscustomobject]@{ Hash = ('a' * 64) } }
 function Wait-NoProductProcesses {}
 function Start-Owned($File, $Arguments) {
-    if ($File -cne $uninstaller -or $Arguments -cne '/S') { throw 'Unexpected synthetic launch' }
+    if ($File -cne $uninstaller -or $Arguments -cne '/currentuser /S') { throw 'Unexpected synthetic launch' }
     $script:uninstallerCalls++
     return 'not-a-process'
 }
@@ -579,6 +652,166 @@ Write-InstallerFailureDiagnostics @() $errors
   assert.match(observed.messages[1], /Installer registration observation failed:/u)
 })
 
+test('post-uninstall diagnostics distinguish remaining predicates and bound private observations', { skip: process.platform !== 'win32' }, t => {
+  const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const diagnostic = source.match(/function Write-UninstallFailureDiagnostics[^]*?\r?\n\}/u)?.[0]
+  assert.ok(diagnostic)
+  const observed = powershellUnit(t, `
+${diagnostic}
+$root = $PSScriptRoot
+$ExpectedSourceCommit = 'a' * 40
+$installPath = Join-Path $root 'Installed App'
+$application = Join-Path $installPath 'cloga-deepseek-harness.exe'
+$uninstaller = Join-Path $installPath 'Uninstall cloga-deepseek-harness.exe'
+New-Item -ItemType Directory -Path (Join-Path $root 'evidence') | Out-Null
+$prior = Join-Path $root 'evidence/installer-failure-registration.json'
+Set-Content -LiteralPath $prior -Value 'retained pre-cleanup evidence' -NoNewline
+function Test-Path($LiteralPath, $PathType) {
+    if ($PathType -cne 'Leaf') { throw 'Unexpected synthetic file query' }
+    if ($LiteralPath -ceq $application) { return $mode -in @('executable', 'capped') }
+    if ($LiteralPath -ceq $uninstaller) { return $mode -ne 'clean' }
+    throw 'Unexpected synthetic path'
+}
+function Product-Registrations {
+    if ($mode -notin @('owner', 'uninstall-key', 'capped')) { return }
+    $count = if ($mode -eq 'capped') { 6 } else { 1 }
+    for ($i = 0; $i -lt $count; $i++) {
+        [pscustomobject]@{ Hive = 'CurrentUser'; View = 'Registry64'; OwnerPresent = ($mode -ne 'uninstall-key')
+            UninstallPresent = ($mode -ne 'owner'); InstallLocation = $installPath
+            UninstallString = 'credential-sentinel'; DisplayName = 'private-display-name' }
+    }
+}
+function Get-CimInstance($ClassName, $OperationTimeoutSec) {
+    if ($ClassName -cne 'Win32_Process' -or $OperationTimeoutSec -ne 5) { throw 'Unexpected synthetic process query' }
+    [pscustomobject]@{ Name = 'foreign.exe'; ExecutablePath = 'C:\\foreign\\foreign.exe'; ProcessId = 999; ParentProcessId = 998; CommandLine = 'credential-sentinel' }
+    if ($mode -eq 'worker') {
+        [pscustomobject]@{ Name = 'relocated.exe'; ExecutablePath = (Join-Path $root 'process-temp/relocated.exe'); ProcessId = 30; ParentProcessId = 20; CommandLine = 'credential-sentinel' }
+    }
+    if ($mode -in @('product', 'capped')) {
+        $count = if ($mode -eq 'capped') { 20 } else { 1 }
+        for ($i = 0; $i -lt $count; $i++) {
+            [pscustomobject]@{ Name = 'cloga-deepseek-harness.exe'; ExecutablePath = $application; ProcessId = (40 + $i); ParentProcessId = 20; CommandLine = 'credential-sentinel' }
+        }
+    }
+}
+$cases = @()
+foreach ($mode in @('clean', 'executable', 'owner', 'uninstall-key', 'product', 'worker', 'capped', 'not-started')) {
+    $errors = [Collections.Generic.List[string]]::new()
+    $launcher = [pscustomobject]@{ Id = 20; HasExited = ($mode -ne 'worker') }
+    $launcher | Add-Member ScriptProperty ExitCode { if (-not $this.HasExited) { throw 'Do not read live exit status' }; return 0 }
+    if ($mode -eq 'not-started') { $launcher = $null }
+    Write-UninstallFailureDiagnostics $launcher $errors
+    $data = Get-Content -LiteralPath (Join-Path $root 'evidence/installer-uninstall-failure.json') -Raw | ConvertFrom-Json
+    $cases += [pscustomobject]@{ mode = $mode; data = $data; errors = @($errors) }
+}
+if ((Get-Content -LiteralPath $prior -Raw) -cne 'retained pre-cleanup evidence') { throw 'Post-uninstall observation overwrote earlier evidence' }
+ConvertTo-Json -InputObject $cases -Depth 8 -Compress
+`)
+  const cases = Object.fromEntries(observed.map(({ mode, data, errors }) => {
+    assert.deepEqual(errors, [])
+    assert.deepEqual(data.observationErrors, [])
+    assert.equal(data.arguments, '/currentuser /S')
+    assert.equal(data.sourceCommit, 'a'.repeat(40))
+    return [mode, data]
+  }))
+  assert.equal(cases.clean.executablePresent, false)
+  assert.equal(cases.clean.uninstallerPresent, false)
+  assert.equal(cases.clean.registrationCount, 0)
+  assert.equal(cases.clean.productProcessCount, 0)
+  assert.equal(cases.clean.ownedTemporaryProcessCount, 0)
+  assert.deepEqual(cases.clean.processes, [])
+  assert.equal(cases.executable.executablePresent, true)
+  assert.equal(cases.executable.launcherExited, true)
+  assert.equal(cases.executable.launcherExitCode, 0)
+  assert.deepEqual(cases.owner.registrations, [{ hive: 'CurrentUser', view: 'Registry64', ownerPresent: true, uninstallPresent: false, installLocationMatches: true }])
+  assert.deepEqual(cases['uninstall-key'].registrations, [{ hive: 'CurrentUser', view: 'Registry64', ownerPresent: false, uninstallPresent: true, installLocationMatches: true }])
+  assert.equal(cases.product.productProcessCount, 1)
+  assert.deepEqual(cases.product.processes, [{ pid: 40, parentPid: 20, inInstallation: true, inOwnedTemporaryRoot: false }])
+  assert.equal(cases.worker.productProcessCount, 0)
+  assert.equal(cases.worker.ownedTemporaryProcessCount, 1)
+  assert.deepEqual(cases.worker.processes, [{ pid: 30, parentPid: 20, inInstallation: false, inOwnedTemporaryRoot: true }])
+  assert.equal(cases.worker.launcherExited, false)
+  assert.equal(cases.worker.launcherExitCode, null)
+  assert.equal(cases.capped.registrationCount, 6)
+  assert.equal(cases.capped.registrations.length, 4)
+  assert.equal(cases.capped.registrationsTruncated, true)
+  assert.equal(cases.capped.productProcessCount, 20)
+  assert.equal(cases.capped.processes.length, 16)
+  assert.equal(cases.capped.processesTruncated, true)
+  assert.equal(cases['not-started'].launcherStarted, false)
+  assert.equal(cases['not-started'].launcherPid, null)
+  assert.equal(cases['not-started'].launcherExitCode, null)
+  assert.doesNotMatch(JSON.stringify(observed), /credential-sentinel|private-display-name|foreign\.exe|ExecutablePath|CommandLine|Installed App/u)
+})
+
+test('post-uninstall observation failures retain partial evidence without exposing raw errors', { skip: process.platform !== 'win32' }, t => {
+  const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const diagnostic = source.match(/function Write-UninstallFailureDiagnostics[^]*?\r?\n\}/u)?.[0]
+  assert.ok(diagnostic)
+  const observed = powershellUnit(t, `
+${diagnostic}
+$root = $PSScriptRoot
+$ExpectedSourceCommit = 'a' * 40
+$installPath = Join-Path $root 'Installed App'
+$application = Join-Path $installPath 'app.exe'; $uninstaller = Join-Path $installPath 'uninstall.exe'
+New-Item -ItemType Directory -Path (Join-Path $root 'evidence') | Out-Null
+function Test-Path { throw 'credential-sentinel-file' }
+function Product-Registrations { throw 'credential-sentinel-registry' }
+function Get-CimInstance { throw 'credential-sentinel-process' }
+$launcher = [pscustomobject]@{ Id = 20 }
+$launcher | Add-Member ScriptProperty HasExited { throw 'credential-sentinel-launcher' }
+$errors = [Collections.Generic.List[string]]::new()
+Write-UninstallFailureDiagnostics $launcher $errors
+$data = Get-Content -LiteralPath (Join-Path $root 'evidence/installer-uninstall-failure.json') -Raw | ConvertFrom-Json
+$root = Join-Path $root 'absent-parent'
+$launcher = [pscustomobject]@{ Id = 20; HasExited = $true }
+$launcher | Add-Member ScriptProperty ExitCode { throw 'credential-sentinel-exit-code' }
+Write-UninstallFailureDiagnostics $launcher $errors
+[pscustomobject]@{ data = $data; errors = @($errors) } | ConvertTo-Json -Depth 6 -Compress
+`)
+  assert.equal(observed.data.launcherPid, 20)
+  assert.equal(observed.data.executablePresent, null)
+  assert.equal(observed.data.registrationCount, null)
+  assert.equal(observed.data.productProcessCount, null)
+  assert.deepEqual(observed.data.observationErrors, ['launcher-state-unavailable', 'installed-file-state-unavailable', 'registration-state-unavailable', 'process-state-unavailable'])
+  assert.equal(observed.errors.length, 9)
+  assert.equal(observed.errors.at(-1), 'Post-uninstall diagnostic write failed')
+  assert.doesNotMatch(JSON.stringify(observed), /credential-sentinel/u)
+})
+
+test('post-uninstall diagnostic exceptions cannot replace primary or cleanup-only failures', { skip: process.platform !== 'win32' }, t => {
+  const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const start = source.indexOf('            $cleanupFailure = $_')
+  const end = source.indexOf('\n        }\n    }\n    # Cleanup itself', start)
+  assert.ok(start >= 0 && end > start)
+  const handler = source.slice(start, end)
+  const observed = powershellUnit(t, `
+function Write-UninstallFailureDiagnostics { throw 'diagnostic failure' }
+$cases = @()
+foreach ($hasPrimary in @($true, $false)) {
+    $failure = $null
+    if ($hasPrimary) { try { throw 'primary failure' } catch { $failure = $_ } }
+    $original = $failure
+    $cleanupErrors = [Collections.Generic.List[string]]::new()
+    $secondaryErrors = [Collections.Generic.List[string]]::new()
+    $uninstallAttempted = $true; $ownedUninstaller = 'synthetic handle'
+    try { throw 'cleanup failure' } catch {
+${handler}
+    }
+    $cases += [pscustomobject]@{ hasPrimary = $hasPrimary; originalRetained = [object]::ReferenceEquals($failure, $original)
+        failure = $failure.Exception.Message; cleanup = @($cleanupErrors); secondary = @($secondaryErrors) }
+}
+ConvertTo-Json -InputObject $cases -Depth 5 -Compress
+`)
+  assert.deepEqual(observed, [
+    { hasPrimary: true, originalRetained: true, failure: 'primary failure', cleanup: ['Installed product cleanup failed: cleanup failure'], secondary: ['Post-uninstall diagnostic collection failed'] },
+    { hasPrimary: false, originalRetained: false, failure: 'cleanup failure', cleanup: ['Installed product cleanup failed: cleanup failure'], secondary: ['Post-uninstall diagnostic collection failed'] },
+  ])
+  assert.ok(source.includes('Wait-Exit $ownedUninstaller 120'))
+  assert.ok(source.includes("if ($timer.Elapsed.TotalSeconds -gt 30) { throw 'Owned uninstaller did not remove executable, registration and product processes' }"))
+  assert.ok(source.includes('while ((Test-Path -LiteralPath $application) -or @(Product-Registrations).Count -ne 0 -or @(Product-Processes).Count -ne 0)'))
+})
+
 test('transaction guard rejects real target-parent staging siblings without deleting evidence', { skip: process.platform !== 'win32' }, t => {
   const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
   const guard = driver.match(/function Assert-NoTransactionDirectories \{[^]*?\r?\n\}/u)?.[0]
@@ -729,8 +962,8 @@ test('cleanup admission precedes Finish and rechecks actual registration before 
   assert.ok(cleanup)
   assert.ok(cleanup.includes('$hasRegistration = @(Product-Registrations).Count -ne 0'))
   assert.ok(cleanup.includes('Get-ChildItem -LiteralPath $installPath -Force'))
-  assert.ok(cleanup.indexOf('[void](Read-Registration)') < cleanup.indexOf("Start-Owned $uninstaller '/S'"))
-  assert.ok(cleanup.indexOf('Wait-NoProductProcesses') < cleanup.indexOf("Start-Owned $uninstaller '/S'"))
+  assert.ok(cleanup.indexOf('[void](Read-Registration)') < cleanup.indexOf("Start-Owned $uninstaller '/currentuser /S'"))
+  assert.ok(cleanup.indexOf('Wait-NoProductProcesses') < cleanup.indexOf("Start-Owned $uninstaller '/currentuser /S'"))
   assert.ok(cleanup.includes("throw 'Owned registration has no usable uninstaller; leave VM teardown to remove the partial installation'"))
   assert.ok(cleanup.includes("$cleanupErrors.Add('Installed product cleanup failed: '"))
 })

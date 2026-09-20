@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { assertUpgradeRunner, installedUpgradeApplication, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeFileHash, verifyUpgradeRelease } from './windows-installed-upgrade-contract.mjs'
 import { retainPrimaryFailure } from './windows-packaged-package-acceptance.mjs'
+import { inspectInstalledDesktopIdentity, readInstalledDesktopRuntimeDescriptor } from './windows-installed-runtime.mjs'
 
 const baseline = JSON.parse(readFileSync(new URL('./windows-upgrade-baseline.json', import.meta.url), 'utf8'))
 const json = path => JSON.parse(readFileSync(path, 'utf8'))
@@ -83,7 +84,9 @@ async function main() {
   }
   assert.equal(upgradeFileHash(retained), json(join(root, 'retained.json')).envSha256)
   const { desktopSmokeEnvironment } = await import('../../scripts/smoke-environment.ts')
-  const { inspectPackagedCopilotSettings } = await import('./copilot-settings-smoke.ts')
+  const inspectSettings = values.phase === 'baseline'
+    ? (await import('./baseline-copilot-settings-smoke.ts')).inspectBaselinePackagedCopilotSettings
+    : (await import('./copilot-settings-smoke.ts')).inspectPackagedCopilotSettings
   const { _electron } = await import('playwright')
   const env = { ...desktopSmokeEnvironment(home), DSH_TELEMETRY_DISABLED: '1' }
   const rounds = values.phase === 'baseline' ? ['baseline'] : ['candidate', 'candidate-restart']
@@ -95,17 +98,13 @@ async function main() {
     const secondaryErrors = []
     try {
       app = await _electron.launch({ executablePath: application, args: [`--user-data-dir=${userData}`], env, timeout: 120_000 })
-      const identity = await app.evaluate(({ app }) => ({ executable: process.execPath, userData: app.getPath('userData'), version: app.getVersion(), packaged: app.isPackaged }))
+      const identity = await app.evaluate(inspectInstalledDesktopIdentity)
       assert.equal(resolve(identity.executable).toLowerCase(), application.toLowerCase())
       assert.equal(resolve(identity.userData).toLowerCase(), userData.toLowerCase())
       assert.equal(identity.version, expected.manifest.version)
       assert.equal(identity.packaged, true)
-      const runtimeText = await app.evaluate(async () => {
-        const { readFile } = await import('node:fs/promises')
-        const { join } = await import('node:path')
-        return readFile(join(process.resourcesPath, 'app.asar', 'dsh', 'desktop-runtime.json'), 'utf8')
-      })
-      assert.equal(hash(runtimeText), expected.manifest.installedEvidence.runtimeSha256)
+      const runtimeBytes = readInstalledDesktopRuntimeDescriptor(application, identity.resourcesPath, expected.manifest.installedEvidence.executableSha256)
+      assert.equal(hash(runtimeBytes), expected.manifest.installedEvidence.runtimeSha256)
       const expectedUrl = values.phase === 'baseline' ? baseline.applicationUrl : 'dsh-app://app/'
       page = await app.firstWindow()
       page.setDefaultTimeout(120_000)
@@ -117,7 +116,7 @@ async function main() {
       await settings.getByRole('button', { name: 'Models', exact: true }).click()
       const account = settings.locator('[data-dsh-github-copilot-compact-account]')
       await account.getByRole('button', { name: 'Sign in with GitHub', exact: true }).waitFor({ state: 'visible' })
-      const settingsEvidence = await inspectPackagedCopilotSettings(settings)
+      const settingsEvidence = await inspectSettings(settings)
       await page.screenshot({ path: join(evidence, `${round}-models.png`) })
       if (round === 'baseline') {
         save(join(root, 'baseline-ready.json'), { ownerToken: owner.token, pid: app.process().pid, application })
@@ -139,7 +138,7 @@ async function main() {
       app = undefined
       save(join(evidence, `${round}.json`), {
         sourceCommit: expected.manifest.source.commit, version: expected.manifest.version,
-        executableSha256: upgradeFileHash(application), runtimeSha256: hash(runtimeText),
+        executableSha256: upgradeFileHash(application), runtimeSha256: hash(runtimeBytes),
         actualInstalledApplication: true, actualHostSettingsViews: settingsEvidence,
         sameRetainedHome: true, retainedEnvSha256: upgradeFileHash(retained), isolatedUserData: true,
         pluginUserChoicesVerified: false, draftAttachmentRefusalVerified: false,

@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { assertUpgradeRunner, installedUpgradeApplication, ownedUpgradePath, upgradeFileHash } from './windows-installed-upgrade-contract.mjs'
+import { inspectInstalledDesktopIdentity, readInstalledDesktopRuntimeDescriptor } from './windows-installed-runtime.mjs'
 
 const repository = fileURLToPath(new URL('../../../../', import.meta.url))
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u
@@ -269,16 +270,12 @@ export async function runPackagedPackageAcceptance(runRoot) {
       }
     } catch (error) { bindFailure = retainPrimaryFailure(bindFailure, error, 'bind-evidence-read', secondaryErrors) }
     if (bindFailure !== undefined) throw bindFailure
-    const identity = await app.evaluate(({ app }) => ({ executable: process.execPath, userData: app.getPath('userData'), packaged: app.isPackaged, version: app.getVersion() }))
+    const identity = await app.evaluate(inspectInstalledDesktopIdentity)
     assert.equal(resolve(identity.executable).toLowerCase(), application.toLowerCase())
     assert.equal(resolve(identity.userData).toLowerCase(), userData.toLowerCase())
     assert.equal(identity.packaged, true)
     assert.equal(identity.version, expected.version)
-    const runtime = await app.evaluate(async () => {
-      const { readFile } = await import('node:fs/promises')
-      const { join } = await import('node:path')
-      return readFile(join(process.resourcesPath, 'app.asar', 'dsh', 'desktop-runtime.json'), 'utf8')
-    })
+    const runtime = readInstalledDesktopRuntimeDescriptor(application, identity.resourcesPath, expected.installedEvidence.executableSha256)
     assert.equal(hash(runtime), expected.installedEvidence.runtimeSha256)
     errors = []
     page = await app.firstWindow()

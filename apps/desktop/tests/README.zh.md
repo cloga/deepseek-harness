@@ -64,13 +64,19 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 [cloga 发布工作流](../../../.github/workflows/desktop-fork-release.yml)仅在一次性的 GitHub 托管 Windows runner 上运行[安装器验收](windows-installer-upgrade.ps1)。选择经过评审的分支，设置 `rehearsal: true` 并填写精确的[发布计划版本](../release/cloga-windows-x64.json)；演练不能发布。驱动会拒绝已有的产品安装，并在调用真实交互式安装器前验证基线与候选版本的身份。它关闭自动启动，使用隔离数据启动已安装应用，检查自定义安装路径和重启，最后卸载。获取产物所用的凭据不会传给应用或原生辅助程序。
 
-注册验证和清理绑定自有目录中的确切 `Uninstall cloga-deepseek-harness.exe`：原版 NSIS 根据已验证的 `executableName` 派生这个文件名，而不是使用显示名称或安装目录名称。注册表命令必须是带引号的自有路径，随后为 `/currentuser`；`QuietUninstallString` 只能再追加确切的 ` /S`。其他可执行文件名、模式或尾随参数仍被拒绝；一致的 HKCU 注册表视图别名不会放宽源码、版本、可执行文件哈希或文件系统祖先检查。纯注册 fixture 验证该命名规则，不读取注册表，也不启动卸载器；托管环境中的真实安装升级验收仍须单独执行。
+安装升级与同版本包操作的观察器均使用[已安装运行时读取器](fixtures/windows-installed-runtime.mjs)。CDP 求值只返回运行中应用的身份字段；描述文件通过维护中的 `readPackagedDesktopRuntimeDescriptor` 载体在 CDP 之外读取。在以 Node 模式启动打包 Electron 之前，读取器重新检查自有安装中的可执行文件哈希，并将观察到的 resources 目录绑定到该安装。描述文件校验对原始 ASAR 字节计算哈希，不使用解析或重新序列化的 JSON。此检查仅针对一次性的托管安装，绝不针对操作者的 Desktop。
+
+不可变的 `0.1.6-alpha.1.cloga.2` 基线使用 sequence 12 和 Copilot alpha.24；只有验证该安装的锁定身份后，才使用其[基线设置检查器](fixtures/baseline-copilot-settings-smoke.ts)。它保留该版本原有的只读模型角色与提供方目录检查，不要求后续版本的工作区或仅提供方 UI。候选及其重启仍使用针对 Copilot alpha.30 的严格[当前设置检查器](fixtures/copilot-settings-smoke.ts)。基线检查不能作为候选检查失败时的回退；两种检查器都不发起认证、保存设置或执行模型／搜索调用。
+
+注册验证和清理绑定自有目录中的确切 `Uninstall cloga-deepseek-harness.exe`：原版 NSIS 根据已验证的 `executableName` 派生这个文件名，而不是使用显示名称或安装目录名称。注册表命令必须是带引号的自有路径，随后为 `/currentuser`；`QuietUninstallString` 只能再追加确切的 ` /S`。其他可执行文件名、模式或尾随参数仍被拒绝；一致的 HKCU 注册表视图别名不会放宽源码、版本、可执行文件哈希或文件系统祖先检查。
+
+清理使用与 `QuietUninstallString` 匹配的固定 `/currentuser /S` 参数调用已验证的自有可执行文件，绝不执行注册表提供的命令文本。卸载后失败会保留有界的启动器状态、剩余文件、注册信息与进程状态标量观察；这些观察不证明超时原因。退出／删除时限、清理断言和主要失败保留规则均不变。纯注册 fixture 验证该命名规则，不读取注册表，也不启动卸载器；托管环境中的真实安装升级验收仍须单独执行。
 
 [打包 skill canary](fixtures/packaged-skills-smoke.mjs) 从指定产物挂载最小 Cordis 服务，并读取其中真实的 ASAR preset 与 skill。其子进程仅接收明确的操作系统环境白名单，用户状态目录全部私有；它自己的清理保留主要失败，只有清理失败时也会判定失败。这些保证仅适用于该 canary，不适用于其他 runtime-smoke 子进程。它通过四次真实 skill 工具调用检查随附 skill 与合成用户 skill，不代表生产 Host 或 profile 验证。[纯 helper 回归](packaged-skills-smoke.test.mjs) 在产物构建前执行，不证明打包行为已通过。
 
 独立的[包操作场景](fixtures/windows-packaged-package-acceptance.mjs)使用另一个私有 home，以及真实的 Plugin Manager 控件、标题栏菜单、shell 确认和替代 Host。它将现有的私有测试组合包原样归档。安装首先提升一个仍禁用该组合包的图；必须经过官方 Enable 开关和另一次正常重启，才能报告行状态为 Running。通过真实设置配置的自定义提供方使用回环测试端点；场景断言不发出模型请求。组合输入、仅附件和仅草稿输入都必须阻止激活，同时保留实时输入。Copilot 的禁用与移除选择在同版本重启后检查；确认移除后不存在时，还必须看到已正确加载的保留 fixture。
 
-[原生 UI 辅助程序](windows-desktop-ui.ps1)将操作绑定到自有进程的具体实例及窗口。启动归属不明或未确认进程退出时，不能认证清理完成。报告和截图独立于已定稿的发布产物，报告写入失败不会替换先前的验收错误。单元测试和解析检查不能证明托管 UI 已通过。应读取每次运行中明确限定范围的标志：本流程不证明跨安装器升级的选择保持、退出后未发送草稿的持久化、提升失败回滚、成功升级后的降级，或已发布渠道的 managed-update 交接。当前本地 Desktop 不是默认测试目标。
+[原生 UI 辅助程序](windows-desktop-ui.ps1)将操作绑定到自有进程的具体实例及窗口。启动归属不明或未确认进程退出时，不能认证清理完成。报告和截图独立于已定稿的发布产物，报告写入失败不会替换先前的验收错误。纯 VM、合成 helper 和解析检查不证明真实安装器升级或托管 UI 验收成功。经过评审的最终源码仍须使用实际安装器完成托管 rehearsal。应读取每次运行中明确限定范围的标志：本流程不证明跨安装器升级的选择保持、退出后未发送草稿的持久化、提升失败回滚、成功升级后的降级，或已发布渠道的 managed-update 交接。当前本地 Desktop 不是默认测试目标。
 
 <a id="verification-open"></a>
 
