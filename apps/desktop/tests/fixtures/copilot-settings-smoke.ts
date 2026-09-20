@@ -7,6 +7,8 @@ export interface CopilotSettingsEvidence {
   readonly modelRolesViewLoaded: true
   readonly currentWorkspaceReadOnly: true
   readonly searchProviderCatalogLoaded: true
+  readonly providerOnlySearchRouting: true
+  readonly fallbackProviderLabel: true
   readonly registeredSearchProviders: readonly string[]
   readonly realSearch: false
 }
@@ -48,6 +50,12 @@ export async function inspectPackagedCopilotSettings(settings: Locator): Promise
   const fallbackSelector = '[data-dsh-web-search-provider]'
   await search.locator(`${primarySelector}:enabled`).waitFor({ state: 'visible' })
   await search.locator(`${fallbackSelector}:enabled`).waitFor({ state: 'visible' })
+  const fieldLabels = await search.locator('label > span:first-child')
+    .evaluateAll(elements => elements.map(element => element.textContent?.trim()))
+  assert.deepEqual(fieldLabels, ['Search provider', 'Fallback provider'])
+  const modelControls = await search.locator('input, [data-dsh-copilot-search-model]')
+    .evaluateAll(elements => elements.length)
+  assert.equal(modelControls, 0, 'Ordinary search routing must remain provider-only without a model prerequisite')
   const searchStatus = (await search.locator('[role="status"]').allTextContents()).join(' ')
   assert(!searchStatus.includes('Search provider list is unavailable.'), 'Search registration catalog must load')
   assert.equal(await search.locator(primarySelector).inputValue(), 'auto')
@@ -66,6 +74,7 @@ export async function inspectPackagedCopilotSettings(settings: Locator): Promise
   assert.deepEqual(primaryIds, fallbackIds, 'Both selectors must project the same registered provider catalog')
   return {
     modelRolesViewLoaded: true, currentWorkspaceReadOnly: true, searchProviderCatalogLoaded: true,
+    providerOnlySearchRouting: true, fallbackProviderLabel: true,
     registeredSearchProviders: primaryIds, realSearch: false,
   }
 }
