@@ -64,7 +64,7 @@ describe('desktop external plugin profile', () => {
     const before = readdirSync(manager.paths.profile).sort()
     await expect(manager.applyRelease(true)).rejects.toThrow('manifest is missing from existing package inventory')
     await expect(manager.disableAllPlugins()).rejects.toThrow('manifest is missing from existing package inventory')
-    expect(() => createPluginProfile(manager.paths.profile)).toThrow('manifest is missing from existing package inventory')
+    expect(() => { createPluginProfile(manager.paths.profile) }).toThrow('manifest is missing from existing package inventory')
     expect(readdirSync(manager.paths.profile).sort()).toEqual(before)
     expect(readFileSync(payload, 'utf8')).toBe('retained inventory bytes')
     expect(readFileSync(patch, 'utf8')).toBe('retain this patch')
@@ -83,7 +83,7 @@ describe('desktop external plugin profile', () => {
     }
     await expect(manager.applyRelease(true)).rejects.toThrow('regular unlinked file')
     await expect(manager.disableAllPlugins()).rejects.toThrow('regular unlinked file')
-    expect(() => createPluginProfile(manager.paths.profile)).toThrow('regular unlinked file')
+    expect(() => { createPluginProfile(manager.paths.profile) }).toThrow('regular unlinked file')
     expect(readdirSync(manager.paths.profile)).toEqual(['package.json'])
     expect(lstatSync(manifest).isSymbolicLink()).toBe(kind !== 'directory')
     if (kind === 'link') expect(readFileSync(target, 'utf8')).toBe('{}')
