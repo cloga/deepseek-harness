@@ -176,14 +176,6 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
         throw new Error(`Packaged Desktop startup failed: ${safeDiagnostic(await page.locator('#error').innerText())}`)
       }
       record(`${phase}:application`)
-      const usageCapability = inspectCopilotUsageCapability(profile)
-      const usageEvidence = await inspectSignedOutCopilotUsage(page)
-      usageCapabilities.push(usageCapability)
-      signedOutUsage.push(usageEvidence)
-      writeFileSync(join(output, `${phase}-usage-readonly.json`), JSON.stringify({
-        capability: usageCapability, signedOut: usageEvidence,
-      }, undefined, 2) + '\n')
-      record(`${phase}:usage-readonly`)
       await page.getByRole('button', { name: 'Settings', exact: true }).click()
       const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
       await settings.getByRole('button', { name: 'Models', exact: true }).click()
@@ -194,6 +186,14 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       record(`${phase}:account`)
       assert(await signIn.isEnabled(), 'The account must expose a writable device-authorization entry')
       assert.equal(await account.locator('[data-dsh-github-copilot-account-error]').count(), 0)
+      const usageCapability = inspectCopilotUsageCapability(profile)
+      const usageEvidence = await inspectSignedOutCopilotUsage(page)
+      usageCapabilities.push(usageCapability)
+      signedOutUsage.push(usageEvidence)
+      writeFileSync(join(output, `${phase}-usage-readonly.json`), JSON.stringify({
+        capability: usageCapability, signedOut: usageEvidence,
+      }, undefined, 2) + '\n')
+      record(`${phase}:usage-readonly`)
       await page.screenshot({ path: join(output, `${phase}-models.png`) })
       await account.getByRole('button', { name: 'Manage', exact: true }).click()
       const management = account.getByRole('region', { name: 'GitHub Copilot account management', exact: true })
