@@ -249,6 +249,43 @@ public static class InstallerCapture {
 
     public static string Save(IntPtr window, string path) {
         Reveal(window);
+        return CaptureWindow(window, path);
+    }
+
+    // Stock NSIS has no HarnessInstaller.Ready property. Accept only the owned, usable
+    // directory (1019/Edit) or finish (1204/Button) page and its enabled Next/Finish action.
+    public static string SaveStock(int process, IntPtr window, int pageControlId, string path) {
+        string pageClass;
+        if (pageControlId == 1019) pageClass = "Edit";
+        else if (pageControlId == 1204) pageClass = "Button";
+        else throw new ArgumentException("Unsupported stock installer page control");
+        uint owner;
+        GetWindowThreadProcessId(window, out owner);
+        var kind = new StringBuilder(128);
+        GetClassName(window, kind, kind.Capacity);
+        var title = new StringBuilder(256);
+        GetWindowText(window, title, title.Capacity);
+        if (process <= 0 || owner != process || !IsWindow(window) || TopLevel(window) != window
+            || !IsWindowVisible(window) || !IsWindowEnabled(window) || kind.ToString() != "#32770"
+            || String.IsNullOrEmpty(ProductName) || !title.ToString().Contains(ProductName))
+            throw new InvalidOperationException("Stock capture requires a live owned installer dialog");
+        RequireStockControl(process, window, pageControlId, pageClass);
+        RequireStockControl(process, window, 1, "Button");
+        return CaptureWindow(window, path);
+    }
+
+    static void RequireStockControl(int process, IntPtr window, int id, string expectedClass) {
+        IntPtr control = FindControlById(window, id);
+        uint owner;
+        GetWindowThreadProcessId(control, out owner);
+        var kind = new StringBuilder(128);
+        GetClassName(control, kind, kind.Capacity);
+        if (control == IntPtr.Zero || !IsWindow(control) || owner != process || TopLevel(control) != window
+            || !IsWindowVisible(control) || !IsWindowEnabled(control) || kind.ToString() != expectedClass)
+            throw new InvalidOperationException("Stock capture requires visible enabled " + expectedClass + " control " + id);
+    }
+
+    static string CaptureWindow(IntPtr window, string path) {
         Rect rect;
         if (!GetWindowRect(window, out rect)) throw new InvalidOperationException("Could not read preview bounds");
         int width = rect.Right - rect.Left, height = rect.Bottom - rect.Top;

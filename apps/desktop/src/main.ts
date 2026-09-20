@@ -609,7 +609,10 @@ async function main(): Promise<void> {
     publishBaseline(undefined)
   }
 
-  const readManagedCompletion = (claimStartupAdmission = false, manualRecovery = false): Promise<DesktopManagedUpdateCompletion | undefined> => {
+  const readManagedCompletion = (
+    claimStartupAdmission = false,
+    manualRecovery = false,
+  ): Promise<DesktopManagedUpdateCompletion | undefined> => {
     if (managedCompletionOperation !== undefined) return managedCompletionOperation
     const host = backend.host
     if (managedUpdate === undefined || host === undefined || lifecycleUnavailable()) return Promise.resolve(undefined)

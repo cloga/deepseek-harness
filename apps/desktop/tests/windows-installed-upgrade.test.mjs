@@ -1,4 +1,4 @@
-/** Unit coverage of runner-only acceptance guards; never starts an application or installer. */
+/** Static/unit guards and isolated synthetic Win32 captures; never starts an application or installer. */
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
@@ -92,10 +92,183 @@ if (('InstallerCapture' -as [type]) -ne $helperType) { throw 'Repeated loading r
     assert.equal(result.status, 0, result.stderr)
     const observed = JSON.parse(result.stdout.trim())
     assert.equal(observed.edition, edition)
-    for (const member of ['Initialize', 'Find', 'FindText', 'FindButton', 'Progress', 'Save', 'SaveWithShadow', 'SendMessage']) {
+    for (const member of ['Initialize', 'Find', 'FindText', 'FindButton', 'Progress', 'Save', 'SaveStock', 'SaveWithShadow', 'SendMessage']) {
       assert.ok(observed.members.includes(member), `Actual helper is missing ${member}`)
     }
     t.diagnostic(`Compilation only: PowerShell ${observed.edition} ${observed.version}`)
+  })
+
+  test(`stock capture validates synthetic Win32 pages in PowerShell ${edition}`, { skip: process.platform !== 'win32' }, t => {
+    const root = directory(t)
+    const helper = fileURLToPath(new URL('./windows-installer-ui.ps1', import.meta.url))
+    const script = `
+$ErrorActionPreference = 'Stop'
+. $env:DSH_INSTALLER_UI_HELPER
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class StockCaptureFixture {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateWindowEx(uint exStyle, string kind, string title, uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr data);
+    [DllImport("user32.dll")] public static extern bool DestroyWindow(IntPtr window);
+    [DllImport("user32.dll")] public static extern bool EnableWindow(IntPtr window, bool enabled);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
+    public static IntPtr Create(string kind, string title, IntPtr parent, int id) {
+        // Off-screen, no activation: PrintWindow captures only these owned windows.
+        IntPtr window = CreateWindowEx(0x08000000, kind, title, parent == IntPtr.Zero ? 0x90000000u : 0x50000000u,
+            parent == IntPtr.Zero ? -30000 : 10, parent == IntPtr.Zero ? -30000 : 10,
+            320, 180, parent, (IntPtr)id, IntPtr.Zero, IntPtr.Zero);
+        if (window == IntPtr.Zero) throw new InvalidOperationException("Cannot create synthetic window");
+        return window;
+    }
+}
+'@
+[InstallerCapture]::ProductName = 'Synthetic stock capture ' + [guid]::NewGuid().ToString()
+$rejected = [Collections.Generic.List[string]]::new()
+function Reject-Capture([string]$Label, [scriptblock]$Action, [string]$Expected) {
+    $failure = $null
+    try { & $Action } catch { $failure = $_ }
+    if ($null -eq $failure -or $failure.Exception.ToString() -notmatch $Expected) { throw "Missing expected rejection for "+$Label+": "+$failure }
+    if (Test-Path -LiteralPath $bad) { throw "Rejected capture wrote a screenshot: $Label" }
+    $rejected.Add($Label)
+}
+function Complete-Fixture($PrimaryFailure, [scriptblock[]]$Cleanup) {
+    $failures = [Collections.Generic.List[Exception]]::new()
+    if ($null -ne $PrimaryFailure) { $failures.Add($PrimaryFailure.Exception) }
+    foreach ($cleanupAction in $Cleanup) {
+        try { & $cleanupAction } catch { $failures.Add($_.Exception) }
+    }
+    if ($failures.Count) { throw [AggregateException]::new('Synthetic capture body/cleanup failed', $failures.ToArray()) }
+}
+# Pure negative controls exercise the same teardown path without leaking a real window.
+try { throw 'synthetic primary failure' } catch { $originalFailure = $_ }
+$cleanupTrace = [Collections.Generic.List[string]]::new()
+$combinedFailure = $null
+try {
+    Complete-Fixture $originalFailure @(
+        { $cleanupTrace.Add('destroy'); throw 'synthetic destruction failure' },
+        { $cleanupTrace.Add('verify'); throw 'synthetic survivor failure' }
+    )
+} catch { $combinedFailure = $_.Exception }
+if ($combinedFailure -isnot [AggregateException]) { throw 'Combined failure was not aggregated' }
+$primaryOnly = $null
+try { Complete-Fixture $originalFailure @({}) } catch { $primaryOnly = $_.Exception }
+$cleanupOnly = $null
+try { Complete-Fixture $null @({ throw 'synthetic cleanup-only failure' }) } catch { $cleanupOnly = $_.Exception }
+$cleanupFailures = @{
+    messages = @($combinedFailure.InnerExceptions | ForEach-Object { $_.Message })
+    trace = @($cleanupTrace)
+    originalRetained = [object]::ReferenceEquals($combinedFailure.InnerExceptions[0], $originalFailure.Exception)
+    primaryOnly = @($primaryOnly.InnerExceptions | ForEach-Object { $_.Message })
+    cleanupOnly = @($cleanupOnly.InnerExceptions | ForEach-Object { $_.Message })
+}
+$bad = Join-Path $env:DSH_STOCK_CAPTURE_ROOT 'rejected.png'
+$primaryFailure = $null
+$window = [StockCaptureFixture]::Create('#32770', [InstallerCapture]::ProductName, [IntPtr]::Zero, 0)
+try {
+    # NSIS page controls are nested under an inner dialog; Next/Finish is on the root.
+    $page = [StockCaptureFixture]::Create('#32770', '', $window, 1018)
+    $directory = [StockCaptureFixture]::Create('Edit', 'Synthetic path', $page, 1019)
+    $action = [StockCaptureFixture]::Create('Button', 'Next', $window, 1)
+    if ([InstallerCapture]::GetProp($window, 'HarnessInstaller.Ready') -ne [IntPtr]::Zero) { throw 'Synthetic stock window unexpectedly has native readiness' }
+    $dimensions = [InstallerCapture]::SaveStock($PID, $window, 1019, (Join-Path $env:DSH_STOCK_CAPTURE_ROOT 'directory.png'))
+    Reject-Capture 'foreign-pid' { [InstallerCapture]::SaveStock(($PID + 1), $window, 1019, $bad) } 'live owned installer dialog'
+    Reject-Capture 'invalid-pid' { [InstallerCapture]::SaveStock(0, $window, 1019, $bad) } 'live owned installer dialog'
+    Reject-Capture 'zero-window' { [InstallerCapture]::SaveStock($PID, [IntPtr]::Zero, 1019, $bad) } 'live owned installer dialog'
+    Reject-Capture 'invalid-window' { [InstallerCapture]::SaveStock($PID, [IntPtr](-1), 1019, $bad) } 'live owned installer dialog'
+    Reject-Capture 'child-window' { [InstallerCapture]::SaveStock($PID, $page, 1019, $bad) } 'live owned installer dialog'
+    Reject-Capture 'unsupported-page' { [InstallerCapture]::SaveStock($PID, $window, 999, $bad) } 'Unsupported stock installer page'
+    Reject-Capture 'absent-finish' { [InstallerCapture]::SaveStock($PID, $window, 1204, $bad) } 'control 1204'
+    [void][StockCaptureFixture]::EnableWindow($directory, $false)
+    Reject-Capture 'disabled-directory' { [InstallerCapture]::SaveStock($PID, $window, 1019, $bad) } 'control 1019'
+    [void][StockCaptureFixture]::EnableWindow($directory, $true)
+    [void][StockCaptureFixture]::ShowWindow($directory, 0)
+    Reject-Capture 'hidden-directory' { [InstallerCapture]::SaveStock($PID, $window, 1019, $bad) } 'control 1019'
+    [void][StockCaptureFixture]::ShowWindow($directory, 8)
+    [void][StockCaptureFixture]::EnableWindow($action, $false)
+    Reject-Capture 'disabled-action' { [InstallerCapture]::SaveStock($PID, $window, 1019, $bad) } 'control 1'
+    [void][StockCaptureFixture]::EnableWindow($action, $true)
+    [void][StockCaptureFixture]::EnableWindow($window, $false)
+    Reject-Capture 'disabled-window' { [InstallerCapture]::SaveStock($PID, $window, 1019, $bad) } 'live owned installer dialog'
+    [void][StockCaptureFixture]::EnableWindow($window, $true)
+    [void][StockCaptureFixture]::ShowWindow($window, 0)
+    Reject-Capture 'hidden-window' { [InstallerCapture]::SaveStock($PID, $window, 1019, $bad) } 'live owned installer dialog'
+    [void][StockCaptureFixture]::ShowWindow($window, 8)
+    [void][InstallerCapture]::SetWindowText($window, 'Wrong product')
+    Reject-Capture 'wrong-title' { [InstallerCapture]::SaveStock($PID, $window, 1019, $bad) } 'live owned installer dialog'
+    [void][InstallerCapture]::SetWindowText($window, [InstallerCapture]::ProductName)
+    # The custom entry still times out instead of accepting this usable stock page.
+    Reject-Capture 'custom-not-ready' { [InstallerCapture]::Save($window, $bad) } 'Native page did not finish creating controls'
+    if (-not [StockCaptureFixture]::DestroyWindow($directory)) { throw 'Could not destroy directory control' }
+    Reject-Capture 'stale-page' { [InstallerCapture]::SaveStock($PID, $window, 1019, $bad) } 'control 1019'
+    $checkbox = [StockCaptureFixture]::Create('Button', 'Launch', $page, 1204)
+    [void][InstallerCapture]::SaveStock($PID, $window, 1204, (Join-Path $env:DSH_STOCK_CAPTURE_ROOT 'finish.png'))
+    [void][StockCaptureFixture]::EnableWindow($checkbox, $false)
+    Reject-Capture 'disabled-finish' { [InstallerCapture]::SaveStock($PID, $window, 1204, $bad) } 'control 1204'
+    [void][StockCaptureFixture]::EnableWindow($checkbox, $true)
+    if (-not [StockCaptureFixture]::DestroyWindow($action)) { throw 'Could not destroy action control' }
+    Reject-Capture 'absent-action' { [InstallerCapture]::SaveStock($PID, $window, 1204, $bad) } 'control 1'
+    $wrongAction = [StockCaptureFixture]::Create('Static', 'Not a button', $window, 1)
+    Reject-Capture 'wrong-action-class' { [InstallerCapture]::SaveStock($PID, $window, 1204, $bad) } 'control 1'
+    if (-not [StockCaptureFixture]::DestroyWindow($wrongAction)) { throw 'Could not destroy wrong action' }
+    $action = [StockCaptureFixture]::Create('Button', 'Finish', $window, 1)
+    if (-not [StockCaptureFixture]::DestroyWindow($checkbox)) { throw 'Could not destroy finish control' }
+    $wrongPage = [StockCaptureFixture]::Create('Edit', 'Not a checkbox', $page, 1204)
+    Reject-Capture 'wrong-page-class' { [InstallerCapture]::SaveStock($PID, $window, 1204, $bad) } 'control 1204'
+} catch { $primaryFailure = $_ } finally {
+    Complete-Fixture $primaryFailure @(
+        { if (-not [StockCaptureFixture]::DestroyWindow($window)) { throw 'Could not destroy owned synthetic dialog' } },
+        {
+            $survivors = @(@($window, $page, $directory, $action, $checkbox, $wrongAction, $wrongPage) |
+                Where-Object { $_ -and [InstallerCapture]::IsWindow($_) })
+            if ($survivors.Count) { throw ('Synthetic windows survived cleanup: ' + ($survivors -join ', ')) }
+        }
+    )
+}
+Reject-Capture 'stale-window' { [InstallerCapture]::SaveStock($PID, $window, 1019, $bad) } 'live owned installer dialog'
+$primaryFailure = $null
+$other = [StockCaptureFixture]::Create('Static', [InstallerCapture]::ProductName, [IntPtr]::Zero, 0)
+try {
+    Reject-Capture 'wrong-window-class' { [InstallerCapture]::SaveStock($PID, $other, 1019, $bad) } 'live owned installer dialog'
+} catch { $primaryFailure = $_ } finally {
+    Complete-Fixture $primaryFailure @(
+        { if (-not [StockCaptureFixture]::DestroyWindow($other)) { throw 'Could not destroy wrong-class window' } },
+        { if ([InstallerCapture]::IsWindow($other)) { throw 'Wrong-class window survived cleanup' } }
+    )
+}
+[pscustomobject]@{ dimensions = $dimensions; rejected = @($rejected); cleanupVerified = $true; cleanupFailures = $cleanupFailures } | ConvertTo-Json -Depth 4 -Compress
+`
+    const names = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'PSMODULEPATH', 'PROGRAMFILES'])
+    const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => names.has(name.toUpperCase())))
+    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {
+      // The real custom readiness timeout is 10 seconds; leave room for compilation and teardown.
+      encoding: 'utf8', timeout: 40_000, env: { ...environment, DSH_INSTALLER_UI_HELPER: helper, DSH_STOCK_CAPTURE_ROOT: root },
+    })
+    assert.equal(result.error, undefined)
+    assert.equal(result.signal, null)
+    assert.equal(result.status, 0, result.stderr)
+    const observed = JSON.parse(result.stdout.trim())
+    assert.equal(observed.dimensions, '320x180')
+    assert.equal(observed.cleanupVerified, true)
+    assert.deepEqual(observed.cleanupFailures, {
+      messages: ['synthetic primary failure', 'synthetic destruction failure', 'synthetic survivor failure'],
+      trace: ['destroy', 'verify'],
+      originalRetained: true,
+      primaryOnly: ['synthetic primary failure'],
+      cleanupOnly: ['synthetic cleanup-only failure'],
+    })
+    assert.deepEqual(observed.rejected, [
+      'foreign-pid', 'invalid-pid', 'zero-window', 'invalid-window', 'child-window', 'unsupported-page', 'absent-finish',
+      'disabled-directory', 'hidden-directory', 'disabled-action', 'disabled-window', 'hidden-window', 'wrong-title',
+      'custom-not-ready', 'stale-page', 'disabled-finish', 'absent-action', 'wrong-action-class', 'wrong-page-class',
+      'stale-window', 'wrong-window-class',
+    ])
+    for (const file of ['directory.png', 'finish.png']) {
+      const png = readFileSync(join(root, file))
+      assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a')
+      assert.equal(png.readUInt32BE(16), 320)
+      assert.equal(png.readUInt32BE(20), 180)
+    }
+    t.diagnostic('Synthetic Win32 windows only; not actual hosted installer qualification')
   })
 }
 
@@ -181,6 +354,23 @@ test('native driver requires hosted runner before mutation and never silently in
   assert.ok(source.includes('draftAttachmentRefusalVerified = $false'))
   assert.ok(source.includes('pluginUserChoicesVerified = $false'))
   assert.ok(source.includes('managedHandoffVerified = $false'))
+})
+
+test('stock baseline captures are separate from strict custom-page readiness', () => {
+  const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const legacy = driver.split('function Start-LegacyInstaller')[1].split('function Start-Installer')[0]
+  assert.match(legacy, /::SaveStock\(\$process\.Id, \$window, 1019, /u)
+  assert.match(legacy, /::SaveStock\(\$Process\.Id, \$window, 1204, /u)
+  assert.doesNotMatch(legacy, /::Save\(/u)
+  const custom = driver.split('function Start-Installer')[1].split('function Wait-NoProductProcesses')[0]
+  assert.equal(custom.match(/::Save\(/gu)?.length, 2)
+  assert.doesNotMatch(custom, /::SaveStock\(/u)
+  const helper = readFileSync(new URL('./windows-installer-ui.ps1', import.meta.url), 'utf8')
+  assert.match(helper, /public static string Save\(IntPtr window, string path\) \{\s+Reveal\(window\);/u)
+  const reveal = helper.split('public static void Reveal(IntPtr window) {')[1].split('public static string Save(')[0]
+  assert.match(reveal, /while \(GetProp\(window, "HarnessInstaller.Ready"\) == IntPtr.Zero\)/u)
+  assert.match(reveal, /ElapsedMilliseconds > 10000\) throw new TimeoutException/u)
+  assert.doesNotMatch(helper, /\bSetProp\b/u)
 })
 
 test('cleanup admission precedes Finish and rechecks actual registration before uninstalling', () => {
