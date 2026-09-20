@@ -323,7 +323,7 @@ describe('Desktop version menu', () => {
     ['zh-CN', '应用', '关于 Desktop 0.1.6-alpha.1.cloga.10…', 'DeepSeek Harness 桌面端'],
     ['fr-FR', 'Application', 'About Desktop 0.1.6-alpha.1.cloga.10…', 'DeepSeek Harness Desktop'],
   ])('shows the full running version before Host readiness in %s', async (locale, application, label, title) => {
-    vi.spyOn(harness.app, 'getLocale').mockReturnValue(locale!)
+    vi.spyOn(harness.app, 'getLocale').mockReturnValue(locale)
     vi.spyOn(harness.app, 'getVersion').mockReturnValue('0.1.6-alpha.1.cloga.10')
     await import('../src/main.ts')
     await harness.preparing.promise
