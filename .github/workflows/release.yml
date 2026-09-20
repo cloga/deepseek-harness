@@ -2,9 +2,9 @@
 # entries, all on one version. The vendored framework and the native packages are
 # separate sequences with their own workflows and version lines.
 #
-# Pack and dependency-layout verification run without credentials on every pull
-# request and master push. The opt-in GitHub-only artifact job below publishes
-# only the approved existing tag; npm remains owned by release-publish.yml.
+# Pack and dependency-layout verification run without publication credentials on
+# pull requests, master pushes and manual rehearsals. Tarballs remain CI artifacts;
+# npm publication remains owned by release-publish.yml.
 name: Release (dsh)
 
 on:
@@ -12,44 +12,17 @@ on:
   push:
     branches: [master]
   workflow_dispatch:
-    inputs:
-      publish_github_artifacts:
-        description: 'Publish the approved Core/Web GitHub artifacts (not npm or Desktop)'
-        type: boolean
-        default: false
-      version:
-        description: 'Exact approved version; must match the existing dsh-v tag and manifests'
-        type: string
-      reviewed_head:
-        description: 'Full approved final PR 81 head SHA (verified through GitHub reviews)'
-        type: string
-      merged_commit:
-        description: 'Full PR 81 merged SHA (must equal peeled tag and dispatch SHA)'
-        type: string
-      ci_run_id:
-        description: 'Successful final-head PR CI run ID; checkout logs must still exist'
-        type: string
-      policy_run_id:
-        description: 'Successful final-head issue-policy run ID'
-        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  # Preserve per-ref PR cancellation; a publication is never displaced by a rehearsal or another dispatch.
-  group: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_github_artifacts && format('{0}-github-artifacts-{1}', github.workflow, github.run_id) || format('{0}-{1}', github.workflow, github.ref) }}
-  cancel-in-progress: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish_github_artifacts) }}
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   PRIMARY_NODE_VERSION: '24'
   DSH_TELEMETRY_DISABLED: '1'
-  RELEASE_PUBLISH: ${{ inputs.publish_github_artifacts }}
-  RELEASE_VERSION: ${{ inputs.version }}
-  RELEASE_REVIEWED_HEAD: ${{ inputs.reviewed_head }}
-  RELEASE_MERGED_COMMIT: ${{ inputs.merged_commit }}
-  RELEASE_CI_RUN: ${{ inputs.ci_run_id }}
-  RELEASE_POLICY_RUN: ${{ inputs.policy_run_id }}
 
 jobs:
   dependencies:
@@ -103,10 +76,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-node-${{ env.PRIMARY_NODE_VERSION }}-pnpm-
 
-      - name: Guard GitHub artifact dispatch
-        if: github.event_name == 'workflow_dispatch' && inputs.publish_github_artifacts
-        run: node scripts/release/github-artifacts.ts guard
-
       - name: Install (immutable)
         run: pnpm install --frozen-lockfile
 
@@ -118,8 +87,6 @@ jobs:
 
   pack:
     name: Pack npm tarballs
-    outputs:
-      artifact-id: ${{ steps.tarballs.outputs.artifact-id }}
     # Persistent runners accept only trusted, credential-free rehearsals.
     runs-on: >-
       ${{ vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
@@ -171,10 +138,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-node-${{ env.PRIMARY_NODE_VERSION }}-pnpm-
 
-      - name: Guard GitHub artifact dispatch
-        if: github.event_name == 'workflow_dispatch' && inputs.publish_github_artifacts
-        run: node scripts/release/github-artifacts.ts guard
-
       - name: Install (immutable)
         run: pnpm install --frozen-lockfile
 
@@ -193,7 +156,7 @@ jobs:
       # verification must not depend on the registry already carrying matching
       # versions — one pull request may bump both families before either
       # publishes — so it installs that family's pack output too. Only dist/npm
-      # is published.
+      # is uploaded as a CI artifact.
       - name: Pack the vendored framework for verification
         run: pnpm run release:pack --family vendor --out dist/npm-vendor --concurrency 8
 
@@ -208,59 +171,9 @@ jobs:
       - name: Verify packed install
         run: pnpm run release:verify-packed-install --family dsh --from dist/npm --from dist/npm-vendor --from dist/npm-landlock
 
-      - name: Seal original GitHub release artifacts
-        if: github.event_name == 'workflow_dispatch' && inputs.publish_github_artifacts
-        run: node node_modules/tsx/dist/cli.mjs scripts/release/github-artifacts-prepare.ts dist/npm
-
       - uses: actions/upload-artifact@v4
-        id: tarballs
         with:
           name: dsh-npm-tarballs
           path: dist/npm/*
           if-no-files-found: error
           retention-days: 7
-
-  github-artifacts:
-    name: Publish Core/Web GitHub artifacts
-    needs: [dependencies, pack]
-    if: >-
-      ${{ success() && github.event_name == 'workflow_dispatch'
-        && inputs.publish_github_artifacts && github.repository == 'cloga/deepseek-harness'
-        && startsWith(github.ref, 'refs/tags/dsh-v') }}
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-      actions: read
-      checks: read
-      pull-requests: read
-      statuses: read
-    concurrency:
-      group: Core-Web-GitHub-artifacts
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-          clean: true
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.PRIMARY_NODE_VERSION }}
-          package-manager-cache: false
-      - uses: actions/download-artifact@v4
-        with:
-          artifact-ids: ${{ needs.pack.outputs.artifact-id }}
-          path: ${{ runner.temp }}/github-artifacts
-          merge-multiple: true
-      - name: Verify evidence and publish original artifacts
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          RELEASE_ARTIFACT_ID: ${{ needs.pack.outputs.artifact-id }}
-        run: node scripts/release/github-artifacts.ts publish "$RUNNER_TEMP/github-artifacts" "$RUNNER_TEMP/github-artifact-write-journal.jsonl"
-      - name: Retain write journal for reconciliation
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: github-artifact-write-journal-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/github-artifact-write-journal.jsonl
-          if-no-files-found: warn
-          retention-days: 90

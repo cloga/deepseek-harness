@@ -87,21 +87,13 @@ for (const [file, jobIds] of [['release.yml', ['dependencies', 'pack']], ['relea
   describe(file, () => {
     const release = workflow(file)
     it('preserves the logical jobs, rehearsal events and read-only permission', () => {
-      expect(Object.keys(release.jobs)).toEqual(file === 'release.yml' ? [...jobIds, 'github-artifacts'] : jobIds)
+      expect(Object.keys(release.jobs)).toEqual(jobIds)
       expect(Object.keys(release.on)).toEqual(['pull_request', 'push', 'workflow_dispatch'])
       expect(release.on.pull_request).toBeNull()
       expect(release.on.push).toEqual({ branches: ['master'] })
       expect(release.permissions).toEqual({ contents: 'read' })
-      if (file === 'release.yml') {
-        expect(release.on.workflow_dispatch).toMatchObject({ inputs: { publish_github_artifacts: { type: 'boolean', default: false } } })
-        expect(release.concurrency).toEqual({
-          group: "${{ github.event_name == 'workflow_dispatch' && inputs.publish_github_artifacts && format('{0}-github-artifacts-{1}', github.workflow, github.run_id) || format('{0}-{1}', github.workflow, github.ref) }}",
-          'cancel-in-progress': "${{ !(github.event_name == 'workflow_dispatch' && inputs.publish_github_artifacts) }}",
-        })
-      } else {
-        expect(release.on.workflow_dispatch).toBeNull()
-        expect(release.concurrency).toEqual({ group: '${{ github.workflow }}-${{ github.ref }}', 'cancel-in-progress': true })
-      }
+      expect(release.on.workflow_dispatch).toBeNull()
+      expect(release.concurrency).toEqual({ group: '${{ github.workflow }}-${{ github.ref }}', 'cancel-in-progress': true })
     })
     for (const jobId of jobIds) {
       describe(jobId, () => {
@@ -172,15 +164,23 @@ for (const [file, jobIds] of [['release.yml', ['dependencies', 'pack']], ['relea
   })
 }
 
-it('preserves exact PR cancellation and isolates non-cancelling publication workflow runs', () => {
-  const concurrency = workflow('release.yml').concurrency!
+it.each([false, true])('ignores legacy publish input %s and keeps per-ref rehearsal cancellation', (publish) => {
+  const release = workflow('release.yml')
+  const concurrency = release.concurrency!
+  const group = (context: Record<string, string | boolean>) => String(concurrency.group)
+    .replace(/\$\{\{[^}]+\}\}/g, expression => String(evaluate(expression, context)))
   const context = { ...trustedPr, 'github.workflow': 'Release (dsh)' }
-  expect(evaluate(String(concurrency.group), context)).toBe('Release (dsh)-refs/pull/42/merge')
-  expect(evaluate(String(concurrency['cancel-in-progress']), context)).toBe(true)
-  const publication = { ...context, 'github.event_name': 'workflow_dispatch', 'inputs.publish_github_artifacts': true, 'github.run_id': '100' }
-  expect(evaluate(String(concurrency.group), publication)).toBe('Release (dsh)-github-artifacts-100')
-  expect(evaluate(String(concurrency['cancel-in-progress']), publication)).toBe(false)
-  expect(evaluate(String(concurrency.group), { ...publication, 'github.run_id': '101' })).toBe('Release (dsh)-github-artifacts-101')
+  expect(group(context)).toBe('Release (dsh)-refs/pull/42/merge')
+  expect(concurrency['cancel-in-progress']).toBe(true)
+  const legacy = { ...context, 'github.event_name': 'workflow_dispatch', 'inputs.publish_github_artifacts': publish,
+    'github.ref': 'refs/tags/dsh-v0.1.6-alpha.5', 'github.run_id': '100' }
+  expect(group(legacy)).toBe('Release (dsh)-refs/tags/dsh-v0.1.6-alpha.5')
+  expect(group({ ...legacy, 'github.run_id': '101' })).toBe(group(legacy))
+  expect(group({ ...legacy, 'github.ref': 'refs/heads/topic' })).not.toBe(group(legacy))
+  expect(group({ ...legacy, 'github.workflow': 'Other rehearsal' })).not.toBe(group(legacy))
+  expect(release.on.workflow_dispatch).toBeNull()
+  expect(Object.keys(release.jobs)).toEqual(['dependencies', 'pack'])
+  for (const job of Object.values(release.jobs)) expect(evaluate(job['runs-on'], legacy)).toBe(hosted)
 })
 
 it.each(['release-publish.yml', 'release-vendor-publish.yml'])('keeps %s manual and entirely hosted', (file) => {
