@@ -5,20 +5,23 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathS
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const SCENARIO = 'snapshots/acp/manual-compact-model-selection'
-export const OUTPUT_PATHS = ['session.v3.jsonl', 'stdout.expected.jsonl', 'system-prompt.expected.md', 'tool-schemas.expected.json'].map(name => `${SCENARIO}/${name}`)
-export const TEST_TITLE = 'snapshot: manual-compact-model-selection matches the expected outputs'
+const SCENARIO = 'snapshots/web/manual-compact-model-selection'
+export const OUTPUT_PATHS = ['session.v3.jsonl', 'system-prompt.expected.md', 'tool-schemas.expected.json', 'checkpoint.expected.md'].map(name => `${SCENARIO}/${name}`)
+export const TEST_TITLE = 'uses the selected model for manual compact without another conversation request'
+export const TEST_GROUP = 'web e2e: manual compact model selection'
 export const REQUIRED_INPUTS = [
   'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml',
   '.github/workflows/manual-compact-generation.yml',
   '.github/scripts/manual-compact-generation-audit.mjs',
   '.github/scripts/manual-compact-generation-audit.test.mjs',
   '.github/scripts/manual-compact-generation-semantic.mjs',
-  'snapshots/acp/acp.snapshot.ts',
-  `${SCENARIO}/input.json`, `${SCENARIO}/snapshot.yml`, `${SCENARIO}/cordis.yml`, `${SCENARIO}/cordis.snapshot.yml`,
-  'packages/test-support/session-snapshot/src/harness.ts',
-  'packages/test-support/session-snapshot/src/suite.ts',
-  'packages/test-support/session-snapshot/src/launcher.ts',
+  'vitest.web.config.ts', 'vitest.snapshot.config.ts',
+  'apps/web/tests/manual-compact-model-selection.e2e.ts',
+  'apps/web/tests/manual-compact-model-selection.overlay.yml',
+  'apps/web/tests/scaffold.ts', 'apps/web/tests/support.ts',
+  `${SCENARIO}/snapshot.yml`,
+  'packages/test-support/session-snapshot/src/normalize.ts',
+  'packages/test-support/session-snapshot/src/manifest.ts',
   'packages/test-support/llm-replay/src/index.ts',
 ]
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024
@@ -88,15 +91,6 @@ function outputBytes(root, path) {
   requireFact(size > 0 && size <= MAX_OUTPUT_BYTES, 'OUTPUT_SIZE')
   return readFileSync(file)
 }
-function parseLines(bytes) {
-  const text = bytes.toString('utf8')
-  requireFact(text.endsWith('\n') && !text.includes('\0'), 'INVALID_JSONL')
-  return text.trimEnd().split('\n').map(line => {
-    const value = JSON.parse(line)
-    requireFact(value !== null && typeof value === 'object' && !Array.isArray(value), 'INVALID_JSONL')
-    return value
-  })
-}
 function report(evidence, name, exactScenario) {
   const value = JSON.parse(readFileSync(regular(evidence, name), 'utf8'))
   requireFact(value.success === true && value.numFailedTests === 0 && value.numFailedTestSuites === 0
@@ -110,16 +104,16 @@ function report(evidence, name, exactScenario) {
   const passed = assertions.filter(item => item.status === 'passed')
   requireFact(passed.length > 0 && value.numPassedTests === passed.length && value.numTotalTests === assertions.length, 'REPORT_COUNTS')
   if (exactScenario) requireFact(passed.length === 1 && passed[0].title === TEST_TITLE
-    && passed[0].fullName === `snapshot scenarios ${TEST_TITLE}`
-    && equal(passed[0].ancestorTitles, ['snapshot scenarios']), 'WRONG_SCENARIO')
+    && passed[0].fullName === `${TEST_GROUP} ${TEST_TITLE}`
+    && equal(passed[0].ancestorTitles, [TEST_GROUP]), 'WRONG_SCENARIO')
   return { passed: passed.length, total: assertions.length }
 }
 const DIAGNOSTIC_SOURCES = [
-  'snapshots/acp/acp.snapshot.ts', 'scripts/session-snapshot-corpus.corpus.ts',
-  'packages/test-support/session-snapshot/src/harness.ts', 'packages/test-support/session-snapshot/src/suite.ts',
-  'packages/test-support/session-snapshot/src/launcher.ts', 'packages/test-support/llm-replay/src/index.ts',
-  'packages/test-support/llm-replay/lib/index.js', 'packages/acp/acp/src/index.ts',
-  'packages/acp/acp/src/session.ts', 'packages/acp/acp/src/model-control.ts', 'packages/acp/acp/lib/index.js',
+  'apps/web/tests/manual-compact-model-selection.e2e.ts', 'apps/web/tests/scaffold.ts', 'apps/web/tests/support.ts',
+  'scripts/session-snapshot-corpus.corpus.ts', 'packages/test-support/session-snapshot/src/normalize.ts',
+  'packages/test-support/session-snapshot/src/manifest.ts', 'packages/test-support/llm-replay/src/index.ts',
+  'packages/test-support/llm-replay/lib/index.js', 'packages/api/session-controller/src/agent.ts',
+  'packages/core/agent/src/model-selection.ts',
   'packages/compaction/compaction-basic/src/index.ts', 'packages/compaction/compaction-basic/src/region.ts',
   'packages/compaction/compaction-basic/src/summarizer.ts', 'packages/compaction/compaction-basic/lib/index.js',
   'packages/core/agent-loop/src/index.ts', 'packages/core/agent-loop/lib/index.js',
@@ -132,7 +126,9 @@ const FAILURE_MARKERS = [
   ['MISSING_FILE', /\bENOENT\b/u],
   ['MODULE_NOT_FOUND', /\bERR_MODULE_NOT_FOUND\b|Cannot find (?:package|module)/u],
   ['HARNESS_FAILURE', /snapshot-harness: scenario failed/u],
-  ['ACP_CONNECTION_CLOSED', /ACP connection closed/u],
+  ['WEB_SCAFFOLD_FAILURE', /web e2e scaffold:|session harvest produced no stabilized fixture|persisted replay/u],
+  ['BROWSER_TIMEOUT', /TimeoutError|locator\.[a-zA-Z]+: Timeout|Timeout [0-9]+ms exceeded/u],
+  ['BROWSER_LAUNCH', /browserType\.launch|Executable doesn't exist|Host system is missing dependencies/u],
   ['UNKNOWN_MODEL_OPTION', /unknown model option:/u],
   ['UNKNOWN_CONFIG_OPTION', /unknown session config option:/u],
   ['REPLAY_EXHAUSTED', /llm-replay: script exhausted/u],
@@ -291,11 +287,11 @@ export function audit(mode, env = process.env) {
     requireFact(semantic.schemaVersion === 1 && semantic.sourceSha === head
       && semantic.seedSha256 === digest(seed) && semantic.sessionSha256 === digest(pending[0].bytes)
       && equal(semantic.checks, { normalRequests: 2, headers: 1, summaries: 1, summaryModel: 'deepseek-v4-pro', maxTokens: 256 }), 'SEMANTIC_RECEIPT_MISMATCH')
-    // Session decoding/semantics are owned by the source-bound official-reader step.
-    parseLines(pending[1].bytes)
-    requireFact(!pending[2].bytes.includes(0) && pending[2].bytes.toString('utf8').trim().length > 0, 'INVALID_PROMPT')
-    const schemas = JSON.parse(pending[3].bytes.toString('utf8'))
-    requireFact(json(schemas).equals(pending[3].bytes) && equal(Object.keys(schemas).sort(), ['changes', 'initial'])
+    // Session decoding belongs to the official reader; the Web owner checks the ARIA golden.
+    requireFact([pending[1], pending[3]].every(item => !item.bytes.includes(0)
+      && item.bytes.toString('utf8').trim().length > 0), 'INVALID_MARKDOWN')
+    const schemas = JSON.parse(pending[2].bytes.toString('utf8'))
+    requireFact(json(schemas).equals(pending[2].bytes) && equal(Object.keys(schemas).sort(), ['changes', 'initial'])
       && Array.isArray(schemas.initial) && schemas.initial.length > 0
       && Array.isArray(schemas.changes) && schemas.changes.length === 0
       && schemas.initial.every(item => typeof item?.name === 'string' && item.parameters !== null && typeof item.parameters === 'object')

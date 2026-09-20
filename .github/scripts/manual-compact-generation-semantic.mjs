@@ -51,7 +51,7 @@ async function main() {
   const root = process.env.GITHUB_WORKSPACE, evidence = process.env.SNAPSHOT_EVIDENCE
   check(isAbsolute(root ?? '') && isAbsolute(evidence ?? '') && /^[0-9a-f]{40}$/u.test(process.env.EXPECTED_HEAD_SHA ?? ''), 'ENVIRONMENT')
   const seedPath = join(evidence, 'private-seed.jsonl')
-  const resultPath = join(root, 'snapshots/acp/manual-compact-model-selection/session.v3.jsonl')
+  const resultPath = join(root, 'snapshots/web/manual-compact-model-selection/session.v3.jsonl')
   noLinks(seedPath, true); noLinks(resultPath, true)
   const seed = readFileSync(seedPath), result = readFileSync(resultPath)
   const { parseSessionLog } = await import(pathToFileURL(join(root, 'packages/test-support/llm-replay/src/index.ts')).href)

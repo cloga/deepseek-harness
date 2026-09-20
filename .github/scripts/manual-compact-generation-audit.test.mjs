@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
-import { OUTPUT_PATHS, REQUIRED_INPUTS, TEST_TITLE } from './manual-compact-generation-audit.mjs'
+import { OUTPUT_PATHS, REQUIRED_INPUTS, TEST_TITLE, TEST_GROUP } from './manual-compact-generation-audit.mjs'
 import { verifyNormalizedSession } from './manual-compact-generation-semantic.mjs'
 
 const AUDITOR = fileURLToPath(new URL('./manual-compact-generation-audit.mjs', import.meta.url))
@@ -38,7 +38,7 @@ function normalizedEvents() {
 function transcript() {
   return [{ type: 'session', version: 3 }, ...normalizedEvents()].map(value => JSON.stringify(value)).join('\n') + '\n'
 }
-function report(title = TEST_TITLE, ancestor = ['snapshot scenarios']) {
+function report(title = TEST_TITLE, ancestor = [TEST_GROUP]) {
   return { success: true, numFailedTests: 0, numFailedTestSuites: 0, numPassedTests: 1, numTotalTests: 1,
     testResults: [{ status: 'passed', assertionResults: [{ status: 'passed', title, ancestorTitles: ancestor,
       fullName: [...ancestor, title].join(' '), failureMessages: [] }] }] }
@@ -70,9 +70,9 @@ function fixture(t) {
   assert.equal(before.status, 0, before.stderr)
   assert.match(before.stdout, /^state_sha=[a-f0-9]{64}\r?\n$/u)
   env.EXPECTED_STATE_SHA = before.stdout.trim().split('=')[1]
-  put(root, OUTPUT_PATHS[1], '{"jsonrpc":"2.0","id":1,"result":{}}\n')
-  put(root, OUTPUT_PATHS[2], 'Reviewed generated prompt.\n')
-  put(root, OUTPUT_PATHS[3], encode({ initial: [{ name: 'read', parameters: { type: 'object' } }], changes: [] }))
+  put(root, OUTPUT_PATHS[1], 'Reviewed generated prompt.\n')
+  put(root, OUTPUT_PATHS[2], encode({ initial: [{ name: 'read', parameters: { type: 'object' } }], changes: [] }))
+  put(root, OUTPUT_PATHS[3], '- text: Compacted prior history.\n')
   for (const name of ['refresh', 'replay']) put(evidence, `private-${name}.json`, encode(report()))
   put(evidence, 'private-corpus.json', encode(report('corpus invariants', [])))
   const hash = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -123,7 +123,7 @@ test('publishes only four candidate outputs and source-bound receipts', t => {
   assert.equal(artifactBytes(f.evidence).includes('private-refresh'), false)
 })
 
-for (const path of ['unrelated.txt', 'pnpm-lock.yaml', 'snapshots/acp/manual-compact-model-selection/input.json', '.github/scripts/manual-compact-generation-audit.mjs']) {
+for (const path of ['unrelated.txt', 'pnpm-lock.yaml', 'apps/web/tests/manual-compact-model-selection.overlay.yml', '.github/scripts/manual-compact-generation-audit.mjs']) {
   test(`rejects changed ${path} without exposing its sentinel`, t => {
     const f = fixture(t); put(f.root, path, SENTINEL); rejectsWithoutLeak(f)
   })
@@ -165,7 +165,7 @@ test('diagnoses failed refresh separately from missing output aftermath without 
   failed.testResults[0].status = 'failed'
   const assertion = failed.testResults[0].assertionResults[0]
   assertion.status = 'failed'
-  assertion.failureMessages = [`Error: snapshot-harness: scenario failed: ACP connection closed ENOENT\nexpected: ${SENTINEL}\nreceived: ${SENTINEL}\n at hiddenFunction (${f.root.replaceAll('\\', '/')}/packages/test-support/session-snapshot/src/harness.ts:371:13)\n ❯ packages/test-support/session-snapshot/src/suite.ts:1294:24\n at /unapproved/${SENTINEL}/private.ts:4:2`]
+  assertion.failureMessages = [`Error: web e2e scaffold: locator.click: Timeout 30000ms exceeded ENOENT\nexpected: ${SENTINEL}\nreceived: ${SENTINEL}\n at hiddenFunction (${f.root.replaceAll('\\', '/')}/apps/web/tests/manual-compact-model-selection.e2e.ts:371:13)\n ❯ apps/web/tests/scaffold.ts:1294:24\n at /unapproved/${SENTINEL}/private.ts:4:2`]
   put(f.evidence, 'private-refresh.json', encode(failed))
   const { result, diagnostics } = rejectsWithoutLeak(f)
   assert.match(result.stderr, /MANUAL_COMPACT_AUDIT_REJECTED:FAILED_STEP/u)
@@ -176,10 +176,10 @@ test('diagnoses failed refresh separately from missing output aftermath without 
   assert.equal(result.stderr.includes('/unapproved/'), false)
   assert.equal(result.stderr.includes(f.root), false)
   assert.deepEqual(diagnostics.phases[0].counts, { total: 1, passed: 0, failed: 1, failedSuites: 1 })
-  assert.deepEqual(diagnostics.phases[0].categories, ['MISSING_FILE', 'HARNESS_FAILURE', 'ACP_CONNECTION_CLOSED'])
+  assert.deepEqual(diagnostics.phases[0].categories, ['MISSING_FILE', 'WEB_SCAFFOLD_FAILURE', 'BROWSER_TIMEOUT'])
   assert.deepEqual(diagnostics.phases[0].positions, [
-    { source: 'packages/test-support/session-snapshot/src/harness.ts', line: 371, column: 13 },
-    { source: 'packages/test-support/session-snapshot/src/suite.ts', line: 1294, column: 24 },
+    { source: 'apps/web/tests/manual-compact-model-selection.e2e.ts', line: 371, column: 13 },
+    { source: 'apps/web/tests/scaffold.ts', line: 1294, column: 24 },
   ])
   assert.equal(diagnostics.targets[0].state, 'file')
   assert.equal(diagnostics.targets[0].bytes > 0, true)
@@ -199,7 +199,7 @@ test('does not project unknown counter values or paths that only resemble allowl
   const failed = report()
   failed.numPassedTests = SENTINEL
   failed.numFailedTests = -1
-  failed.testResults[0].message = `at /foreign/${SENTINEL}/packages/test-support/session-snapshot/src/harness.ts:99:7`
+  failed.testResults[0].message = `at /foreign/${SENTINEL}/apps/web/tests/manual-compact-model-selection.e2e.ts:99:7`
   put(f.evidence, 'private-refresh.json', encode(failed))
   const { diagnostics } = rejectsWithoutLeak(f)
   assert.equal(diagnostics.phases[0].counts.passed, null)
@@ -228,8 +228,16 @@ test('rejects changed model prose instead of exporting arbitrary sidecar content
 })
 test('rejects invalid schema extensions with a private payload', t => {
   const f = fixture(t)
-  put(f.root, OUTPUT_PATHS[3], encode({ initial: [{ name: 'read', parameters: {} }], changes: [], private: SENTINEL }))
+  put(f.root, OUTPUT_PATHS[2], encode({ initial: [{ name: 'read', parameters: {} }], changes: [], private: SENTINEL }))
   rejectsWithoutLeak(f)
+})
+test('rejects a leftover ACP stdout artifact outside the Web allowlist', t => {
+  const f = fixture(t)
+  put(f.root, 'snapshots/acp/manual-compact-model-selection/stdout.expected.jsonl', SENTINEL)
+  rejectsWithoutLeak(f)
+})
+test('rejects invalid checkpoint Markdown without uploading its payload', t => {
+  const f = fixture(t); put(f.root, OUTPUT_PATHS[3], `\0${SENTINEL}`); rejectsWithoutLeak(f)
 })
 test('rejects a workflow reference outside the exact PR merge carrier', t => {
   const f = fixture(t); f.env.WORKFLOW_REF = 'cloga/deepseek-harness/.github/workflows/manual-compact-generation.yml@refs/heads/master'; rejectsWithoutLeak(f)

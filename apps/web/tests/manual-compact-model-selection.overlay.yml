@@ -1,0 +1,14 @@
+# Exercise the shipped manual command with distinct route-owned summary budgets.
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: deepseek-v4-flash
+
+- id: compaction-basic
+  config:
+    auto: false
+    maxTokens: 128
+    modelPolicies:
+      - provider: deepseek-official
+        model: deepseek-v4-pro
+        maxTokens: 256

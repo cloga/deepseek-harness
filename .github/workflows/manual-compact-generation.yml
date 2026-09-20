@@ -70,7 +70,7 @@ jobs:
           if [[ -e "$evidence" || -L "$evidence" ]]; then echo 'Evidence path must be new'; exit 1; fi
           mkdir -m 700 "$evidence"
           printf 'SNAPSHOT_EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
-          printf 'NODE_COMPILE_CACHE=%s\nTMPDIR=%s\n' "$RUNNER_TEMP/manual-compact-node-cache" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'NODE_COMPILE_CACHE=%s\nTMPDIR=%s\nPLAYWRIGHT_BROWSERS_PATH=%s\n' "$RUNNER_TEMP/manual-compact-node-cache" "$RUNNER_TEMP" "$RUNNER_TEMP/manual-compact-browsers" >> "$GITHUB_ENV"
 
       - name: Bind exact source, lock, recipe, generator, and all tracked inputs
         id: before
@@ -82,6 +82,9 @@ jobs:
           pnpm install --frozen-lockfile
           bash scripts/prepare-ci-bubblewrap.sh
 
+      - name: Install isolated Chromium and its standard CI system prerequisites
+        run: pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install --with-deps chromium
+
       - name: Build normal Host and Client artifacts
         run: pnpm run build
 
@@ -91,8 +94,8 @@ jobs:
           DSH_SNAPSHOT: refresh
         run: |
           status=0
-          pnpm exec vitest run --config vitest.snapshot.config.ts snapshots/acp/acp.snapshot.ts \
-            -t 'snapshot: manual-compact-model-selection matches the expected outputs' \
+          pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/manual-compact-model-selection.e2e.ts \
+            -t 'uses the selected model for manual compact without another conversation request' \
             --reporter=json --outputFile="$SNAPSHOT_EVIDENCE/private-refresh.json" \
             > "$SNAPSHOT_EVIDENCE/private-refresh.stdout" 2> "$SNAPSHOT_EVIDENCE/private-refresh.stderr" || status=$?
           if (( status != 0 )); then echo 'Selected snapshot refresh failed'; exit "$status"; fi
@@ -103,8 +106,8 @@ jobs:
           DSH_SNAPSHOT: replay
         run: |
           status=0
-          pnpm exec vitest run --config vitest.snapshot.config.ts snapshots/acp/acp.snapshot.ts \
-            -t 'snapshot: manual-compact-model-selection matches the expected outputs' \
+          pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/manual-compact-model-selection.e2e.ts \
+            -t 'uses the selected model for manual compact without another conversation request' \
             --reporter=json --outputFile="$SNAPSHOT_EVIDENCE/private-replay.json" \
             > "$SNAPSHOT_EVIDENCE/private-replay.stdout" 2> "$SNAPSHOT_EVIDENCE/private-replay.stderr" || status=$?
           if (( status != 0 )); then echo 'Selected snapshot replay failed'; exit "$status"; fi
@@ -174,9 +177,9 @@ jobs:
           path: |
             ${{ env.SNAPSHOT_EVIDENCE }}/upload/inputs.json
             ${{ env.SNAPSHOT_EVIDENCE }}/upload/qualified.json
-            ${{ env.SNAPSHOT_EVIDENCE }}/upload/generated/snapshots/acp/manual-compact-model-selection/session.v3.jsonl
-            ${{ env.SNAPSHOT_EVIDENCE }}/upload/generated/snapshots/acp/manual-compact-model-selection/stdout.expected.jsonl
-            ${{ env.SNAPSHOT_EVIDENCE }}/upload/generated/snapshots/acp/manual-compact-model-selection/system-prompt.expected.md
-            ${{ env.SNAPSHOT_EVIDENCE }}/upload/generated/snapshots/acp/manual-compact-model-selection/tool-schemas.expected.json
+            ${{ env.SNAPSHOT_EVIDENCE }}/upload/generated/snapshots/web/manual-compact-model-selection/session.v3.jsonl
+            ${{ env.SNAPSHOT_EVIDENCE }}/upload/generated/snapshots/web/manual-compact-model-selection/system-prompt.expected.md
+            ${{ env.SNAPSHOT_EVIDENCE }}/upload/generated/snapshots/web/manual-compact-model-selection/tool-schemas.expected.json
+            ${{ env.SNAPSHOT_EVIDENCE }}/upload/generated/snapshots/web/manual-compact-model-selection/checkpoint.expected.md
           if-no-files-found: error
           retention-days: 7

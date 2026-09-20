@@ -1,9 +1,9 @@
 version: 1
 scenario: manual-compact-model-selection
-profile: acp
-composition: manual-compact-model-selection
+profile: web
+composition: web-manual-compact-model-selection
 recording: authored
 header:
-  class: manual-compact-model-selection
+  class: web-manual-compact-model-selection
   pin: true
 permission: danger-full-access
