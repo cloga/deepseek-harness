@@ -66,8 +66,8 @@ kind: "package-reference"
 | `thresholdRatio` | `0.8` | 在 `floor(routedContextWindow × ratio)` 处开始压缩。 |
 | `retainRatio` | `0.16` | 以已路由上下文窗口的一部分表示逐字保留的近期对话；与 `retainTokens` 互斥。 |
 | `retainTokens` | — | 逐字保留的近期对话绝对预算；与 `retainRatio` 互斥，并且必须低于已解析阈值。 |
-| `summarizationProvider` | `''` | 与 `summarizationModel` 一起设置；空对使用最新已路由请求目标，再回退到 `AgentOptions` 对。 |
-| `summarizationModel` | `''` | 与 `summarizationProvider` 一起设置；空对使用最新已路由请求目标，再回退到 `AgentOptions` 对。 |
+| `summarizationProvider` | `''` | 与 `summarizationModel` 一起设置；空对使用手动压缩开始时选中的模型，否则使用最新已路由请求目标，再回退到 `AgentOptions` 对。 |
+| `summarizationModel` | `''` | 与 `summarizationProvider` 一起设置；空对使用手动压缩开始时选中的模型，否则使用最新已路由请求目标，再回退到 `AgentOptions` 对。 |
 | `maxTokens` | `8192` | 摘要请求的输出上限；可包含推理 token。 |
 | `compactionRetries` | `1` | 压力仍高于阈值时，在首次压缩后进行的额外尝试次数。 |
 | `maxOverflowRetries` | `1` | 已确认上下文窗口溢出后的最大重试次数；`0` 只禁用恢复。 |
@@ -83,6 +83,10 @@ kind: "package-reference"
 ### 通过 /compact 按需压缩
 
 挂载 `dsh-command-compact` 后，在聊天 UI 中输入 `/compact` 即可立即压缩，即使未达到压力阈值。命令会报告压缩了多少历史项以及估算节省的 token 数。当 agent 正在轮次中或压缩已在运行时，`/compact` 会报告压缩暂不可用；运行期间你发送的提示词会被接受，并在压缩结束后才开始。
+
+手动压缩在空闲维护开始时快照当前模型选择，因此切换模型后无需再发送一轮对话即可运行 `/compact`。同一快照用于选择 `modelPolicies`；显式配置的摘要提供方／模型仍优先决定摘要路由。摘要运行期间的新选择只影响后续工作，压缩也不会消费待应用的对话模型选择。自动压力压缩和溢出恢复仍使用持久请求路由。选择不同的摘要模型可能无法复用前缀缓存；所选历史仍完整回放。
+
+摘要达到输出上限时会被拒绝，不会提交不完整的检查点。`/compact` 会将此情况与其他摘要错误区分。两个重试设置都不会重试截断的摘要；应选择另一个模型或检查摘要预算，而不是重复相同请求。提高输出上限也需要足够的输入／输出上下文余量。
 
 ### 修剪超大工具输出
 
@@ -115,7 +119,7 @@ kind: "package-reference"
 
 ### 摘要机制
 
-直接 `ctx.llm.stream()` 调用使用已配置的提供方／模型对与上限，回退到最新已记录请求目标，然后再回退到 `AgentOptions` 对，而不运行仅用于 agent loop 的 `agent/request` 扩展点。该调用将 surface 节点 0 处派生的 `system/message` 作为 `messages` 的首项回放，后接已遮蔽区域消息（包括位于其 surface 位置的被遮蔽历史内 `system/message`），并逐字携带 header 的工具——包括所选适配器必须解析或明确拒绝的图片引用——并将压缩指令作为最后一条 user 消息追加，从而复用提供方的热前缀 cache，而非使它失效。空内容系统头节点不贡献消息，但仍处于压缩范围之外。调用将 `GenerateOptions.purpose` 设为 `compaction`；只有返回文本进入检查点，推理与工具调用都会被排除。图片输出会以 `UNSUPPORTED_CONTENT` 失败，而不是消失。替换 user 消息用 `<compacted-summary>` 标签框定摘要；原始摘要保留在 `compaction/summary` 事件上。
+直接 `ctx.llm.stream()` 调用使用已配置的提供方／模型对与上限，依次回退到手动操作捕获的目标、最新已记录请求目标及 `AgentOptions` 对。手动入口读取 Agent 作用域的 `model-selection/query` 查询，不运行提示词组装或仅用于 agent loop 的 `agent/request` 扩展点。该调用将 surface 节点 0 处派生的 `system/message` 作为 `messages` 的首项回放，后接已遮蔽区域消息（包括位于其 surface 位置的被遮蔽历史内 `system/message`），并逐字携带 header 的工具——包括所选适配器必须解析或明确拒绝的图片引用——并将压缩指令作为最后一条 user 消息追加，从而复用提供方的热前缀 cache，而非使它失效。空内容系统头节点不贡献消息，但仍处于压缩范围之外。调用将 `GenerateOptions.purpose` 设为 `compaction`；只有返回文本进入检查点，推理与工具调用都会被排除。图片输出会以 `UNSUPPORTED_CONTENT` 失败，而不是消失。替换 user 消息用 `<compacted-summary>` 标签框定摘要；原始摘要保留在 `compaction/summary` 事件上。
 
 ### 区域事务
 

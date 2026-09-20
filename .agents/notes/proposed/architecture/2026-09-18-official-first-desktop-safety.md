@@ -26,6 +26,7 @@ The backend should stage a private candidate and report PREPARED (`state: 'prepa
 | Ancestor SDK/package confinement | Runtime resolution generations do not alone confine ancestor package lookup | Retain profile/shared-package and inherited Worker constraints; require equivalent native resolution and negative escape cases before retirement. |
 | Windows filesystem birthtime | A general file identity check does not establish delete/recreate detection on Windows | Retain the birthtime distinction until a Windows replacement regression demonstrates official parity. |
 | Multiline Goal editing | An official Goal control does not establish multiline objective editing parity | Retain the multiline behavior until line-break preservation and existing Goal actions pass equivalent UI coverage. |
+| Manual compaction model selection | Partial: exact official `0.1.6-alpha.2` and the pre-merge candidate use the durable prior request route rather than the accepted current selector snapshot; evidence owners are `packages/compaction/compaction-basic/src/index.ts` and `packages/core/agent/src/model-selection.ts` | Retain PR #92's once-captured owner-scoped selection at maintenance acceptance for policy and the default summary target; explicit summary overrides still take precedence, and automatic pressure/overflow keeps the durable route. Retire only after equivalent official selection, scope, cancellation, error, UI, and replay coverage is verified. |
 
 ### Retained rationale and partial supersession
 
@@ -54,6 +55,7 @@ The [fork release-channel decision](../../implemented/architecture/2026-09-15-fo
 - Malicious archives, hooks, source drift, corrupted retained artifacts, peer identity conflicts, ancestor SDK lookup, and Worker inheritance retain their negative tests. Windows birthtime and artifact-lock separator cases run on Windows.
 - Explicitly authorized shell activation verifies staged health, final-location readiness, actual inventory and receipts, and rollback on failure. No successful receipt is recorded for an optional failure or preparation alone.
 - Official update UI and InputHub migration receive mounted-composer, detached-send, stale-report, disposal, and multiline Goal browser evidence. Installation never accepts scalar impact reporting as consent.
+- Manual compaction uses the accepted selection without consuming a pending chat selection. `MAX_TOKENS` / `summary-truncated` fails closed without increasing the output cap, retrying, or committing an incomplete checkpoint. Scoped cancellation, error, UI, and replay checks do not establish oversized-history rescue, live-provider acceptance, or qualification of the alpha2 candidate.
 - Documentation pairing, archive seals, focused unit tests, integrated build/type checks, and isolated packaged release qualification pass on the exact selected source. Existing installations, active Sessions, and immutable releases remain untouched during qualification.
 
 ## Risks

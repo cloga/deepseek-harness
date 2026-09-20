@@ -1262,4 +1262,30 @@ One session committed a different agent preset to its durable log. Consumers inv
 ```
 
 Source: [`packages/preset/agent-presets/src/types.ts`](../../packages/preset/agent-presets/src/types.ts)
+
+<a id="model-selection-events"></a>
+
+### `model-selection/*` events
+
+<a id="model-selectionquery--waterfall"></a>
+
+#### `model-selection/query` — waterfall
+
+Read a detached snapshot without assembling a prompt or consuming a selection. Scope-filtered dispatch uses payload.owner as the routing key.
+
+```ts cordis-catalog
+/**
+ * Read a detached snapshot without assembling a prompt or consuming a selection.
+ * Scope-filtered dispatch uses payload.owner as the routing key.
+ * @param payload.owner - exact identity whose current selection is queried.
+ * @param next - delegate when this listener owns no current selection.
+ * @returns the current selection, or undefined when no owner supplies one.
+ * @mode waterfall
+ */
+'model-selection/query'(this: Scoped<ModelSelectionQuery>, payload: ModelSelectionQuery, next: () => ModelSelection | undefined): ModelSelection | undefined
+```
+
+Types: [Scoped](scope.zh.md)
+
+Source: [`packages/core/agent/src/model-selection.ts`](../../packages/core/agent/src/model-selection.ts)
 <!-- END GENERATED cordis-surface -->

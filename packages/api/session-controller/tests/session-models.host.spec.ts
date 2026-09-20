@@ -7,7 +7,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry, { agentEvents } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { agentEvents, readModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AttachmentStore from '@deepseek-ai/dsh-attachment'
 import LlmRuntime, { LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
@@ -158,6 +158,37 @@ function currentSelection(ctx: Context, sessionId: SessionId) {
 }
 
 describe('Web session model selection', () => {
+  it('exposes the pending selection to maintenance without assembling or consuming a request', async () => {
+    const { ctx, agent, sessionId } = await harness({ provider: 'empty', model: 'old-route' })
+    try {
+      const remote = createSessionTestRemote(ctx, {
+        defaultModelSelection: () => ({ provider: 'empty', model: 'default-route' }),
+        cwd: '/tmp',
+      })
+      expectValue(await remote.selectModel(request({
+        sessionId, provider: 'deepseek-official', model: 'deepseek-reasoner',
+      })))
+      const header = agent.session.requestHeader()
+      const eventCount = agent.session.snapshotEvents().length
+      const selected = readModelSelection(agent.ctx, agent)
+      expect(selected).toEqual({ provider: 'deepseek-official', model: 'deepseek-reasoner', reasoningEffort: ReasoningEffortId('high') })
+      expect(agent.session.requestHeader()).toBe(header)
+      expect(header?.config).toMatchObject({ provider: 'empty', model: 'old-route' })
+      expect(agent.session.snapshotEvents()).toHaveLength(eventCount)
+      expect(ctx.sessionProjections.stateOf(agent.session, 'modelSelection')?.pending).toEqual(selected)
+      expect(currentSelection(ctx, sessionId)).toEqual(selected)
+
+      expectValue(await remote.selectModel(request({
+        sessionId, provider: 'deepseek-official', model: 'deepseek-chat',
+      })))
+      expect(selected?.model).toBe('deepseek-reasoner')
+      expect(readModelSelection(agent.ctx, agent))
+        .toEqual({ provider: 'deepseek-official', model: 'deepseek-chat', reasoningEffort: ReasoningEffortId('high') })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('validates an ordered image batch before persisting any member', async () => {
     const { ctx, agent, sessionId } = await harness()
     const validateImage = vi.fn((_input: { data: Uint8Array }) => Promise.resolve())
