@@ -233,10 +233,10 @@ export async function inspectDesktopVersionMenu(
   const token = randomUUID()
   let failure: unknown
   try {
-    await app.evaluate(observeDesktopVersionMenu, { action: 'arm', token, expectedVersion, windowId, ...anchor })
+    await app.evaluate(observeDesktopVersionMenu, { action: 'arm', token, expectedVersion, windowId, ...anchor } satisfies ObserverCommand)
     await button.click({ timeout: 10_000 })
     // read disposes even when observation fails; it waits only for this owned popup or its deadline.
-    const evidence = await app.evaluate(observeDesktopVersionMenu, { action: 'read', token })
+    const evidence = await app.evaluate(observeDesktopVersionMenu, { action: 'read', token } satisfies ObserverCommand)
     if (evidence === null) throw new Error('Caption observer returned no evidence')
     await page.waitForFunction(() => {
       const buttons = document.querySelector('[data-windows-menu]')?.shadowRoot?.querySelectorAll('[role=menuitem]')
@@ -248,7 +248,7 @@ export async function inspectDesktopVersionMenu(
     failure = error
     throw error
   } finally {
-    try { await app.evaluate(observeDesktopVersionMenu, { action: 'dispose', token }) }
+    try { await app.evaluate(observeDesktopVersionMenu, { action: 'dispose', token } satisfies ObserverCommand) }
     catch (error) {
       throw new AggregateError([...(failure === undefined ? [] : [failure]), error], 'Caption click and observer cleanup failed')
     }

@@ -150,7 +150,7 @@ describe('packaged Windows caption-menu observation', () => {
   it('rejects missing popup completion without dispatching About', async () => {
     const f = fixture()
     await observeDesktopVersionMenu(f.electron, f.arm)
-    new f.Menu().popup({ ...f.popupOptions, callback: undefined })
+    new f.Menu().popup({ window: f.window, x: f.popupOptions.x, y: f.popupOptions.y })
     await expect(f.read()).rejects.toThrow('completion callback is missing')
     expect(f.about.click).not.toHaveBeenCalled()
     f.assertRestored()
@@ -227,7 +227,7 @@ describe('packaged Windows caption-menu observation', () => {
     menu.popup({ ...f.popupOptions, x: 105, y: 51 })
     menu.popup({ ...f.popupOptions, window: { id: 99 }, x: 999 })
     menu.popup({ ...f.popupOptions, x: Number.NaN })
-    menu.popup({ ...f.popupOptions, x: undefined })
+    menu.popup({ window: f.window, y: f.popupOptions.y, callback: f.callback })
     const rejected = expect(f.read()).rejects.toThrow('expected anchor (60, 50); last owned-window mismatched anchor (105, 51)')
     await vi.advanceTimersByTimeAsync(15_000)
     await rejected
