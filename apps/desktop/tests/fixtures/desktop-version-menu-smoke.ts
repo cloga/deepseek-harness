@@ -154,15 +154,17 @@ export async function observeDesktopVersionMenu(
         const about = this.items[0]
         const expectedLabel = command.applicationMenuLabel === '应用'
           ? `关于 Desktop ${desktopVersion}…` : `About Desktop ${desktopVersion}…`
+        const matchingAboutCount = this.items.filter(item => /^(?:About Desktop |关于 Desktop )/u.test(item.label)).length
         // Constructed Electron MenuItems use null for an omitted role, not template-level undefined.
         if (about === undefined || about.label !== expectedLabel || !about.enabled || !about.visible
           || about.role !== null || typeof about.click !== 'function'
-          || this.items.filter(item => /^(?:About Desktop |关于 Desktop )/u.test(item.label)).length !== 1) {
+          || matchingAboutCount !== 1) {
           throw new Error('The first Application menu item must expose the full running Desktop version with an explicit callback'
             + `; label=${JSON.stringify(about?.label)}, role=${JSON.stringify(about?.role)}, click=${typeof about?.click}`
-            + `, enabled=${String(about?.enabled)}, visible=${String(about?.visible)}`)
+            + `, enabled=${String(about?.enabled)}, visible=${String(about?.visible)}, matchingAboutCount=${matchingAboutCount}`)
         }
         if (typeof options.callback !== 'function') throw new Error('Caption popup completion callback is missing')
+        // Native click exists even without a template callback; require the actual About dispatch below.
         const aboutDescriptor = Object.getOwnPropertyDescriptor(app, 'showAboutPanel')
         let aboutDispatchCount = 0
         try {

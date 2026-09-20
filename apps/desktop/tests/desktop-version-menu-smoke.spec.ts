@@ -10,18 +10,23 @@ const version = '0.1.6-alpha.2.cloga.1'
 type Electron = Parameters<typeof observeDesktopVersionMenu>[0]
 type Command = Parameters<typeof observeDesktopVersionMenu>[1]
 
-function fixture(chinese = false) {
+function fixture(chinese = false, explicitClick = true) {
   const originalAbout = vi.fn()
   const app = { getVersion: () => version, showAboutPanel: originalAbout as () => void }
   const window = { id: 7, webContents: { getZoomFactor: () => 1.25 } }
+  const templateClick = explicitClick
+    ? vi.fn((_item: unknown, _window: unknown, _event: unknown) => { app.showAboutPanel() }) : undefined
+  // Electron 44.0.0 normalizes an omitted role to null and always wraps the optional template click.
+  // https://github.com/electron/electron/blob/v44.0.0/lib/browser/api/menu-item.ts
   const about = {
     label: chinese ? `关于 Desktop ${version}…` : `About Desktop ${version}…`,
     enabled: true,
     visible: true,
-    // Electron MenuItem construction normalizes an omitted role to null.
     role: null as string | null | undefined,
-    click: vi.fn(() => { app.showAboutPanel() }) as (() => void) | undefined,
+    click: undefined as ((event: unknown, window: unknown, webContents: unknown) => void) | undefined,
   }
+  // Model the custom, non-role path; the observer must reject role overrides before dispatch.
+  about.click = vi.fn((event: unknown, focusedWindow: unknown) => { templateClick?.(about, focusedWindow, event) })
   const originalPopup = vi.fn()
   class Menu {
     static getApplicationMenu(): unknown { return null }
@@ -46,7 +51,10 @@ function fixture(chinese = false) {
     expect(Object.getOwnPropertySymbols(app)).toEqual([])
     expect(originalAbout).not.toHaveBeenCalled()
   }
-  return { electron, app, window, about, Menu, arm, callback, popupOptions, originalPopup, originalAbout, read, dispose, assertRestored }
+  return {
+    electron, app, window, about, templateClick, Menu, arm, callback, popupOptions,
+    originalPopup, originalAbout, read, dispose, assertRestored,
+  }
 }
 
 afterEach(() => { vi.useRealTimers() })
@@ -64,6 +72,7 @@ describe('packaged Windows caption-menu observation', () => {
     expect(f.originalPopup).not.toHaveBeenCalled()
     expect(f.callback).toHaveBeenCalledExactlyOnceWith()
     expect(f.about.click).toHaveBeenCalledWith({}, f.window, f.window.webContents)
+    expect(f.templateClick).toHaveBeenCalledExactlyOnceWith(f.about, f.window, {})
     f.assertRestored()
   })
 
@@ -145,6 +154,17 @@ describe('packaged Windows caption-menu observation', () => {
     f.assertRestored()
   })
 
+  it('rejects a native click wrapper without an explicit template callback', async () => {
+    const f = fixture(false, false)
+    expect(f.templateClick).toBeUndefined()
+    expect(typeof f.about.click).toBe('function')
+    await observeDesktopVersionMenu(f.electron, f.arm)
+    new f.Menu().popup(f.popupOptions)
+    await expect(f.read()).rejects.toThrow('exactly once')
+    expect(f.callback).toHaveBeenCalledOnce()
+    f.assertRestored()
+  })
+
   it.each([undefined, '', 'about', 'quit'])('rejects a non-null constructed menu role: %s', async (role) => {
     const f = fixture()
     f.about.role = role
@@ -152,6 +172,7 @@ describe('packaged Windows caption-menu observation', () => {
     new f.Menu().popup(f.popupOptions)
     await expect(f.read()).rejects.toThrow(`role=${JSON.stringify(role)}, click=function, enabled=true, visible=true`)
     expect(f.about.click).not.toHaveBeenCalled()
+    expect(f.templateClick).not.toHaveBeenCalled()
     expect(f.callback).toHaveBeenCalledOnce()
     f.assertRestored()
   })
