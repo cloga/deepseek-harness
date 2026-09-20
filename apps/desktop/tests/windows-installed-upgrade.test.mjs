@@ -446,8 +446,9 @@ function Product-Registrations { [pscustomobject]@{ Id = 'synthetic-registered-i
 function Resolve-InstallerRegistration { [pscustomobject]@{ ExecutableSha256 = ('a' * 64) } }
 function Get-FileHash { $script:hashCalls++; [pscustomobject]@{ Hash = ('a' * 64) } }
 function Wait-NoProductProcesses {}
+function New-OwnedUninstallerCopy { [pscustomobject]@{ Path = (Join-Path $root 'process-temp/copied.exe'); Target = $installPath } }
 function Start-Owned($File, $Arguments) {
-    if ($File -cne $uninstaller -or $Arguments -cne '/currentuser /S') { throw 'Unexpected synthetic launch' }
+    if ($File -cne $uninstallerCopy.Path -or $File -ceq $uninstaller -or $Arguments -cne ('/currentuser /S _?=' + $installPath)) { throw 'Unexpected synthetic launch' }
     $script:uninstallerCalls++
     return 'not-a-process'
 }
@@ -486,6 +487,189 @@ if ((Get-Content -LiteralPath $uninstaller -Raw) -cne 'synthetic uninstaller, ne
 [pscustomobject]@{ rejected = $rejected; hashCalls = $hashCalls; uninstallerCalls = $uninstallerCalls; payloadRetained = $true } | ConvertTo-Json -Compress
 `, { DSH_REGISTRATION_HELPER: fileURLToPath(new URL('./fixtures/windows-installer-registration.ps1', import.meta.url)) })
   assert.deepEqual(observed, { rejected: ['parent', 'root'], hashCalls: 0, uninstallerCalls: 0, payloadRetained: true })
+})
+
+function uninstallCopyUnit(t, body) {
+  const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const functions = source.slice(source.indexOf('function Close-UninstallStream'), source.indexOf('function Write-InstallerFailureDiagnostics'))
+  assert.ok(functions.includes('function New-OwnedUninstallerCopy'))
+  return powershellUnit(t, `
+. $env:DSH_REGISTRATION_HELPER
+${functions}
+$env:GITHUB_RUN_ID = '123'; $env:GITHUB_RUN_ATTEMPT = '1'
+$token = 'fixture-owned-token'
+function Initialize-CopyCase($Name) {
+    $script:root = Join-Path $PSScriptRoot $Name
+    $script:installPath = Join-Path $root 'Installed App/cloga-deepseek-harness-desktop'
+    $script:uninstaller = Join-Path $installPath 'Uninstall cloga-deepseek-harness.exe'
+    $script:sourcePath = $uninstaller
+    $script:temporaryRoot = Join-Path $root 'process-temp'
+    Microsoft.PowerShell.Management\\New-Item -ItemType Directory -Path $installPath, $temporaryRoot | Out-Null
+    [IO.File]::WriteAllText($uninstaller, 'inert uninstaller bytes')
+    @{ token = $token; runId = '123'; runAttempt = '1' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'owner.json')
+    $script:expectedRegistration = [pscustomobject]@{ Id = 'fixture-id'; Key = 'fixture-key'; OwnerKey = 'fixture-owner-key'
+        Version = '1.0.0'; Source = ('a' * 40); ExecutableSha256 = ('b' * 64); InstallLocation = $installPath }
+    $script:copyDirectory = Join-Path $temporaryRoot 'uninstall-fixture'
+    $script:copyPath = Join-Path $copyDirectory 'owned-uninstaller.exe'
+    $script:cleanupErrors = [Collections.Generic.List[string]]::new()
+    $script:readmissions = 0; $script:quiescenceChecks = 0
+}
+function Read-Registration { $script:readmissions++; return $expectedRegistration.PSObject.Copy() }
+function Wait-NoProductProcesses { $script:quiescenceChecks++ }
+${body}
+`, { DSH_REGISTRATION_HELPER: fileURLToPath(new URL('./fixtures/windows-installer-registration.ps1', import.meta.url)) })
+}
+
+test('owned uninstall copy hashes real streams, seals only the copy and releases the installed source', { skip: process.platform !== 'win32' }, t => {
+  const observed = uninstallCopyUnit(t, `
+Initialize-CopyCase 'stream-copy'
+$copy = New-OwnedUninstallerCopy $copyDirectory $expectedRegistration $cleanupErrors
+$guardDeniedWrite = $false; $guardDeniedDelete = $false
+try {
+    try { $probe = [IO.File]::Open($copy.Path, 'Open', 'Write', 'ReadWrite'); $probe.Dispose() } catch { $guardDeniedWrite = $true }
+    try { [IO.File]::Delete($copy.Path) } catch { $guardDeniedDelete = $true }
+    $sourceWritable = [IO.File]::Open($sourcePath, 'Open', 'ReadWrite', 'None')
+    $sourceWritable.Dispose()
+    $facts = [ordered]@{ before = $copy.SourceBeforeSha256; after = $copy.SourceAfterSha256; copied = $copy.Sha256
+        bytes = [IO.File]::ReadAllText($copy.Path); sourceReleased = $true; guardDeniedWrite = $guardDeniedWrite; guardDeniedDelete = $guardDeniedDelete
+        inTemporary = $copy.Path.StartsWith($temporaryRoot + '\\'); outsideInstallation = -not $copy.Path.StartsWith($installPath + '\\')
+        readmissions = $readmissions; quiescenceChecks = $quiescenceChecks }
+} finally { Close-UninstallStream $copy.Guard $cleanupErrors }
+$writable = [IO.File]::Open($copy.Path, 'Open', 'Write', 'None'); $writable.Dispose()
+$facts.copyReleased = $true; $facts.errors = @($cleanupErrors)
+$facts | ConvertTo-Json -Compress
+`)
+  assert.deepEqual(observed, {
+    before: digest('inert uninstaller bytes'), after: digest('inert uninstaller bytes'), copied: digest('inert uninstaller bytes'),
+    bytes: 'inert uninstaller bytes', sourceReleased: true, guardDeniedWrite: true, guardDeniedDelete: true,
+    inTemporary: true, outsideInstallation: true, readmissions: 1, quiescenceChecks: 1, copyReleased: true, errors: [],
+  })
+})
+
+test('owned uninstall copy rejects aliases, collisions, hash drift and stale readmission before launch', { skip: process.platform !== 'win32' }, t => {
+  const observed = uninstallCopyUnit(t, `
+$originalHash = (Get-Command Get-UninstallStreamSha256).ScriptBlock
+function Get-UninstallStreamSha256([IO.Stream]$Stream) {
+    $script:hashCalls++
+    $actual = & $originalHash $Stream
+    if (($damage -eq 'source-hash-drift' -and $hashCalls -eq 2) -or ($damage -eq 'copy-hash-drift' -and $hashCalls -eq 3)) { return ('f' * 64) }
+    return $actual
+}
+function Read-Registration {
+    $script:readmissions++
+    if ($damage -eq 'owner-changed') { @{ token = 'changed'; runId = '123'; runAttempt = '1' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'owner.json') }
+    $value = $expectedRegistration.PSObject.Copy()
+    if ($damage -eq 'registration-changed') { $value.Version = '2.0.0' }
+    return $value
+}
+function Wait-NoProductProcesses {
+    $script:quiescenceChecks++
+    if ($damage -eq 'process-became-live') { throw 'Owned application became live' }
+}
+function New-Item($ItemType, $Path, $ErrorAction) {
+    Microsoft.PowerShell.Management\\New-Item -ItemType $ItemType -Path $Path -ErrorAction Stop | Out-Null
+    if ($damage -eq 'file-collision') { [IO.File]::WriteAllText((Join-Path $Path 'owned-uninstaller.exe'), 'retained collision bytes') }
+    if ($damage -eq 'copy-directory-junction') {
+        $real = $Path + '-real'
+        Move-Item -LiteralPath $Path -Destination $real
+        Microsoft.PowerShell.Management\\New-Item -ItemType Junction -Path $Path -Target $real | Out-Null
+    }
+}
+$results = @()
+foreach ($damage in @('directory-collision', 'file-collision', 'source-junction', 'temporary-junction', 'copy-directory-junction', 'outside-owned-temp', 'invalid-target', 'source-hash-drift', 'copy-hash-drift', 'registration-changed', 'owner-changed', 'process-became-live')) {
+    Initialize-CopyCase $damage
+    $hashCalls = 0
+    if ($damage -eq 'directory-collision') {
+        Microsoft.PowerShell.Management\\New-Item -ItemType Directory -Path $copyDirectory | Out-Null
+        [IO.File]::WriteAllText((Join-Path $copyDirectory 'sentinel'), 'retained collision bytes')
+    }
+    if ($damage -eq 'source-junction') {
+        $moved = Join-Path $root 'physical-install'
+        Move-Item -LiteralPath $installPath -Destination $moved
+        Microsoft.PowerShell.Management\\New-Item -ItemType Junction -Path $installPath -Target $moved | Out-Null
+    }
+    if ($damage -eq 'temporary-junction') {
+        $moved = $temporaryRoot + '-real'
+        Move-Item -LiteralPath $temporaryRoot -Destination $moved
+        Microsoft.PowerShell.Management\\New-Item -ItemType Junction -Path $temporaryRoot -Target $moved | Out-Null
+    }
+    if ($damage -eq 'outside-owned-temp') { $copyDirectory = Join-Path $installPath 'in-place-forbidden' }
+    if ($damage -eq 'invalid-target') { $installPath += [char]34 }
+    $failure = $null
+    try { $unexpected = New-OwnedUninstallerCopy $copyDirectory $expectedRegistration $cleanupErrors } catch { $failure = $_ }
+    if ($null -eq $failure) { Close-UninstallStream $unexpected.Guard $cleanupErrors; throw ('Accepted unsafe case: ' + $damage) }
+    # Hash fault injection wraps the real stream hashing; both mismatches must follow all three observations.
+    if ($damage -in @('source-hash-drift', 'copy-hash-drift') -and $hashCalls -ne 3) { throw 'Hash comparison skipped a real stream' }
+    if ($damage -eq 'directory-collision' -and [IO.File]::ReadAllText((Join-Path $copyDirectory 'sentinel')) -cne 'retained collision bytes') { throw 'Directory collision was overwritten' }
+    if ($damage -eq 'file-collision' -and [IO.File]::ReadAllText($copyPath) -cne 'retained collision bytes') { throw 'File collision was overwritten' }
+    $probe = [IO.File]::Open($sourcePath, 'Open', 'ReadWrite', 'None'); $probe.Dispose()
+    if (Test-Path -LiteralPath $copyPath -PathType Leaf) { $probe = [IO.File]::Open($copyPath, 'Open', 'ReadWrite', 'None'); $probe.Dispose() }
+    $results += [pscustomobject]@{ damage = $damage; rejected = $true; streamsReleased = $true; errors = @($cleanupErrors) }
+}
+ConvertTo-Json -InputObject $results -Depth 4 -Compress
+`)
+  assert.deepEqual(observed.map(item => item.damage), ['directory-collision', 'file-collision', 'source-junction', 'temporary-junction', 'copy-directory-junction', 'outside-owned-temp', 'invalid-target', 'source-hash-drift', 'copy-hash-drift', 'registration-changed', 'owner-changed', 'process-became-live'])
+  for (const item of observed) assert.deepEqual({ rejected: item.rejected, streamsReleased: item.streamsReleased, errors: item.errors }, { rejected: true, streamsReleased: true, errors: [] })
+})
+
+test('owned copied-worker launch uses final unquoted target and waits only its tracked handle', { skip: process.platform !== 'win32' }, t => {
+  const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const start = source.indexOf('                $copyDirectory = Join-Path')
+  const end = source.indexOf('                $timer = ', start)
+  assert.ok(start >= 0 && end > start)
+  const launch = source.slice(start, end)
+  const observed = uninstallCopyUnit(t, `
+function Start-Owned($File, $Arguments) {
+    if ($File -cne $uninstallerCopy.Path -or $File -ceq $uninstaller -or $File.StartsWith($installPath + '\\')) { throw 'Uninstaller ran in place or another file was selected' }
+    if ($Arguments -cne ('/currentuser /S _?=' + $installPath) -or $Arguments.Contains([char]34)) { throw 'Unbound NSIS arguments' }
+    if (-not $uninstallerCopy.Guard.CanRead) { throw 'Copied bytes lost their read guard' }
+    $probe = [IO.File]::Open($sourcePath, 'Open', 'ReadWrite', 'None'); $probe.Dispose()
+    $script:actual = [pscustomobject]@{ Id = 71; HasExited = ($outcome -ne 'timeout'); ExitCode = $(if ($outcome -eq 'nonzero') { 2 } else { 0 }) }
+    $processes.Add($actual)
+    return $actual
+}
+function Wait-Exit($Process, $Seconds) {
+    if (-not [object]::ReferenceEquals($Process, $actual) -or $Seconds -ne 120 -or $processes.Count -ne 1 -or -not [object]::ReferenceEquals($processes[0], $actual)) { throw 'Wrong execution handle or deadline' }
+    $script:waited = $true
+    if (-not $Process.HasExited) { throw 'Owned qualification process exceeded its deadline' }
+    if ($Process.ExitCode -ne 0) { throw 'Owned qualification process returned nonzero' }
+}
+$cases = @()
+foreach ($outcome in @('success', 'timeout', 'nonzero')) {
+    Initialize-CopyCase $outcome
+    $processes = [Collections.Generic.List[object]]::new()
+    $uninstallRegistration = $expectedRegistration
+    $uninstallerCopy = $null; $failure = $null; $waited = $false; $postconditionsReached = $false
+    try {
+${launch}
+        $postconditionsReached = $true
+    } catch { $failure = $_ } finally { if ($null -ne $uninstallerCopy) { Close-UninstallStream $uninstallerCopy.Guard $cleanupErrors } }
+    $cases += [pscustomobject]@{ outcome = $outcome; waited = $waited; postconditionsReached = $postconditionsReached; failed = ($null -ne $failure); errors = @($cleanupErrors) }
+}
+ConvertTo-Json -InputObject $cases -Depth 4 -Compress
+`)
+  assert.deepEqual(observed, [
+    { outcome: 'success', waited: true, postconditionsReached: true, failed: false, errors: [] },
+    { outcome: 'timeout', waited: true, postconditionsReached: false, failed: true, errors: [] },
+    { outcome: 'nonzero', waited: true, postconditionsReached: false, failed: true, errors: [] },
+  ])
+  const finalReaper = source.lastIndexOf('[void](Stop-OwnedProcesses $processes $cleanupErrors)')
+  assert.ok(finalReaper < source.indexOf('Close-UninstallStream $uninstallerCopy.Guard', finalReaper))
+  assert.ok(source.includes('$processes.Add($process)'))
+  assert.doesNotMatch(launch, /Start-Owned \$uninstaller\s|--updated|--delete-app-data|\/NCRC|\/D=/u)
+})
+
+test('owned uninstall stream disposal failures aggregate without replacing the active error', { skip: process.platform !== 'win32' }, t => {
+  const observed = uninstallCopyUnit(t, `
+$errors = [Collections.Generic.List[string]]::new()
+$stream = [pscustomobject]@{}
+$stream | Add-Member ScriptMethod Dispose { throw 'private disposal error' }
+try { throw 'primary copy failure' } catch { $failure = $_; $original = $_ }
+Close-UninstallStream $stream $errors
+Close-UninstallStream $null $errors
+[pscustomobject]@{ originalRetained = [object]::ReferenceEquals($failure, $original); errors = @($errors) } | ConvertTo-Json -Compress
+`)
+  assert.deepEqual(observed, { originalRetained: true, errors: ['Owned uninstall stream disposal failed'] })
 })
 
 test('production registration GUID is bound to the exact appId and pinned builder namespace', () => {
@@ -666,6 +850,7 @@ $uninstaller = Join-Path $installPath 'Uninstall cloga-deepseek-harness.exe'
 New-Item -ItemType Directory -Path (Join-Path $root 'evidence') | Out-Null
 $prior = Join-Path $root 'evidence/installer-failure-registration.json'
 Set-Content -LiteralPath $prior -Value 'retained pre-cleanup evidence' -NoNewline
+Add-Type 'public static class InstallerCapture { public static string DiagnosticText(int pid) { if (pid != 20) throw new System.Exception("foreign PID"); return "HWND=private-handle PID=20 VISIBLE=True TEXT=credential-sentinel\\nHWND=another-handle PID=20 VISIBLE=False TEXT=<unresponsive>\\nLIMIT_REACHED=True"; } }'
 function Test-Path($LiteralPath, $PathType) {
     if ($PathType -cne 'Leaf') { throw 'Unexpected synthetic file query' }
     if ($LiteralPath -ceq $application) { return $mode -in @('executable', 'capped') }
@@ -700,7 +885,10 @@ foreach ($mode in @('clean', 'executable', 'owner', 'uninstall-key', 'product', 
     $launcher = [pscustomobject]@{ Id = 20; HasExited = ($mode -ne 'worker') }
     $launcher | Add-Member ScriptProperty ExitCode { if (-not $this.HasExited) { throw 'Do not read live exit status' }; return 0 }
     if ($mode -eq 'not-started') { $launcher = $null }
-    Write-UninstallFailureDiagnostics $launcher $errors
+    $copy = [pscustomobject]@{ Sha256 = ('b' * 64); SourceBeforeSha256 = ('b' * 64); SourceAfterSha256 = ('b' * 64)
+        InsideOwnedTemporaryRoot = $true; OutsideInstallation = $true; Target = $installPath; Path = 'private-copy-path'; Guard = 'credential-sentinel' }
+    if ($mode -eq 'not-started') { $copy = $null }
+    Write-UninstallFailureDiagnostics $launcher $errors $copy
     $data = Get-Content -LiteralPath (Join-Path $root 'evidence/installer-uninstall-failure.json') -Raw | ConvertFrom-Json
     $cases += [pscustomobject]@{ mode = $mode; data = $data; errors = @($errors) }
 }
@@ -710,7 +898,7 @@ ConvertTo-Json -InputObject $cases -Depth 8 -Compress
   const cases = Object.fromEntries(observed.map(({ mode, data, errors }) => {
     assert.deepEqual(errors, [])
     assert.deepEqual(data.observationErrors, [])
-    assert.equal(data.arguments, '/currentuser /S')
+    assert.equal(data.arguments, '/currentuser /S _?=<owned-install-root>')
     assert.equal(data.sourceCommit, 'a'.repeat(40))
     return [mode, data]
   }))
@@ -732,6 +920,13 @@ ConvertTo-Json -InputObject $cases -Depth 8 -Compress
   assert.deepEqual(cases.worker.processes, [{ pid: 30, parentPid: 20, inInstallation: false, inOwnedTemporaryRoot: true }])
   assert.equal(cases.worker.launcherExited, false)
   assert.equal(cases.worker.launcherExitCode, null)
+  assert.equal(cases.worker.workerWindowCount, 2)
+  assert.equal(cases.worker.workerVisibleWindowCount, 1)
+  assert.equal(cases.worker.workerUnresponsiveWindowCount, 1)
+  assert.equal(cases.worker.workerWindowsTruncated, true)
+  assert.equal(cases.worker.copyVerified, true)
+  assert.equal(cases.worker.copySha256, 'b'.repeat(64))
+  for (const key of ['copyHashesAgree', 'copyInsideOwnedTemporaryRoot', 'copyOutsideInstallation', 'targetMatches']) assert.equal(cases.worker[key], true)
   assert.equal(cases.capped.registrationCount, 6)
   assert.equal(cases.capped.registrations.length, 4)
   assert.equal(cases.capped.registrationsTruncated, true)
@@ -741,7 +936,9 @@ ConvertTo-Json -InputObject $cases -Depth 8 -Compress
   assert.equal(cases['not-started'].launcherStarted, false)
   assert.equal(cases['not-started'].launcherPid, null)
   assert.equal(cases['not-started'].launcherExitCode, null)
-  assert.doesNotMatch(JSON.stringify(observed), /credential-sentinel|private-display-name|foreign\.exe|ExecutablePath|CommandLine|Installed App/u)
+  assert.equal(cases['not-started'].copyVerified, false)
+  assert.equal(cases['not-started'].copySha256, null)
+  assert.doesNotMatch(JSON.stringify(observed), /credential-sentinel|private-copy-path|private-handle|another-handle|private-display-name|foreign\.exe|ExecutablePath|CommandLine|Installed App/u)
 })
 
 test('post-uninstall observation failures retain partial evidence without exposing raw errors', { skip: process.platform !== 'win32' }, t => {
@@ -962,8 +1159,8 @@ test('cleanup admission precedes Finish and rechecks actual registration before 
   assert.ok(cleanup)
   assert.ok(cleanup.includes('$hasRegistration = @(Product-Registrations).Count -ne 0'))
   assert.ok(cleanup.includes('Get-ChildItem -LiteralPath $installPath -Force'))
-  assert.ok(cleanup.indexOf('[void](Read-Registration)') < cleanup.indexOf("Start-Owned $uninstaller '/currentuser /S'"))
-  assert.ok(cleanup.indexOf('Wait-NoProductProcesses') < cleanup.indexOf("Start-Owned $uninstaller '/currentuser /S'"))
+  assert.ok(cleanup.indexOf('$uninstallRegistration = Read-Registration') < cleanup.indexOf('Start-Owned $uninstallerCopy.Path'))
+  assert.ok(cleanup.indexOf('Wait-NoProductProcesses') < cleanup.indexOf('Start-Owned $uninstallerCopy.Path'))
   assert.ok(cleanup.includes("throw 'Owned registration has no usable uninstaller; leave VM teardown to remove the partial installation'"))
   assert.ok(cleanup.includes("$cleanupErrors.Add('Installed product cleanup failed: '"))
 })
