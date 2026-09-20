@@ -251,6 +251,72 @@ function Write-InstallerFailureDiagnostics($OwnedInstallers, $Errors) {
         ConvertTo-Json -InputObject @(Product-Registrations) -Depth 4 | Set-Content -LiteralPath (Join-Path $root 'evidence/installer-failure-registration.json') -Encoding utf8NoBOM
     } catch { $Errors.Add('Installer registration observation failed: ' + $_.Exception.Message) }
 }
+# A launcher exit is not proof that NSIS's relocated worker completed. Observe only owned paths and fixed product keys.
+function Write-UninstallFailureDiagnostics($UninstallerProcess, $Errors) {
+    $observation = [ordered]@{
+        schemaVersion = 1; sourceCommit = $ExpectedSourceCommit; arguments = '/currentuser /S'
+        launcherStarted = ($null -ne $UninstallerProcess); launcherPid = $null; launcherExited = $null; launcherExitCode = $null
+        executablePresent = $null; uninstallerPresent = $null
+        registrationCount = $null; registrations = @(); registrationsTruncated = $false
+        productProcessCount = $null; ownedTemporaryProcessCount = $null; processes = @(); processesTruncated = $false
+        observationErrors = @()
+    }
+    $observationErrors = [Collections.Generic.List[string]]::new()
+    try {
+        if ($null -ne $UninstallerProcess) {
+            $observation.launcherPid = $UninstallerProcess.Id
+            $observation.launcherExited = $UninstallerProcess.HasExited
+            # PowerShell can return null for a failed property getter without entering catch.
+            if ($observation.launcherExited -isnot [bool]) { throw 'Launcher exit state unavailable' }
+            if ($observation.launcherExited) {
+                $observation.launcherExitCode = $UninstallerProcess.ExitCode
+                if ($observation.launcherExitCode -isnot [int]) { throw 'Launcher exit code unavailable' }
+            }
+        }
+    } catch { $observationErrors.Add('launcher-state-unavailable') }
+    try {
+        $observation.executablePresent = Test-Path -LiteralPath $application -PathType Leaf
+        $observation.uninstallerPresent = Test-Path -LiteralPath $uninstaller -PathType Leaf
+    } catch { $observationErrors.Add('installed-file-state-unavailable') }
+    try {
+        $entries = @(Product-Registrations)
+        $observation.registrationCount = $entries.Count
+        $observation.registrationsTruncated = $entries.Count -gt 4
+        $observation.registrations = @($entries | Select-Object -First 4 | ForEach-Object {
+            [ordered]@{
+                hive = $_.Hive; view = $_.View
+                ownerPresent = $_.OwnerPresent; uninstallPresent = $_.UninstallPresent
+                installLocationMatches = ($_.InstallLocation -ceq $installPath)
+            }
+        })
+    } catch { $observationErrors.Add('registration-state-unavailable') }
+    try {
+        $temporaryRoot = (Join-Path $root 'process-temp') + '\'
+        $observed = @(Get-CimInstance Win32_Process -OperationTimeoutSec 5 | Where-Object {
+            $_.Name -eq 'cloga-deepseek-harness.exe' -or ($_.ExecutablePath -and (
+                $_.ExecutablePath.StartsWith($installPath + '\', [StringComparison]::OrdinalIgnoreCase) -or
+                $_.ExecutablePath.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase)))
+        })
+        $temporary = @($observed | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase) })
+        $observation.ownedTemporaryProcessCount = $temporary.Count
+        $observation.productProcessCount = @($observed | Where-Object {
+            $_.Name -eq 'cloga-deepseek-harness.exe' -or ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($installPath + '\', [StringComparison]::OrdinalIgnoreCase))
+        }).Count
+        $observation.processesTruncated = $observed.Count -gt 16
+        $observation.processes = @($observed | Select-Object -First 16 | ForEach-Object {
+            [ordered]@{
+                pid = $_.ProcessId; parentPid = $_.ParentProcessId
+                inInstallation = [bool]($_.ExecutablePath -and $_.ExecutablePath.StartsWith($installPath + '\', [StringComparison]::OrdinalIgnoreCase))
+                inOwnedTemporaryRoot = [bool]($_.ExecutablePath -and $_.ExecutablePath.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase))
+            }
+        })
+    } catch { $observationErrors.Add('process-state-unavailable') }
+    $observation.observationErrors = @($observationErrors)
+    foreach ($issue in $observationErrors) { $Errors.Add('Post-uninstall observation failed: ' + $issue) }
+    try {
+        $observation | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $root 'evidence/installer-uninstall-failure.json') -Encoding utf8NoBOM
+    } catch { $Errors.Add('Post-uninstall diagnostic write failed') }
+}
 function Installation-Inventory {
     $items = @(Get-ChildItem -LiteralPath $installPath -Recurse -Force)
     if (@($items | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) { throw 'Installed payload contains an unexpected filesystem alias' }
@@ -328,6 +394,8 @@ try {
 } finally {
     $initialReaped = Stop-OwnedProcesses $processes $cleanupErrors
     if ($installationAttempted) {
+        $uninstallAttempted = $false
+        $ownedUninstaller = $null
         try {
             if (-not $initialReaped) { throw 'Owned process exit is unconfirmed; retain installation and profiles for VM teardown' }
             if ($packageAcceptanceAttempted) {
@@ -343,7 +411,10 @@ try {
                 [void](Read-Registration)
                 if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) { throw 'Owned registration has no usable uninstaller; leave VM teardown to remove the partial installation' }
                 Wait-NoProductProcesses
-                Wait-Exit (Start-Owned $uninstaller '/S') 120
+                # Bind the validated HKCU mode explicitly; never execute a registry-supplied command string.
+                $uninstallAttempted = $true
+                $ownedUninstaller = Start-Owned $uninstaller '/currentuser /S'
+                Wait-Exit $ownedUninstaller 120
                 $timer = [Diagnostics.Stopwatch]::StartNew()
                 while ((Test-Path -LiteralPath $application) -or @(Product-Registrations).Count -ne 0 -or @(Product-Processes).Count -ne 0) {
                     if ($timer.Elapsed.TotalSeconds -gt 30) { throw 'Owned uninstaller did not remove executable, registration and product processes' }
@@ -358,8 +429,13 @@ try {
             }
             Wait-Exit (Start-Fixture cleanup) 120
         } catch {
-            $cleanupErrors.Add('Installed product cleanup failed: ' + $_.Exception.Message)
-            if ($null -eq $failure) { $failure = $_ }
+            $cleanupFailure = $_
+            $cleanupErrors.Add('Installed product cleanup failed: ' + $cleanupFailure.Exception.Message)
+            if ($null -eq $failure) { $failure = $cleanupFailure }
+            if ($uninstallAttempted) {
+                try { Write-UninstallFailureDiagnostics $ownedUninstaller $secondaryErrors }
+                catch { $secondaryErrors.Add('Post-uninstall diagnostic collection failed') }
+            }
         }
     }
     # Cleanup itself can start processes after the first pass; kill AND acknowledge every late handle before disposal.
