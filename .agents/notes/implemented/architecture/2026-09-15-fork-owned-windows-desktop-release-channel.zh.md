@@ -60,7 +60,21 @@ Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须�
 
 Publication run 必须使用当前 `master`。受保护 release job 是唯一具有 `contents: write` 的 job。它下载 build artifact，交叉检查完整 asset set，以精确 source commit tag 创建 draft，上传每个 asset，并只在 asset set 完整后发布。随后它要求 GitHub 报告 release immutable，tag 与 release target 解析到 build commit，并且每个 remote asset digest 匹配本地 bytes。最后一个只读 job 通过仅用于构建的元数据适配器针对 GitHub 运行已发布 discovery，并要求它选择经过评审的 version、sequence、commit 与 tree。
 
+## Workflow 发布策略
+
+[fork 发布策略](../../../../.github/AGENTS.md#fork-publication-policy) 将 Desktop 确定为默认公开交付物，也涵盖 Core/Web 变更。Issue #90 表明，checksum 有效的包 tarball 仍可能违反用户批准的产品与通道要求。Release 标题和资产数量不能证明交付了 installer。
+
+`verify-release-policy` 使用现有 YAML parser 发现每个 `.yml` 和 `.yaml` workflow。阻塞式 `ci-static` 检查显式权限默认值，仅允许现有 Desktop release job 使用 `contents: write`，拒绝未经评审的 package/OIDC writer 及已识别的发布命令/action，并将 rehearsal job/event 清单固定为 CI artifact 输出。现有 npm、Python 和 native publication job 使用精确的 fork 排除条件；dispatch 输入与 repository variable 无法覆盖这些条件。非 fork 行为保持不变，包括已配置的私有 Python publisher。Pages OIDC 是按确切 job 命名的非 release 例外。
+
+该检查验证声明的 workflow 权限与已知入口，不解释任意 shell 程序、local action、external action 或凭据使用。它不检查远端设置，也不能阻止获授权的源码编辑者修改策略。评审仍负责新代码与另行获授权的通道。Desktop 现有 publisher 在任何远端调用之前验证精确的 installer 与配套资产清单；有效 checksum、Desktop 标题或 Desktop tag 都不能替代该清单。实际 installer 资格仍由 packaging 与 acceptance 检查负责，而不是文件名检查。
+
+源码策略变异测试覆盖新增 writer、继承权限、已识别的发布步骤、输入/变量覆盖及当前源码。离线 publisher 回归拒绝 checksum 一致的 293 个 Core/Web tarball、用 tarball 替换 installer，以及在 installer 旁额外加入 tarball。这些测试补充现有发布成功路径与 receipt 检查，不改变 packaging 或版本。
+
 ## 考虑过的替代方案
+
+**仅按标题或 checksum 批准 release。** 两者都不能识别可安装的 Desktop 产品。Workflow 权限清单与 publisher 的精确资产清单分别检查不同义务；两者都不能替代打包后验收。
+
+**禁用 upstream workflow 或增加 dispatch 覆盖开关。** 禁用会丢弃有效的 upstream 分发与不带凭据的 rehearsal。Dispatch 覆盖会将操作输入变成新 fork 通道的授权。固定 repository 排除条件保留 upstream 行为，同时禁止这种覆盖。
 
 **忽略所有 blocked 结果或删除 operation 历史。** 两者都会丢失安装中断保护与诊断证据。只有经过验证、未开始安装的失败不阻塞启动；已经暂存的失败需要独立核验的替代证据。
 

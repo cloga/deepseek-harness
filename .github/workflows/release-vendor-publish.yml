@@ -77,6 +77,7 @@ jobs:
 
   publish:
     name: Publish to npm
+    if: github.repository != 'cloga/deepseek-harness'
     needs: pack
     runs-on: ubuntu-24.04
     environment: npm-publish

@@ -3,8 +3,8 @@
 # separate sequences with their own workflows and version lines.
 #
 # Pack and dependency-layout verification run without credentials on every pull
-# request and master push. Publication is a manual workflow_dispatch of
-# release-publish.yml from a dsh-v* tag.
+# request and master push. Upstream npm publication is a manual workflow_dispatch
+# of release-publish.yml from a dsh-v* tag; the cloga fork ships Desktop only.
 name: Release (dsh)
 
 on:
@@ -157,7 +157,7 @@ jobs:
       # verification must not depend on the registry already carrying matching
       # versions — one pull request may bump both families before either
       # publishes — so it installs that family's pack output too. Only dist/npm
-      # is published.
+      # is uploaded as a CI artifact.
       - name: Pack the vendored framework for verification
         run: pnpm run release:pack --family vendor --out dist/npm-vendor --concurrency 8
 
