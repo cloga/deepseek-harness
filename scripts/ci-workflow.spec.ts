@@ -1025,8 +1025,15 @@ describe('Issue lifecycle workflow', () => {
     const steps = lifecycleJob.steps.filter(isRecord)
     const tokenStep = steps.find(s => s.name === 'Create project token')
     const handleStep = steps.find(s => s.name === 'Handle repository event')
-    expect(tokenStep?.if).toBeUndefined()
-    expect(handleStep?.if).toBeUndefined()
+    for (const step of [tokenStep, handleStep]) {
+      const condition = step?.if
+      expect(condition).toBe("github.repository == 'deepseek-ai/deepseek-harness'")
+      if (typeof condition !== 'string') throw new TypeError('Project lifecycle steps need an owner condition')
+      for (const repository of ['deepseek-ai/deepseek-harness', 'cloga/deepseek-harness', 'outsider/fork']) {
+        expect(runInNewContext(condition, { github: { repository } }, { timeout: 1000 }))
+          .toBe(repository === 'deepseek-ai/deepseek-harness')
+      }
+    }
 
     // issue-policy owns PR validation; it is read-only and a real gate.
     const policyPullRequest = workflowEvent(policy, 'pull_request')
