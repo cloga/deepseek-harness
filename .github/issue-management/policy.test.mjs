@@ -4,6 +4,8 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { runInNewContext } from 'node:vm'
+import config from './config.json' with { type: 'json' }
 
 import { api, graphql, initializeIssueStartDate, issueSnapshot } from './github.mjs'
 import { auditIssue, initializePullRequestStartDates, repairIssueLabels, runLifecycle } from './lifecycle.mjs'
@@ -766,7 +768,7 @@ test('rejects multiple, unknown, legacy, and Issue-source PR labels', () => {
   )
 })
 
-const mockPolicyApi = (t, { pull = {}, requested = true, reviews = [], issues = {}, priority = 'P1', projectError = false } = {}) => {
+const mockPolicyApi = (t, { pull = {}, requested = true, reviews = [], issues = {}, priority = 'P1', projectError = false, projectData, repositoryOwner = 'deepseek-harness' } = {}) => {
   const environment = ['GH_TOKEN', 'GITHUB_TOKEN', 'PROJECT_TOKEN', 'GITHUB_API_URL', 'GITHUB_OUTPUT']
   const previous = new Map(environment.map((key) => [key, process.env[key]]))
   const directory = mkdtempSync(join(tmpdir(), 'dsh-policy-'))
@@ -782,10 +784,12 @@ const mockPolicyApi = (t, { pull = {}, requested = true, reviews = [], issues = 
   process.env.GITHUB_OUTPUT = join(directory, 'output')
   const requests = []
   const output = []
+  const projectRequests = []
   t.mock.method(process.stdout, 'write', (text) => { output.push(text); return true })
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     const path = new URL(url).pathname + new URL(url).search
     requests.push(path)
+    if (path !== '/graphql') assert.ok(path.startsWith(`/repos/${repositoryOwner}/deepseek-harness/`), 'Unexpected repository: ' + path)
     if (path.endsWith('/pulls/10')) return Response.json({
       draft: false, user: { type: 'User' }, body: 'Refs #2',
       labels: [{ name: 'kind/cleanup' }, { name: 'area/infra' }], ...pull,
@@ -795,17 +799,188 @@ const mockPolicyApi = (t, { pull = {}, requested = true, reviews = [], issues = 
     }
     if (path.endsWith('/reviews?per_page=100')) return Response.json(reviews)
     if (path === '/graphql') {
+      projectRequests.push(JSON.parse(options.body))
       assert.equal(options.headers.Authorization, 'Bearer repository-token')
       if (projectError) return Response.json({ errors: [{ message: 'Project access denied' }] })
-      return Response.json({ data: projectGraphqlData({ priority }) })
+      return Response.json({ data: projectData ?? projectGraphqlData({ priority }) })
     }
     const number = Number(path.match(/\/issues\/(\d+)$/)?.[1])
     assert.ok(Object.hasOwn(issues, number), 'Unexpected request: ' + path)
     const issue = issues[number]
     return Response.json(issue ?? { message: 'Not Found' }, { status: issue === null ? 404 : 200 })
   })
-  return { requests, output, workflowOutput: () => readFileSync(process.env.GITHUB_OUTPUT, 'utf8') }
+  return { requests, projectRequests, output, workflowOutput: () => readFileSync(process.env.GITHUB_OUTPUT, 'utf8') }
 }
+
+const forkPolicyContext = (t, {
+  owner = 'cloga', repository = 'cloga/deepseek-harness',
+  eventRepository = repository, baseRepository = repository,
+} = {}) => {
+  for (const [key, value] of Object.entries({ DSH_ISSUE_REPOSITORY_OWNER: owner, GITHUB_REPOSITORY: repository })) {
+    const previous = process.env[key]
+    t.after(() => {
+      if (previous === undefined) delete process.env[key]
+      else process.env[key] = previous
+    })
+    if (value === null) delete process.env[key]
+    else process.env[key] = value
+  }
+  return {
+    repository: { full_name: eventRepository },
+    pull_request: {
+      number: 10, base: { repo: { full_name: baseRepository } },
+      head: { repo: { full_name: 'outsider/untrusted' } },
+      body: 'Fixes outsider/untrusted#999', draft: true, labels: [],
+    },
+  }
+}
+
+for (const owner of [null, 'cloga']) {
+  test(`separates repository reads from the original Project organization with override ${owner}`, async (t) => {
+    const event = forkPolicyContext(t, { owner })
+    const repositoryOwner = owner ?? 'deepseek-harness'
+    const fixture = mockPolicyApi(t, {
+      repositoryOwner,
+      pull: {
+        body: `Fixes ${repositoryOwner}/deepseek-harness#2; Refs #4; Fixes outsider/untrusted#999`,
+        labels: [{ name: 'kind/cleanup' }, { name: 'area/infra' }, { name: 'p1' }],
+      },
+      issues: { 2: {}, 4: {} },
+    })
+    assert.deepEqual(await runPullRequestPreflight(event), { eligible: true, needsProject: true })
+    assert.equal(fixture.projectRequests.length, 0)
+    await runPullRequestCheck(event)
+    assert.equal(fixture.requests.filter(path => path.endsWith('/issues/2')).length, 2)
+    assert.equal(fixture.requests.filter(path => path.endsWith('/issues/4')).length, 2)
+    assert.equal(fixture.projectRequests.length, 1)
+    const query = fixture.projectRequests[0]
+    assert.match(query.query, /organization\(login: \$organization\)/)
+    assert.match(query.query, /repository\(owner: \$repositoryOwner, name: \$repository\)/)
+    assert.deepEqual(query.variables, {
+      organization: 'deepseek-harness', repositoryOwner, repository: 'deepseek-harness',
+      number: 2, project: 1, includeStatusActor: false, includeStartDate: false,
+      priorityField: 'Priority', startDateField: 'Start Date',
+    })
+    assert.ok(fixture.output.some(text => text.includes('Issue policy 通过')))
+  })
+}
+
+for (const [name, options] of [
+  ['empty owner', { owner: '' }],
+  ['other owner', { owner: 'outsider' }],
+  ['unscoped owner', { owner: 'cloga/other' }],
+  ['absent Actions repository', { repository: null }],
+  ['official Actions repository', { repository: 'deepseek-harness/deepseek-harness' }],
+  ['wrong repository name', { repository: 'cloga/other' }],
+  ['wrong event repository', { eventRepository: 'outsider/deepseek-harness' }],
+  ['absent event repository', { eventRepository: null }],
+  ['wrong PR base', { baseRepository: 'outsider/deepseek-harness' }],
+  ['absent PR base', { baseRepository: null }],
+]) {
+  test('rejects fork owner override before any request for ' + name, async (t) => {
+    const event = forkPolicyContext(t, options)
+    event.pull_request.head.repo.full_name = 'cloga/deepseek-harness'
+    const fixture = mockPolicyApi(t)
+    await assert.rejects(runPullRequestPreflight(event), /repository owner override/)
+    await assert.rejects(runPullRequestCheck(event), /repository owner override/)
+    assert.deepEqual(fixture.requests, [])
+    assert.deepEqual(fixture.output, [])
+  })
+}
+
+for (const [name, pull, requested, count] of [
+  ['draft', { draft: true }, true, 1],
+  ['Bot', { user: { type: 'Bot' } }, true, 1],
+  ['App', { user: { type: 'App' } }, true, 1],
+  ['not reviewed', {}, false, 3],
+]) {
+  test('bases fork ' + name + ' exemption only on current repository data', async (t) => {
+    const event = forkPolicyContext(t)
+    const fixture = mockPolicyApi(t, { repositoryOwner: 'cloga', pull: { body: 'Fixes #999', ...pull }, requested })
+    assert.deepEqual(await runPullRequestPreflight(event), { eligible: false, needsProject: false })
+    await runPullRequestCheck(event)
+    assert.equal(fixture.requests.length, count * 2)
+    assert.equal(fixture.projectRequests.length, 0)
+    assert.equal(fixture.workflowOutput(), 'eligible=false\nexempt=true\nneeds-project=false\n')
+  })
+}
+
+for (const [name, options, error] of [
+  ['Project denied', { projectError: true, issues: { 2: {} } }, /Project access denied/],
+  ['missing Project', { projectData: { organization: null }, issues: { 2: {} } }, /目标 Project 不存在/],
+  ['invalid Project field', { projectData: projectGraphqlData({ priorityType: 'TEXT' }), issues: { 2: {} } }, /Priority 字段必须为 Single Select/],
+  ['Priority mismatch', { issues: { 2: {} } }, /Issue policy 未通过/],
+  ['missing Issue', { issues: { 2: null } }, /404/],
+]) {
+  test('keeps fork resolving validation blocking on ' + name, async (t) => {
+    const event = forkPolicyContext(t)
+    const fixture = mockPolicyApi(t, { repositoryOwner: 'cloga', pull: { body: 'Fixes #2' }, ...options })
+    await assert.rejects(runPullRequestCheck(event), error)
+    assert.ok(fixture.requests.includes('/repos/cloga/deepseek-harness/issues/2'))
+  })
+}
+
+for (const [name, pull, issues, error] of [
+  ['missing kind', { labels: [{ name: 'area/infra' }] }, { 2: {} }, /恰好有一个允许的 kind/],
+  ['missing area', { labels: [{ name: 'kind/cleanup' }] }, { 2: {} }, /至少有一个 area/],
+  ['no Issue reference', { body: 'Fixes #3' }, { 3: { pull_request: {} } }, /同仓库 Issue/],
+]) {
+  test('enforces Ready fork metadata without Project access: ' + name, async (t) => {
+    const event = forkPolicyContext(t)
+    const fixture = mockPolicyApi(t, { repositoryOwner: 'cloga', pull, issues })
+    assert.deepEqual(await runPullRequestPreflight(event), { eligible: true, needsProject: false })
+    await assert.rejects(runPullRequestCheck(event), /Issue policy 未通过/)
+    assert.match(fixture.output.join(''), error)
+    assert.equal(fixture.projectRequests.length, 0)
+  })
+}
+
+test('re-reads fork eligibility after exempt preflight and fails on unavailable required Project access', async (t) => {
+  const event = forkPolicyContext(t)
+  const pull = { draft: true, body: 'Fixes #2' }
+  const fixture = mockPolicyApi(t, { repositoryOwner: 'cloga', pull, issues: { 2: {} }, projectError: true })
+  assert.deepEqual(await runPullRequestPreflight(event), { eligible: false, needsProject: false })
+  pull.draft = false
+  await assert.rejects(runPullRequestCheck(event), /Project access denied/)
+  assert.equal(fixture.requests.length, 6)
+  assert.equal(fixture.projectRequests.length, 1)
+})
+
+for (const key of ['organization', 'repository']) {
+  test('refuses an owner override when configured ' + key + ' has changed', async (t) => {
+    const event = forkPolicyContext(t)
+    const previous = config[key]
+    t.after(() => { config[key] = previous })
+    config[key] = 'unexpected'
+    const fixture = mockPolicyApi(t)
+    await assert.rejects(runPullRequestPreflight(event), /repository owner override/)
+    assert.deepEqual(fixture.requests, [])
+  })
+}
+
+test('captures the validated owner before repository reads begin', async (t) => {
+  const event = forkPolicyContext(t)
+  const fixture = mockPolicyApi(t, { repositoryOwner: 'cloga', issues: { 2: {} } })
+  const fetch = globalThis.fetch
+  t.mock.method(globalThis, 'fetch', (...args) => {
+    process.env.DSH_ISSUE_REPOSITORY_OWNER = 'unexpected'
+    process.env.GITHUB_REPOSITORY = 'unexpected/repository'
+    return fetch(...args)
+  })
+  await runPullRequestCheck(event)
+  assert.equal(fixture.requests.length, 4)
+})
+
+test('does not activate the PR owner override for lifecycle snapshots', async (t) => {
+  forkPolicyContext(t)
+  const fixture = mockPolicyApi(t, { issues: { 2: {} } })
+  const snapshot = await lifecyclePullRequestSnapshot(10)
+  assert.deepEqual(snapshot.references, { all: [2], resolving: [], related: [2] })
+  assert.deepEqual(fixture.requests, [
+    '/repos/deepseek-harness/deepseek-harness/pulls/10',
+    '/repos/deepseek-harness/deepseek-harness/issues/2',
+  ])
+})
 
 for (const [name, pull, requested, count] of [
   ['draft', { draft: true }, true, 1],
@@ -891,7 +1066,7 @@ test('performs no lifecycle requests for removed signals or title-only edits', a
   assert.deepEqual(fixture.requests, [])
 })
 
-test('keeps the required job unconditional and scopes trusted preflight to the upstream repository', () => {
+test('keeps the required job unconditional and scopes trusted preflight to supported repositories', () => {
   const source = readFileSync(new URL('../workflows/issue-policy.yml', import.meta.url), 'utf8')
   const job = source.slice(source.indexOf('  policy:'))
   assert.ok(job.includes('    name: Issue policy'))
@@ -899,7 +1074,22 @@ test('keeps the required job unconditional and scopes trusted preflight to the u
   assert.ok(source.includes('types: [opened, edited, synchronize, reopened, labeled, unlabeled, ready_for_review, review_requested]'))
   const steps = job.split('      - name: ').slice(1)
   assert.equal(steps.length, 4)
-  assert.ok(steps[0].includes('ref: ${{ github.event.repository.default_branch }}'))
+  const ref = steps[0].match(/^          ref: (.+)$/m)?.[1]
+  const selector = ref?.match(/^\$\{\{ github\.repository == 'cloga\/deepseek-harness' && '([a-f0-9]{40})' \|\| github\.event\.repository\.default_branch \}\}$/)
+  assert.ok(selector, 'Fork checkout must use one literal full commit and retain the default-branch fallback')
+  for (const repository of ['cloga/deepseek-harness', 'deepseek-harness/deepseek-harness', 'deepseek-ai/deepseek-harness', 'cloga/other', 'other/deepseek-harness']) {
+    for (const defaultBranch of ['master', 'another-default']) {
+      const selected = runInNewContext(ref.slice(3, -2), {
+        github: { repository, sha: 'untrusted-current-head', event: {
+          repository: { default_branch: defaultBranch }, pull_request: { head: { sha: 'untrusted-pr-head' } },
+        } },
+      }, { timeout: 1000 })
+      assert.equal(selected, repository === 'cloga/deepseek-harness' ? selector[1] : defaultBranch)
+    }
+  }
+  assert.ok(steps[0].includes('clean: true'))
+  assert.doesNotMatch(steps[0], /sparse-checkout:|repository:|path:/)
+  assert.equal(source.match(/uses: actions\/checkout@/g)?.length, 1)
   assert.ok(steps[0].includes('persist-credentials: false'))
   assert.doesNotMatch(source, /pull_request\.head|pull_request_target/)
   assert.ok(steps[1].includes('id: preflight'))
@@ -907,17 +1097,82 @@ test('keeps the required job unconditional and scopes trusted preflight to the u
   assert.ok(steps[1].includes('node .github/issue-management/policy.mjs pr-preflight'))
   assert.ok(steps[1].includes('if [ -f .github/issue-management/selective-preflight.json ]; then'))
   assert.doesNotMatch(steps[1], /secrets\.|PROJECT_TOKEN/)
-  // Forks must not query the upstream organization's PR or Project namespace.
-  assert.deepEqual(steps[1].match(/^        if:.*$/gm), [
-    "        if: github.repository == 'deepseek-ai/deepseek-harness'",
-  ])
+  // The reviewed fork uses its validated namespace; unrelated forks must remain inert.
+  const preflightCondition = steps[1].match(/^        if: (.+)$/m)?.[1]
+  assert.equal(preflightCondition, "(github.repository == 'deepseek-ai/deepseek-harness' || github.repository == 'cloga/deepseek-harness')")
+  for (const repository of ['cloga/deepseek-harness', 'deepseek-ai/deepseek-harness', 'deepseek-harness/deepseek-harness', 'cloga/other', 'other/deepseek-harness']) {
+    assert.equal(runInNewContext(preflightCondition, { github: { repository } }, { timeout: 1000 }),
+      repository === 'cloga/deepseek-harness' || repository === 'deepseek-ai/deepseek-harness')
+  }
   assert.ok(steps[2].includes("github.repository == 'deepseek-ai/deepseek-harness'"))
   assert.ok(steps[2].includes("steps.preflight.outputs.needs-project == 'true'"))
   assert.ok(steps[2].includes('permission-organization-projects: read'))
   assert.ok(steps[3].includes('PROJECT_TOKEN: ${{ steps.app-token.outputs.token }}'))
-  assert.ok(steps[3].includes('run: node .github/issue-management/policy.mjs pr'))
+  assert.ok(steps[3].includes('          node .github/issue-management/policy.mjs pr\n'))
   assert.ok(steps[3].includes("github.repository == 'deepseek-ai/deepseek-harness'"))
   assert.ok(steps[3].includes("steps.preflight.outputs.legacy-automated != 'true'"))
+  for (const step of [steps[1], steps[3]]) {
+    assert.ok(step.includes('shell: bash'))
+    assert.ok(step.includes([
+      '        run: |',
+      '          unset DSH_ISSUE_REPOSITORY_OWNER',
+      '          if [ "${GITHUB_REPOSITORY:-}" = "cloga/deepseek-harness" ]; then',
+      '            export DSH_ISSUE_REPOSITORY_OWNER=cloga',
+      '          fi',
+    ].join('\n')))
+  }
+  assert.doesNotMatch(source, /DSH_ISSUE_REPOSITORY_OWNER:|GITHUB_ENV|git checkout|git reset/)
+  for (const repository of ['cloga/deepseek-harness', 'deepseek-ai/deepseek-harness', 'deepseek-harness/deepseek-harness', 'cloga/other', 'other/deepseek-harness']) {
+    const allowed = repository === 'cloga/deepseek-harness' || repository === 'deepseek-ai/deepseek-harness'
+    for (const needsProject of ['', 'false', 'true']) {
+      for (const legacyAutomated of ['', 'false', 'true']) {
+        for (const [index, expected] of [[2, allowed && needsProject === 'true'], [3, allowed && legacyAutomated !== 'true']]) {
+          const condition = steps[index].match(/        if: >-\n((?:          .+\n)+)/)?.[1]
+          assert.ok(condition)
+          const expression = condition.trim().replaceAll('.needs-project', "['needs-project']")
+            .replaceAll('.legacy-automated', "['legacy-automated']")
+          assert.equal(runInNewContext(expression, {
+            github: { repository }, steps: { preflight: { outputs: { 'needs-project': needsProject, 'legacy-automated': legacyAutomated } } },
+          }, { timeout: 1000 }), expected)
+        }
+      }
+    }
+  }
+})
+
+test('sets the owner only in fork policy processes and propagates command failures', {
+  skip: process.platform === 'win32' && !process.env.DSH_POLICY_TEST_BASH ? 'Requires a POSIX bash test launcher' : false,
+}, (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-policy-owner-process-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const policyDirectory = join(directory, '.github', 'issue-management')
+  mkdirSync(policyDirectory, { recursive: true })
+  writeFileSync(join(policyDirectory, 'selective-preflight.json'), '{"version":1}\n')
+  const source = readFileSync(new URL('../workflows/issue-policy.yml', import.meta.url), 'utf8')
+  const steps = source.split('      - name: ').slice(1)
+  for (const index of [1, 3]) {
+    const body = steps[index].split('        run: |\n')[1]
+    assert.ok(body, 'Policy command must have a bash run block')
+    const script = body.split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n')
+    for (const repository of ['cloga/deepseek-harness', 'deepseek-harness/deepseek-harness', 'cloga/other']) {
+      for (const status of [0, 23]) {
+        const output = join(directory, 'probe')
+        writeFileSync(output, '')
+        const result = spawnSync(process.env.DSH_POLICY_TEST_BASH || 'bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c',
+          'node() { printf "%s|%s\\n" "${DSH_ISSUE_REPOSITORY_OWNER-absent}" "$*" >> "$POLICY_PROBE_OUTPUT"; return "$POLICY_PROBE_STATUS"; };\n' + script,
+        ], {
+          cwd: directory,
+          env: { PATH: process.env.PATH, GITHUB_REPOSITORY: repository, DSH_ISSUE_REPOSITORY_OWNER: 'inherited-invalid',
+            POLICY_PROBE_OUTPUT: output.replaceAll('\\', '/'), POLICY_PROBE_STATUS: String(status) },
+          encoding: 'utf8', timeout: 30_000,
+        })
+        assert.equal(result.error, undefined)
+        assert.equal(result.signal, null)
+        assert.equal(result.status, status, result.stderr)
+        assert.equal(readFileSync(output, 'utf8'), `${repository === 'cloga/deepseek-harness' ? 'cloga' : 'absent'}|.github/issue-management/policy.mjs ${index === 1 ? 'pr-preflight' : 'pr'}\n`)
+      }
+    }
+  }
 })
 
 test('runs trusted rollout selection with absent and present capability markers', { skip: process.platform === 'win32' ? 'The policy workflow executes under hosted Ubuntu bash' : false }, (t) => {
