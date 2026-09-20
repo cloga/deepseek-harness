@@ -1,0 +1,5 @@
+# The copied Agent preset owns its private compaction policy; Host sets only the initial model.
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: deepseek-v4-flash

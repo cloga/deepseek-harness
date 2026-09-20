@@ -62,6 +62,8 @@ await handle.agent.whenIdle()
 
 `Agent.ctx` 是该 agent 的作用域上下文：通过它进行的注册（工具、提示词段、变量、事件监听器、限制）只对该 agent 生效，并在 dispose（资源释放）时全部撤销。同一机制也是 agent preset 用来让一个会话获得不同能力集、同时不影响其邻居的方式。
 
+调用 `installModelSelection()` 的入口还提供同步的 `model-selection/query` 监听器。使用 `readModelSelection(agent.ctx, agent)`，可为轮次外维护读取独立快照，而不组装提示词或消费待应用的选择。该函数使用原始所有者对象作为作用域键；载荷只承诺该身份，不承诺完整的 Agent。没有选择时返回 `undefined`；查询不会改变正在执行的步骤已经捕获的选择。
+
 ### 拦截或观察进行中的工作
 
 `agent/*` 事件让插件无需依赖循环包即可作用于实时工作。`agent/pre-step` 可以拒绝拟进入的步骤或替换进入它的消息；`agent/request-error` 让监听器重试失败的模型请求；`agent/turn-stopping` 在本可完成的轮次关闭前运行，并可通过 steer 使其保持打开。`agent/assistant-stream` 携带一个进程本地 Assistant attempt 的有序 start、瞬态分片与 end frame。start 给出该 attempt 的轮次与步骤，分片索引从零开始密集递增，`end.index` 则是下一个分片位置。loop 会在 committed end frame 前把完整紧凑流提交为一个 `assistant/message` 或 `assistant/attempt`，因此实时事件仍是呈现数据而非回放来源。`agent/status`、`agent/created` 与 `agent/disposed` 驱动 UI 与协调状态，逐消息的 `agent/inbox/*` 通知则让收件箱投影保持同步。确切签名、分发 mode 与 payload 约定见 [core 子系统页](../../../docs/subsystems/core.zh.md#cordis-surface) 的生成区块。

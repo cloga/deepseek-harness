@@ -12,21 +12,39 @@ import {
   validatePullRequest,
 } from './rules.mjs'
 
+function resolveRepositoryOwner(event) {
+  const owner = process.env.DSH_ISSUE_REPOSITORY_OWNER
+  if (owner === undefined) return config.organization
+  const repository = 'cloga/deepseek-harness'
+  if (
+    owner !== 'cloga'
+    || config.organization !== 'deepseek-harness'
+    || config.repository !== 'deepseek-harness'
+    || process.env.GITHUB_REPOSITORY !== repository
+    || event.repository?.full_name !== repository
+    || event.pull_request?.base?.repo?.full_name !== repository
+  ) {
+    throw new Error('Invalid repository owner override: requires cloga/deepseek-harness Actions and PR base context')
+  }
+  return owner
+}
+
 /**
  * Resolve all same-repository body references with REST, excluding pull-request numbers.
  * @param {number} number Pull-request number.
  * @param {{body?: string}} pull Current REST pull-request data.
+ * @param {string} repositoryOwner Resolved repository owner; defaults to the configured organization.
  * @returns {Promise<object>} Issue-only references and placeholder priorities; never reads Project data.
  */
-export async function resolvingReferencesSnapshot(number, pull) {
+export async function resolvingReferencesSnapshot(number, pull, repositoryOwner = config.organization) {
   const references = parseReferences({
     body: pull.body ?? '',
-    repository: `${config.organization}/${config.repository}`,
+    repository: `${repositoryOwner}/${config.repository}`,
   })
   const issues = new Map()
   for (const issueNumber of references.all) {
     const issue = await api(
-      `/repos/${config.organization}/${config.repository}/issues/${issueNumber}`,
+      `/repos/${repositoryOwner}/${config.repository}/issues/${issueNumber}`,
     )
     if (!issue.pull_request) issues.set(issueNumber, { priority: null })
   }
@@ -41,10 +59,11 @@ export async function resolvingReferencesSnapshot(number, pull) {
  * Read current PR policy inputs, skipping references for exempt PRs.
  * @param {number} number Pull-request number.
  * @param {boolean} includeProject Read Project Priority for resolving Issues when true.
+ * @param {string} repositoryOwner Resolved repository owner, independent of the configured Project organization.
  * @returns {Promise<object>} Policy snapshot; rejects any failed read and performs no writes.
  */
-export async function pullRequestSnapshot(number, includeProject = true) {
-  const pull = await api(`/repos/${config.organization}/${config.repository}/pulls/${number}`)
+export async function pullRequestSnapshot(number, includeProject = true, repositoryOwner = config.organization) {
+  const pull = await api(`/repos/${repositoryOwner}/${config.repository}/pulls/${number}`)
   const snapshot = {
     number,
     isDraft: pull.draft,
@@ -57,16 +76,16 @@ export async function pullRequestSnapshot(number, includeProject = true) {
   }
   if (snapshot.isDraft || ['Bot', 'App'].includes(snapshot.authorType)) return snapshot
   const [reviewRequests, reviews] = await Promise.all([
-    api(`/repos/${config.organization}/${config.repository}/pulls/${number}/requested_reviewers`),
-    api(`/repos/${config.organization}/${config.repository}/pulls/${number}/reviews?per_page=100`),
+    api(`/repos/${repositoryOwner}/${config.repository}/pulls/${number}/requested_reviewers`),
+    api(`/repos/${repositoryOwner}/${config.repository}/pulls/${number}/reviews?per_page=100`),
   ])
   snapshot.reviewRequestCount = reviewRequests.users.length + reviewRequests.teams.length
   snapshot.reviewCount = reviews.length
   if (!requiresPullRequestPolicy(snapshot)) return snapshot
-  Object.assign(snapshot, await resolvingReferencesSnapshot(number, pull))
+  Object.assign(snapshot, await resolvingReferencesSnapshot(number, pull, repositoryOwner))
   if (includeProject) {
     for (const issueNumber of snapshot.references.resolving) {
-      const context = await projectContext(issueNumber)
+      const context = await projectContext(issueNumber, false, false, repositoryOwner)
       snapshot.issues.get(issueNumber).priority = context.item?.priorityValue?.name ?? null
     }
   }
@@ -91,11 +110,12 @@ const EXEMPT_MESSAGE =
 
 /**
  * Determine current policy eligibility and Project access needs without Project credentials.
- * @param {{pull_request: {number: number}}} event GitHub event identifying the PR.
+ * @param {{repository?: {full_name: string}, pull_request: {number: number, base?: {repo: {full_name: string}}}}} event GitHub PR event; an owner override requires matching Actions, event, and base repositories.
  * @returns {Promise<{eligible: boolean, needsProject: boolean}>} Trusted workflow decisions.
  */
 export async function runPullRequestPreflight(event) {
-  const pull = await pullRequestSnapshot(event.pull_request.number, false)
+  const repositoryOwner = resolveRepositoryOwner(event)
+  const pull = await pullRequestSnapshot(event.pull_request.number, false, repositoryOwner)
   const eligible = requiresPullRequestPolicy(pull)
   const needsProject = eligible && pull.references.resolving.length > 0
   if (process.env.GITHUB_OUTPUT) {
@@ -110,11 +130,12 @@ export async function runPullRequestPreflight(event) {
 
 /**
  * Enforce all PR rules against current GitHub state, independently of preflight.
- * @param {{pull_request: {number: number}}} event GitHub event identifying the PR.
+ * @param {{repository?: {full_name: string}, pull_request: {number: number, base?: {repo: {full_name: string}}}}} event GitHub PR event; an owner override requires matching Actions, event, and base repositories.
  * @returns {Promise<void>} Resolves on success or exemption; rejects policy failures.
  */
 export async function runPullRequestCheck(event) {
-  const pull = await pullRequestSnapshot(event.pull_request.number)
+  const repositoryOwner = resolveRepositoryOwner(event)
+  const pull = await pullRequestSnapshot(event.pull_request.number, true, repositoryOwner)
   const errors = validatePullRequest(pull)
   if (errors.length > 0) {
     for (const error of errors) process.stdout.write(`::error::${error}\n`)

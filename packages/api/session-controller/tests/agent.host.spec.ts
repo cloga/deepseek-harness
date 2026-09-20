@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { readModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionLogOffset, SessionId } from '@deepseek-ai/dsh-session'
@@ -256,6 +256,42 @@ describe('ApiSession Agent lookup and recovery', () => {
 })
 
 describe('ApiSession model selection', () => {
+  it('rehydrates a pending selection before maintenance queries without consuming it or replacing the old header', async () => {
+    const original = await harness()
+    const meta = header('rehydrated-model-selection')
+    const live = agent(original.ctx, meta)
+    const recorded: SessionEvent[] = []
+    original.ctx.on('session/event', (session, event) => {
+      if (session === live.session) recorded.push(event)
+    })
+    const oldRoute = { provider: 'old-provider', model: 'old-model' }
+    const selected = { provider: 'selected-provider', model: 'selected-model' }
+    live.session.append('request/header', { header: { config: oldRoute }, reason: 'initial' })
+    original.agents.selectForNextRequest(live, selected)
+    expect(recorded.map(event => event.type)).toEqual(['request/header', 'model/selection'])
+    await original.ctx.fiber.dispose()
+
+    const restored = await harness()
+    vi.spyOn(restored.ctx.agentDefaultModel, 'currentSelection').mockReturnValue({
+      provider: 'default-provider', model: 'default-model',
+    })
+    const session = restored.ctx.sessions.create(meta.id, { meta, seed: recorded })
+    const owner = { id: meta.id, session, status: 'idle', ctx: restored.ctx } as Agent
+    const previousHeader = session.requestHeader()
+    const previousSeq = session.seq
+    expect(readModelSelection(owner.ctx, owner)).toBeUndefined()
+    const composition = await restored.agents.composeAgent(undefined)
+    await composition.setup(owner.ctx, owner)
+
+    expect(readModelSelection(owner.ctx, owner)).toEqual(selected)
+    expect(restored.ctx.sessionProjections.stateOf(session, 'modelSelection')).toEqual({
+      lastUsed: oldRoute, pending: selected,
+    })
+    expect(session.requestHeader()).toBe(previousHeader)
+    expect(previousHeader?.config).toEqual(oldRoute)
+    expect(session.seq).toBe(previousSeq)
+  })
+
   it('requires the model-selection projection', async () => {
     const { ctx, agents } = await harness()
     const live = agent(ctx, header('missing-model-projection'))

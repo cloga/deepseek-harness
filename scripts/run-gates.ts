@@ -296,6 +296,7 @@ export function gatesForMode(selected: Mode): Gate[] {
 
 function ciSharedStaticGates(): Gate[] {
   return [
+    pnpmScript('release-policy', 'verify-release-policy', { label: 'fork release policy' }),
     pnpmScript('runtime-closure', 'verify-runtime-closure', { label: 'runtime closure' }),
     pnpmScript('default-product-isolation', 'verify-default-product-isolation', { label: 'default product isolation' }),
     pnpmScript('application-entrypoints', 'verify-application-entrypoints', { label: 'application entrypoints' }),

@@ -1,3 +1,4 @@
+import { deepStrictEqual } from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -294,8 +295,8 @@ describe('Desktop fork release plan', () => {
     expect(plan).toMatchObject({
       schemaVersion: 2,
       channel: 'cloga-windows-x64',
-      version: '0.1.6-alpha.1.cloga.11',
-      sequence: 21,
+      version: '0.1.6-alpha.1.cloga.15',
+      sequence: 25,
       upstreamVersion: '0.1.6-alpha.1',
       migration: {
         owner: 'cloga/dsh-windows-ops',
@@ -303,7 +304,7 @@ describe('Desktop fork release plan', () => {
         channelVersion: '0.1.5-rc.2.local.1',
       },
     })
-    expect(plan.desktopProvisioning).toEqual({
+    deepStrictEqual(plan.desktopProvisioning, {
       schemaVersion: 1,
       mode: 'exact',
       plugins: [{
@@ -313,24 +314,24 @@ describe('Desktop fork release plan', () => {
           type: 'githubRelease',
           owner: 'cloga',
           repo: 'dsh-github-copilot',
-          tag: 'v0.4.0-alpha.27',
-          asset: 'dsh-github-copilot-0.4.0-alpha.27.tgz',
-          assetId: 573327174,
+          tag: 'v0.4.0-alpha.32',
+          asset: 'dsh-github-copilot-0.4.0-alpha.32.tgz',
+          assetId: 576880049,
           packageName: 'dsh-github-copilot',
-          version: '0.4.0-alpha.27',
-          size: 678130,
-          sha256: 'c2a1d331436e217dd76ae57635dd79ceb8839b723e036dd111019b2d14b7b186',
-          integrity: 'sha512-t6k14sg/mMLGvNGoJmrdtxLk2yAkZ3lJEYSQc2gZy8LgD0sG62Z/fCFiS71M3B9CurFtSmZn0HzSujzBhUf0sw==',
-          targetCommit: '8f8211b0a2d39ac8b8a39cb18f2d3287403b6594',
+          version: '0.4.0-alpha.32',
+          size: 723822,
+          sha256: '8f5b55488fd1bb9949ef8aa23b1bf2d41b3da52584b38497685ce07559290e32',
+          integrity: 'sha512-lbZNmi4EQrCB018C1RE+mwb6m0nK/a7eJtpB1T4/MI+VKRllMJfrVJGmauSPsn4lV2xGGA48cEA23hK0u9T+Og==',
+          targetCommit: '76d190aed688e073df930adb3c753d2a749519c9',
           dependencyRegistry: 'https://packagefeedproxy.microsoft.io/npm/',
           checksumManifest: {
             format: 'sha256sums',
             asset: 'SHA256SUMS',
-            assetId: 573327192,
-            url: 'https://github.com/cloga/dsh-github-copilot/releases/download/v0.4.0-alpha.27/SHA256SUMS',
+            assetId: 576880065,
+            url: 'https://github.com/cloga/dsh-github-copilot/releases/download/v0.4.0-alpha.32/SHA256SUMS',
             size: 104,
-            sha256: '4266646d9a06e3401aa3316ac314419de17d2f5762037a55394bd29f4af16144',
-            integrity: 'sha512-J8Nt5zfuxZlBzqpsAIenfvImPp3qYVQ6eBJvsDBI2UgABCB4jSPOB1WCjJYLSN8/GRDim5puskAfIXfaNibySw==',
+            sha256: 'a8e7dd1906b0478d80d5540217d80bb09837079d46b17c71143597de2726c7c2',
+            integrity: 'sha512-OE5SovBXez6XTcmJcrqPfamWgN4KPxGxM7XnaGcSovFNWz5SvCB6Z8dMXN7sm9NuBJhxLUpu1NMLyNRQquAX5g==',
           },
         },
       }],
@@ -340,7 +341,7 @@ describe('Desktop fork release plan', () => {
       mode: 'github-release-managed',
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
-      currentSequence: 21,
+      currentSequence: 25,
       minimumSequence: 2,
       provisioning: {
         capability: { id: 'desktopNativePluginProvisioning' },

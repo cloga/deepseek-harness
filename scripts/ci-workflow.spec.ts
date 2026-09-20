@@ -888,13 +888,13 @@ describe('Python release workflows', () => {
     expect(authorize.run).toContain('[ "$REPOSITORY" = "$PYPI_PUBLISHER_REPOSITORY" ]')
     expect(validateSteps).toContain('100000000')
     expect(publishRuntime).toMatchObject({
-      if: "github.event_name == 'workflow_dispatch' && inputs.publish",
+      if: "github.repository != 'cloga/deepseek-harness' && github.event_name == 'workflow_dispatch' && inputs.publish",
       needs: 'validate',
       environment: 'pypi-runtime',
       permissions: { contents: 'read', 'id-token': 'write' },
     })
     expect(publishSdk).toMatchObject({
-      if: "github.event_name == 'workflow_dispatch' && inputs.publish",
+      if: "github.repository != 'cloga/deepseek-harness' && github.event_name == 'workflow_dispatch' && inputs.publish",
       needs: ['validate', 'publish-runtime'],
       environment: 'pypi',
       permissions: { contents: 'read', 'id-token': 'write' },
@@ -1213,10 +1213,9 @@ describe('Issue lifecycle workflow', () => {
     expect(preflightStep?.run).toContain('node .github/issue-management/policy.mjs pr-preflight')
     expect(preflightStep?.if).toBeUndefined()
     expect(policyJob.if).toBeUndefined()
-    const projectGate =
-      "github.repository == 'deepseek-ai/deepseek-harness' && steps.preflight.outputs.needs-project == 'true'"
-    const validationGate =
-      "github.repository == 'deepseek-ai/deepseek-harness' && steps.preflight.outputs.legacy-automated != 'true'"
+    const repositoryGate = "(github.repository == 'deepseek-ai/deepseek-harness' || github.repository == 'cloga/deepseek-harness')"
+    const projectGate = `${repositoryGate} && steps.preflight.outputs.needs-project == 'true'`
+    const validationGate = `${repositoryGate} && steps.preflight.outputs.legacy-automated != 'true'`
 
     expect(tokenStep).toMatchObject({
       id: 'app-token',
