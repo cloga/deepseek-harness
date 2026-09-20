@@ -20,6 +20,8 @@ An approved plugin transaction stops the Host that is executing the command. Ele
 
 List responses contain only package name, version, and enabled state. Mutation errors cross IPC as a small error-code allowlist; failure messages use fixed text instead of echoing arbitrary manager, subprocess, network, path, package, or input diagnostics. The user's command input retains normal `command/run` logging. Internal startup diagnostics retain their existing product path after interruption.
 
+GitHub transport failures retain the HTTP status, a fixed request category, and bounded numeric rate-limit or retry headers for diagnosis. They omit URLs, response bodies, request IDs, cookies, and arbitrary header values. The transport does not retry a denial automatically or infer a rate-limit cause from status 403 alone; no credential is injected into the application for acceptance.
+
 ## Alternatives considered
 
 **Allow `dsh plugin --profile desktop`.** This bypasses the running Electron owner and cannot preserve impact confirmation, transaction exclusion, receipts, staged health checks, or rollback.

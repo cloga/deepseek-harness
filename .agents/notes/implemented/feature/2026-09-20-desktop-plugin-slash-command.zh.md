@@ -20,6 +20,8 @@ Desktop 独占 `$DSH_HOME/profiles/desktop`。插件窗口可以调用已验证�
 
 列表只返回包名、版本和启用状态。变更失败只通过小型错误码 allowlist 穿过 IPC；失败提示使用固定文案，不回显任意 manager、subprocess、network、路径、包或输入诊断。用户输入的命令仍按普通 `command/run` 机制记录。中断后的内部 startup diagnostics 继续走现有产品路径。
 
+GitHub 传输失败时保留 HTTP 状态、固定的请求类别，以及有界的数字限额或重试响应头用于诊断，不包含 URL、响应正文、请求 ID、Cookie 或任意响应头值。传输层不自动重试拒绝响应，也不单凭 403 状态推断限流；验收不会向应用注入凭据。
+
 ## 考虑过的替代方案
 
 **允许 `dsh plugin --profile desktop`。** 这会绕过运行中的 Electron owner，无法保留影响确认、事务互斥、receipt、staged health check 或 rollback。
