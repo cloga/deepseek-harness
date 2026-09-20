@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -17,7 +17,8 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 function directory(t) {
   const root = mkdtempSync(join(tmpdir(), 'package-acceptance-unit-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
-  return root
+  // TEMP can name an alias; descendants must use the guard's canonical owner.
+  return realpathSync.native(root)
 }
 
 test('installed observers agree on the driver-owned nested application path', t => {
@@ -47,9 +48,41 @@ for (const location of ['container', 'application-parent']) {
     if (location === 'application-parent') mkdirSync(container)
     const link = location === 'container' ? container : join(container, 'cloga-deepseek-harness-desktop')
     symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir')
-    assert.throws(() => installedUpgradeApplication(root), /must not traverse a link/)
+    try {
+      assert.throws(() => installedUpgradeApplication(root), /must not traverse a link/)
+    } finally {
+      if (lstatSync(link).isSymbolicLink()) unlinkSync(link)
+    }
   })
 }
+
+test('installed path guards retain their intended checks when TEMP names a junction', { skip: process.platform !== 'win32' }, t => {
+  const root = directory(t)
+  const target = join(root, 'canonical-temp')
+  const alias = join(root, 'temp-alias')
+  mkdirSync(target)
+  symlinkSync(target, alias, 'junction')
+  try {
+    assert.notEqual(alias.toLowerCase(), realpathSync.native(alias).toLowerCase())
+    const names = new Set(['SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC'])
+    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => names.has(name.toUpperCase())))
+    // Exact names select only the three pure guards, never this parent test,
+    // the PowerShell cases, an installed application or the native UI driver.
+    // No test-worker fork: the bounded spawn owns the entire child process.
+    const pattern = '^(installed observers agree on the driver-owned nested application path|installed application path rejects a linked (container|application-parent))$'
+    const result = spawnSync(process.execPath, ['--test', '--experimental-test-isolation=none', '--test-reporter=tap', `--test-name-pattern=${pattern}`, fileURLToPath(import.meta.url)], {
+      encoding: 'utf8', env: { ...env, TEMP: alias, TMP: alias }, timeout: 20_000,
+    })
+    assert.equal(result.error, undefined)
+    assert.equal(result.signal, null)
+    assert.equal(result.status, 0, result.stdout + result.stderr)
+    assert.match(result.stdout, /^# pass 3\r?$/mu)
+    assert.match(result.stdout, /^# fail 0\r?$/mu)
+    assert.deepEqual(readdirSync(target), [], 'Child guards must dispose every directory created through the TEMP alias')
+  } finally {
+    if (lstatSync(alias).isSymbolicLink()) unlinkSync(alias)
+  }
+})
 
 test('fresh evidence cannot claim any real acceptance path passed', () => {
   const report = initialPackageAcceptance('a'.repeat(40))
@@ -213,16 +246,21 @@ test('graph reader hashes exact metadata, payload bytes and link spellings witho
   mkdirSync(external)
   writeFileSync(join(profile, 'package.json'), '{"private":true}\n')
   writeFileSync(join(external, 'external.js'), 'outside\n')
-  symlinkSync(external, join(profile, 'shared'), process.platform === 'win32' ? 'junction' : 'dir')
-  const first = packageGraphSnapshot(profile)
-  assert.equal(first.fingerprint, digest(JSON.stringify(first.entries)))
-  assert.equal(first.entries.length, 2)
-  assert.equal(first.entries[1].kind, 'link')
-  writeFileSync(join(external, 'external.js'), 'external changes do not mutate the link spelling\n')
-  assert.deepEqual(packageGraphSnapshot(profile), first)
-  writeFileSync(join(profile, 'package.json'), '{"private":false}\n')
-  assert.notEqual(packageGraphSnapshot(profile).fingerprint, first.fingerprint)
-  assert.throws(() => packageGraphSnapshot(join(profile, 'shared')))
+  const link = join(profile, 'shared')
+  symlinkSync(external, link, process.platform === 'win32' ? 'junction' : 'dir')
+  try {
+    const first = packageGraphSnapshot(profile)
+    assert.equal(first.fingerprint, digest(JSON.stringify(first.entries)))
+    assert.equal(first.entries.length, 2)
+    assert.equal(first.entries[1].kind, 'link')
+    writeFileSync(join(external, 'external.js'), 'external changes do not mutate the link spelling\n')
+    assert.deepEqual(packageGraphSnapshot(profile), first)
+    writeFileSync(join(profile, 'package.json'), '{"private":false}\n')
+    assert.notEqual(packageGraphSnapshot(profile).fingerprint, first.fingerprint)
+    assert.throws(() => packageGraphSnapshot(link))
+  } finally {
+    if (lstatSync(link).isSymbolicLink()) unlinkSync(link)
+  }
 })
 
 test('a process generation needs creation time and executable as well as PID', () => {
