@@ -239,6 +239,8 @@ pnpm run package:desktop:win:x64:unsigned
 
 Rehearsal 要求 checkout 等于所选远端分支的当前 head，执行构建、finalization、checksum 验证、隔离验收和产物上传，并跳过发布与远端 release discovery。发布要求使用当前 `master`；只有受保护的 release job 获得 `contents: write` 权限，它交叉检查下载的产物，以精确 commit tag 创建 draft，上传全部资产并发布，随后要求 GitHub 报告 release 不可变且资产 digest 匹配。最后一个 job 在发布后检查远端 release discovery。
 
+只读 rehearsal 使用按分支划分的并发组 `desktop-fork-rehearsal-<github.ref>`；发布保留全局 `desktop-fork-release` 组。不同分支可以独立验收，不占用发布组。两者均使用 `cancel-in-progress: false`，保护正在执行的工作，但不保证先进先出：同组的另一次 dispatch 可能替换待运行任务。避免重复触发同一分支的 rehearsal，也避免相互竞争的发布 dispatch。已经运行或等待中的任务保留其触发时 workflow 的并发设置。分开调度既不预留 sequence，也不放宽当前 ref、精确源码、CI、已安装升级、完整性或受保护发布的要求。
+
 Preparation 和 remote verification 使用步骤专属的只读 `DSH_DESKTOP_RELEASE_GITHUB_TOKEN` 为允许的元数据 GET 请求认证；该适配器的产物下载保持匿名。独立的已验证安装器基线获取步骤使用步骤专属的只读 `GH_TOKEN` 获取 GitHub 元数据与资产。两种凭据均不传入打包或应用启动步骤，也不记录到打包资源与 receipt。因此不能把整个构建与验收 workflow 称为无凭据流程。[Fork 发布决策](../../.agents/notes/implemented/architecture/2026-09-15-fork-owned-windows-desktop-release-channel.zh.md)定义认证限制。
 
 每个 release 包含交互式 NSIS installer、`release.json`、`build-receipt.json`、`SHA256SUMS` 与 `SHA512SUMS`。Manifest 与 receipt 锁定源码 commit 与 tree、lockfile 与 plan hash、构建工具与依赖 registry、fork package identity、installer size 与 hash、插件 capability 与结构化 source/receipt 版本、允许的 origin 与 redirect，以及重启后 completion 语义。独立的[已安装升级验收](tests/windows-installer-upgrade.ps1)只在一次性的 GitHub 托管 Windows runner 上执行经过验证的基线与候选安装器；这不授权在工作站上安装或重启。
