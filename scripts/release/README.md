@@ -6,7 +6,7 @@ This reference owns the controlled Core/Web GitHub-artifact path in [release.yml
 
 ## Scope and prerequisites
 
-The optional writer admits only `cloga/deepseek-harness`, PR 79 targeting `review/issue-72-official-base`, and version `0.1.6-alpha.4`. It requires an already-approved, existing `dsh-v<version>` tag. It never invokes npm publication, tag/ref writes, a build, installation, or package lifecycle under the write token. A future version requires a reviewed source change, not a different unchecked input.
+The optional writer admits only `cloga/deepseek-harness`, PR 80 targeting `review/issue-72-official-base`, and version `0.1.6-alpha.5`. It requires an already-approved, existing `dsh-v<version>` tag. It never invokes npm publication, tag/ref writes, a build, installation, or package lifecycle under the write token. A future version requires a reviewed source change, not a different unchecked input.
 
 The original dsh-family tarballs are Core/Web package artifacts, not a Desktop release, npm publication, or offline installer. Packed-install validation also uses vendored framework and Landlock entry tarballs that this artifact set does not include. Those companions, optional native platform packages, and other registry dependencies remain an external installation closure.
 

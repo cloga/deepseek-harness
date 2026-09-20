@@ -15,7 +15,7 @@ import {
 const sha = 'a'.repeat(40)
 const tree = 'b'.repeat(40)
 const head = 'c'.repeat(40)
-const version = '0.1.6-alpha.4'
+const version = '0.1.6-alpha.5'
 const selection: Selection = {
   repository: 'cloga/deepseek-harness', event: 'workflow_dispatch', publish: 'true',
   ref: `refs/tags/dsh-v${version}`, source: sha, version, reviewedHead: head, mergedCommit: sha,
@@ -56,7 +56,7 @@ describe('dispatch and checkout evidence', () => {
   it('admits only the approved existing tag dispatch and first attempt', () => {
     expect(() => { assertDispatch(selection) }).not.toThrow()
   })
-  it.each(['0.1.6-alpha.2.20260919.1', '0.1.6-alpha.3'])('rejects previous candidate %s even when its tag matches', (previous) => {
+  it.each(['0.1.6-alpha.2.20260919.1', '0.1.6-alpha.3', '0.1.6-alpha.4'])('rejects previous candidate %s even when its tag matches', (previous) => {
     expect(() => { assertDispatch({ ...selection, version: previous, ref: `refs/tags/dsh-v${previous}` }) }).toThrow()
   })
   it.each([
@@ -139,6 +139,16 @@ describe('bounded HTTP', () => {
     await expect(api.json('/releases', 'POST', {})).rejects.toThrow('uncertain')
     expect(calls).toBe(1)
   })
+  it('uses JSON negotiation for Actions logs and binary negotiation for release assets', async () => {
+    const accept: Array<string | null> = []
+    const api = new GitHub('secret', async (_url, options) => {
+      accept.push(new Headers(options?.headers).get('accept'))
+      return new Response('log', { status: 200 })
+    }, async () => {})
+    expect(await api.bytes('/actions/jobs/10/logs')).toEqual(Buffer.from('log'))
+    expect(await api.bytes('/releases/assets/20')).toEqual(Buffer.from('log'))
+    expect(accept).toEqual(['application/vnd.github+json', 'application/octet-stream'])
+  })
   it('never forwards authorization over a redirect', async () => {
     const auth: Array<string | null> = []
     const api = new GitHub('secret', async (_url, options) => {
@@ -158,14 +168,14 @@ const laneNames = ['all checks passed', 'node 24 / static', 'node 24 / coverage'
   'python runtime / release-shaped matrix / build (linux)']
 function run(id: number, path: string) {
   return { id, path, run_attempt: 1, event: 'pull_request', status: 'completed', conclusion: 'success', head_sha: head,
-    repository, head_repository: repository, pull_requests: [{ number: 79, head: { sha: head }, base: { ref: 'review/issue-72-official-base' } }] }
+    repository, head_repository: repository, pull_requests: [{ number: 80, head: { sha: head }, base: { ref: 'review/issue-72-official-base' } }] }
 }
 function fixture(mode = '') {
   const ci = run(100, '.github/workflows/ci.yml')
   const policy = run(101, '.github/workflows/issue-policy.yml')
   const ciJobs = laneNames.map((name, index) => ({ id: index + 1, run_id: 100, name, status: 'completed', conclusion: 'success', steps: index === 0 ? [] : [step] }))
   const requiredChecks = [{ name: 'all checks passed', head_sha: head, status: 'completed', conclusion: 'success', app: { id: 1, slug: 'github-actions' } }]
-  const pr = { number: 79, merged: true, merged_at: '2026-09-19T11:00:00Z', merge_commit_sha: sha, draft: false,
+  const pr = { number: 80, merged: true, merged_at: '2026-09-19T11:00:00Z', merge_commit_sha: sha, draft: false,
     user: { login: 'author' }, head: { sha: head, repo: repository }, base: { ref: 'review/issue-72-official-base', repo: repository } }
   const branch = { data: { repository: { ref: { branchProtectionRule: null }, pullRequest: { reviewDecision: 'APPROVED' } } } }
   const routes = new Map<string, unknown>([
@@ -175,7 +185,7 @@ function fixture(mode = '') {
     [`/git/commits/${sha}`, { sha, tree: { sha: tree }, parents: [{ sha: head }] }],
     [`/git/tags/${'e'.repeat(40)}`, { object: { type: 'commit', sha } }],
     [`/git/commits/${tested}`, { sha: tested, tree: { sha: tree }, parents: [{ sha: head }] }],
-    ['/pulls/79', pr], ['/graphql', branch],
+    ['/pulls/80', pr], ['/graphql', branch],
     ['/rulesets', [{ id: 1, target: 'tag', enforcement: 'active' }]],
     ['/rulesets/1', { id: 1, target: 'tag', enforcement: 'active', source_type: 'Repository', source: selection.repository,
       current_user_can_bypass: 'never', bypass_actors: [], conditions: { ref_name: { include: [selection.ref], exclude: [] } },
@@ -184,7 +194,7 @@ function fixture(mode = '') {
       { type: 'pull_request', parameters: { required_approving_review_count: 1 } },
       { type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'all checks passed', integration_id: 1 }] } },
     ]],
-    ['/pulls/79/reviews', [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', commit_id: head, author_association: 'COLLABORATOR' }]],
+    ['/pulls/80/reviews', [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', commit_id: head, author_association: 'COLLABORATOR' }]],
     ['/actions/runs/100', ci], ['/actions/runs/101', policy],
     ['/actions/runs/100/attempts/1/jobs', { jobs: ciJobs }],
     ['/actions/runs/101/attempts/1/jobs', { jobs: [{ id: 50, run_id: 101, name: 'Issue policy', status: 'completed', conclusion: 'success', steps: [] }] }],
@@ -217,7 +227,7 @@ function fixture(mode = '') {
     }
     const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status })
     if (method === 'POST' && path === '/graphql') {
-      if (typeof options?.body !== 'string' || !options.body.includes('pullRequest(number: 79)')) throw new Error('Wrong governing PR review query')
+      if (typeof options?.body !== 'string' || !options.body.includes('pullRequest(number: 80)')) throw new Error('Wrong governing PR review query')
       return json(routes.get(path))
     }
     if (method !== 'GET') {
@@ -281,14 +291,16 @@ function fixture(mode = '') {
 }
 
 describe('authoritative evidence and draft publication', () => {
-  it.each(['merged-pr', 'ci-association', 'policy-association'])('rejects superseded PR75 evidence: %s', async (variant) => {
-    const f = fixture()
-    if (variant === 'merged-pr') f.pr.number = 75
-    if (variant === 'ci-association') f.ci.pull_requests = [{ number: 75, head: { sha: head }, base: { ref: 'review/issue-72-official-base' } }]
-    if (variant === 'policy-association') f.policy.pull_requests = [{ number: 75, head: { sha: head }, base: { ref: 'review/issue-72-official-base' } }]
-    await expect(f.publish()).rejects.toThrow()
-    expect(f.writes).toHaveLength(0)
-  })
+  it.each([75, 79].flatMap(number => ['merged-pr', 'ci-association', 'policy-association'].map(variant => ({ number, variant }))))(
+    'rejects superseded PR$number evidence: $variant', async ({ number, variant }) => {
+      const f = fixture()
+      if (variant === 'merged-pr') f.pr.number = number
+      if (variant === 'ci-association') f.ci.pull_requests = [{ number, head: { sha: head }, base: { ref: 'review/issue-72-official-base' } }]
+      if (variant === 'policy-association') f.policy.pull_requests = [{ number, head: { sha: head }, base: { ref: 'review/issue-72-official-base' } }]
+      await expect(f.publish()).rejects.toThrow()
+      expect(f.writes).toHaveLength(0)
+    },
+  )
   it('accepts empty post-merge PR associations for successful final-head CI and policy runs', async () => {
     const f = fixture()
     f.ci.pull_requests = []
@@ -297,7 +309,7 @@ describe('authoritative evidence and draft publication', () => {
   })
   it.each(['number', 'head', 'base', 'not-array'])('rejects supplied run associations without the exact governing PR: %s', async (variant) => {
     const f = fixture()
-    const association = { number: 79, head: { sha: head }, base: { ref: 'review/issue-72-official-base' } }
+    const association = { number: 80, head: { sha: head }, base: { ref: 'review/issue-72-official-base' } }
     if (variant === 'number') association.number = 76
     if (variant === 'head') association.head.sha = sha
     if (variant === 'base') association.base.ref = 'other-base'
@@ -412,7 +424,7 @@ describe('authoritative evidence and draft publication', () => {
   it('does not invent mandatory external reviews or block optional skipped checks', async () => {
     const f = fixture()
     f.routes.set('/rules/branches/review%2Fissue-72-official-base', [])
-    f.routes.set('/pulls/79/reviews', [])
+    f.routes.set('/pulls/80/reviews', [])
     f.branch.data.repository.pullRequest.reviewDecision = ''
     f.ciJobs.push({ id: 99, run_id: 100, name: 'optional keyed e2e', status: 'completed', conclusion: 'skipped', steps: [] })
     f.requiredChecks.push({ name: 'manual publisher', head_sha: head, status: 'in_progress', conclusion: '', app: { id: 1, slug: 'github-actions' } })
