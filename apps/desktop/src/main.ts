@@ -226,6 +226,7 @@ async function main(): Promise<void> {
   let mutationPending: ReturnType<DesktopProjectManager['mutate']> | undefined
   let mutationAbort: AbortController | undefined
   let recoveryPending: Promise<void> | undefined
+  let resetConfirmationAbort: AbortController | undefined
   let rendererImpactGeneration = 0
   let managedCompletionChecked = false
   const locale = resolveDesktopLocale(app.getLocale())
@@ -335,6 +336,35 @@ async function main(): Promise<void> {
   }
   recoverApplication = (action): Promise<void> => runRecovery(async () => {
     await startup?.catch(() => undefined)
+    if (action === 'reset') {
+      if (!profileRecoveryAvailable()) throw new Error(messages.startupReinstallAdvice)
+      const window = mainWindow
+      if (window === undefined || window.isDestroyed() || hasQuitStarted()) return
+      const cancellation = new AbortController()
+      resetConfirmationAbort = cancellation
+      const onClosed = (): void => { cancellation.abort() }
+      window.once('closed', onClosed)
+      try {
+        const result = await dialog.showMessageBox(window, {
+          type: 'warning',
+          title: messages.resetConfiguration,
+          message: messages.resetConfigurationPrompt,
+          detail: `${messages.startupConfigurationAdvice}\n\n${messages.resetConfigurationWarning}`,
+          buttons: [messages.confirmConfigurationReset, messages.cancel],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true,
+          signal: cancellation.signal,
+        })
+        if (result.response !== 0 || cancellation.signal.aborted || hasQuitStarted() || window.isDestroyed()) {
+          if (!hasQuitStarted() && !window.isDestroyed()) publishBackend(backendState())
+          return
+        }
+      } finally {
+        window.removeListener('closed', onClosed)
+        if (resetConfirmationAbort === cancellation) resetConfirmationAbort = undefined
+      }
+    }
     await backend.stop()
     if (action === 'restart') {
       app.relaunch()
@@ -860,6 +890,7 @@ async function main(): Promise<void> {
     if (quitting) return
     quitting = true
     mutationAbort?.abort()
+    resetConfirmationAbort?.abort()
     const drain = mutationPending !== undefined || recoveryPending !== undefined
       ? Promise.allSettled([mutationPending, recoveryPending]).then(() => backend.close())
       : backend.close()

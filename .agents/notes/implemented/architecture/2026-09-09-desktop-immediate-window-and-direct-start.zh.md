@@ -14,9 +14,9 @@ Status: implemented
 
 Electron 在 profile 校准或 Host 启动前创建带本地加载页的主窗口。该页面仅依赖已打包的壳资源，并通过自有 preload 接收 starting、ready 或 error 状态。就绪后在同一窗口加载产品 UI；启动失败时显示诊断和可用恢复操作。加载期间关闭窗口会取消后续启动工作，并等待正在启动的子进程退出。
 
-主窗口提供恢复操作，因为失败的 Host 无法提供自身控件。错误页保留诊断、重启和重装指导。只有已打包应用加载了运行时元数据且资源可用时，才提供禁用插件和重置 Desktop。重置会删除 profile 中除所持锁文件外的所有内容，不保留备份；共享产品数据和 Harness-home 环境文件保持完整。profile 目录保持原位，避免清理期间另一事务获取替代锁。preload 不可用时，独立恢复控件使用被拦截的表单导航。渲染进程崩溃会使导航缓存失效，以重新加载启动页。
+主窗口提供恢复操作，因为失败的 Host 无法提供自身控件。错误页保留诊断、重启和重装指导。只有已打包应用加载了运行时元数据且资源可用时，才提供禁用插件和重置 Desktop。重置须按[用户清单决策](../bug-fix/2026-09-19-desktop-user-inventory-guards.zh.md)取得原生破坏性操作确认并保留经过验证的私有恢复副本；共享产品数据和 Harness-home 环境文件保持完整。profile 目录保持原位，避免清理期间另一事务获取替代锁。preload 不可用时，独立恢复控件使用被拦截的表单导航。渲染进程崩溃会使导航缓存失效，以重新加载启动页。
 
-Desktop 直接准备 profile 后启动实际 Host，不另行启动健康检查后端。包修改保留依赖验证、获准生命周期构建、运行时标识检查和锁。失败后保留部分修改，供显式修复；不自动回滚 profile。
+[验证 Release 事务决策](2026-09-15-desktop-verified-release-plugin-transactions.zh.md)以 staged 健康检查及激活回滚，取代本决策中的原地准备和不回滚行为。本决策继续负责尽早创建窗口及不依赖 preload 的恢复控件。
 
 本决策部分取代[打包决策](2026-08-25-electron-desktop-packaging-and-updates.zh.md)和[内置运行时决策](2026-09-08-desktop-bundled-runtime-and-external-plugins.zh.md)中的 staging 后端探针与延迟创建主窗口。这两份记录仍保留发布、签名、传输、资源归属与依赖事务的理由。完整运行时文件验证仍属于打包操作。
 

@@ -35,7 +35,7 @@ Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.
 
 准备与打包共享 `app-builder-lib` 26.15.3 的元数据转换，并显式启用 script/keyword 删除设置。运行时包名、版本、模块入口声明、依赖与 `dsh` 元数据仍与 shell 的 fork 元数据分离。删除包元数据并非在所有情况下都不影响行为：依赖可能在运行时读取被删除的字段，因此小型 ASAR canary 不能替代完整规范化产物的 smoke 与打包发布演练。[内置运行时决策](../../.agents/notes/implemented/architecture/2026-09-08-desktop-bundled-runtime-and-external-plugins.zh.md)负责内部 API 版本耦合与验证范围限制。
 
-1. 主窗口在 profile 准备或后端启动前显示本地加载页。新 profile 创建清单并记录运行时身份，不物化共享包链接。复用会检查运行时身份与锁文件内容；打包的插件 plan 还必须准确核对已安装版本、receipt、本地产物哈希与启用状态。
+1. 主窗口在 profile 准备或后端启动前显示本地加载页。新 profile 创建清单并记录运行时身份，不物化共享包链接。已有包元数据但运行时元数据缺失时，初始化会停止而不覆盖 profile；孤立的用户 receipt、bundle 或来源 lock 需要人工检查。复用会检查运行时身份与锁文件内容；打包的插件 plan 还必须准确核对已安装版本、receipt、本地产物哈希与启用状态。
 2. 应用升级先把目标运行时元数据和目标插件清单一起暂存，再检查 peer。过时的 release-owned 插件不会阻止计划中的替换或删除。Profile 配置和手动插件版本会保留。
 3. 每次 profile 变更只复制元数据与保留的产物，绝不复制 `node_modules`。内置 pnpm 在 staging 中禁用脚本重建私有依赖，验证共享 peer 兼容性，再运行获准的待执行构建并再次验证。运行时升级绝不在活动的保留 profile 中执行包操作。
 4. 插件添加、更新和删除使用内置 pnpm 及 Desktop 独有的包管理器状态。`githubRelease` 来源绑定精确 Release、资产、commit、大小、hash、integrity、包身份与依赖 registry 元数据；Desktop 只通过批准的 GitHub 主机下载，并在禁用生命周期脚本的情况下从经过验证的本地 tgz 安装根包。保留的宿主包必须声明为 peer。运行时模式根据打包清单验证这些 peer，不要求 profile 链接。
@@ -79,9 +79,11 @@ GitHub ref 接受分支名、tag 与 commit，包括含斜杠的分支名；不�
 
 Windows Ops 修改 [`release/cloga-windows-x64.json`](release/cloga-windows-x64.json) 中的 `desktopProvisioning`，然后运行受保护的 `desktop-fork-release.yml` workflow，同时传入经过评审的 plan version（`confirm_version`）与源码 commit（`expected_source_sha`）；[发布通道决策](../../.agents/notes/implemented/architecture/2026-09-15-fork-owned-windows-desktop-release-channel.zh.md)定义源码锁定校验。直接使用现有不可变的版本化 tgz 与 `SHA256SUMS` 资产，不要重新发布。Prepare 为 packaging 设置 `DSH_DESKTOP_PLUGIN_PROVISIONING_PLAN` 并嵌入 plan 与 capability schema 3。Finalization 拒绝经过评审的输入、打包 capability 与 plan、发布字节和 receipt hash 之间的不一致。它将打包 plan 发布为 `desktop-provisioning.json`，在 `build-receipt.json` 中记录文件 hash 与规范 plan hash，并通过 `SHA256SUMS` 和 `SHA512SUMS` 覆盖 release 文件。部署需要包含实际非空 provider plan 的 release。
 
-Desktop 在启动时把 release-owned 插件协调到打包 plan，同时保留计划包名之外的手动 registry、来源快照与 verified-release 插件及其启用状态。计划中的包名遵循其精确来源，即使用户曾在该名称下安装不同包。Required 条目构成经过验证的基线。每个 optional 条目加入独立 candidate；download、validation、install、graph 或 health 失败只排除该条目，并记录阶段与原因，不保留成功 receipt。Required 失败保留活动 profile。复用要求 desired/result 成员完全一致，来源、receipt、版本、产物字节与启用状态匹配，且没有额外 release-owned 根包。空 plan 只删除 release-owned 根包。
+Desktop 在启动时把 release-owned 插件协调到打包 plan，同时保留手动 registry、来源快照与 verified-release 声明，包括已禁用插件。同名手动安装会阻止自动替换，只有已启用、user-owned 且验证来源与计划完全相同的安装例外。其他来源、版本、产物、commit、安装类型或启用状态冲突需要显式用户操作。Required 条目构成经过验证的基线。每个 optional 条目在独立 candidate 中测试；失败会记录阶段与原因，不保留成功 receipt。如果排除 optional 条目会移除已有用户插件，则整次事务失败并保留活动 profile。复用要求 desired/result 成员完全一致，来源、receipt、版本、产物字节与启用状态匹配，且没有额外 release-owned 根包。空 plan 只删除 release-owned 根包。
 
-私有 receipt 存储将用户或发行版归属与来源验证分别记录。显式手动验证安装记录用户归属，包括对同一来源的重装；重建该精确来源时保留用户归属。旧数据仅在先前一致的 provisioning state 中存在 active、相同 receipt 且 manifest 引用匹配时推断发行版归属，其他验证插件保留用户归属。旧记录无法区分留下完全相同 receipt 的手动重装。归属迁移与变更随暂存 profile 一起提交或回滚。[插件保留决策](../../.agents/notes/implemented/bug-fix/2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md)负责这些删除与迁移规则。
+私有 receipt 存储将用户或发行版归属与来源验证分别记录。显式手动验证安装记录用户归属，包括对同一来源的重装；重建该精确来源时保留用户归属。只有 receipt 产物引用与声明匹配且不存在冲突来源快照时，release ownership 才能把该声明排除在用户保留检查之外。旧数据仅在先前一致的 provisioning state 中存在 active、相同 receipt 且 manifest 引用匹配时推断发行版归属，其他验证插件保留用户归属。旧记录无法区分留下完全相同 receipt 的手动重装。归属迁移与变更随暂存 profile 一起提交或回滚。[插件保留决策](../../.agents/notes/implemented/bug-fix/2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md)负责归属迁移；[用户清单决策](../../.agents/notes/implemented/bug-fix/2026-09-19-desktop-user-inventory-guards.zh.md)负责初始化与冲突检查。
+
+每次包事务在 prune 或包操作前捕获用户依赖 specifier、启用状态、receipt 身份与 owner、来源 lock 身份，以及经过校验的产物摘要。Receipt 和快照引用必须与声明的依赖一致；矛盾或并存的来源需要人工检查。事务冻结准备好的目标声明，在 staged 健康检查后及最终激活后核对保留的声明和产物字节，并在替换前确认活动声明仍匹配。显式 add、install、update 和 remove 只能替换其验证确定的目标名称；toggle 只能改变该目标的启用标记，disable-all 只能改变启用标记。这些检查不能恢复首次捕获前已经被一致清空的清单。带版本的激活证据和保留的私有操作记录支持后续恢复与归因，但不能识别更早且未被记录的操作方。
 
 每次 staged 冻结 pnpm 安装前，Desktop 仅规范化产物 importer specifier 中的 Windows 分隔符差异；候选项必须精确匹配 manifest 中的规范引用，由已验证的来源快照 lock 或 verified-release receipt 支持，且产物 SHA-256 匹配。既有规范化器限制文件读取大小，拒绝不安全的文件和产物目录，并以原子替换方式写入 staged 锁文件。它不改变包解析结果、版本、integrity 或 manifest；无关漂移仍由冻结校验检查。
 
@@ -89,9 +91,11 @@ Windows Ops 验证 `resources/managed-update/capability.json` 中的 `desktopNat
 
 加载页不依赖 Host。错误页提供重启和重装指导。只有已打包应用的资源支持 profile 恢复时，才提供禁用插件和重置 Desktop；开发模式和早期初始化失败只提供重启。应用菜单仍提供插件管理器入口。每次后端启动前都会检查运行时标识。
 
-重置删除 `$DSH_HOME/profiles/desktop` 中的所有条目，然后在持有外部事务锁时初始化内置 profile。它删除 Desktop 配置和已安装第三方包，不保留备份。共享任务、设置和 Harness-home `.env` 保持不变。壳资源和 preload 失败时使用独立文档显示可用恢复操作和诊断；其控件不依赖 preload。
+启动页和不依赖 preload 的应急页都必须先取得原生破坏性操作确认，默认选择取消，然后重置才会停止 Host。取消会恢复恢复操作控件；退出应用或关闭窗口会使迟到的确认失效。在持有事务锁时，Desktop 将配置和产物复制到 `$DSH_HOME/desktop/profile-recovery/reset-*`，排除生成的 `node_modules`，校验并同步文件，并在删除活动 profile 前发布副本 receipt。配置链接或复制失败会停止重置，并尝试重新启动未改变的 Host。随后重置初始化内置 profile；独立 outcome 记录最终 Host 就绪或失败。共享任务、设置和 Harness-home `.env` 保持不变。副本可能包含私有配置，既不会上传，也不会自动恢复；不要把其内容附到公开报告中。
 
-包事务持有 `$DSH_HOME/desktop/profile.lock`，直到 pnpm 进程退出并完成激活。两次目录重命名记录在 `$DSH_HOME/desktop/profile-activation.json` 中；启动在同一个锁下恢复中断且未提交的 profile。恢复失败时，保留 journal 和其中指定的 `.desktop-transaction-*` 目录及其 `rollback`，不要删除，也不要在保留 profile 中运行 pnpm。运行时解析不改动旧 symlink 或 Windows junction；显式 profile 清理绝不跟随目录链接。原生构建仍受 profile 中经过审查的 `allowBuilds` 列表约束。
+包事务持有 `$DSH_HOME/desktop/profile.lock`，直到 pnpm 退出并完成激活。版本 2 的 `profile-activation.json` 记录操作身份及前后清单指纹。恢复在重命名或清理前核对活动及保留的候选。版本 1 的 journal 不能授权手动清单不同或运行时、workspace、必需 lock 元数据不完整的恢复。孤立 rollback 阻止初始化空活动路径；健康 profile 仍可与孤立 staging 共存。验证失败会保留 journal 和事务目录供检查。不要删除这些副本，也不要在保留 profile 中运行 pnpm。运行时解析不改动旧链接；清理绝不跟随目录链接，原生构建继续使用经过审查的 `allowBuilds` 策略。
+
+`$DSH_HOME/desktop/profile-operations` 下的私有记录在激活 journal 清理后继续保留操作类型、验证确定的目标名称、事务身份、清单 hash/名称及结果。保留上限为 64 组记录，包括部分写入，每条最多 128 KiB；不删除未知文件。来源 URL、原始错误、提示词和配置内容不进入记录。原子发布记录之前同步文件数据，但不保证断电后的目录持久性。提交后审计失败会保留 committed journal 和 rollback，而不是撤销已提交 profile 或宣称成功。
 
 ### Fork 拥有的 Windows 托管更新
 

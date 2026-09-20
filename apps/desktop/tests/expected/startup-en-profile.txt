@@ -1,6 +1,6 @@
 DeepSeek Harness could not start
 Choose a recovery action below. Disabling third-party plugins retains their files.
-Reset Desktop deletes all Desktop profile configuration and third-party plugins without a backup, then starts a fresh profile. Shared tasks and settings are retained.
+Reset first saves a verified copy of configuration and plugin artifacts under the Harness home (desktop/profile-recovery), then removes the active Desktop configuration and plugins. node_modules is excluded; restoration is manual. If copying fails, nothing is deleted. Shared tasks and settings are retained.
 If application files are missing or damaged, close the application and reinstall it. Your tasks are stored separately.
 Failure details
 Close and restart

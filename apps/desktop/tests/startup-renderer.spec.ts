@@ -69,7 +69,7 @@ it('shows English loading and recovery actions without a Host document', async (
   expect(page.copy()).toMatchInlineSnapshot(`
     "DeepSeek Harness could not start
     Choose a recovery action below. Disabling third-party plugins retains their files.
-    Reset Desktop deletes all Desktop profile configuration and third-party plugins without a backup, then starts a fresh profile. Shared tasks and settings are retained.
+    Reset first saves a verified copy of configuration and plugin artifacts under the Harness home (desktop/profile-recovery), then removes the active Desktop configuration and plugins. node_modules is excluded; restoration is manual. If copying fails, nothing is deleted. Shared tasks and settings are retained.
     If application files are missing or damaged, close the application and reinstall it. Your tasks are stored separately.
     Plugin failed to load
     Close and restart
@@ -97,7 +97,7 @@ it('shows Chinese loading and recovery copy', async () => {
   expect(page.copy()).toMatchInlineSnapshot(`
     "DeepSeek Harness 无法启动
     请选择下方的恢复操作。禁用第三方插件会保留插件文件。
-    重置 Desktop 会删除桌面端的全部 profile 配置和第三方插件，不保留备份，然后重新初始化并启动。共享任务和设置会保留。
+    重置会先将配置和插件制品的已校验副本保存在 Harness 数据目录下的 desktop/profile-recovery，再清除当前 Desktop 配置和插件。副本不含 node_modules，需手动还原；复制失败时不会删除原文件。共享任务和设置保留。
     如果应用文件缺失或损坏，请关闭应用并重新安装。任务数据存储在独立位置。
     插件加载失败
     关闭并重启

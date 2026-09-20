@@ -979,6 +979,7 @@ describe('desktop main startup', () => {
   })
 
   it.each(['plugins', 'reset'])('runs %s recovery from a document with a broken preload', async (action) => {
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 0 })
     await import('../src/main.ts')
     await harness.preparing.promise
     const window = harness.windows[0]!
@@ -999,7 +1000,8 @@ describe('desktop main startup', () => {
     expect(window.urls.at(-1)).toBe('dsh-app://app/index.html')
   })
 
-  it('allows a full profile reset for an unclassified startup failure', async () => {
+  it('allows a confirmed full profile reset for an unclassified startup failure', async () => {
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 0 })
     await import('../src/main.ts')
     await harness.preparing.promise
     harness.prepared.resolve()
@@ -1013,6 +1015,98 @@ describe('desktop main startup', () => {
     harness.hosts[1]!.ready.resolve()
     await reset
     expect(invoke(DESKTOP_IPC.backendStatus)).toEqual({ phase: 'ready' })
+  })
+
+  it.each(['ipc', 'emergency'])('cancels destructive reset without changing the profile through %s', async (entry) => {
+    harness.pluginsEnabled = true
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    const window = harness.windows[0]!
+    if (entry === 'emergency') window.webContents.emit('preload-error', {}, 'preload-app.cjs', new Error('preload unavailable'))
+    harness.prepared.reject(new Error('profile startup failed'))
+    await harness.errorPublished.promise
+    const before = [...window.urls]
+    window.webContents.send.mockClear()
+    if (entry === 'ipc') await Promise.resolve(invoke(DESKTOP_IPC.configurationReset))
+    else {
+      window.webContents.emit('will-navigate', { preventDefault: vi.fn() }, 'dsh-recovery://reset/')
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(window, expect.objectContaining({
+      type: 'warning', defaultId: 1, cancelId: 1,
+      message: 'Delete all Desktop plugins and configuration?',
+      buttons: ['Delete Plugins and Reset', 'Cancel'],
+    }))
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
+    const options = harness.dialog.showMessageBox.mock.calls[0]?.[1] as { detail: string }
+    expect(options.detail).toContain('not a normal update or restart')
+    expect(harness.mutations).toEqual([])
+    expect(harness.pluginsEnabled).toBe(true)
+    expect(harness.hosts).toHaveLength(0)
+    expect(window.urls).toEqual(before)
+    expect(window.webContents.send).toHaveBeenCalledWith(DESKTOP_IPC.backendState, expect.objectContaining({ phase: 'error' }))
+  })
+
+  it.each(['en', 'zh-CN'])('shows %s destructive reset consent with cancellation as the default', async (locale) => {
+    vi.spyOn(harness.app, 'getLocale').mockReturnValue(locale)
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.reject(new Error('profile startup failed'))
+    await harness.errorPublished.promise
+    await Promise.resolve(invoke(DESKTOP_IPC.configurationReset))
+    const options = harness.dialog.showMessageBox.mock.calls[0]?.[1] as {
+      title: string
+      message: string
+      detail: string
+      buttons: string[]
+      defaultId: number
+      cancelId: number
+    }
+    expect(options).toMatchObject({ defaultId: 1, cancelId: 1 })
+    await expect([options.title, options.message, options.detail, ...options.buttons, ''].join('\n'))
+      .toMatchFileSnapshot(join(import.meta.dirname, 'expected', `reset-${locale}.txt`))
+    expect(harness.mutations).toEqual([])
+  })
+
+  it.each(['quit', 'window-close'])('aborts reset consent on %s and ignores a late affirmative response', async (action) => {
+    harness.pluginsEnabled = true
+    harness.dialog.showMessageBox.mockImplementation((_window: unknown, options: { signal: AbortSignal }) => new Promise((resolve) => {
+      options.signal.addEventListener('abort', () => { resolve({ response: 0 }) }, { once: true })
+    }))
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.reject(new Error('profile startup failed'))
+    await harness.errorPublished.promise
+    const window = harness.windows[0]!
+    const closedListeners = window.listenerCount('closed')
+    const reset = Promise.resolve(invoke(DESKTOP_IPC.configurationReset))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
+    await expect(Promise.resolve(invoke(DESKTOP_IPC.configurationReset))).rejects.toThrow('in progress')
+    if (action === 'quit') harness.app.quit()
+    else window.close()
+    await reset
+    if (action === 'quit') await harness.quitCompleted.promise
+    expect(harness.mutations).toEqual([])
+    expect(harness.pluginsEnabled).toBe(true)
+    expect(harness.hosts).toHaveLength(0)
+    expect(window.listenerCount('closed')).toBe(closedListeners)
+  })
+
+  it('keeps plugins when the reset confirmation dialog fails', async () => {
+    harness.pluginsEnabled = true
+    harness.dialog.showMessageBox.mockRejectedValue(new Error('dialog unavailable'))
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.reject(new Error('profile startup failed'))
+    await harness.errorPublished.promise
+    await Promise.resolve(invoke(DESKTOP_IPC.configurationReset))
+    expect(harness.mutations).toEqual([])
+    expect(harness.pluginsEnabled).toBe(true)
+    expect(harness.hosts).toHaveLength(0)
+    expect(invoke(DESKTOP_IPC.backendStatus)).toMatchObject({ phase: 'error', message: 'dialog unavailable' })
   })
 
   it('keeps a self-contained reinstall document in the main window after preload failure', async () => {
