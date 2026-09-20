@@ -1,0 +1,11 @@
+{
+  "startup": {
+    "status": "recovery-required",
+    "message": "installer-exit--805306369"
+  },
+  "explicitRecovery": {
+    "status": "complete",
+    "sequence": 19,
+    "version": "1.2.3"
+  }
+}
