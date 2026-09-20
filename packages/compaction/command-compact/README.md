@@ -43,6 +43,7 @@ The command turns each expected failure into a stable message you can show direc
 |---|---|
 | Compaction already running, or the agent is mid-turn | `Compaction is unavailable because this process has an active compaction, or the agent is not idle.` |
 | The history changed while condensing | `The history selected for compaction changed before it could be replaced. The attempt is recorded in the session log.` |
+| Summary output reached its token cap | `The compaction summary reached its output token cap. No incomplete checkpoint was committed. Try a different selected model or adjust the configured summary budget.` |
 | No useful summary could be produced | `Compaction could not produce a useful summary. The attempt is recorded in the session log.` |
 | Condensation did not finish cleanly | `Compaction did not finish cleanly; some session history may have changed. Inspect the current session state before retrying.` |
 | The conversation could not be saved | `Compaction finished, but the session could not be saved.` |

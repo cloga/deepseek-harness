@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import { createScope } from '@deepseek-ai/dsh-scope'
 import {
   agentEvents,
   installModelSelection,
+  readModelSelection,
   type Agent,
   type ModelSelection,
   type ModelSelectionRef,
@@ -72,6 +74,53 @@ async function preStep(
 }
 
 describe('installModelSelection()', () => {
+  it('reads a detached current selection without assembly or consuming the pending choice', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    const agent = createAgent()
+    const scope = createScope(ctx, agent)
+    const selection: ModelSelectionRef = { current: undefined, assembled: { provider: 'old', model: 'old' } }
+    const dispose = installModelSelection(scope.ctx, selection)
+    const read = () => readModelSelection(scope.ctx, agent)
+    try {
+      expect(read()).toBeUndefined()
+      selection.current = { provider: 'next', model: 'next', reasoningEffort: ReasoningEffortId('low') }
+      const snapshot = read()
+      expect(snapshot).toEqual(selection.current)
+      expect(snapshot).not.toBe(selection.current)
+      selection.current.model = 'later'
+      expect(snapshot?.model).toBe('next')
+      expect(read()?.model).toBe('later')
+      expect(selection.assembled).toEqual({ provider: 'old', model: 'old' })
+      expect(agent.session.requestHeader()).toBeUndefined()
+      dispose()
+      expect(read()).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('isolates selection queries between agent scopes and removes the query on scope disposal', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    const a = createAgent()
+    const b = createAgent()
+    const scopeA = createScope(ctx, a)
+    const scopeB = createScope(ctx, b)
+    installModelSelection(scopeA.ctx, { current: { provider: 'a', model: 'a' }, assembled: undefined })
+    installModelSelection(scopeB.ctx, { current: { provider: 'b', model: 'b' }, assembled: undefined })
+    const read = (agent: Agent) => readModelSelection(ctx, agent)
+    try {
+      expect(read(a)).toEqual({ provider: 'a', model: 'a' })
+      expect(read(b)).toEqual({ provider: 'b', model: 'b' })
+      await scopeA.dispose()
+      expect(read(a)).toBeUndefined()
+      expect(read(b)).toEqual({ provider: 'b', model: 'b' })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('snapshots prompt variables and request routing together, then disposes its listeners', async () => {
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)

@@ -10,6 +10,7 @@ import {
   type LlmCallConfig,
   type ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
+import { scopeTarget, type Scoped } from '@deepseek-ai/dsh-scope'
 import type { PreStepDecision } from './runtime-types.ts'
 
 /** Complete provider, model, and optional reasoning effort selected for one live Agent. */
@@ -28,6 +29,37 @@ export interface ModelSelectionRef {
   current: ModelSelection | undefined
   /** Selection captured when the current step entered prompt assembly. */
   assembled: ModelSelection | undefined
+}
+
+/** Identity-only subject of a model-selection query; no Agent methods are required. */
+export interface ModelSelectionQuery {
+  /** The exact object used as the selection owner's scope key. */
+  readonly owner: object
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /**
+     * Read a detached snapshot without assembling a prompt or consuming a selection.
+     * Scope-filtered dispatch uses payload.owner as the routing key.
+     * @param payload.owner - exact identity whose current selection is queried.
+     * @param next - delegate when this listener owns no current selection.
+     * @returns the current selection, or undefined when no owner supplies one.
+     * @mode waterfall
+     */
+    'model-selection/query'(this: Scoped<ModelSelectionQuery>, payload: ModelSelectionQuery, next: () => ModelSelection | undefined): ModelSelection | undefined
+  }
+}
+
+/**
+ * Read the selection installed for one scope identity without entering a model turn.
+ * @param ctx - context through which to dispatch the scoped query.
+ * @param owner - exact object used as the selection owner's scope key.
+ * @returns a detached current selection, or undefined when no selection is installed.
+ */
+export function readModelSelection(ctx: Context, owner: object): ModelSelection | undefined {
+  const query: ModelSelectionQuery = { owner }
+  return ctx.waterfall(scopeTarget(query, owner), 'model-selection/query', query, () => undefined)
 }
 
 function sameRoute(left: ModelSelection, right: ModelSelection): boolean {
@@ -74,6 +106,15 @@ function modelSwitchNotice(previous: ModelSelection, selected: ModelSelection) {
  * @returns Disposer for all scoped waterfall listeners.
  */
 export function installModelSelection(agentCtx: Context, selection: ModelSelectionRef): () => void {
+  const disposeSelection = agentCtx.on('model-selection/query', (_payload, next) => {
+    const selected = selection.current
+    if (selected === undefined) return next()
+    return {
+      provider: selected.provider,
+      model: selected.model,
+      ...selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort },
+    }
+  })
   const disposeAssembly = agentCtx.on('system-prompt/assemble', async (_assembly, _context, next) => {
     const selected = selection.current
     const assembled = await next()
@@ -120,6 +161,7 @@ export function installModelSelection(agentCtx: Context, selection: ModelSelecti
     { prepend: true },
   )
   return () => {
+    disposeSelection()
     disposeAssembly()
     disposeRequest()
     disposeNotice()

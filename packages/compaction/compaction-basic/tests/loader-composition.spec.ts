@@ -6,7 +6,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
-import LlmRuntime from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createAssistantMessage, createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { installModelSelection, type Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
@@ -85,6 +87,77 @@ describe('real Loader composition', () => {
       retainRatio: 0.125,
       auto: false,
     })
+  })
+
+  it('uses a newly selected model and its YAML policy for manual condensation', async () => {
+    const loaded = await loadYaml([
+      "- name: '@deepseek-ai/dsh-llm'",
+      "- name: '@deepseek-ai/dsh-session'",
+      "- name: '@deepseek-ai/dsh-session-projection'",
+      "- name: '@deepseek-ai/dsh-token-meter'",
+      "- name: '@deepseek-ai/dsh-compaction-basic'",
+      '  config:',
+      '    auto: false',
+      '    maxTokens: 800',
+      '    modelPolicies:',
+      '      - provider: selected',
+      '        model: summary-model',
+      '        maxTokens: 1600',
+    ])
+    const requests: GenerateOptions[] = []
+    loaded.llm.registerAdapter(['old', 'selected'], new class extends LlmAdapter {
+      override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({ provider, id: model, name: model })
+      }
+      override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        requests.push(options)
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'checkpoint' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }())
+    const session = loaded.sessions.create()
+    for (let turn = 1; turn <= 2; turn += 1) {
+      session.append('turn/start', { turn })
+      session.append('step/start', { turn, step: 1 })
+      session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'important prior work '.repeat(100) }],
+        source: { kind: 'user' },
+      }), { surfaceOp: 'append' })
+      if (turn === 1) session.append('request/header', {
+        header: { config: { provider: 'old', model: 'old-model' } }, reason: 'initial',
+      })
+      session.append('assistant/message', {
+        turn, step: 1, stream: [],
+        message: createAssistantMessage({
+          content: [{ type: 'text', text: 'prior answer '.repeat(100) }],
+          source: { provider: 'old', model: 'old-model' },
+        }),
+      }, { surfaceOp: 'append' })
+      session.append('step/end', { turn, step: 1 })
+      session.append('turn/end', { turn, reason: { kind: 'completed' } })
+    }
+    const controller = new AbortController()
+    // Only maintenance scheduling is stubbed; the YAML-loaded backend, LLM,
+    // selection owner, policy resolution, and durable replacement run for real.
+    const agent = {
+      ctx: loaded, session, options: { provider: 'old', model: 'old-model' },
+      runMaintenance: <T>(task: (signal: AbortSignal) => Promise<T>) => task(controller.signal),
+    } as Agent
+    installModelSelection(loaded, {
+      current: { provider: 'selected', model: 'summary-model' }, assembled: undefined,
+    })
+    const header = session.requestHeader()
+    const result = await loaded.compaction.compactNow(agent, controller.signal)
+    expect(result).not.toBeNull()
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({
+      provider: 'selected', model: 'summary-model', maxTokens: 1600, purpose: 'compaction',
+    })
+    expect(session.requestHeader()).toBe(header)
+    const summaries = session.snapshotEvents().filter(event => event.type === 'compaction/summary')
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]?.data).toMatchObject({ provider: 'selected', model: 'summary-model', maxTokens: 1600 })
   })
 
   it('rejects stale token-meter config after Schemastery normalization', async () => {
