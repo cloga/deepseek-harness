@@ -68,7 +68,7 @@ describe('packaged Copilot usage acceptance', () => {
   })
 
   it.each([{ trigger: 1, text: 0 }, { trigger: 0, text: 1 }])(
-    'rejects emitted signed-out usage evidence %#', async counts => {
+    'rejects emitted signed-out usage evidence %#', async (counts) => {
       await expect(inspectSignedOutCopilotUsage(page(counts))).rejects.toThrow()
     },
   )

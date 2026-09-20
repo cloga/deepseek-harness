@@ -30,15 +30,22 @@ export function inspectCopilotUsageCapability(profile: string): CopilotUsageCapa
   const raw: unknown = JSON.parse(readFileSync(join(
     profile, 'node_modules', 'dsh-github-copilot', 'deployment-baseline.json',
   ), 'utf8'))
-  assert(typeof raw === 'object' && raw !== null && 'capabilities' in raw && Array.isArray(raw.capabilities))
-  const capability = raw.capabilities.find(candidate => typeof candidate === 'object' && candidate !== null
-    && 'id' in candidate && candidate.id === 'account-quota-composer-usage')
+  assert(typeof raw === 'object' && raw !== null)
+  const capabilities = Reflect.get(raw, 'capabilities') as unknown
+  assert(Array.isArray(capabilities))
+  const capability = capabilities.find((candidate: unknown) => typeof candidate === 'object' && candidate !== null
+    && Reflect.get(candidate, 'id') === 'account-quota-composer-usage') as unknown
   assert(typeof capability === 'object' && capability !== null)
-  assert('required' in capability && capability.required === true)
-  assert('evidenceScope' in capability
-    && capability.evidenceScope === 'synthetic-quota-and-public-remote-ui-contracts-not-live-account-access')
-  assert('tests' in capability && Array.isArray(capability.tests))
-  const names = capability.tests.map((test: unknown) => typeof test === 'object' && test !== null && 'name' in test ? test.name : undefined)
+  assert(Reflect.get(capability, 'required') === true)
+  assert(Reflect.get(capability, 'evidenceScope')
+    === 'synthetic-quota-and-public-remote-ui-contracts-not-live-account-access')
+  const tests = Reflect.get(capability, 'tests') as unknown
+  assert(Array.isArray(tests))
+  const names = tests.map((test: unknown) => {
+    if (typeof test !== 'object' || test === null) return undefined
+    const name = Reflect.get(test, 'name') as unknown
+    return typeof name === 'string' ? name : undefined
+  })
   assert(names.includes('quota Remote reaches the actual Host gateway without startup or signed-out network requests'))
   assert(names.includes('uses real Cordis Remote tracing and reversible public SlotRegistry registration'))
   return {
