@@ -2,6 +2,8 @@
 
 export const en = {
   application: 'Application',
+  externalLinkFailedTitle: 'Could not open the browser',
+  externalLinkFailedAdvice: 'Check that a default browser is configured, then try opening the link again.',
   startupFailed: 'DeepSeek Harness could not start',
   startupLoading: 'Starting DeepSeek Harness…',
   startupLoadingDescription: 'Your workspace will open when it is ready.',
@@ -114,6 +116,8 @@ export type DesktopMessages = { readonly [Key in keyof typeof en]: string }
 
 export const zh = {
   application: '应用',
+  externalLinkFailedTitle: '无法打开浏览器',
+  externalLinkFailedAdvice: '请检查系统是否已设置默认浏览器，然后重新打开链接。',
   startupFailed: 'DeepSeek Harness 无法启动',
   startupLoading: '正在启动 DeepSeek Harness…',
   startupLoadingDescription: '准备就绪后将自动打开工作区。',

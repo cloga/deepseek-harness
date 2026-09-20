@@ -27,6 +27,8 @@ The local startup page exposes startup status and available recovery actions; th
 
 Electron chooses typed English or Chinese shell copy from its application locale and falls back to English. Menus, native dialogs, the startup page, and the plugin-management renderer use the same locale payload; the repository Client UI i18n gate checks these desktop sources.
 
+HTTP and HTTPS links requested by an owned Desktop window open in the system browser. Popup windows remain denied, external navigation does not replace the application document, and other external URI schemes remain blocked. `dsh-app:` navigation stays internal; `dsh-recovery:` remains subject to the existing recovery checks. A failed browser handoff shows localized advice without exposing the URL or underlying error. This policy does not change Web-client browser previews; the [external-link decision](../../.agents/notes/implemented/bug-fix/2026-09-20-desktop-external-links.md) owns the safety and verification limits.
+
 Windows packaging and every application window use [assets/whale.png](assets/whale.png), a 256-pixel transparent rendering of the shared [whale favicon](../web/public/favicon.svg). Packaging includes this asset inside the application archive and uses it for the executable and installer-generated shortcut icons; a missing or malformed image fails packaging. Changing a shortcut alone does not replace a running window's icon. Install the updated release and reopen Desktop only after saving active work.
 
 ### Runtime and plugin activation

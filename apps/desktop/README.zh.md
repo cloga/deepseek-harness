@@ -27,6 +27,8 @@ Electron 拥有 `$DSH_HOME/profiles/desktop`。其 `dependencies` 包含精确�
 
 Electron 根据应用 locale 选择类型化的英文或中文桌面壳文案，并以英文作为 fallback。菜单、原生对话框、启动页与插件管理渲染进程使用同一 locale 数据；仓库的 Client UI i18n gate 会检查这些桌面源文件。
 
+Desktop 自有窗口请求打开的 HTTP 和 HTTPS 链接交给系统浏览器。弹出窗口仍被拒绝，外部导航不会替换应用文档，其他外部 URI scheme 仍被阻止。`dsh-app:` 导航保留在应用内；`dsh-recovery:` 仍受现有恢复检查约束。浏览器交接失败时显示本地化建议，不暴露 URL 或底层错误。此策略不改变 Web 客户端的浏览器预览行为；[外链决策](../../.agents/notes/implemented/bug-fix/2026-09-20-desktop-external-links.zh.md)说明安全和验证边界。
+
 Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.png)，它是共享[鲸鱼 favicon](../web/public/favicon.svg) 的 256 像素透明栅格图。打包会把该图片放入应用归档，并用于可执行文件和安装器创建的快捷方式图标；图片缺失或格式错误时拒绝打包。单独修改快捷方式不会改变运行中窗口的图标。应先保存当前工作，再安装更新并重新打开 Desktop。
 
 ### 运行时与插件激活
