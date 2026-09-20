@@ -115,6 +115,7 @@ describe('CompactionEngine seam', () => {
     const signal = new AbortController().signal
     expect(await svc.compactNow({
       ...stubAgent(session),
+      ctx,
       runMaintenance: task => task(new AbortController().signal),
     }, signal)).toBeNull()
     expect(svc.lastSignal).toBe(signal)

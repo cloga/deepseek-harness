@@ -30,6 +30,7 @@ export type ManualCompactionErrorCode =
   | 'cancelled'
   | 'changed'
   | 'summary'
+  | 'summary-truncated'
   | 'commit'
   | 'persistence'
 
@@ -68,6 +69,8 @@ export interface CompactionAgentContext {
  * other compaction transactions.
  */
 export interface ManualCompactAgentContext extends CompactionAgentContext {
+  /** Agent-scoped context used to query the current model selection without starting a turn. */
+  readonly ctx: Context
   /**
    * Run a non-turn maintenance operation only while the agent is idle, withholding later
    * waking input until it settles.

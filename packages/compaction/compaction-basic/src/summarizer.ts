@@ -76,6 +76,8 @@ const CHECKPOINT_PREAMBLE =
  * compaction instruction is then the only novel input.
  */
 export interface SummarizationInput {
+  /** Manual-operation route snapshot used for policy and the default summary target. */
+  readonly conversationTarget?: { readonly provider: string; readonly model: string }
   /** The conversation's tool schemas, reused for prefix-cache alignment; absent when the request carried none. */
   readonly tools?: readonly ToolSchema[]
   /** The derived system head, when present, followed by the shadowed region in surface order. */
@@ -133,7 +135,7 @@ export async function summarizeWithLlm(
     && agent.options.model.length > 0
     ? { provider: agent.options.provider, model: agent.options.model }
     : undefined
-  const target = configured ?? latest ?? agentTarget
+  const target = configured ?? input.conversationTarget ?? latest ?? agentTarget
   if (target === undefined) {
     throw new Error(
       'no provider/model available for summarization: set both BasicCompactionConfig summarization fields, route one request, or set both AgentOptions fields',
@@ -191,6 +193,17 @@ export function frameSummary(summary: readonly ContentBlock[]): ContentBlock[] {
   ]
 }
 
+/** The summary reached its output token cap before producing a complete checkpoint. */
+export class SummaryTruncatedError extends Error {
+  override readonly name = 'SummaryTruncatedError'
+  /** Stable summary failure code retained for existing recovery listeners. */
+  readonly code = 'MAX_TOKENS'
+
+  constructor() {
+    super('summarization truncated at the token cap (incomplete checkpoint)')
+  }
+}
+
 /** Map a terminal summarization finish to its fail-closed error. */
 function finishError(finish: FinishReason): Error | undefined {
   switch (finish.kind) {
@@ -198,11 +211,8 @@ function finishError(finish: FinishReason): Error | undefined {
     case 'aborted': {
       return new LlmError(finish.failure.message, finish.failure.code, finish.failure)
     }
-    case 'max-tokens': {
-      const error = new Error('summarization truncated at the token cap (incomplete checkpoint)') as Error & { code?: string }
-      error.code = 'MAX_TOKENS'
-      return error
-    }
+    case 'max-tokens':
+      return new SummaryTruncatedError()
     default:
       return undefined
   }
