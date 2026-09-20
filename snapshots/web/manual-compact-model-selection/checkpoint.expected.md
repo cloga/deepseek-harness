@@ -1,0 +1,2 @@
+- button "compact Compacted 4 history items (~{{tokens}} tokens)" [expanded]
+- paragraph: "Preserve schema and rollback state. Verify checksums and exact official parity before publishing through review. Do not restart active sessions or commit private data. Next: verify release artifacts."

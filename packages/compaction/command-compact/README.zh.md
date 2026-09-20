@@ -43,6 +43,7 @@ kind: "package-reference"
 |---|---|
 | 压缩已在运行，或 agent 正在轮次中 | `Compaction is unavailable because this process has an active compaction, or the agent is not idle.` |
 | 压缩过程中历史发生了变化 | `The history selected for compaction changed before it could be replaced. The attempt is recorded in the session log.` |
+| 摘要输出达到 token 上限 | `The compaction summary reached its output token cap. No incomplete checkpoint was committed. Try a different selected model or adjust the configured summary budget.` |
 | 无法产生有用的摘要 | `Compaction could not produce a useful summary. The attempt is recorded in the session log.` |
 | 压缩未干净地完成 | `Compaction did not finish cleanly; some session history may have changed. Inspect the current session state before retrying.` |
 | 会话无法保存 | `Compaction finished, but the session could not be saved.` |

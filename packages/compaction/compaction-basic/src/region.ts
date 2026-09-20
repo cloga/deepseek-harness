@@ -21,7 +21,7 @@ import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import { SessionSeq, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { frameSummary } from './summarizer.ts'
+import { frameSummary, SummaryTruncatedError } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
 
 interface RegionDependencies {
@@ -289,6 +289,13 @@ function throwManualFailure(failure: TransactionFailure): never {
     throw new ManualCompactionError(
       'changed',
       'the compacted history changed during manual compaction',
+      { cause: failure.error },
+    )
+  }
+  if (failure.error instanceof SummaryTruncatedError) {
+    throw new ManualCompactionError(
+      'summary-truncated',
+      'manual compaction summary reached its output token cap; no incomplete checkpoint was committed',
       { cause: failure.error },
     )
   }

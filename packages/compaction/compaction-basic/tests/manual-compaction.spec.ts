@@ -9,9 +9,9 @@ import * as SessionInvariant from '@deepseek-ai/dsh-session/invariant'
 import * as AgentInvariant from '@deepseek-ai/dsh-agent/invariant'
 import * as AgentLoopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
 import * as CompactionInvariant from '@deepseek-ai/dsh-compaction/invariant'
-import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
+import { BasicCompactionEngine, type BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import { CompactionId, isCompactCheckpointSource, ManualCompactionError } from '@deepseek-ai/dsh-compaction'
-import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
+import type { CompactionEngine, CompactionResult, ManualCompactAgentContext } from '@deepseek-ai/dsh-compaction'
 import {
   createAssistantMessage,
   createUserMessage,
@@ -19,6 +19,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import type {
   ContentBlock,
+  GenerateOptions,
   LlmResolvedModelInfo,
   Message,
   StreamChunk,
@@ -28,7 +29,7 @@ import SessionStore, { Session, SessionId, type SessionEvent } from '@deepseek-a
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import { installModelSelection, type Agent, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {
   SummarizationInput,
   SummaryResult,
@@ -208,6 +209,7 @@ function fakeAgent(
   maintenanceSignal = new AbortController().signal,
 ): Agent {
   return {
+    ctx: new Context(),
     session,
     options: { provider: MODEL, model: MODEL },
     runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -237,6 +239,162 @@ function detachedService(): { ctx: Context; compact: GatedCompactionEngine; flus
 function compactEvents(session: Session): SessionEvent[] {
   return session.snapshotEvents().filter(event => event.type.startsWith('compaction/'))
 }
+
+/** Records actual summary routing at the public adapter boundary. */
+class RoutingAdapter extends TextAdapter {
+  readonly calls: GenerateOptions[] = []
+  readonly summaryStarted = Promise.withResolvers<undefined>()
+  summaryGate: Promise<undefined> | undefined
+
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    if (options.purpose === 'compaction') {
+      this.summaryStarted.resolve(undefined)
+      if (this.summaryGate !== undefined) await this.summaryGate
+    }
+    yield* super.stream(options)
+  }
+}
+
+async function routeHarness(config: BasicCompactionConfig = {}, installSelection = true) {
+  const ctx = new Context()
+  try {
+    await mountAgentLoopTestDependencies(ctx)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    await ctx.plugin(TokenMeter)
+    const adapter = new RoutingAdapter()
+    ctx.llm.registerAdapter(['a', 'b', 'c', 'summary'], adapter)
+    const compact = new BasicCompactionEngine(ctx, { auto: false, ...config })
+    const agent = await ctx.agentLoop.create(SessionId('manual-selection'), { provider: 'a', model: 'a' })
+    const selection: ModelSelectionRef = { current: { provider: 'a', model: 'a' }, assembled: undefined }
+    if (installSelection) installModelSelection(agent.ctx, selection)
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: PROMPT }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    expect(agent.session.requestHeader()?.config).toMatchObject({ provider: 'a', model: 'a' })
+    selection.current = { provider: 'b', model: 'b' }
+    return { ctx, agent, compact, adapter, selection }
+  } catch (error) {
+    await ctx.fiber.dispose()
+    throw error
+  }
+}
+
+describe('manual compaction selected route', () => {
+  it('accepts the public minimal manual context without publishing it as a full Agent', async () => {
+    const f = await routeHarness({}, false)
+    try {
+      const owner: ManualCompactAgentContext = {
+        ctx: f.ctx,
+        session: f.agent.session,
+        options: f.agent.options,
+        runMaintenance: task => f.agent.runMaintenance(task),
+      }
+      installModelSelection(owner.ctx, {
+        current: { provider: 'b', model: 'b' }, assembled: undefined,
+      })
+      const service: CompactionEngine = f.compact
+      expect(await service.compactNow(owner, SIGNAL)).not.toBeNull()
+      expect(f.adapter.calls.filter(call => call.purpose === 'compaction'))
+        .toMatchObject([{ provider: 'b', model: 'b' }])
+    } finally {
+      await f.ctx.fiber.dispose()
+    }
+  })
+
+  it('uses the pending route and its policy without a new conversation header or consuming the choice', async () => {
+    const f = await routeHarness({ maxTokens: 111, modelPolicies: [{ provider: 'b', model: 'b', maxTokens: 222 }] })
+    try {
+      const header = f.agent.session.requestHeader()
+      expect(await f.compact.compactNow(f.agent, SIGNAL)).not.toBeNull()
+      expect(f.adapter.calls.filter(call => call.purpose === 'compaction')).toMatchObject([
+        { provider: 'b', model: 'b', maxTokens: 222 },
+      ])
+      expect(f.adapter.calls.filter(call => call.purpose === undefined)).toHaveLength(1)
+      expect(f.agent.session.requestHeader()).toEqual(header)
+      expect(f.selection.current).toEqual({ provider: 'b', model: 'b' })
+      expect(f.agent.session.snapshotEvents().findLast(event => event.type === 'compaction/summary')?.data)
+        .toMatchObject({ provider: 'b', model: 'b', maxTokens: 222, llmStreamCall: true })
+    } finally {
+      await f.ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps an explicit summary route above the pending route while resolving its conversation policy', async () => {
+    const f = await routeHarness({
+      summarizationProvider: 'summary', summarizationModel: 'summary',
+      modelPolicies: [{ provider: 'b', model: 'b', maxTokens: 333 }],
+    })
+    try {
+      await f.compact.compactNow(f.agent, SIGNAL)
+      expect(f.adapter.calls.filter(call => call.purpose === 'compaction')).toMatchObject([
+        { provider: 'summary', model: 'summary', maxTokens: 333 },
+      ])
+    } finally {
+      await f.ctx.fiber.dispose()
+    }
+  })
+
+  it('captures the route before opening the transaction and holds it while a later selection changes', async () => {
+    const f = await routeHarness({ modelPolicies: [{ provider: 'b', model: 'b', maxTokens: 444 }] })
+    const gate = deferred()
+    f.adapter.summaryGate = gate.promise
+    let running: Promise<CompactionResult | null> | undefined
+    try {
+      f.ctx.on('session/event', (session, event) => {
+        if (session === f.agent.session && event.type === 'compaction/start') {
+          f.selection.current = { provider: 'c', model: 'c' }
+        }
+      })
+      running = f.compact.compactNow(f.agent, SIGNAL)
+      await Promise.race([f.adapter.summaryStarted.promise, running.then(() => { throw new Error('summary never started') })])
+      expect(f.selection.current).toEqual({ provider: 'c', model: 'c' })
+      gate.resolve()
+      await running
+      expect(f.adapter.calls.filter(call => call.purpose === 'compaction')).toMatchObject([
+        { provider: 'b', model: 'b', maxTokens: 444 },
+      ])
+      f.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'continue' }], source: { kind: 'user' } }))
+      await f.agent.whenIdle()
+      expect(f.agent.session.requestHeader()?.config).toMatchObject({ provider: 'c', model: 'c' })
+    } finally {
+      gate.resolve()
+      await running?.catch(() => undefined)
+      await f.ctx.fiber.dispose()
+    }
+  })
+
+  it('falls back to the durable route without an installed selection owner', async () => {
+    const f = await routeHarness({}, false)
+    try {
+      await f.compact.compactNow(f.agent, SIGNAL)
+      expect(f.adapter.calls.filter(call => call.purpose === 'compaction')).toMatchObject([{ provider: 'a', model: 'a' }])
+    } finally {
+      await f.ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps automatic overflow recovery on the committed route despite a pending selection', async () => {
+    const f = await routeHarness({ maxTokens: 111, modelPolicies: [{ provider: 'b', model: 'b', maxTokens: 222 }] })
+    try {
+      let recovered = false
+      f.agent.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+        if (!recovered) {
+          recovered = true
+          await f.compact.compactIfNeeded(agent, 'context-overflow', signal)
+        }
+        return next()
+      })
+      f.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'continue' }], source: { kind: 'user' } }))
+      await f.agent.whenIdle()
+      expect(f.adapter.calls.filter(call => call.purpose === 'compaction')).toMatchObject([
+        { provider: 'a', model: 'a', maxTokens: 111 },
+      ])
+      expect(f.agent.session.requestHeader()?.config).toMatchObject({ provider: 'b', model: 'b' })
+    } finally {
+      await f.ctx.fiber.dispose()
+    }
+  })
+})
 
 describe('compactNow through the real loop', () => {
   it('passes logged image omissions to the summarizer without changing the original message', async () => {
@@ -412,8 +570,15 @@ describe('compactNow transaction and failure classification', () => {
     const session = Session.create(SessionId('empty'))
     let released = 0
     const agent = fakeAgent(session, () => () => { released += 1 })
-
-    expect(await compact.compactNow(agent, SIGNAL)).toBeNull()
+    const query = vi.fn((): never => { throw new Error('no configured model') })
+    const disposeQuery = agent.ctx.on('model-selection/query', query)
+    try {
+      expect(await compact.compactNow(agent, SIGNAL)).toBeNull()
+      expect(query).not.toHaveBeenCalled()
+    } finally {
+      disposeQuery()
+      await agent.ctx.fiber.dispose()
+    }
     expect(released).toBe(1)
     expect(compact.calls).toHaveLength(0)
     expect(compactEvents(session)).toEqual([])
