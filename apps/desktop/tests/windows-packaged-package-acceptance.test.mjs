@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
+import { installedUpgradeApplication } from './fixtures/windows-installed-upgrade-contract.mjs'
 import { initialPackageAcceptance, packageCleanupVerified, packageGraphSnapshot, preparedTransactionId, retainPrimaryFailure, sameProcess, validatePackageFixture } from './fixtures/windows-packaged-package-acceptance.mjs'
 
 const source = readFileSync(new URL('./fixtures/windows-packaged-package-acceptance.mjs', import.meta.url), 'utf8')
@@ -17,6 +18,37 @@ function directory(t) {
   const root = mkdtempSync(join(tmpdir(), 'package-acceptance-unit-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   return root
+}
+
+test('installed observers agree on the driver-owned nested application path', t => {
+  const root = directory(t)
+  assert.equal(installedUpgradeApplication(root), join(root, 'Installed App', 'cloga-deepseek-harness-desktop', 'cloga-deepseek-harness.exe'))
+  const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  assert.ok(driver.includes("$baselineAppFilename = 'cloga-deepseek-harness-desktop'"))
+  assert.ok(driver.includes("$installPath = Join-Path $root ('Installed App\\' + $baselineAppFilename)"))
+  for (const name of ['windows-installed-upgrade-smoke.mjs', 'windows-packaged-package-acceptance.mjs']) {
+    const consumer = readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8')
+    assert.ok(consumer.includes('const application = installedUpgradeApplication(root)'), name)
+    assert.equal(consumer.includes("join(root, 'Installed App', 'cloga-deepseek-harness.exe')"), false)
+  }
+  assert.ok(native.includes("$application = Join-Path $root 'Installed App\\cloga-deepseek-harness-desktop\\cloga-deepseek-harness.exe'"))
+  const helperLoad = native.indexOf(". (Join-Path $PSScriptRoot 'fixtures/windows-installer-registration.ps1')")
+  const ancestry = native.indexOf('Assert-InstallerOwnedPath $root $application')
+  assert.ok(helperLoad > native.indexOf("throw 'Foreign runner owner'"))
+  assert.ok(ancestry > helperLoad && ancestry < native.indexOf('$fixture = Read-Process $FixturePid'))
+})
+
+for (const location of ['container', 'application-parent']) {
+  test(`installed application path rejects a linked ${location}`, t => {
+    const root = directory(t)
+    const target = join(root, 'elsewhere')
+    mkdirSync(target)
+    const container = join(root, 'Installed App')
+    if (location === 'application-parent') mkdirSync(container)
+    const link = location === 'container' ? container : join(container, 'cloga-deepseek-harness-desktop')
+    symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir')
+    assert.throws(() => installedUpgradeApplication(root), /must not traverse a link/)
+  })
 }
 
 test('fresh evidence cannot claim any real acceptance path passed', () => {

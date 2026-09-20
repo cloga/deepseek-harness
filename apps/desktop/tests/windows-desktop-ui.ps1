@@ -23,7 +23,9 @@ for ($cursor = $root; $cursor; $cursor = Split-Path $cursor -Parent) {
 $owner = Get-Content -LiteralPath (Join-Path $root 'owner.json') -Raw | ConvertFrom-Json
 $validated = Get-Content -LiteralPath (Join-Path $root 'validated.json') -Raw | ConvertFrom-Json
 if ($owner.token -cne $OwnerToken -or $validated.ownerToken -cne $OwnerToken -or $owner.runId -cne $env:GITHUB_RUN_ID -or $owner.runAttempt -cne $env:GITHUB_RUN_ATTEMPT -or $validated.candidate.manifest.source.commit -cne $env:GITHUB_SHA) { throw 'Foreign runner owner' }
-$application = Join-Path $root 'Installed App\cloga-deepseek-harness.exe'
+$application = Join-Path $root 'Installed App\cloga-deepseek-harness-desktop\cloga-deepseek-harness.exe'
+. (Join-Path $PSScriptRoot 'fixtures/windows-installer-registration.ps1')
+Assert-InstallerOwnedPath $root $application
 $profile = Join-Path $root 'package-home\profiles\desktop'
 $workspace = Join-Path $root 'package-workspace'
 $evidence = Join-Path $root 'evidence'

@@ -41,6 +41,14 @@ export function ownedUpgradePath(root, path) {
   return candidate
 }
 
+/** Locate the exact nested application installed by the shared NSIS driver.
+ * @param {string} root - Existing owned qualification root.
+ * @returns {string} Owned application path; does not launch or verify installed bytes.
+ */
+export function installedUpgradeApplication(root) {
+  return ownedUpgradePath(root, join(root, 'Installed App', 'cloga-deepseek-harness-desktop', 'cloga-deepseek-harness.exe'))
+}
+
 /** Hash exact file bytes, not a manifest self-hash.
  * @param {string} path - Regular evidence file.
  * @param {string} algorithm - Hash algorithm.

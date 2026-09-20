@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
-import { assertUpgradeRunner, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeFileHash, verifyUpgradeRelease } from './windows-installed-upgrade-contract.mjs'
+import { assertUpgradeRunner, installedUpgradeApplication, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeFileHash, verifyUpgradeRelease } from './windows-installed-upgrade-contract.mjs'
 import { retainPrimaryFailure } from './windows-packaged-package-acceptance.mjs'
 
 const baseline = JSON.parse(readFileSync(new URL('./windows-upgrade-baseline.json', import.meta.url), 'utf8'))
@@ -69,7 +69,7 @@ async function main() {
   }
   const expected = values.phase === 'baseline' ? validated.previous : validated.candidate
   assert.equal(upgradeFileHash(expected.manifestPath), expected.manifestFileSha256)
-  const application = ownedUpgradePath(root, join(root, 'Installed App', 'cloga-deepseek-harness.exe'))
+  const application = installedUpgradeApplication(root)
   assert.equal(upgradeFileHash(application), expected.manifest.installedEvidence.executableSha256)
   const home = ownedUpgradePath(root, join(root, 'home'))
   const userData = ownedUpgradePath(root, join(root, 'electron-user-data'))

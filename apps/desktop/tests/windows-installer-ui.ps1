@@ -51,6 +51,7 @@ public static class InstallerCapture {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder text, int count);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wparam, string text);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr wparam, StringBuilder text, uint flags, uint timeout, out IntPtr result);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr wparam, IntPtr lparam, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool SetWindowText(IntPtr window, string text);
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
     [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
@@ -252,13 +253,30 @@ public static class InstallerCapture {
         return CaptureWindow(window, path);
     }
 
-    // Stock NSIS has no HarnessInstaller.Ready property. Accept only the owned, usable
-    // directory (1019/Edit) or finish (1204/Button) page and its enabled Next/Finish action.
+    // Stock NSIS has no HarnessInstaller.Ready property. The pinned English MUI2 finish page
+    // creates bitmap/title/text/run in order; nsDialogs assigns zero-based IDs starting at 1200.
+    // https://github.com/kichik/nsis/blob/v304/Contrib/nsDialogs/nsDialogs.c
+    // https://github.com/electron-userland/electron-builder-binaries/blob/nsis-3.0.4.1/nsis/Contrib/Modern%20UI%202/Pages/Finish.nsh
     public static string SaveStock(int process, IntPtr window, int pageControlId, string path) {
-        string pageClass;
-        if (pageControlId == 1019) pageClass = "Edit";
-        else if (pageControlId == 1204) pageClass = "Button";
-        else throw new ArgumentException("Unsupported stock installer page control");
+        if (pageControlId != 1019 && pageControlId != 1203) throw new ArgumentException("Unsupported stock installer page control");
+        RequireStockWindow(process, window);
+        if (pageControlId == 1203) StockRun(process, window);
+        else RequireStockControl(process, window, 1019, "Edit");
+        IntPtr action = RequireStockControl(process, window, 1, "Button");
+        if (pageControlId == 1203 && Text(action) != "&Finish") throw new InvalidOperationException("Stock finish action caption differs");
+        return CaptureWindow(window, path);
+    }
+
+    // Validate before toggling Run; a reboot radio can occupy the same numeric control ID.
+    public static IntPtr StockRun(int process, IntPtr window) {
+        RequireStockWindow(process, window);
+        IntPtr control = RequireStockControl(process, window, 1203, "Button");
+        if ((GetWindowLong(control, -16) & 0xf) != 3 || Text(control) != "&Run " + ProductName)
+            throw new InvalidOperationException("Stock finish requires the expected Run auto-checkbox");
+        return control;
+    }
+
+    static void RequireStockWindow(int process, IntPtr window) {
         uint owner;
         GetWindowThreadProcessId(window, out owner);
         var kind = new StringBuilder(128);
@@ -269,12 +287,9 @@ public static class InstallerCapture {
             || !IsWindowVisible(window) || !IsWindowEnabled(window) || kind.ToString() != "#32770"
             || String.IsNullOrEmpty(ProductName) || !title.ToString().Contains(ProductName))
             throw new InvalidOperationException("Stock capture requires a live owned installer dialog");
-        RequireStockControl(process, window, pageControlId, pageClass);
-        RequireStockControl(process, window, 1, "Button");
-        return CaptureWindow(window, path);
     }
 
-    static void RequireStockControl(int process, IntPtr window, int id, string expectedClass) {
+    static IntPtr RequireStockControl(int process, IntPtr window, int id, string expectedClass) {
         IntPtr control = FindControlById(window, id);
         uint owner;
         GetWindowThreadProcessId(control, out owner);
@@ -283,6 +298,51 @@ public static class InstallerCapture {
         if (control == IntPtr.Zero || !IsWindow(control) || owner != process || TopLevel(control) != window
             || !IsWindowVisible(control) || !IsWindowEnabled(control) || kind.ToString() != expectedClass)
             throw new InvalidOperationException("Stock capture requires visible enabled " + expectedClass + " control " + id);
+        return control;
+    }
+
+    // Failure evidence only, not page admission: owned windows, at most 64 entries and two seconds.
+    // WM_GETTEXT is bounded so an unresponsive installer cannot block its eventual teardown.
+    public static string DiagnosticText(int process) {
+        if (process <= 0) throw new ArgumentException("Diagnostic process must be owned");
+        var output = new StringBuilder();
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        int count = 0;
+        IntPtr foreground = GetForegroundWindow();
+        uint foregroundOwner;
+        GetWindowThreadProcessId(foreground, out foregroundOwner);
+        output.AppendLine("FOREGROUND=" + foreground + " PID=" + foregroundOwner);
+        WindowCallback observe = delegate(IntPtr window, IntPtr unused) {
+            if (count >= 64 || timer.ElapsedMilliseconds >= 2000) return false;
+            uint owner;
+            GetWindowThreadProcessId(window, out owner);
+            if (owner != process) return true;
+            count++;
+            var text = new StringBuilder(256);
+            var kind = new StringBuilder(64);
+            GetClassName(window, kind, kind.Capacity);
+            IntPtr result;
+            bool read = SendMessageTimeout(window, 0xD, (IntPtr)text.Capacity, text, 0x2, 50, out result) != IntPtr.Zero;
+            string check = "n/a";
+            if (kind.ToString() == "Button" && timer.ElapsedMilliseconds < 2000)
+                check = SendMessageTimeout(window, 0xF0, IntPtr.Zero, IntPtr.Zero, 0x2, 50, out result) != IntPtr.Zero ? result.ToString() : "<unresponsive>";
+            output.AppendLine("HWND=" + window + " PID=" + owner + " ROOT=" + TopLevel(window)
+                + " CLASS=" + kind + " ID=" + GetDlgCtrlID(window) + " VISIBLE=" + IsWindowVisible(window)
+                + " ENABLED=" + IsWindowEnabled(window) + " STYLE=" + GetWindowLong(window, -16)
+                + " CHECK=" + check + " TEXT=" + (read ? text.ToString() : "<unresponsive>"));
+            return count < 64 && timer.ElapsedMilliseconds < 2000;
+        };
+        EnumWindows(delegate(IntPtr window, IntPtr unused) {
+            uint owner;
+            GetWindowThreadProcessId(window, out owner);
+            if (owner == process) {
+                if (!observe(window, IntPtr.Zero)) return false;
+                EnumChildWindows(window, observe, IntPtr.Zero);
+            }
+            return count < 64 && timer.ElapsedMilliseconds < 2000;
+        }, IntPtr.Zero);
+        output.AppendLine("LIMIT_REACHED=" + (count >= 64 || timer.ElapsedMilliseconds >= 2000));
+        return output.ToString();
     }
 
     static string CaptureWindow(IntPtr window, string path) {

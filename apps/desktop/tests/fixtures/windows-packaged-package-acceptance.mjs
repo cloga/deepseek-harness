@@ -7,7 +7,7 @@ import { join, relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
-import { assertUpgradeRunner, ownedUpgradePath, upgradeFileHash } from './windows-installed-upgrade-contract.mjs'
+import { assertUpgradeRunner, installedUpgradeApplication, ownedUpgradePath, upgradeFileHash } from './windows-installed-upgrade-contract.mjs'
 
 const repository = fileURLToPath(new URL('../../../../', import.meta.url))
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u
@@ -152,7 +152,7 @@ export async function runPackagedPackageAcceptance(runRoot) {
   const expected = validated.candidate.manifest
   assert.equal(expected.source.commit, process.env.GITHUB_SHA)
   assert.equal(expected.upstreamVersion, '0.1.6-alpha.2')
-  const application = ownedUpgradePath(root, join(root, 'Installed App', 'cloga-deepseek-harness.exe'))
+  const application = installedUpgradeApplication(root)
   assert.equal(upgradeFileHash(application), expected.installedEvidence.executableSha256)
   assert.equal(upgradeFileHash(validated.candidate.manifestPath), validated.candidate.manifestFileSha256)
   const home = ownedUpgradePath(root, join(root, 'package-home'))

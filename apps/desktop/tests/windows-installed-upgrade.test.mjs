@@ -92,7 +92,7 @@ if (('InstallerCapture' -as [type]) -ne $helperType) { throw 'Repeated loading r
     assert.equal(result.status, 0, result.stderr)
     const observed = JSON.parse(result.stdout.trim())
     assert.equal(observed.edition, edition)
-    for (const member of ['Initialize', 'Find', 'FindText', 'FindButton', 'Progress', 'Save', 'SaveStock', 'SaveWithShadow', 'SendMessage']) {
+    for (const member of ['Initialize', 'Find', 'FindText', 'FindButton', 'Progress', 'Save', 'SaveStock', 'StockRun', 'DiagnosticText', 'SaveWithShadow', 'SendMessage']) {
       assert.ok(observed.members.includes(member), `Actual helper is missing ${member}`)
     }
     t.diagnostic(`Compilation only: PowerShell ${observed.edition} ${observed.version}`)
@@ -112,6 +112,10 @@ public static class StockCaptureFixture {
     [DllImport("user32.dll")] public static extern bool DestroyWindow(IntPtr window);
     [DllImport("user32.dll")] public static extern bool EnableWindow(IntPtr window, bool enabled);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
+    [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr window);
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr window, int index);
+    [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr window, int index, int value);
+    public static void ButtonStyle(IntPtr window, int style) { SetWindowLong(window, -16, (GetWindowLong(window, -16) & ~15) | style); }
     public static IntPtr Create(string kind, string title, IntPtr parent, int id) {
         // Off-screen, no activation: PrintWindow captures only these owned windows.
         IntPtr window = CreateWindowEx(0x08000000, kind, title, parent == IntPtr.Zero ? 0x90000000u : 0x50000000u,
@@ -177,7 +181,7 @@ try {
     Reject-Capture 'invalid-window' { [InstallerCapture]::SaveStock($PID, [IntPtr](-1), 1019, $bad) } 'live owned installer dialog'
     Reject-Capture 'child-window' { [InstallerCapture]::SaveStock($PID, $page, 1019, $bad) } 'live owned installer dialog'
     Reject-Capture 'unsupported-page' { [InstallerCapture]::SaveStock($PID, $window, 999, $bad) } 'Unsupported stock installer page'
-    Reject-Capture 'absent-finish' { [InstallerCapture]::SaveStock($PID, $window, 1204, $bad) } 'control 1204'
+    Reject-Capture 'absent-finish' { [InstallerCapture]::SaveStock($PID, $window, 1203, $bad) } 'control 1203'
     [void][StockCaptureFixture]::EnableWindow($directory, $false)
     Reject-Capture 'disabled-directory' { [InstallerCapture]::SaveStock($PID, $window, 1019, $bad) } 'control 1019'
     [void][StockCaptureFixture]::EnableWindow($directory, $true)
@@ -200,25 +204,53 @@ try {
     Reject-Capture 'custom-not-ready' { [InstallerCapture]::Save($window, $bad) } 'Native page did not finish creating controls'
     if (-not [StockCaptureFixture]::DestroyWindow($directory)) { throw 'Could not destroy directory control' }
     Reject-Capture 'stale-page' { [InstallerCapture]::SaveStock($PID, $window, 1019, $bad) } 'control 1019'
-    $checkbox = [StockCaptureFixture]::Create('Button', 'Launch', $page, 1204)
-    [void][InstallerCapture]::SaveStock($PID, $window, 1204, (Join-Path $env:DSH_STOCK_CAPTURE_ROOT 'finish.png'))
+    # Model pinned MUI2 Finish.nsh creation order, not a hand-assigned Run ID.
+    # nsDialogs.c (v304) resets controlCount=0 and CreateControl uses 1200+id.
+    $finishControls = @()
+    foreach ($caption in @('bitmap', 'title', 'text', ('&Run ' + [InstallerCapture]::ProductName))) {
+        $kind = if ($finishControls.Count -eq 3) { 'Button' } else { 'Static' }
+        $finishControls += [StockCaptureFixture]::Create($kind, $caption, $page, (1200 + $finishControls.Count))
+    }
+    $checkbox = $finishControls[3]
+    $finishId = [StockCaptureFixture]::GetDlgCtrlID($checkbox)
+    [StockCaptureFixture]::ButtonStyle($checkbox, 3)
+    [void][InstallerCapture]::SetWindowText($action, '&Finish')
+    if ([InstallerCapture]::StockRun($PID, $window) -ne $checkbox) { throw 'Run control identity differs' }
+    [void][InstallerCapture]::SaveStock($PID, $window, $finishId, (Join-Path $env:DSH_STOCK_CAPTURE_ROOT 'finish.png'))
+    Reject-Capture 'obsolete-finish-id' { [InstallerCapture]::SaveStock($PID, $window, 1204, $bad) } 'Unsupported stock installer page'
+    [StockCaptureFixture]::ButtonStyle($checkbox, 9)
+    Reject-Capture 'reboot-radio' { [InstallerCapture]::StockRun($PID, $window) } 'Run auto-checkbox'
+    [StockCaptureFixture]::ButtonStyle($checkbox, 3)
+    [void][InstallerCapture]::SetWindowText($checkbox, 'Reboot now')
+    Reject-Capture 'wrong-run-caption' { [InstallerCapture]::StockRun($PID, $window) } 'Run auto-checkbox'
+    [void][InstallerCapture]::SetWindowText($checkbox, ('&Run ' + [InstallerCapture]::ProductName))
+    [void][InstallerCapture]::SetWindowText($action, '&Next')
+    Reject-Capture 'wrong-finish-caption' { [InstallerCapture]::SaveStock($PID, $window, $finishId, $bad) } 'finish action caption'
+    [void][InstallerCapture]::SetWindowText($action, '&Finish')
+    [void][InstallerCapture]::SendMessage($checkbox, 0xF1, [IntPtr]1, [IntPtr]::Zero)
+    $diagnostic = [InstallerCapture]::DiagnosticText($PID)
+    if (-not [InstallerCapture]::IsWindow($checkbox) -or [InstallerCapture]::SendMessage($checkbox, 0xF0, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32() -ne 1) { throw 'Observation mutated owned controls' }
+    $foreignDiagnostic = [InstallerCapture]::DiagnosticText(($PID + 1))
     [void][StockCaptureFixture]::EnableWindow($checkbox, $false)
-    Reject-Capture 'disabled-finish' { [InstallerCapture]::SaveStock($PID, $window, 1204, $bad) } 'control 1204'
+    Reject-Capture 'disabled-finish' { [InstallerCapture]::SaveStock($PID, $window, 1203, $bad) } 'control 1203'
     [void][StockCaptureFixture]::EnableWindow($checkbox, $true)
     if (-not [StockCaptureFixture]::DestroyWindow($action)) { throw 'Could not destroy action control' }
-    Reject-Capture 'absent-action' { [InstallerCapture]::SaveStock($PID, $window, 1204, $bad) } 'control 1'
+    Reject-Capture 'absent-action' { [InstallerCapture]::SaveStock($PID, $window, 1203, $bad) } 'control 1'
     $wrongAction = [StockCaptureFixture]::Create('Static', 'Not a button', $window, 1)
-    Reject-Capture 'wrong-action-class' { [InstallerCapture]::SaveStock($PID, $window, 1204, $bad) } 'control 1'
+    Reject-Capture 'wrong-action-class' { [InstallerCapture]::SaveStock($PID, $window, 1203, $bad) } 'control 1'
     if (-not [StockCaptureFixture]::DestroyWindow($wrongAction)) { throw 'Could not destroy wrong action' }
     $action = [StockCaptureFixture]::Create('Button', 'Finish', $window, 1)
     if (-not [StockCaptureFixture]::DestroyWindow($checkbox)) { throw 'Could not destroy finish control' }
-    $wrongPage = [StockCaptureFixture]::Create('Edit', 'Not a checkbox', $page, 1204)
-    Reject-Capture 'wrong-page-class' { [InstallerCapture]::SaveStock($PID, $window, 1204, $bad) } 'control 1204'
+    $wrongPage = [StockCaptureFixture]::Create('Edit', 'Not a checkbox', $page, 1203)
+    Reject-Capture 'wrong-page-class' { [InstallerCapture]::SaveStock($PID, $window, 1203, $bad) } 'control 1203'
+    $extraControls = @()
+    for ($index = 0; $index -lt 70; $index++) { $extraControls += [StockCaptureFixture]::Create('Static', 'bounded', $window, (2000 + $index)) }
+    $limitedDiagnostic = [InstallerCapture]::DiagnosticText($PID)
 } catch { $primaryFailure = $_ } finally {
     Complete-Fixture $primaryFailure @(
         { if (-not [StockCaptureFixture]::DestroyWindow($window)) { throw 'Could not destroy owned synthetic dialog' } },
         {
-            $survivors = @(@($window, $page, $directory, $action, $checkbox, $wrongAction, $wrongPage) |
+            $survivors = @((@($window, $page, $directory, $action, $checkbox, $wrongAction, $wrongPage) + @($finishControls) + @($extraControls)) |
                 Where-Object { $_ -and [InstallerCapture]::IsWindow($_) })
             if ($survivors.Count) { throw ('Synthetic windows survived cleanup: ' + ($survivors -join ', ')) }
         }
@@ -235,7 +267,7 @@ try {
         { if ([InstallerCapture]::IsWindow($other)) { throw 'Wrong-class window survived cleanup' } }
     )
 }
-[pscustomobject]@{ dimensions = $dimensions; rejected = @($rejected); cleanupVerified = $true; cleanupFailures = $cleanupFailures } | ConvertTo-Json -Depth 4 -Compress
+[pscustomobject]@{ dimensions = $dimensions; finishId = $finishId; diagnostic = $diagnostic; foreignDiagnostic = $foreignDiagnostic; limitedDiagnostic = $limitedDiagnostic; rejected = @($rejected); cleanupVerified = $true; cleanupFailures = $cleanupFailures } | ConvertTo-Json -Depth 4 -Compress
 `
     const names = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'PSMODULEPATH', 'PROGRAMFILES'])
     const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => names.has(name.toUpperCase())))
@@ -249,6 +281,11 @@ try {
     const observed = JSON.parse(result.stdout.trim())
     assert.equal(observed.dimensions, '320x180')
     assert.equal(observed.cleanupVerified, true)
+    assert.equal(observed.finishId, 1203)
+    assert.match(observed.diagnostic, /CLASS=Button ID=1203 VISIBLE=True ENABLED=True STYLE=\d+ CHECK=1 TEXT=&Run Synthetic stock capture/u)
+    assert.doesNotMatch(observed.foreignDiagnostic, /Synthetic stock capture/u)
+    assert.match(observed.limitedDiagnostic, /LIMIT_REACHED=True/u)
+    assert.equal(observed.limitedDiagnostic.match(/^HWND=/gmu).length, 64)
     assert.deepEqual(observed.cleanupFailures, {
       messages: ['synthetic primary failure', 'synthetic destruction failure', 'synthetic survivor failure'],
       trace: ['destroy', 'verify'],
@@ -259,7 +296,7 @@ try {
     assert.deepEqual(observed.rejected, [
       'foreign-pid', 'invalid-pid', 'zero-window', 'invalid-window', 'child-window', 'unsupported-page', 'absent-finish',
       'disabled-directory', 'hidden-directory', 'disabled-action', 'disabled-window', 'hidden-window', 'wrong-title',
-      'custom-not-ready', 'stale-page', 'disabled-finish', 'absent-action', 'wrong-action-class', 'wrong-page-class',
+      'custom-not-ready', 'stale-page', 'obsolete-finish-id', 'reboot-radio', 'wrong-run-caption', 'wrong-finish-caption', 'disabled-finish', 'absent-action', 'wrong-action-class', 'wrong-page-class',
       'stale-window', 'wrong-window-class',
     ])
     for (const file of ['directory.png', 'finish.png']) {
@@ -271,6 +308,294 @@ try {
     t.diagnostic('Synthetic Win32 windows only; not actual hosted installer qualification')
   })
 }
+
+function powershellUnit(t, body, extraEnv = {}) {
+  const root = directory(t)
+  const script = join(root, 'fixture-unit.ps1')
+  writeFileSync(script, "$ErrorActionPreference = 'Stop'\n" + body)
+  const names = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'PSMODULEPATH', 'PROGRAMFILES'])
+  const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => names.has(name.toUpperCase())))
+  const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', script], { encoding: 'utf8', timeout: 15_000, env: { ...environment, ...extraEnv } })
+  assert.equal(result.error, undefined)
+  assert.equal(result.signal, null)
+  assert.equal(result.status, 0, result.stderr)
+  return JSON.parse(result.stdout.trim())
+}
+
+test('native baseline binding hashes original acquired bytes before deriving its source', { skip: process.platform !== 'win32' }, t => {
+  const root = directory(t)
+  const manifest = join(root, 'release.json')
+  const bytes = JSON.stringify({ source: { repository: 'cloga/deepseek-harness', tag: 'dsh-desktop-v0.1.6-alpha.1.cloga.2', commit: '2'.repeat(40) }, manifestSha256: '3'.repeat(64) })
+  writeFileSync(manifest, bytes)
+  const observed = powershellUnit(t, `
+. $env:DSH_REGISTRATION_HELPER
+$path = $env:DSH_MANIFEST
+$pin = $env:DSH_MANIFEST_DIGEST
+$tag = 'dsh-desktop-v0.1.6-alpha.1.cloga.2'
+$source = Get-PinnedInstallerBaselineSource $path $pin $tag
+$rejected = @()
+function Reject-Source($Label, [scriptblock]$Action) {
+    $failure = $null
+    try { & $Action | Out-Null } catch { $failure = $_ }
+    if ($null -eq $failure) { throw ('Accepted unbound source: ' + $Label) }
+    $script:rejected += $Label
+}
+Reject-Source 'internal-self-hash' { Get-PinnedInstallerBaselineSource $path ('3' * 64) $tag }
+Reject-Source 'wrong-tag' { Get-PinnedInstallerBaselineSource $path $pin 'other-tag' }
+Reject-Source 'directory' { Get-PinnedInstallerBaselineSource $PSScriptRoot $pin $tag }
+$changed = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+$changed.source.commit = '4' * 40
+$changed.manifestSha256 = '5' * 64
+$changed | ConvertTo-Json | Set-Content -LiteralPath $path
+Reject-Source 'substituted-source-and-self-hash' { Get-PinnedInstallerBaselineSource $path $pin $tag }
+[pscustomobject]@{ source = $source; rejected = $rejected } | ConvertTo-Json -Compress
+`, { DSH_REGISTRATION_HELPER: fileURLToPath(new URL('./fixtures/windows-installer-registration.ps1', import.meta.url)), DSH_MANIFEST: manifest, DSH_MANIFEST_DIGEST: digest(bytes) })
+  writeFileSync(manifest, bytes)
+  assert.equal(observed.source, '2'.repeat(40))
+  assert.equal(observed.source, pinnedUpgradeSourceCommit(root, digest(bytes)))
+  assert.deepEqual(observed.rejected, ['internal-self-hash', 'wrong-tag', 'directory', 'substituted-source-and-self-hash'])
+})
+
+test('cleanup rejects parent and root junctions before hashing or invoking the uninstaller', { skip: process.platform !== 'win32' }, t => {
+  const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const readRegistration = source.match(/function Read-Registration[^]*?\r?\n\}/u)?.[0]
+  assert.ok(readRegistration)
+  const start = source.indexOf('            $hasRegistration = ')
+  const launch = "                Wait-Exit (Start-Owned $uninstaller '/S') 120"
+  const end = source.indexOf(launch, start)
+  assert.ok(start >= 0 && end > start)
+  const admission = source.slice(start, end + launch.length) + '\n            }'
+  const observed = powershellUnit(t, `
+. $env:DSH_REGISTRATION_HELPER
+${readRegistration}
+# Only registry/process boundaries are synthetic; execute the driver's actual cleanup admission.
+function Product-Registrations { [pscustomobject]@{ Id = 'synthetic-registered-install' } }
+function Resolve-InstallerRegistration { [pscustomobject]@{ ExecutableSha256 = ('a' * 64) } }
+function Get-FileHash { $script:hashCalls++; [pscustomobject]@{ Hash = ('a' * 64) } }
+function Wait-NoProductProcesses {}
+function Start-Owned($File, $Arguments) {
+    if ($File -cne $uninstaller -or $Arguments -cne '/S') { throw 'Unexpected synthetic launch' }
+    $script:uninstallerCalls++
+    return 'not-a-process'
+}
+function Wait-Exit {}
+$root = Join-Path $PSScriptRoot 'run-root'
+$parent = Join-Path $root 'Installed App'
+$installPath = Join-Path $parent 'cloga-deepseek-harness-desktop'
+$application = Join-Path $installPath 'cloga-deepseek-harness.exe'
+$uninstaller = Join-Path $installPath 'Uninstall DeepSeek Harness (cloga).exe'
+New-Item -ItemType Directory -Path $installPath | Out-Null
+Set-Content -LiteralPath $application -Value 'synthetic payload, never executable' -NoNewline
+Set-Content -LiteralPath $uninstaller -Value 'synthetic uninstaller, never executable' -NoNewline
+$cleanup = {
+${admission}
+}
+$hashCalls = 0; $uninstallerCalls = 0
+& $cleanup
+if ($hashCalls -ne 1 -or $uninstallerCalls -ne 1) { throw 'Ordinary owned cleanup was not admitted' }
+$rejected = @()
+foreach ($case in @('parent', 'root')) {
+    $alias = if ($case -eq 'parent') { $parent } else { $root }
+    $relocated = Join-Path $PSScriptRoot ('relocated-' + $case)
+    Move-Item -LiteralPath $alias -Destination $relocated
+    try {
+        New-Item -ItemType Junction -Path $alias -Target $relocated | Out-Null
+        try {
+            $hashCalls = 0; $uninstallerCalls = 0; $failure = $null
+            try { & $cleanup } catch { $failure = $_ }
+            if ($null -eq $failure -or $failure.Exception.Message -notmatch 'filesystem alias') { throw ('Cleanup accepted ' + $case + ' junction') }
+            if ($hashCalls -ne 0 -or $uninstallerCalls -ne 0) { throw 'Cleanup touched bytes or launched through an alias' }
+            $rejected += $case
+        } finally { Remove-Item -LiteralPath $alias -Force }
+    } finally { Move-Item -LiteralPath $relocated -Destination $alias }
+}
+if ((Get-Content -LiteralPath $uninstaller -Raw) -cne 'synthetic uninstaller, never executable') { throw 'Cleanup mutated retained evidence' }
+[pscustomobject]@{ rejected = $rejected; hashCalls = $hashCalls; uninstallerCalls = $uninstallerCalls; payloadRetained = $true } | ConvertTo-Json -Compress
+`, { DSH_REGISTRATION_HELPER: fileURLToPath(new URL('./fixtures/windows-installer-registration.ps1', import.meta.url)) })
+  assert.deepEqual(observed, { rejected: ['parent', 'root'], hashCalls: 0, uninstallerCalls: 0, payloadRetained: true })
+})
+
+test('production registration GUID is bound to the exact appId and pinned builder namespace', () => {
+  const bytes = createHash('sha1').update(Buffer.from('50e065bc313411e69bab38c9862bdaf3', 'hex')).update('io.github.cloga.deepseek-harness.desktop').digest().subarray(0, 16)
+  bytes[6] = (bytes[6] & 0x0f) | 0x50
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const id = bytes.toString('hex').replace(/^(........)(....)(....)(....)(............)$/u, '$1-$2-$3-$4-$5')
+  assert.equal(id, 'e82f4b7a-f955-53af-bd9b-031d4e7ad569')
+  const source = readFileSync(new URL('./fixtures/windows-installer-registration.ps1', import.meta.url), 'utf8')
+  assert.ok(source.includes(`$id = '${id}'`))
+  assert.ok(source.includes("$owner.GetValue('InstallLocation', $null,"))
+  assert.doesNotMatch(source, /Get-ChildItem|Set-ItemProperty|CreateSubKey|SetValue/u)
+  assert.ok(source.includes('$base.OpenSubKey($ownerPath, $false)'))
+  assert.ok(source.includes('$base.OpenSubKey($uninstallPath, $false)'))
+  for (const name of ['owner', 'uninstall', 'base']) assert.ok(source.includes(`$${name}.Dispose()`))
+})
+
+test('exact baseline and candidate registrations accept only identical view aliases and verified identities', { skip: process.platform !== 'win32' }, t => {
+  const root = directory(t)
+  const input = join(root, 'records.json')
+  const id = 'e82f4b7a-f955-53af-bd9b-031d4e7ad569'
+  const installPath = join(root, 'Installed App', 'cloga-deepseek-harness-desktop')
+  const baselineSource = '2'.repeat(40)
+  const candidateSource = '1'.repeat(40)
+  const release = (version, commit) => ({ manifest: {
+    version, source: { repository: 'cloga/deepseek-harness', commit },
+    identity: { appId: 'io.github.cloga.deepseek-harness.desktop', productName: 'DeepSeek Harness (cloga)', executableName: 'cloga-deepseek-harness', packageName: 'cloga-deepseek-harness-desktop' },
+    installedEvidence: { executableSha256: (commit === baselineSource ? 'a' : 'b').repeat(64) },
+  } })
+  const baseline = release('0.1.6-alpha.1.cloga.2', baselineSource)
+  const candidate = release('0.1.6-alpha.2.cloga.1', candidateSource)
+  const record = version => ({
+    Id: id, Hive: 'CurrentUser', View: 'Registry64', OwnerKey: `Software\\${id}`, Key: `Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${id}`,
+    OwnerPresent: true, UninstallPresent: true, InstallLocation: installPath,
+    DisplayName: `DeepSeek Harness (cloga) ${version}`, DisplayVersion: version,
+    UninstallString: `"${join(installPath, 'Uninstall DeepSeek Harness (cloga).exe')}" /currentuser`,
+    QuietUninstallString: `"${join(installPath, 'Uninstall DeepSeek Harness (cloga).exe')}" /currentuser /S`,
+  })
+  const old = record(baseline.manifest.version)
+  const next = record(candidate.manifest.version)
+  const cases = [
+    ['missing', []], ['32-only', [{ ...old, View: 'Registry32' }]], ['duplicate-view', [old, old]],
+    ['foreign-machine', [old, { ...old, Hive: 'LocalMachine' }]],
+    ...Object.entries({
+      Id: 'other-guid', OwnerKey: 'Software\\other', Key: 'Software\\other', OwnerPresent: false, UninstallPresent: false,
+      InstallLocation: installPath + '-foreign', DisplayName: 'DeepSeek Harness (cloga)', DisplayVersion: '0.1.6-alpha.1.cloga.99',
+      UninstallString: old.UninstallString.replaceAll('"', ''), QuietUninstallString: old.QuietUninstallString + ' /foreign',
+    }).map(([field, value]) => [`wrong-${field}`, [{ ...old, [field]: value }]]),
+    ['old-uninstall-location-assumption', [{ ...old, OwnerPresent: false, InstallLocation: null }]],
+    ['conflicting-alias-path', [old, { ...old, View: 'Registry32', InstallLocation: installPath + '-foreign' }]],
+    ['conflicting-alias-version', [old, { ...next, View: 'Registry32' }]],
+    ['missing-mode', [{ ...old, UninstallString: old.UninstallString.replace(' /currentuser', '') }]],
+    ['wrong-mode', [{ ...old, UninstallString: old.UninstallString.replace('/currentuser', '/allusers') }]],
+    ['foreign-uninstaller', [{ ...old, UninstallString: '"C:\\foreign.exe" /currentuser' }]],
+  ]
+  const invalidReleases = [
+    ['source', { ...candidate.manifest, source: { ...candidate.manifest.source, commit: '2'.repeat(40) } }],
+    ['repository', { ...candidate.manifest, source: { ...candidate.manifest.source, repository: 'other/repository' } }],
+    ['version', { ...candidate.manifest, version: 'unversioned' }],
+    ['executable-hash', { ...candidate.manifest, installedEvidence: { executableSha256: 'invalid' } }],
+    ...['appId', 'productName', 'packageName', 'executableName'].map(field => [field, { ...candidate.manifest, identity: { ...candidate.manifest.identity, [field]: 'foreign' } }]),
+  ]
+  writeFileSync(input, JSON.stringify({ installPath, baselineSource, candidateSource, baseline, candidate, old, next, cases, invalidReleases }))
+  const observed = powershellUnit(t, `
+. $env:DSH_REGISTRATION_HELPER
+# Pure validation must not observe or mutate this machine's production registry.
+function Get-InstallerRegistrationEntries { throw 'Unit test attempted registry access' }
+$data = Get-Content -LiteralPath $env:DSH_REGISTRATION_INPUT -Raw | ConvertFrom-Json
+$oldIdentity = New-InstallerRegistrationIdentity $data.baseline $data.baselineSource
+$newIdentity = New-InstallerRegistrationIdentity $data.candidate $data.candidateSource
+$identities = @($oldIdentity, $newIdentity)
+$accepted = @()
+foreach ($entry in @($data.old, $data.next)) {
+    $accepted += Resolve-InstallerRegistration @($entry) $identities $data.installPath
+    $alias = $entry.PSObject.Copy()
+    $alias.View = 'Registry32'
+    $accepted += Resolve-InstallerRegistration @($entry, $alias) $identities $data.installPath
+}
+$rejected = @()
+foreach ($case in $data.cases) {
+    $failure = $null
+    try { [void](Resolve-InstallerRegistration @($case[1]) $identities $data.installPath) } catch { $failure = $_ }
+    if ($null -eq $failure) { throw ('Accepted invalid registration: ' + $case[0]) }
+    $rejected += $case[0]
+}
+foreach ($case in $data.invalidReleases) {
+    $failure = $null
+    try { [void](New-InstallerRegistrationIdentity ([pscustomobject]@{ manifest = $case[1] }) $data.candidateSource) } catch { $failure = $_ }
+    if ($null -eq $failure) { throw ('Accepted substituted identity: ' + $case[0]) }
+    $rejected += ('release-' + $case[0])
+}
+$failure = $null
+try { [void](Resolve-InstallerRegistration @($data.next) @($oldIdentity) $data.installPath) } catch { $failure = $_ }
+if ($null -eq $failure) { throw 'Candidate accepted during baseline-only phase' }
+[pscustomobject]@{ accepted = $accepted; rejected = $rejected; phaseRejected = $true } | ConvertTo-Json -Depth 5 -Compress
+`, { DSH_REGISTRATION_HELPER: fileURLToPath(new URL('./fixtures/windows-installer-registration.ps1', import.meta.url)), DSH_REGISTRATION_INPUT: input })
+  assert.deepEqual(observed.accepted.map(value => [value.Version, value.Source, value.ExecutableSha256]), [
+    [baseline.manifest.version, baselineSource, 'a'.repeat(64)], [baseline.manifest.version, baselineSource, 'a'.repeat(64)],
+    [candidate.manifest.version, candidateSource, 'b'.repeat(64)], [candidate.manifest.version, candidateSource, 'b'.repeat(64)],
+  ])
+  assert.ok(observed.accepted.every(value => value.Id === id && value.InstallLocation === installPath))
+  assert.deepEqual(observed.rejected, [...cases.map(([name]) => name), ...invalidReleases.map(([name]) => `release-${name}`)])
+  assert.equal(observed.phaseRejected, true)
+})
+
+test('driver binds registration and stock Run admission before trusting installed state', () => {
+  const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  assert.ok(source.includes("Get-PinnedInstallerBaselineSource (Join-Path $baseline 'release.json') $baselinePin.manifest.sha256 $baselinePin.tag"))
+  assert.ok(source.includes("Join-Path $PSScriptRoot 'fixtures/windows-upgrade-baseline.json'"))
+  assert.ok(source.includes('New-InstallerRegistrationIdentity $validated.previous $baselineSource'))
+  assert.ok(source.includes('New-InstallerRegistrationIdentity $validated.candidate $ExpectedSourceCommit'))
+  assert.ok(source.indexOf('$registrationIdentities = @($baselineIdentity, $candidateIdentity)') < source.indexOf('$installationAttempted = $true'))
+  assert.equal(source.match(/Read-Registration @\(\$baselineIdentity\)/gu).length, 2)
+  assert.equal(source.match(/Read-Registration @\(\$candidateIdentity\)/gu).length, 1)
+  assert.ok(source.includes('-cne $entry.ExecutableSha256'))
+  const registration = source.split('function Read-Registration')[1].split('function Write-InstallerFailureDiagnostics')[0]
+  assert.ok(registration.indexOf('Assert-InstallerOwnedPath $root $path') < registration.indexOf('Get-FileHash -LiteralPath $application'))
+  const legacyFinish = source.split('function Finish-LegacyInstaller')[1].split('function Start-Installer')[0]
+  assert.ok(legacyFinish.indexOf('::StockRun($Process.Id, $window)') < legacyFinish.indexOf('::Click($checkbox)'))
+  assert.ok(legacyFinish.includes("throw 'Baseline launch checkbox default changed'"))
+  assert.ok(legacyFinish.includes("throw 'Could not disable baseline automatic launch'"))
+})
+
+test('failure observations precede process cleanup and cannot replace the primary error', { skip: process.platform !== 'win32' }, t => {
+  const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const diagnostic = source.match(/function Write-InstallerFailureDiagnostics[^]*?\r?\n\}/u)?.[0]
+  assert.ok(diagnostic)
+  const handler = source.slice(source.indexOf('    $failure = $_\n    Write-InstallerFailureDiagnostics'))
+  assert.ok(handler.indexOf('Write-InstallerFailureDiagnostics') < handler.indexOf('Stop-OwnedProcesses $processes'))
+  const observed = powershellUnit(t, `
+${diagnostic}
+Add-Type 'public static class InstallerCapture { public static string DiagnosticText(int pid) { throw new System.InvalidOperationException("synthetic UI read failure"); } }'
+function Product-Registrations { [pscustomobject]@{ Id = 'synthetic-registration-only' } }
+$root = $PSScriptRoot
+New-Item -ItemType Directory -Path (Join-Path $root 'evidence') | Out-Null
+$errors = [Collections.Generic.List[string]]::new()
+try { throw 'primary installer failure' } catch { $failure = $_; $original = $_ }
+Write-InstallerFailureDiagnostics @([pscustomobject]@{ HasExited = $false; Id = 123 }) $errors
+$registration = Get-Content -LiteralPath (Join-Path $root 'evidence/installer-failure-registration.json') -Raw | ConvertFrom-Json
+$root = Join-Path $root 'absent-parent'
+Write-InstallerFailureDiagnostics @() $errors
+[pscustomobject]@{ samePrimary = [object]::ReferenceEquals($failure, $original); messages = @($errors); registration = @($registration) } | ConvertTo-Json -Depth 4 -Compress
+`)
+  assert.equal(observed.samePrimary, true)
+  assert.deepEqual(observed.registration, [{ Id: 'synthetic-registration-only' }])
+  assert.equal(observed.messages.length, 2)
+  assert.match(observed.messages[0], /Owned installer UI observation failed: .*synthetic UI read failure/u)
+  assert.match(observed.messages[1], /Installer registration observation failed:/u)
+})
+
+test('transaction guard rejects real target-parent staging siblings without deleting evidence', { skip: process.platform !== 'win32' }, t => {
+  const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const guard = driver.match(/function Assert-NoTransactionDirectories \{[^]*?\r?\n\}/u)?.[0]
+  assert.ok(guard)
+  const installer = readFileSync(new URL('../scripts/installer-directories.nsh', import.meta.url), 'utf8')
+  assert.ok(installer.includes('StrCpy $dshNewDirectory "$INSTDIR.new-$0"'))
+  assert.ok(installer.includes('StrCpy $dshOldDirectory "$INSTDIR.old-$0"'))
+  const observed = powershellUnit(t, `
+${guard}
+$root = $PSScriptRoot
+$installPath = Join-Path $root 'Installed App/cloga-deepseek-harness-desktop'
+Assert-NoTransactionDirectories
+New-Item -ItemType Directory -Path $installPath | Out-Null
+Assert-NoTransactionDirectories
+$rejected = @()
+foreach ($stage in @('new', 'old')) {
+    $path = $installPath + '.' + $stage + '-{11111111-1111-4111-8111-111111111111}'
+    New-Item -ItemType Directory -Path $path | Out-Null
+    if ($stage -eq 'old') { (Get-Item -LiteralPath $path).Attributes = [IO.FileAttributes]::Directory -bor [IO.FileAttributes]::Hidden }
+    $sentinel = Join-Path $path 'evidence.txt'
+    Set-Content -LiteralPath $sentinel -Value 'retained staged bytes' -NoNewline
+    $failure = $null
+    try { Assert-NoTransactionDirectories } catch { $failure = $_ }
+    if ($null -eq $failure -or $failure.Exception.Message -notmatch 'transaction directory') { throw ('Guard missed exact staging sibling: ' + $stage) }
+    if ((Get-Content -LiteralPath $sentinel -Raw) -cne 'retained staged bytes') { throw 'Guard mutated staged evidence' }
+    $rejected += $stage
+    Remove-Item -LiteralPath $path -Recurse -Force
+}
+Assert-NoTransactionDirectories
+[pscustomobject]@{ rejected = $rejected; cleanAccepted = $true } | ConvertTo-Json -Compress
+`)
+  assert.deepEqual(observed, { rejected: ['new', 'old'], cleanAccepted: true })
+})
 
 test('owned paths reject roots, escapes and existing junction ancestors', t => {
   const root = directory(t)
@@ -347,7 +672,7 @@ test('native driver requires hosted runner before mutation and never silently in
   const legacy = source.split('function Start-LegacyInstaller')[1].split('function Start-Installer')[0]
   assert.ok(legacy.includes("Start-Owned $path ('/currentuser /D=' + $installPath)"))
   assert.ok(legacy.includes('Wait-StockControl $process $window 1019'))
-  assert.ok(legacy.includes('Wait-StockControl $Process $window 1204 600'))
+  assert.ok(legacy.includes('Wait-StockControl $Process $window 1203 600'))
   assert.ok(source.includes("$baselineAppFilename = 'cloga-deepseek-harness-desktop'"))
   assert.ok(source.includes('Finish-LegacyInstaller (Start-LegacyInstaller $validated.previous)'))
   assert.ok(source.includes("throw 'Installer unexpectedly launched the product'"))
@@ -360,7 +685,7 @@ test('stock baseline captures are separate from strict custom-page readiness', (
   const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
   const legacy = driver.split('function Start-LegacyInstaller')[1].split('function Start-Installer')[0]
   assert.match(legacy, /::SaveStock\(\$process\.Id, \$window, 1019, /u)
-  assert.match(legacy, /::SaveStock\(\$Process\.Id, \$window, 1204, /u)
+  assert.match(legacy, /::SaveStock\(\$Process\.Id, \$window, 1203, /u)
   assert.doesNotMatch(legacy, /::Save\(/u)
   for (const [name, process] of [['Start-LegacyInstaller', 'process'], ['Finish-LegacyInstaller', 'Process']]) {
     const section = driver.split(`function ${name}`)[1].split('\nfunction ')[0]

@@ -48,21 +48,10 @@ $packageAcceptanceAttempted = $false
 $registration = $null
 $monitor = $null
 $installationAttempted = $false
-function Product-Registrations {
-    foreach ($hive in @('HKCU:', 'HKLM:')) {
-        foreach ($subkey in @('Software\Microsoft\Windows\CurrentVersion\Uninstall', 'Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')) {
-            $path = Join-Path $hive $subkey
-            if (Test-Path $path) {
-                foreach ($key in Get-ChildItem -LiteralPath $path) {
-                    $entry = Get-ItemProperty -LiteralPath $key.PSPath
-                    if ($entry.DisplayName -eq $product) {
-                        [pscustomobject]@{ Key = $key.PSPath; Hive = $hive; Id = $key.PSChildName; InstallLocation = $entry.InstallLocation }
-                    }
-                }
-            }
-        }
-    }
-}
+$registrationIdentities = @()
+$installerProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
+. (Join-Path $PSScriptRoot 'fixtures/windows-installer-registration.ps1')
+function Product-Registrations { Get-InstallerRegistrationEntries }
 function Product-Processes {
     @(Get-CimInstance Win32_Process | Where-Object {
         $_.Name -eq 'cloga-deepseek-harness.exe' -or ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($installPath + '\', [StringComparison]::OrdinalIgnoreCase))
@@ -162,6 +151,7 @@ function Start-LegacyInstaller($Release) {
         if ((Get-AuthenticodeSignature -LiteralPath $path).Status -ne 'NotSigned') { throw 'Unexpected baseline installer signature state' }
         $process = Start-Owned $path ('/currentuser /D=' + $installPath)
     } finally { $stream.Dispose() }
+    $installerProcesses.Add($process)
     $window = Wait-StockWindow $process
     $directory = Wait-StockControl $process $window 1019
     if ([IO.Path]::GetFullPath([InstallerCapture]::Text($directory)).TrimEnd('\') -cne $installPath) { throw 'Baseline installer custom path changed before installation' }
@@ -172,7 +162,8 @@ function Start-LegacyInstaller($Release) {
 }
 function Finish-LegacyInstaller([Diagnostics.Process]$Process) {
     $window = Wait-StockWindow $Process 600
-    $checkbox = Wait-StockControl $Process $window 1204 600
+    [void](Wait-StockControl $Process $window 1203 600)
+    $checkbox = [InstallerCapture]::StockRun($Process.Id, $window)
     if ([InstallerCapture]::SendMessage($checkbox, 0xF0, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32() -ne 1) { throw 'Baseline launch checkbox default changed' }
     [InstallerCapture]::Click($checkbox)
     $timer = [Diagnostics.Stopwatch]::StartNew()
@@ -181,7 +172,7 @@ function Finish-LegacyInstaller([Diagnostics.Process]$Process) {
         Start-Sleep -Milliseconds 25
     }
     [void](Wait-StockControl $Process $window 1)
-    [void][InstallerCapture]::SaveStock($Process.Id, $window, 1204, (Join-Path $root ('evidence/baseline-finish-' + $Process.Id + '.png')))
+    [void][InstallerCapture]::SaveStock($Process.Id, $window, 1203, (Join-Path $root ('evidence/baseline-finish-' + $Process.Id + '.png')))
     [InstallerCapture]::Click((Wait-StockControl $Process $window 1))
     Wait-Exit $Process 30
 }
@@ -194,6 +185,7 @@ function Start-Installer($Release) {
         $arguments = '/THEME=light'
         $process = Start-Owned $path $arguments
     } finally { $stream.Dispose() }
+    $installerProcesses.Add($process)
     $timer = [Diagnostics.Stopwatch]::StartNew()
     do {
         if ($process.HasExited) { throw "Installer exited before welcome ($($process.ExitCode))" }
@@ -237,10 +229,27 @@ function Wait-NoProductProcesses {
         Start-Sleep -Milliseconds 100
     }
 }
-function Read-Registration {
-    $entries = @(Product-Registrations)
-    if ($entries.Count -ne 1 -or $entries[0].Hive -ne 'HKCU:' -or [IO.Path]::GetFullPath($entries[0].InstallLocation).TrimEnd('\') -ne $installPath) { throw 'Production registration does not identify the exact owned custom installation' }
-    return $entries[0]
+function Read-Registration([object[]]$Identities = $registrationIdentities) {
+    $entry = Resolve-InstallerRegistration @(Product-Registrations) $Identities $installPath
+    foreach ($path in @($installPath, $application, $uninstaller)) {
+        Assert-InstallerOwnedPath $root $path
+    }
+    if ((Get-FileHash -LiteralPath $application -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.ExecutableSha256) {
+        throw 'Registered executable differs from its verified release'
+    }
+    return $entry
+}
+function Write-InstallerFailureDiagnostics($OwnedInstallers, $Errors) {
+    foreach ($process in $OwnedInstallers) {
+        try {
+            if (-not $process.HasExited) {
+                [InstallerCapture]::DiagnosticText($process.Id) | Set-Content -LiteralPath (Join-Path $root ('evidence/installer-failure-ui-' + $process.Id + '.txt')) -Encoding utf8NoBOM
+            }
+        } catch { $Errors.Add('Owned installer UI observation failed: ' + $_.Exception.Message) }
+    }
+    try {
+        ConvertTo-Json -InputObject @(Product-Registrations) -Depth 4 | Set-Content -LiteralPath (Join-Path $root 'evidence/installer-failure-registration.json') -Encoding utf8NoBOM
+    } catch { $Errors.Add('Installer registration observation failed: ' + $_.Exception.Message) }
 }
 function Installation-Inventory {
     $items = @(Get-ChildItem -LiteralPath $installPath -Recurse -Force)
@@ -250,15 +259,28 @@ function Installation-Inventory {
     }) | ConvertTo-Json -Depth 4 -Compress
 }
 function Assert-NoTransactionDirectories {
-    if (@(Get-ChildItem -LiteralPath $root -Directory | Where-Object { $_.Name -like 'Installed App.new-*' -or $_.Name -like 'Installed App.old-*' }).Count -ne 0) { throw 'Installer left a transaction directory requiring investigation' }
+    # installer-directories.nsh stages "$INSTDIR.new-$0" and "$INSTDIR.old-$0" beside the exact target.
+    $parent = Split-Path $installPath -Parent
+    $leaf = Split-Path $installPath -Leaf
+    if (-not (Test-Path -LiteralPath $parent)) { return }
+    $directory = Get-Item -LiteralPath $parent -Force
+    if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Installation parent is not an owned directory' }
+    if (@(Get-ChildItem -LiteralPath $parent -Directory -Force | Where-Object {
+        $_.Name.StartsWith($leaf + '.new-', [StringComparison]::OrdinalIgnoreCase) -or $_.Name.StartsWith($leaf + '.old-', [StringComparison]::OrdinalIgnoreCase)
+    }).Count -ne 0) { throw 'Installer left a transaction directory requiring investigation' }
 }
 try {
     Wait-Exit (Start-Fixture validate) 120
     $validated = Get-Content -LiteralPath (Join-Path $root 'validated.json') -Raw | ConvertFrom-Json
     if ($validated.ownerToken -ne $token) { throw 'Validation does not belong to this run' }
+    $baselinePin = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'fixtures/windows-upgrade-baseline.json') -Raw | ConvertFrom-Json
+    $baselineSource = Get-PinnedInstallerBaselineSource (Join-Path $baseline 'release.json') $baselinePin.manifest.sha256 $baselinePin.tag
+    $baselineIdentity = New-InstallerRegistrationIdentity $validated.previous $baselineSource
+    $candidateIdentity = New-InstallerRegistrationIdentity $validated.candidate $ExpectedSourceCommit
+    $registrationIdentities = @($baselineIdentity, $candidateIdentity)
     $installationAttempted = $true
     Finish-LegacyInstaller (Start-LegacyInstaller $validated.previous)
-    $registration = Read-Registration
+    $registration = Read-Registration @($baselineIdentity)
     if ((Get-FileHash -LiteralPath $application -Algorithm SHA256).Hash.ToLowerInvariant() -ne $validated.previous.manifest.installedEvidence.executableSha256) { throw 'Installed baseline executable differs from verified release' }
     $before = Installation-Inventory
     $before | Set-Content -LiteralPath (Join-Path $root 'evidence/baseline-inventory.json') -Encoding utf8NoBOM
@@ -278,14 +300,14 @@ try {
     if ($okay -eq [IntPtr]::Zero) { throw 'Running-application prompt has no native OK action' }
     [InstallerCapture]::Click($okay)
     Wait-Exit $refused 30 2
-    if ($live.HasExited -or (Installation-Inventory) -ne $before -or (Read-Registration).Key -ne $registration.Key) { throw 'Running-application refusal changed the installation or stopped the baseline' }
+    if ($live.HasExited -or (Installation-Inventory) -ne $before -or (Read-Registration @($baselineIdentity)).Key -ne $registration.Key) { throw 'Running-application refusal changed the installation or stopped the baseline' }
     Assert-NoTransactionDirectories
     @{ ownerToken = $token } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'baseline-finish-request.json') -Encoding utf8NoBOM
     Wait-Exit $monitor 120
     $monitor = $null
     Wait-NoProductProcesses
     Finish-Installer (Start-Installer $validated.candidate)
-    if ((Read-Registration).Key -ne $registration.Key) { throw 'Upgrade changed the production registration identity' }
+    if ((Read-Registration @($candidateIdentity)).Key -ne $registration.Key) { throw 'Upgrade changed the production registration identity' }
     Assert-NoTransactionDirectories
     Wait-Exit (Start-Fixture candidate) 900
     Wait-NoProductProcesses
@@ -302,6 +324,7 @@ try {
     $success = $true
 } catch {
     $failure = $_
+    Write-InstallerFailureDiagnostics $installerProcesses $secondaryErrors
 } finally {
     $initialReaped = Stop-OwnedProcesses $processes $cleanupErrors
     if ($installationAttempted) {
