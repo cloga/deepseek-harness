@@ -15,7 +15,7 @@ import {
 const sha = 'a'.repeat(40)
 const tree = 'b'.repeat(40)
 const head = 'c'.repeat(40)
-const version = '0.1.6-alpha.3'
+const version = '0.1.6-alpha.4'
 const selection: Selection = {
   repository: 'cloga/deepseek-harness', event: 'workflow_dispatch', publish: 'true',
   ref: `refs/tags/dsh-v${version}`, source: sha, version, reviewedHead: head, mergedCommit: sha,
@@ -56,8 +56,7 @@ describe('dispatch and checkout evidence', () => {
   it('admits only the approved existing tag dispatch and first attempt', () => {
     expect(() => { assertDispatch(selection) }).not.toThrow()
   })
-  it('rejects the previous dated candidate even when its tag matches its version', () => {
-    const previous = '0.1.6-alpha.2.20260919.1'
+  it.each(['0.1.6-alpha.2.20260919.1', '0.1.6-alpha.3'])('rejects previous candidate %s even when its tag matches', (previous) => {
     expect(() => { assertDispatch({ ...selection, version: previous, ref: `refs/tags/dsh-v${previous}` }) }).toThrow()
   })
   it.each([
@@ -279,6 +278,40 @@ function fixture(mode = '') {
 }
 
 describe('authoritative evidence and draft publication', () => {
+  it('accepts empty post-merge PR associations for successful final-head CI and policy runs', async () => {
+    const f = fixture()
+    f.ci.pull_requests = []
+    f.policy.pull_requests = []
+    expect(await f.publish()).toBe(700)
+  })
+  it.each(['number', 'head', 'base', 'not-array'])('rejects supplied run associations without the exact governing PR: %s', async (variant) => {
+    const f = fixture()
+    const association = { number: 75, head: { sha: head }, base: { ref: 'review/issue-72-official-base' } }
+    if (variant === 'number') association.number = 76
+    if (variant === 'head') association.head.sha = sha
+    if (variant === 'base') association.base.ref = 'other-base'
+    f.ci.pull_requests = [association]
+    if (variant === 'not-array') f.routes.set('/actions/runs/100', { ...f.ci, pull_requests: null })
+    await expect(f.publish()).rejects.toThrow()
+    expect(f.writes).toHaveLength(0)
+  })
+  it.each(['run-head', 'run-path', 'run-event', 'run-repository', 'run-head-repository', 'run-attempt', 'pr-number', 'pr-unmerged', 'pr-head', 'pr-base'])('retains independent source admission with empty associations: %s', async (variant) => {
+    const f = fixture()
+    f.ci.pull_requests = []
+    f.policy.pull_requests = []
+    if (variant === 'run-head') f.ci.head_sha = sha
+    if (variant === 'run-path') f.ci.path = '.github/workflows/other.yml'
+    if (variant === 'run-event') f.ci.event = 'push'
+    if (variant === 'run-repository') f.ci.repository = { full_name: 'other/repository' }
+    if (variant === 'run-head-repository') f.ci.head_repository = { full_name: 'other/repository' }
+    if (variant === 'run-attempt') f.ci.run_attempt = 0
+    if (variant === 'pr-number') f.pr.number = 76
+    if (variant === 'pr-unmerged') f.pr.merged = false
+    if (variant === 'pr-head') f.pr.head.sha = sha
+    if (variant === 'pr-base') f.pr.base.ref = 'other-base'
+    await expect(f.publish()).rejects.toThrow()
+    expect(f.writes).toHaveLength(0)
+  })
   it('uploads exact originals serially, verifies remote bytes, then finalizes a non-latest prerelease', async () => {
     const f = fixture()
     expect(await f.publish()).toBe(700)

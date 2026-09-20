@@ -7,7 +7,7 @@ import { setTimeout } from 'node:timers/promises'
 import { verifyEvidence, verifyTag, verifyTagProtection } from './github-artifacts-evidence.ts'
 
 const REPOSITORY = 'cloga/deepseek-harness'
-const VERSION = '0.1.6-alpha.3'
+const VERSION = '0.1.6-alpha.4'
 const SHA = /^[a-f0-9]{40}$/u
 const ID = /^[1-9][0-9]*$/u
 const BASENAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u

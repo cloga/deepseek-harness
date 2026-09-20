@@ -158,7 +158,11 @@ async function successfulRun(api: GitHub, id: string, path: string, selection: S
     || run.path !== path || run.event !== 'pull_request' || run.status !== 'completed' || run.conclusion !== 'success'
     || run.repository.full_name !== REPOSITORY || run.head_repository.full_name !== REPOSITORY
     || run.head_sha !== selection.reviewedHead
-    || !run.pull_requests.some(pr => pr.number === 75 && pr.head.sha === selection.reviewedHead && pr.base.ref === BASE)) {
+    // GitHub can clear run associations after merge; merged PR/head/tree facts
+    // are verified separately. A supplied nonempty list must still match.
+    || !Array.isArray(run.pull_requests)
+    || (run.pull_requests.length > 0
+      && !run.pull_requests.some(pr => pr.number === 75 && pr.head.sha === selection.reviewedHead && pr.base.ref === BASE))) {
     throw new Error('Selected PR workflow is not successful evidence for the reviewed final head')
   }
   return run
