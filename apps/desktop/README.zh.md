@@ -4,7 +4,7 @@
 
 桌面应用是完整 dsh Web 应用外的一层 Electron 壳。Electron RunAsNode 子进程启动共享 profile runner，Electron 立即从 `dsh-app://app/` 加载打包内的 Web 入口。共享加载页等待 Host 启动注入，然后在同一文档中启动客户端。Electron 将应用 HTTP 请求转发给已认证的 Web Host；WebSocket 流连接到该 Host，仅为归属的应用窗口附加凭据。Node IPC 承载启动注入、就绪与关闭。Desktop 默认使用端口 `19387`，与 Web 的 `3080` 分开；可通过 `webserver.config.port` patch 覆盖。
 
-应用菜单第一项“**关于 DeepSeek Harness**”打开 Electron 原生关于面板，展示应用图标、产品名称和当前安装的发布版本。菜单文案跟随桌面壳的语言。macOS 从应用包读取图标，因此未打包的开发启动会显示 Electron 图标；Windows 使用随包分发的 PNG。
+应用菜单的“关于”命令打开 Electron 原生关于面板，展示应用图标、产品名称和正在运行的 Desktop 版本。菜单文案跟随桌面壳的语言。macOS 从应用包读取图标，因此未打包的开发启动会显示 Electron 图标；Windows 使用随包分发的 PNG。
 
 Desktop 的本地原生目录流程打开绑定应用窗口的 Electron 文件夹对话框，并先恢复、显示和聚焦该窗口。并发请求共用一个对话框；取消不返回路径，失败后可以重试。普通 Web 使用 Host 选择器。浏览模式列出 Host 目录。Linux 缺少 zenity 或 kdialog 时，自动选择使用浏览模式，不使用 Electron 对话框。
 
@@ -52,9 +52,11 @@ Electron 拥有 `$DSH_HOME/profiles/desktop`。其 `dependencies` 包含 pnpm �
 
 Electron 根据应用语言选择类型化的英文或中文 shell 文案，并回退到英文。在 Windows 上，主文档的语言会更新桌面菜单、恢复与更新提示。仓库 Client UI i18n 检查覆盖桌面端源码。
 
-Windows 使用 40 DIP 顶栏，保留原生窗口按钮，颜色随应用调色板同步。侧栏开关旁的本地化“应用”和“编辑”入口打开原生弹出菜单。仅当应用框架发布 shell overlay 席位后才挂载菜单，启动加载期间不显示。“应用”提供检查更新和退出；“编辑”向当前编辑器发送对应按键，提供撤销、重做、剪切、复制、粘贴、删除和全选。插件管理使用主应用的“插件”页面。按 Alt 不会出现额外的原生菜单行。其他平台保留原生菜单。可编辑区域保留快捷键和不带快捷键标注的右键菜单；命令可用状态由 Chromium 提供，选中的只读文本提供“复制”命令。
+Windows 使用 40 DIP 顶栏，保留原生窗口按钮，颜色随应用调色板同步。由 preload 拥有的同一个顶栏菜单在启动加载期间和应用框架中提供本地化“应用”和“编辑”入口，打开原生弹出菜单。加载期间使用源码定义的备用位置和主题样式；应用框架发布 shell overlay 席位和主题变量后，同一个菜单随其调整，位于侧栏开关旁。“应用”提供检查更新和退出；“编辑”向当前编辑器发送对应按键，提供撤销、重做、剪切、复制、粘贴、删除和全选。插件管理使用主应用的“插件”页面。按 Alt 不会出现额外的原生菜单行。其他平台保留原生菜单。可编辑区域保留快捷键和不带快捷键标注的右键菜单；命令可用状态由 Chromium 提供，选中的只读文本提供“复制”命令。
 
 macOS 上自定义应用菜单还会声明标准的 File、Window 和应用菜单，因为替换 Electron 的默认菜单会丢掉 Close Window（⌘W）、Minimize（⌘M）和 Hide（⌘H）。Linux 保留应用菜单和 Edit 菜单。
+
+应用菜单（macOS 上为应用名称菜单）的首项是 **关于 Desktop {version}…**，直接显示正在运行的 Electron 应用的完整版本号，保留预发布和 fork 后缀；点击后打开显示相同 Desktop 版本的原生“关于”面板。此入口在 Host 就绪前的启动加载期间即可访问。版本取自 Electron，无需检查更新或访问网络。这里不会显示可用的新版本或独立安装的 CLI 版本。
 
 Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.png)，它是共享[鲸鱼 favicon](../web/public/favicon.svg) 的 256 像素透明栅格图。打包会把该图片放入应用归档，并用于可执行文件和安装器创建的快捷方式图标；图片缺失或格式错误时拒绝打包。单独修改快捷方式不会改变运行中窗口的图标。应先保存当前工作，再安装更新并重新打开 Desktop。
 
@@ -233,7 +235,7 @@ pnpm run package:desktop:win:x64:unsigned
 
 ### Fork 拥有的 Windows 发布
 
-当前已发布的不可变基线是 `0.1.6-alpha.1.cloga.10`，sequence 为 20（Release 392425408）。alpha2 候选版本是 `0.1.6-alpha.2.cloga.1`，暂定 sequence 为 21；候选版本不会预留 sequence，发布前必须重新检查通道。其 plan 不构成发布或已安装升级证据。安装器升级 fixture（测试前置数据）仍锁定 `0.1.6-alpha.1.cloga.2`，sequence 为 12，不证明从 `.cloga.10` 升级已通过验收。
+当前已发布的不可变基线是 `0.1.6-alpha.1.cloga.10`，sequence 为 20（Release 392425408）。alpha2 候选版本是 `0.1.6-alpha.2.cloga.1`，暂定 sequence 为 23；候选版本不会预留 sequence，发布前必须重新检查通道。其 plan 不构成发布或已安装升级证据。安装器升级 fixture（测试前置数据）仍锁定 `0.1.6-alpha.1.cloga.2`，sequence 为 12，不证明从 `.cloga.10` 升级已通过验收。
 
 `release/cloga-windows-x64.json` 中经过评审的 plan 同时推进语义版本与整数 sequence。每次手动触发 `Desktop fork release (Windows x64)` workflow 都必须提供 `confirm_version` 与 `expected_source_sha`。安装依赖之前，源码锁定值必须恰好为 40 个小写十六进制字符，并与检出的 `HEAD` 完全一致；确认未变的版本号不代表授权较新的 commit。Workflow 固定 Node 24.13.0 与 pnpm 11.7.0，从冻结 lockfile 安装，测试 Desktop，打包固定 cloga 身份，并验证独立 helper、capability、未签名 installer、已安装 executable、runtime descriptor 与原生/托管互斥。
 
@@ -245,7 +247,9 @@ Preparation 和 remote verification 使用步骤专属的只读 `DSH_DESKTOP_REL
 
 每个 release 包含交互式 NSIS installer、`release.json`、`build-receipt.json`、`SHA256SUMS` 与 `SHA512SUMS`。Manifest 与 receipt 锁定源码 commit 与 tree、lockfile 与 plan hash、构建工具与依赖 registry、fork package identity、installer size 与 hash、插件 capability 与结构化 source/receipt 版本、允许的 origin 与 redirect，以及重启后 completion 语义。独立的[已安装升级验收](tests/windows-installer-upgrade.ps1)只在一次性的 GitHub 托管 Windows runner 上执行经过验证的基线与候选安装器；这不授权在工作站上安装或重启。
 
-在 finalization 前，[打包 Copilot 验收](tests/fixtures/copilot-release-smoke.ts) 使用全新的 Harness 与 Electron 数据目录启动 unpacked Electron 应用。它要求真实 Settings > Models 账户、登录入口、Manage 面板、成功加载的只读 Model roles 视图及已注册搜索提供方目录。它验证已安装插件依赖图和 provisioning 清单，再在退出后重新启动时重复这些观察。独立的七天 workflow artifact 记录截图、安全的设置观察、receipt、打包 runtime/capability/plan 记录、可执行文件元数据与精确源码身份。失败运行保留脱敏启动诊断和 receipt/state 是否存在，不保留凭据或 profile 副本。夹具绝不保存设置、创建 Session、登录或调用模型与搜索提供方。目录注册不等于提供方可用；这些检查不证明 OAuth 成功、模型可用、搜索路由或回退行为，也不证明旧版本到新版本的 installer 升级。Rehearsal artifact 不是不可变 Release。
+在 finalization 前，[打包 Copilot 验收](tests/fixtures/copilot-release-smoke.ts) 使用全新的 Harness 与 Electron 数据目录启动 unpacked Electron 应用。它要求真实 Settings > Models 账户、登录入口、不再包含已移除 compatibility disclosure 的展开 Manage 面板、成功加载的只读 Model roles 视图、仅提供方级别的 Search provider 与 Fallback provider 控件，以及已注册搜索提供方目录。它验证已安装插件依赖图和 provisioning 清单，再在退出后重新启动时重复这些观察。独立的七天 workflow artifact 记录截图、安全的设置观察、receipt、打包 runtime/capability/plan 记录、可执行文件元数据与精确源码身份。失败运行保留脱敏启动诊断和 receipt/state 是否存在，不保留凭据或 profile 副本。夹具绝不保存设置、创建 Session、登录、打开验证地址或调用模型与搜索提供方。目录注册不等于提供方可用；这些检查不证明 OAuth 成功、模型可用、搜索路由或回退行为，也不证明旧版本到新版本的 installer 升级。Rehearsal artifact 不是不可变 Release。
+
+alpha2 候选计划固定 Copilot `0.4.0-alpha.30`；采用该插件锁定不证明 Core 升级已经通过打包验收。只读验收覆盖 alpha.29 的仅提供方设置和 alpha.30 的登出 Manage 状态。Copilot 自己的合成 Client 测试覆盖 Desktop 同窗口验证交接、Web 新标签页行为以及可选择的手动验证地址；Desktop 打包不会发起该流程。Alpha.28 request-budget 与 compaction 行为和 alpha.29 账户拥有搜索模型解析继续属于由哈希绑定的插件行为，需要单独的模型/搜索验收。[托管 Copilot 维护决策](../../.agents/notes/implemented/architecture/2026-09-20-managed-desktop-copilot-maintenance.zh.md)记录精确发布证据、官方 Core alpha.2 重叠、保留缺口和迁移条件。
 
 独立依赖图检查以打包 Electron 的 Node 模式针对 `app.asar/dsh` 运行构建后的验证器，选择运行时解析，并以活动 profile 为工作目录。它移除继承的 `NODE_PATH`、`NODE_OPTIONS` 与 ASAR 覆盖项，不使用 tsx loader，并将结果绑定到原始运行时描述文件哈希。这只验证包清单；真实 Host 验收单独验证模块加载。源码 runner 的查找路径仅用于诊断。缺失的可选 peer，以及仅在 profile 之外找到的可选非宿主 peer，均被视为缺失；profile 之外的必需依赖仍会报错。
 

@@ -187,7 +187,8 @@ const harness = await vi.hoisted(async () => {
     name: 'Desktop test',
     whenReady: () => Promise.resolve(),
     getLocale: (): string => 'en-US',
-    getVersion: () => '1.0.0',
+    getVersion: (): string => '1.0.0',
+    showAboutPanel: vi.fn(),
     getAppPath: () => 'desktop-test-app',
     setAboutPanelOptions: vi.fn<(options: Electron.AboutPanelOptionsOptions) => void>(),
     requestSingleInstanceLock: () => true,
@@ -445,9 +446,46 @@ describe('desktop main startup', () => {
     const submenu = applicationMenuItems()
     const options = harness.app.setAboutPanelOptions.mock.calls[0]![0]
     const expected = JSON.parse(readFileSync(new URL('./expected/about-panel.json', import.meta.url), 'utf8')) as Record<string, unknown>
-    expect({ menu: submenu.slice(0, 2), options: { ...options, iconPath: '<app icon>' } }).toEqual(expected[locale])
+    const menu = submenu.slice(0, 2).map(({ click: _click, ...item }) => item)
+    expect({ menu, options: { ...options, iconPath: '<app icon>' } }).toEqual(expected[locale])
     expect(options.iconPath).toBe(packaged ? join('desktop-test-resources', 'icon.png')
       : join('desktop-test-app', 'resources', 'icon-windows.png'))
+    expect(harness.app.setAboutPanelOptions).toHaveBeenCalledOnce()
+    expect(harness.app.showAboutPanel).not.toHaveBeenCalled()
+    Reflect.apply(submenu[0]!.click!, undefined, [])
+    expect(harness.app.showAboutPanel).toHaveBeenCalledOnce()
+  })
+
+  it.each((['win32', 'darwin', 'linux'] as const).flatMap(platform => [
+    { platform, locale: 'en-US', application: 'Application', label: 'About Desktop 0.1.6-alpha.1.cloga.10…' },
+    { platform, locale: 'zh-CN', application: '应用', label: '关于 Desktop 0.1.6-alpha.1.cloga.10…' },
+    { platform, locale: 'fr-FR', application: 'Application', label: 'About Desktop 0.1.6-alpha.1.cloga.10…' },
+  ]))('builds the full running version menu before Host readiness on $platform in $locale', async ({ platform, locale, application, label }) => {
+    vi.stubGlobal('process', { ...process, platform })
+    vi.spyOn(harness.app, 'getLocale').mockReturnValue(locale)
+    vi.spyOn(harness.app, 'getVersion').mockReturnValue('0.1.6-alpha.1.cloga.10')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    const submenu = applicationMenuItems()
+    if (platform === 'win32') expect(harness.menu.setApplicationMenu).toHaveBeenCalledExactlyOnceWith(null)
+    else expect(harness.menu.mock.calls[0]![0][0]!.label).toBe(platform === 'darwin' ? harness.app.name : application)
+    const about = submenu[0]!
+    expect(about.label).toBe(label)
+    expect(about.role).toBeUndefined()
+    expect(submenu.filter(item => item.label === label)).toHaveLength(1)
+    expect(submenu[1]).toEqual({ type: 'separator' })
+    expect(harness.app.setAboutPanelOptions).toHaveBeenCalledExactlyOnceWith({
+      applicationName: 'DeepSeek Harness', applicationVersion: '0.1.6-alpha.1.cloga.10',
+      version: '', copyright: '', iconPath: join('desktop-test-resources', 'icon.png'),
+    })
+    expect(harness.app.showAboutPanel).not.toHaveBeenCalled()
+    const updateChecks = harness.updateCheck.mock.calls.length
+    Reflect.apply(about.click!, undefined, [])
+    expect(harness.app.showAboutPanel).toHaveBeenCalledOnce()
+    expect(harness.hosts).toHaveLength(0)
+    expect(harness.updateCheck).toHaveBeenCalledTimes(updateChecks)
+    expect(harness.updateInstall).not.toHaveBeenCalled()
+    expect(harness.app.quit).not.toHaveBeenCalled()
   })
 
   it('shows one explained startup login before Host readiness and joins concurrent checks without reopening it', async () => {
@@ -672,7 +710,7 @@ describe('desktop main startup', () => {
     expect(() => handler(event, 'application', NaN, 34)).toThrow('invalid popup request')
     const application = handler(event, 'application', 48, 34)
     expect(harness.menu.buildFromTemplate.mock.lastCall![0].map(item => item.label ?? item.type)).toEqual([
-      '关于 DeepSeek Harness', 'separator', '检查更新…', 'separator', '退出',
+      '关于 Desktop 1.0.0…', 'separator', '检查更新…', 'separator', '退出',
     ])
     expect(harness.popup.mock.lastCall![0]).toMatchObject({ window, x: 48, y: 34 })
     expect(harness.popup.mock.lastCall![0].callback).toBeTypeOf('function')
@@ -709,8 +747,8 @@ describe('desktop main startup', () => {
       : ['Application', 'editMenu'])
     const application = template[0]!.submenu as MenuItemConstructorOptions[]
     expect(application.map(describeItem)).toEqual(platform === 'darwin'
-      ? ['about', 'separator', en.checkUpdatesMenu, 'separator', 'hide', 'hideOthers', 'unhide', 'separator', 'quit']
-      : ['about', 'separator', en.checkUpdatesMenu, 'separator', 'quit'])
+      ? ['About Desktop 1.0.0…', 'separator', en.checkUpdatesMenu, 'separator', 'hide', 'hideOthers', 'unhide', 'separator', 'quit']
+      : ['About Desktop 1.0.0…', 'separator', en.checkUpdatesMenu, 'separator', 'quit'])
     expect(harness.menu.setApplicationMenu).toHaveBeenCalledOnce()
   })
 

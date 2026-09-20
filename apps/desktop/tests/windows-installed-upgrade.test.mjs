@@ -383,7 +383,7 @@ $root = Join-Path $PSScriptRoot 'run-root'
 $parent = Join-Path $root 'Installed App'
 $installPath = Join-Path $parent 'cloga-deepseek-harness-desktop'
 $application = Join-Path $installPath 'cloga-deepseek-harness.exe'
-$uninstaller = Join-Path $installPath 'Uninstall DeepSeek Harness (cloga).exe'
+$uninstaller = Join-Path $installPath 'Uninstall cloga-deepseek-harness.exe'
 New-Item -ItemType Directory -Path $installPath | Out-Null
 Set-Content -LiteralPath $application -Value 'synthetic payload, never executable' -NoNewline
 Set-Content -LiteralPath $uninstaller -Value 'synthetic uninstaller, never executable' -NoNewline
@@ -448,8 +448,9 @@ test('exact baseline and candidate registrations accept only identical view alia
     Id: id, Hive: 'CurrentUser', View: 'Registry64', OwnerKey: `Software\\${id}`, Key: `Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${id}`,
     OwnerPresent: true, UninstallPresent: true, InstallLocation: installPath,
     DisplayName: `DeepSeek Harness (cloga) ${version}`, DisplayVersion: version,
-    UninstallString: `"${join(installPath, 'Uninstall DeepSeek Harness (cloga).exe')}" /currentuser`,
-    QuietUninstallString: `"${join(installPath, 'Uninstall DeepSeek Harness (cloga).exe')}" /currentuser /S`,
+    // Stock NSIS uses PRODUCT_FILENAME, derived from executableName rather than productName.
+    UninstallString: `"${join(installPath, 'Uninstall cloga-deepseek-harness.exe')}" /currentuser`,
+    QuietUninstallString: `"${join(installPath, 'Uninstall cloga-deepseek-harness.exe')}" /currentuser /S`,
   })
   const old = record(baseline.manifest.version)
   const next = record(candidate.manifest.version)
@@ -467,6 +468,20 @@ test('exact baseline and candidate registrations accept only identical view alia
     ['missing-mode', [{ ...old, UninstallString: old.UninstallString.replace(' /currentuser', '') }]],
     ['wrong-mode', [{ ...old, UninstallString: old.UninstallString.replace('/currentuser', '/allusers') }]],
     ['foreign-uninstaller', [{ ...old, UninstallString: '"C:\\foreign.exe" /currentuser' }]],
+    ['display-name-uninstaller', [{ ...old,
+      UninstallString: `"${join(installPath, 'Uninstall DeepSeek Harness (cloga).exe')}" /currentuser`,
+      QuietUninstallString: `"${join(installPath, 'Uninstall DeepSeek Harness (cloga).exe')}" /currentuser /S`,
+    }]],
+    ['package-name-uninstaller', [{ ...old,
+      UninstallString: `"${join(installPath, 'Uninstall cloga-deepseek-harness-desktop.exe')}" /currentuser`,
+      QuietUninstallString: `"${join(installPath, 'Uninstall cloga-deepseek-harness-desktop.exe')}" /currentuser /S`,
+    }]],
+    ['command-injection', [{ ...old, UninstallString: old.UninstallString + ' & echo injected' }]],
+    ['trailing-uninstall-arguments', [{ ...old, UninstallString: old.UninstallString + ' /S' }]],
+    ['quiet-foreign-uninstaller', [{ ...old, QuietUninstallString: '"C:\\foreign.exe" /currentuser /S' }]],
+    ['quiet-missing-mode', [{ ...old, QuietUninstallString: old.QuietUninstallString.replace(' /currentuser', '') }]],
+    ['quiet-wrong-mode', [{ ...old, QuietUninstallString: old.QuietUninstallString.replace('/currentuser', '/allusers') }]],
+    ['quiet-missing-silent', [{ ...old, QuietUninstallString: old.UninstallString }]],
   ]
   const invalidReleases = [
     ['source', { ...candidate.manifest, source: { ...candidate.manifest.source, commit: '2'.repeat(40) } }],
@@ -520,6 +535,7 @@ if ($null -eq $failure) { throw 'Candidate accepted during baseline-only phase' 
 
 test('driver binds registration and stock Run admission before trusting installed state', () => {
   const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  assert.ok(source.includes("$uninstaller = Join-Path $installPath 'Uninstall cloga-deepseek-harness.exe'"))
   assert.ok(source.includes("Get-PinnedInstallerBaselineSource (Join-Path $baseline 'release.json') $baselinePin.manifest.sha256 $baselinePin.tag"))
   assert.ok(source.includes("Join-Path $PSScriptRoot 'fixtures/windows-upgrade-baseline.json'"))
   assert.ok(source.includes('New-InstallerRegistrationIdentity $validated.previous $baselineSource'))

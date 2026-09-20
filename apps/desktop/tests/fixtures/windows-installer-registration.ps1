@@ -120,7 +120,8 @@ function Resolve-InstallerRegistration([object[]]$Entries, [object[]]$Identities
         if ($entry.InstallLocation -cne $InstallPath) { throw 'Registration path is not the exact owned installation' }
         $matches = @($Identities | Where-Object { $_.Id -ceq $id -and $_.Version -ceq $entry.DisplayVersion -and $_.DisplayName -ceq $entry.DisplayName })
         if ($matches.Count -ne 1) { throw 'Registration name/version is not an expected verified release' }
-        $command = '"' + (Join-Path $InstallPath 'Uninstall DeepSeek Harness (cloga).exe') + '" /currentuser'
+        # Stock NSIS uses PRODUCT_FILENAME; the release identity fixes executableName, not its display name.
+        $command = '"' + (Join-Path $InstallPath 'Uninstall cloga-deepseek-harness.exe') + '" /currentuser'
         if ($entry.UninstallString -cne $command -or $entry.QuietUninstallString -cne ($command + ' /S')) {
             throw 'Registration uninstall commands do not bind the exact owned executable and mode'
         }
