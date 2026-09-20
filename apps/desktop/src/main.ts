@@ -609,7 +609,7 @@ async function main(): Promise<void> {
     publishBaseline(undefined)
   }
 
-  const readManagedCompletion = (claimStartupAdmission = false): Promise<DesktopManagedUpdateCompletion | undefined> => {
+  const readManagedCompletion = (claimStartupAdmission = false, manualRecovery = false): Promise<DesktopManagedUpdateCompletion | undefined> => {
     if (managedCompletionOperation !== undefined) return managedCompletionOperation
     const host = backend.host
     if (managedUpdate === undefined || host === undefined || lifecycleUnavailable()) return Promise.resolve(undefined)
@@ -625,7 +625,9 @@ async function main(): Promise<void> {
         completion = await completeDesktopManagedUpdate(managedUpdate.operationsRoot, managedUpdate.completionPath,
           managedUpdate.capability, managedCompletedSequence, process.execPath,
           join(resources.dsh, 'desktop-runtime.json'), join(process.resourcesPath, 'desktop-provisioning', 'plan.json'), activeProject,
-          baselineNotice?.status)
+          baselineNotice?.status, undefined, manualRecovery ? {
+            version: app.getVersion(), capabilityPath: join(process.resourcesPath, 'managed-update', 'capability.json'),
+          } : undefined)
       } catch (error) {
         completion = { status: 'recovery-required', message: desktopErrorState(error).message,
           command: managedUpdateRecoveryCommand(process.execPath) }
@@ -1031,7 +1033,7 @@ async function main(): Promise<void> {
     if (!managedRecoveryAvailable()) return Promise.resolve()
     const operation: Promise<boolean> = Promise.resolve().then(async () => {
       if (!managedRecoveryAvailable()) return false
-      const completion = await readManagedCompletion()
+      const completion = await readManagedCompletion(false, true)
       if (completion === undefined || !managedRecoveryAvailable()) return false
       return showManagedCompletionIssue()
     }).catch((error: unknown) => {

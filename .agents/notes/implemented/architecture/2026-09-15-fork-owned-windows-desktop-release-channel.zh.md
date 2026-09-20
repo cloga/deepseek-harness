@@ -46,13 +46,21 @@ Helper 下载仍最多尝试三次，退避为 500/1000 毫秒。每次元数据
 
 普通退出与原生恢复会等待已获准的插件激活和托管更新交接，再关闭最终 Host。尚未完成的确认会取消；已获准的候选启动或回滚可以完成，但不会重新开放请求准入，也不会导航正在关闭的窗口。Launcher 用确认未启动 helper 或确认 helper 已退出的证据标识失败；任意 Promise 拒绝、终止请求或超时都不证明 helper 已停止。Helper 清理未获确认时，普通退出仍被阻止，并恢复仍可用的壳窗口显示，避免父进程 PID 消失意外授权安装。经过验证、由安装器拥有的交接保留独立退出路径。
 
-保留事务的协调在接受取消标记前，先验证新版 helper 的阶段、错误类别、安装状态与退出证据；取消文件不能掩盖格式错误或相互矛盾的安装器证据。旧 schema-2 handoff 只作为历史身份读取，绝不授权新的启动。失败或中断的 stage 本身不能获得完成资格。候选必须匹配已安装 executable、runtime、capability sequence、无冲突的 release 身份及打包 plan。基线尚待处理或保留用户选择时，只在所选候选的证据目录记录 `baseline-not-qualified`，不写 completion receipt，也不触发重新安装；只有后续通过清单验证的复查才可完成。
+保留事务的协调在接受取消标记前，先验证新版 helper 的阶段、错误类别、安装状态与退出证据；取消文件不能掩盖格式错误或相互矛盾的安装器证据。旧 schema-2 handoff 只作为历史身份读取，绝不授权新的启动。失败或中断的 stage 本身不能获得完成资格。候选必须匹配已安装 executable、runtime、capability sequence、无冲突的 release 身份及打包 plan。基线尚待处理或保留用户选择时，在 `baseline-outcome.json` 中记录 `baseline-not-qualified`：写入所选候选的证据目录，或在没有 helper operation 的独立手动恢复中写到 `completion.json` 旁。此诊断不会虚构 helper operation、推进 completion 或触发重新安装；只有后续通过清单验证的复查才可完成。
 
 打包的 `--recover-managed-update` 入口向拥有应用的 Electron 实例请求一次新的、串行化的证据复查。它与持续生效的原生致命恢复状态分离，绝不清除致命状态或当前 helper 是否已停止的不确定性。只有就绪 Host 与 completion 所拥有的启动准入 token 仍精确匹配时，可用结果才能释放门控。因门控等待的初始文档通过原有 boot Promise 继续，不重新加载。退出会等待已获准的复查；检查保留证据不会停止或重启 Host、改写 profile、授权安装或绕过请求准入。普通第二实例启动只聚焦应用。尚待处理或保留用户选择的基线仍可用，但不视为已认证。
 
 加载后的配置区分打包的 discovery 下限与持久完成的 sequence。Discovery 与 handoff 使用打包和已完成 sequence 中的较大值；completion 只使用持久 receipt 的 sequence，缺失时为零。若 completion 使用打包下限，就会跳过新安装 release 自身的待完成结果及清单检查。重复 completion 是幂等的，清单验证失败会保留先前 receipt，较高的已完成 sequence 绝不降低。
 
 不可变 `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest 仅在源码 repository 没有匹配 release 时作为精确 sequence-zero migration 保留。Migration record 固定 manifest 与 installer hash，并固定 build receipt 的 `dsh-v0.1.5-rc.2` source tag；由 manifest 固定的 receipt 仍保留 source commit 与 tree。任何格式错误、可变、冲突或不可达的 source release 都会 fail closed，不会 fallback。一旦 source release 存在，Windows Ops 不能充当第二通道。
+
+## 保留历史与手动安装恢复
+
+Completion 将历史 handoff 身份读取与当前启动资格分开：schema 2 和早期 schema 3 都包含字段严格为 `version`/`commit` 的迁移源。只读规范化先验证 commit，再构造仅供 parser 使用的 tag 元数据，保留 schema-3 provisioning 验证，并丢弃规范化的 capability，不授权安装，也不改写保留文件。仅按 capability schema 判断兼容性会拒绝已发布的 schema-3 历史，因为迁移字段在该 schema 内发生过变化。未知 schema 和格式错误记录仍然 fail closed。
+
+已经暂存的失败保持未解决状态，除非独立候选核验了同一或更高版本的实际安装。已确认但尚未记录终态的 helper 若仍存活，则不允许取代该事务；存活检查不会结束它。Completion 将保留的 manifest 字节绑定到 handoff asset hash，检查 executable/runtime hash，要求当前打包 sequence 与插件清单匹配，并拒绝更高序号或同序号冲突的已暂存事务。补充的安装前 manifest 只能标识当前打包 release；未开始安装的未来下载不能阻止有效的当前安装完成。验证已完成历史时，不会追溯应用后来提高的 discovery 下限。
+
+显式恢复可通过不可变发现与 manifest 验证的 build receipt，独立于历史 handoff 验证当前安装的 release。精确 version 和 sequence 选择允许在更新 release 已发布时恢复，而不安装它。Receipt 绑定源码身份、executable/runtime hash、打包 capability 字节，以及 provisioning-plan 字节与规范 hash。Completion 仍要求最终位置 Host 就绪及实际清单，在网络访问后重新读取历史 operation，并拒绝并发推进的 completion。历史 operation 保持不变。普通启动只使用本地 completion 证据；离线或无法验证的发布元数据不能授权手动安装恢复。此入口不能修复无法启动的 Host。结果仍阻塞时，提供保留活动工作确认的现有更新流程。[Desktop README](../../../../apps/desktop/README.zh.md) 说明恢复用法。
 
 ## 发布
 

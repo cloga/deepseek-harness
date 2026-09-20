@@ -100,6 +100,13 @@ Windows Ops 验证 `resources/managed-update/capability.json` 中的 `desktopNat
 
 `$DSH_HOME/desktop/profile-operations` 下的私有记录在激活 journal 清理后继续保留操作类型、验证确定的目标名称、事务身份、清单 hash/名称及结果。保留上限为 64 组记录，包括部分写入，每条最多 128 KiB；不删除未知文件。来源 URL、原始错误、提示词和配置内容不进入记录。原子发布记录之前同步文件数据，但不保证断电后的目录持久性。提交后审计失败会保留 committed journal 和 rollback，而不是撤销已提交 profile 或宣称成功。
 
+### 保留的更新历史与手动安装恢复
+
+保留的 schema-2 和 schema-3 handoff 可能包含基于 commit 的迁移源记录；completion 验证这些记录，不改写历史，也不使其具备新安装资格。身份验证通过且发生在 stage 提升前的失败属于终态，不推进 completion receipt。已经暂存或可能启动 installer 的事务需要与已安装 executable/runtime、打包 capability 和插件清单匹配的独立证据。仅有更新的打包版本不构成完成证据。
+
+恢复命令通过 `--recover-managed-update` 调用已安装 executable。它转交给持有单实例锁的 Electron，并要求最终位置的 Host 已就绪。手动重装后，即使该版本没有 managed helper operation，此显式操作也能从已安装版本的不可变 GitHub Release 获取独立 completion 证据。它核验 tag 与源码身份、manifest 和 build-receipt hash、已安装 executable/runtime 字节、打包 capability 与 provisioning plan，以及实际插件清单。它原样保留历史 operation，拒绝格式错误、仍在运行、更新序号或冲突的安装证据。普通启动仅使用本地 completion 证据；发布元数据不可用或无法验证时，手动安装恢复保持阻塞，原 completion receipt 保持不变。
+
+恢复成功会打开应用，不重置插件或重启 Host。证据仍不通过时，操作提供现有 **Check for updates** 流程，并在替换安装前保留活动工作确认。恢复绝不重跑旧 handoff 或绕过 hash 检查。如果 Host 无法就绪，仍需在此流程之外进行经过验证的交互式重装；单独重装不会完成旧 managed operation。为安装关闭精确的 Electron 和 Host 进程前，先审查并确认活动工作。手动启动修复后的应用后，运行其显示的恢复命令。本地安装与启动验证由操作者负责。
 
 ## 开发
 
@@ -226,7 +233,7 @@ pnpm run package:desktop:win:x64:unsigned
 
 ### Fork 拥有的 Windows 发布
 
-当前已发布的不可变基线是 `0.1.6-alpha.1.cloga.8`，sequence 为 18（Release 392280775）。alpha2 候选版本是 `0.1.6-alpha.2.cloga.1`，暂定 sequence 为 19；候选版本不会预留 sequence，发布前必须重新检查通道。其 plan 不构成发布或已安装升级证据。安装器升级 fixture（测试前置数据）仍锁定 `0.1.6-alpha.1.cloga.2`，sequence 为 12，不证明从 `.cloga.8` 升级已通过验收。
+当前已发布的不可变基线是 `0.1.6-alpha.1.cloga.10`，sequence 为 20（Release 392425408）。alpha2 候选版本是 `0.1.6-alpha.2.cloga.1`，暂定 sequence 为 21；候选版本不会预留 sequence，发布前必须重新检查通道。其 plan 不构成发布或已安装升级证据。安装器升级 fixture（测试前置数据）仍锁定 `0.1.6-alpha.1.cloga.2`，sequence 为 12，不证明从 `.cloga.10` 升级已通过验收。
 
 `release/cloga-windows-x64.json` 中经过评审的 plan 同时推进语义版本与整数 sequence。每次手动触发 `Desktop fork release (Windows x64)` workflow 都必须提供 `confirm_version` 与 `expected_source_sha`。安装依赖之前，源码锁定值必须恰好为 40 个小写十六进制字符，并与检出的 `HEAD` 完全一致；确认未变的版本号不代表授权较新的 commit。Workflow 固定 Node 24.13.0 与 pnpm 11.7.0，从冻结 lockfile 安装，测试 Desktop，打包固定 cloga 身份，并验证独立 helper、capability、未签名 installer、已安装 executable、runtime descriptor 与原生/托管互斥。
 

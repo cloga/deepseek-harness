@@ -106,6 +106,35 @@ export async function discoverDesktopManagedSourceRelease(
   installedSequence: number,
   operations: ManagedUpdateOperations = defaultOperations,
 ): Promise<DesktopManagedUpdateSelection | undefined> {
+  const selections = await discoverSourceReleases(capability, operations)
+  return selectSourceRelease(selections.filter(selection => selection.manifest.sequence >= installedSequence))
+}
+
+/**
+ * Resolve the independently published release for the running application, never the newest update.
+ * @param capability - Current packaged sequence and fixed release authority.
+ * @param version - Running Electron application's version.
+ * @param operations - Credential-free metadata transport.
+ * @returns Exact immutable installed release; rejects missing, conflicting, or unverifiable evidence.
+ */
+export async function discoverDesktopManagedInstalledRelease(
+  capability: DesktopManagedUpdateCapability,
+  version: string,
+  operations: ManagedUpdateOperations = defaultOperations,
+): Promise<DesktopManagedUpdateSelection> {
+  const selections = await discoverSourceReleases(capability, operations)
+  const selected = selectSourceRelease(selections.filter(selection => selection.manifest.sequence === capability.currentSequence))
+  if (selected === undefined || selected.manifest.owner !== DESKTOP_MANAGED_UPDATE_SOURCE_REPOSITORY
+    || selected.manifest.version !== version) {
+    throw new Error('desktop managed update: installed release has no matching immutable publication')
+  }
+  return selected
+}
+
+async function discoverSourceReleases(
+  capability: DesktopManagedUpdateCapability,
+  operations: ManagedUpdateOperations,
+): Promise<DesktopManagedUpdateSelection[]> {
   const response = await withDesktopUpdateNetworkError('release-list', () => requestDesktopGithubRelease(
     new URL(RELEASES_API),
     'application/vnd.github+json',
@@ -160,16 +189,18 @@ export async function discoverDesktopManagedSourceRelease(
       || manifest.source.tag !== release.tag_name) {
       throw new Error('desktop managed update: release metadata does not match its manifest')
     }
-    if (manifest.sequence >= installedSequence) {
-      selections.push({
-        kind: 'source',
-        manifest,
-        manifestUrl,
-        manifestSha256: manifest.manifestSha256,
-        assetSha256: fetched.sha256,
-      })
-    }
+    selections.push({
+      kind: 'source',
+      manifest,
+      manifestUrl,
+      manifestSha256: manifest.manifestSha256,
+      assetSha256: fetched.sha256,
+    })
   }
+  return selections
+}
+
+function selectSourceRelease(selections: DesktopManagedUpdateSelection[]): DesktopManagedUpdateSelection | undefined {
   selections.sort((left, right) => right.manifest.sequence - left.manifest.sequence)
   const selected = selections[0]
   const conflict = selected === undefined ? undefined : selections.find(candidate => (

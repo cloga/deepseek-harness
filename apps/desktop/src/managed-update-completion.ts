@@ -3,7 +3,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { lstat, readdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import {
   parseDesktopManagedUpdateHandoff,
   parseDesktopManagedUpdateManifest,
@@ -12,6 +12,8 @@ import {
   type DesktopManagedUpdateManifest,
 } from './managed-update-protocol.ts'
 import { managedUpdateRecoveryCommand } from './managed-update-recovery.ts'
+import { verifyDesktopManualInstallEvidence, type DesktopManualInstallRecovery } from './manual-install-evidence.ts'
+import { readDesktopManagedCompletedSequence } from './managed-update-state.ts'
 import {
   desktopPluginProvisioningPlanSha256,
   parseDesktopPluginProvisioningPlan,
@@ -107,10 +109,13 @@ function retainedHandoffIdentity(
   let normalized = value
   const capability = value.capability
   if (typeof capability === 'object' && capability !== null && !Array.isArray(capability)
-    && 'schemaVersion' in capability && capability.schemaVersion === 2) {
+    && 'schemaVersion' in capability && (capability.schemaVersion === 2 || capability.schemaVersion === 3)) {
     const historical = capability as Record<string, unknown>
-    exactKeys(historical, ['schemaVersion', 'mode', 'owner', 'tagPrefix', 'manifestAsset', 'currentSequence',
-      'minimumSequence', ...(historical.migration === undefined ? [] : ['migration'])], 'historical capability')
+    const schema2 = historical.schemaVersion === 2
+    if (schema2) {
+      exactKeys(historical, ['schemaVersion', 'mode', 'owner', 'tagPrefix', 'manifestAsset', 'currentSequence',
+        'minimumSequence', ...(historical.migration === undefined ? [] : ['migration'])], 'historical capability')
+    }
     let migration = historical.migration
     if (migration !== undefined) {
       if (typeof migration !== 'object' || migration === null || Array.isArray(migration)) {
@@ -122,17 +127,19 @@ function retainedHandoffIdentity(
         throw new Error('desktop managed update: historical migration source must be an object')
       }
       const expectedSource = source as Record<string, unknown>
-      exactKeys(expectedSource, ['version', 'commit'], 'historical migration source')
-      if (typeof expectedSource.commit !== 'string' || !/^[a-f0-9]{40}$/u.test(expectedSource.commit)) {
-        throw new Error('desktop managed update: historical migration source commit is invalid')
+      if (schema2 || 'commit' in expectedSource) {
+        exactKeys(expectedSource, ['version', 'commit'], 'historical migration source')
+        if (typeof expectedSource.commit !== 'string' || !/^[a-f0-9]{40}$/u.test(expectedSource.commit)) {
+          throw new Error('desktop managed update: historical migration source commit is invalid')
+        }
+        migration = { ...legacy, expectedSource: {
+          version: expectedSource.version, tag: `dsh-v${String(expectedSource.version)}`,
+        } }
       }
-      migration = { ...legacy, expectedSource: {
-        version: expectedSource.version, tag: `dsh-v${String(expectedSource.version)}`,
-      } }
     }
     // Supply only parser metadata missing from schema 2; never return this synthetic capability.
     normalized = { ...value, capability: {
-      ...historical, schemaVersion: 3, provisioning: currentCapability.provisioning,
+      ...historical, schemaVersion: 3, ...(schema2 ? { provisioning: currentCapability.provisioning } : {}),
       ...(migration === undefined ? {} : { migration }),
     } }
   }
@@ -185,8 +192,7 @@ interface PendingFailure {
 
 interface CompletionCandidate {
   readonly manifest: DesktopManagedUpdateManifest
-  readonly operationRoot: string
-  readonly staged: boolean
+  readonly evidenceRoot?: string
 }
 
 interface OperationClassification {
@@ -302,7 +308,7 @@ async function classifyOperation(
     return {
       status: 'pre-install-failed',
       ...(manifest.owner === 'cloga/deepseek-harness' && manifest.sequence > completedSequence
-        && manifest.sequence === capability.currentSequence ? { candidate: { manifest, operationRoot, staged: false } } : {}),
+        && manifest.sequence === capability.currentSequence ? { candidate: { manifest, evidenceRoot: operationRoot } } : {}),
     }
   }
   const [result, pending] = await Promise.all([
@@ -344,7 +350,7 @@ async function classifyOperation(
     throw new Error('The acknowledged managed update helper is still running without a terminal result.')
   }
   if (result?.status === 'installer-exited' && rootResult === undefined) {
-    return { status: 'pending', candidate: { manifest, operationRoot, staged: true } }
+    return { status: 'pending', candidate: { manifest, evidenceRoot: stage } }
   }
   return {
     status: 'pending',
@@ -371,6 +377,7 @@ async function classifyOperation(
  * @param activeProfile - Final-location profile, after its Host has reached readiness.
  * @param baselineDisposition - Trusted unqualified-baseline assessment; never bypasses installed artifact or plan checks.
  * @param helperRunning - Read-only liveness probe for acknowledged helpers without terminal results.
+ * @param manualRecovery - Explicit current-install verification; absent during ordinary offline startup.
  * @returns Verified completion, no pending installation, unqualified baseline, or actionable recovery diagnostics.
  */
 export async function completeDesktopManagedUpdate(
@@ -384,6 +391,7 @@ export async function completeDesktopManagedUpdate(
   activeProfile: string,
   baselineDisposition?: 'preserved-user-choice' | 'pending',
   helperRunning: (pid: number) => boolean = helperProcessRunning,
+  manualRecovery?: DesktopManualInstallRecovery,
 ): Promise<DesktopManagedUpdateCompletion> {
   const recovery = (error: unknown): DesktopManagedUpdateCompletion => ({
     status: 'recovery-required',
@@ -398,13 +406,24 @@ export async function completeDesktopManagedUpdate(
     return recovery(error)
   }
   try {
-    const operations: OperationClassification[] = []
-    for (const name of operationNames.sort()) {
-      if (!/^[a-f0-9]{64}$/u.test(name)) continue
-      operations.push(await classifyOperation(join(operationsRoot, name), name, capability, completedSequence, helperRunning))
+    completedSequence = Math.max(completedSequence, await readDesktopManagedCompletedSequence(completionPath))
+    const classify = async (names: string[]): Promise<OperationClassification[]> => {
+      const classified: OperationClassification[] = []
+      for (const name of names.sort()) {
+        if (!/^[a-f0-9]{64}$/u.test(name)) continue
+        classified.push(await classifyOperation(join(operationsRoot, name), name, capability, completedSequence, helperRunning))
+      }
+      return classified
     }
+    let operations = await classify(operationNames)
     if (!operations.some(operation => operation.status === 'pending')) return { status: 'none' }
+    let independent: DesktopManagedUpdateManifest | undefined
+    if (manualRecovery !== undefined && capability.currentSequence > completedSequence) {
+      independent = await verifyDesktopManualInstallEvidence(capability, provisioningPlan, manualRecovery)
+      operations = await classify(await readdir(operationsRoot))
+    }
     const candidates = operations.flatMap(operation => operation.candidate === undefined ? [] : [operation.candidate])
+    if (independent !== undefined) candidates.push({ manifest: independent })
     const failures = operations.flatMap(operation => operation.failure === undefined ? [] : [operation.failure])
     if (candidates.length === 0) {
       throw new Error(failures[0]?.message ?? 'The managed update has no verified completion candidate.')
@@ -435,13 +454,16 @@ export async function completeDesktopManagedUpdate(
     if (baselineDisposition !== undefined) {
       const outcome = { status: 'baseline-not-qualified' as const, disposition: baselineDisposition,
         sequence: manifest.sequence, version: manifest.version }
-      const evidenceRoot = selected.staged ? join(selected.operationRoot, 'stage') : selected.operationRoot
-      await writeJsonAtomic(join(evidenceRoot, 'baseline-outcome.json'), {
+      // Independent recovery has no helper operation; keep its baseline evidence outside retained history.
+      await writeJsonAtomic(join(selected.evidenceRoot ?? dirname(completionPath), 'baseline-outcome.json'), {
         schemaVersion: 1, ...outcome, manifestSha256: manifest.manifestSha256,
       })
       return outcome
     }
     assertDesktopProvisioningInventory(activeProfile, installedPlan)
+    if (await readDesktopManagedCompletedSequence(completionPath) > completedSequence) {
+      throw new Error('desktop managed update: completion advanced during verification; recheck the installed release')
+    }
     await writeJsonAtomic(completionPath, {
       schemaVersion: 1,
       status: 'complete',

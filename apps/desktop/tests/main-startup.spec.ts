@@ -1194,6 +1194,30 @@ describe('desktop main startup', () => {
       manifestSha256: manifest.manifestSha256, assetSha256: 'b'.repeat(64) }
   }
 
+  it.each(['ready', 'failed'] as const)('checks managed completion only after final Host readiness: %s', async (outcome) => {
+    managedFixture()
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    expect(baseline.completion).not.toHaveBeenCalled()
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    expect(baseline.completion).not.toHaveBeenCalled()
+    const host = harness.hosts[0]!
+    if (outcome === 'failed') {
+      host.exited.resolve()
+      host.ready.reject(new Error('final-location Host failed'))
+      await harness.dialogShown.promise
+      expect(baseline.completion).not.toHaveBeenCalled()
+    } else {
+      host.ready.resolve()
+      await invoke(DESKTOP_IPC.boot)
+      expect(baseline.completion).toHaveBeenCalledOnce()
+      expect(baseline.completion.mock.calls[0]?.[3]).toBe(0)
+      expect(baseline.completion.mock.calls[0]?.[7]).toBe('desktop-test-profile')
+      expect(baseline.completion.mock.calls[0]?.[10]).toBeUndefined()
+    }
+  })
+
   it.each(['removed', 'installed-override', 'disabled', 'ambiguous-legacy'] as const)(
     'boots preserved user choice without staging or certifying the baseline: %s', async (reason) => {
       managedFixture()
@@ -1307,6 +1331,12 @@ describe('desktop main startup', () => {
     await entered.promise
     await expect(managed.launch!(selected)).rejects.toThrow('Managed completion recheck already owns admission')
     expect(baseline.completion).toHaveBeenCalledTimes(2)
+    expect(baseline.completion.mock.calls[0]?.[10]).toBeUndefined()
+    expect(baseline.completion.mock.calls[1]?.[10]).toEqual({
+      version: '1.0.0', capabilityPath: join(process.resourcesPath, 'managed-update', 'capability.json'),
+    })
+    expect(baseline.completion.mock.calls[1]?.[8]).toBe('preserved-user-choice')
+    expect(baseline.completion.mock.calls[1]?.[9]).toBeUndefined()
     result.resolve({ status: 'none' })
     await vi.advanceTimersByTimeAsync(0)
     expect(harness.windows[0]!.urls).toEqual(urls)
@@ -1336,6 +1366,10 @@ describe('desktop main startup', () => {
     await invoke(DESKTOP_IPC.boot)
     await vi.advanceTimersByTimeAsync(0)
     expect(baseline.completion).toHaveBeenCalledTimes(2)
+    expect(baseline.completion.mock.calls[0]?.[10]).toBeUndefined()
+    expect(baseline.completion.mock.calls[1]?.[10]).toEqual({
+      version: '1.0.0', capabilityPath: join(process.resourcesPath, 'managed-update', 'capability.json'),
+    })
     expect(harness.hosts).toHaveLength(1)
     expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
     expect(harness.applyRelease).toHaveBeenCalledOnce()
