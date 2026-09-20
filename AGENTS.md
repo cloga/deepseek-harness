@@ -116,6 +116,10 @@ Before pushing, follow [dsh-pre-push-checks](.agents/skills/dsh-pre-push-checks/
 - `test:coverage`, not `test`, is the CI coverage gate ([why](docs/testing.md)).
 - **Web browser automation and GIF recording:** launch with `pnpm dsh web --patch apps/web/tests/pin-browse-picker.overlay.yml` to use the [in-page directory picker](apps/web/tests/pin-browse-picker.overlay.yml); omit this override only when testing native picker behavior explicitly.
 
+## Fork release delivery
+
+For `cloga/deepseek-harness`, deliver Windows Desktop installers by default; package rehearsals are not public releases. Follow the [release owner](scripts/release/README.md#fork-delivery-and-retired-entry); do not revive the retired Core/Web writer.
+
 ## Secrets / .env
 
 Windows packaging/signing: [required reading](apps/desktop/README.md#windows-ev-signing).
