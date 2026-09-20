@@ -1116,9 +1116,10 @@ async function main(): Promise<void> {
     updates.dispose()
   })
 
+  const desktopVersion = app.getVersion()
   app.setAboutPanelOptions({
     applicationName: 'DeepSeek Harness',
-    applicationVersion: app.getVersion(),
+    applicationVersion: desktopVersion,
     // The release has no separate build number; omit Electron's bundle version.
     version: '',
     copyright: '',
@@ -1135,7 +1136,8 @@ async function main(): Promise<void> {
     ? [{ role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }]
     : []
   const applicationItems = (): MenuItemConstructorOptions[] => [
-    { label: currentDesktopLocale().messages.aboutMenu, role: 'about' },
+    { label: formatDesktopMessage(currentDesktopLocale().messages.aboutMenu, { version: desktopVersion }),
+      click: () => { app.showAboutPanel() } },
     { type: 'separator' },
     { label: currentDesktopLocale().messages.checkUpdatesMenu, click: () => { void openUpdatePrompt(true) } },
     ...packagePolicy === undefined ? [] : [{

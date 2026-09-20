@@ -1,7 +1,7 @@
 {
   "en-US": {
     "menu": [
-      { "label": "About DeepSeek Harness", "role": "about" },
+      { "label": "About Desktop 1.0.0…" },
       { "type": "separator" }
     ],
     "options": {
@@ -14,7 +14,7 @@
   },
   "zh-CN": {
     "menu": [
-      { "label": "关于 DeepSeek Harness", "role": "about" },
+      { "label": "关于 Desktop 1.0.0…" },
       { "type": "separator" }
     ],
     "options": {

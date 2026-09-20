@@ -31,6 +31,7 @@ import {
 } from '../../scripts/packaged-runtime.mjs'
 import { inspectPackagedGraphResolution, packagedGraphCheckArguments } from './packaged-graph-check.ts'
 import { inspectPackagedCopilotSettings } from './copilot-settings-smoke.ts'
+import { inspectDesktopVersionMenu, type DesktopVersionMenuEvidence } from './desktop-version-menu-smoke.ts'
 
 /** Paths available only during the awaited, read-only post-acceptance inspection. */
 export interface PackagedCopilotProfileInspection {
@@ -120,6 +121,7 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
   const environment = desktopSmokeEnvironment(home)
   const userData = join(home, 'electron-user-data')
   const inventories: string[] = []
+  const versionMenus: DesktopVersionMenuEvidence[] = []
   const started = performance.now()
   const timeline: { event: string; milliseconds: number }[] = []
   const record = (event: string): void => { timeline.push({ event, milliseconds: performance.now() - started }) }
@@ -167,6 +169,10 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       })
       assert.equal(resolve(await app.evaluate(({ app }) => app.getPath('userData'))), userData)
       page = await app.firstWindow()
+      const versionMenu = await inspectDesktopVersionMenu(app, page, reviewed.version)
+      versionMenus.push(versionMenu)
+      writeFileSync(join(output, `${phase}-version-menu.json`), JSON.stringify(versionMenu, undefined, 2) + '\n')
+      record(`${phase}:version-menu`)
       page.setDefaultTimeout(120_000)
       await page.waitForFunction(packagedCopilotStartupReady, undefined, { timeout: 300_000 })
       if (page.url() !== 'dsh-app://app/') {
@@ -260,6 +266,7 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
     writeFileSync(join(output, 'acceptance.json'), JSON.stringify({
       sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
       desktopVersion: reviewed.version,
+      versionMenus,
       runtimeVersion: runtime.release.version,
       plugin: copilot.source,
       transport: 'official Web-backed Desktop Host with packaged Electron dsh-app origin bridge',

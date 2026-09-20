@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { installWindowsMenu } from '../src/preload-menu.ts'
 import { DESKTOP_IPC } from '../src/ipc.ts'
+import { WINDOWS_TITLEBAR_HEIGHT } from '../src/windows-layout.ts'
 
 const invoke = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<void>>())
 vi.mock('electron', () => ({ ipcRenderer: { invoke } }))
@@ -15,24 +16,45 @@ beforeEach(() => {
   invoke.mockResolvedValue(undefined)
 })
 
-it('keeps caption menus absent until the application frame replaces loading', async () => {
+it('opens the caption menu during loading and retains the same host when AppFrame arrives', async () => {
   document.body.replaceChildren()
-  menu = installWindowsMenu()
   const loading = document.createElement('div')
   loading.dataset.dshBoot = ''
   document.body.append(loading)
-  await new Promise<void>((resolve) => { queueMicrotask(resolve) })
-  expect(document.querySelector('[data-windows-menu]')).toBeNull()
+  const input = document.createElement('input')
+  loading.append(input)
+  input.focus()
+  menu = installWindowsMenu()
+  const host = document.querySelector('[data-windows-menu]')!
+  expect(document.activeElement).toBe(input)
+  expect(document.querySelector('[data-shell-overlay]')).toBeNull()
+  expect(host.parentElement).toBe(document.body)
+  const button = host.shadowRoot!.querySelector('button')!
+  expect(button.textContent).toBe('Application')
+  vi.spyOn(button, 'getBoundingClientRect').mockReturnValue(new DOMRect(48, 6, 90, 28))
+  button.click()
+  expect(invoke).toHaveBeenCalledExactlyOnceWith(DESKTOP_IPC.windowsMenu, 'application', 48, 34)
+  await vi.waitFor(() => { expect(button.getAttribute('aria-expanded')).toBe('false') })
   const appSeat = document.createElement('div')
   appSeat.dataset.shellOverlay = ''
   loading.replaceWith(appSeat)
-  await vi.waitFor(() => { expect(document.querySelector('[data-windows-menu]')).not.toBeNull() })
+  await new Promise<void>((resolve) => { queueMicrotask(resolve) })
+  expect(document.querySelectorAll('[data-windows-menu]')).toHaveLength(1)
+  expect(document.querySelector('[data-windows-menu]')).toBe(host)
+  expect(host.shadowRoot!.querySelector('button')).toBe(button)
+  button.click()
+  expect(invoke).toHaveBeenCalledTimes(2)
 })
 
-it('does not mount menus after a loading document is disposed', async () => {
+it('removes the loading menu and its focus listener without remounting after disposal', async () => {
   document.body.replaceChildren()
+  const added = vi.spyOn(document, 'addEventListener')
+  const removed = vi.spyOn(document, 'removeEventListener')
   menu = installWindowsMenu()
+  expect(document.querySelector('[data-windows-menu]')).not.toBeNull()
+  const listener = added.mock.calls.find(([type]) => type === 'focusout')![1]
   menu.dispose()
+  expect(removed).toHaveBeenCalledWith('focusout', listener, true)
   const appSeat = document.createElement('div')
   appSeat.dataset.shellOverlay = ''
   document.body.append(appSeat)
@@ -43,6 +65,8 @@ afterEach(() => {
   menu?.dispose()
   menu = undefined
   document.body.replaceChildren()
+  document.body.removeAttribute('style')
+  document.body.removeAttribute('data-ds-dark-theme')
   document.documentElement.lang = ''
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
@@ -60,6 +84,42 @@ it('localizes caption entries and removes the menu on disposal', () => {
   menu.dispose()
   menu = undefined
   expect(document.querySelector('[data-windows-menu]')).toBeNull()
+})
+
+it('provides caption geometry, system font and paired system colors before theme delivery', () => {
+  document.body.replaceChildren()
+  menu = installWindowsMenu()
+  const css = document.querySelector('[data-windows-menu]')!.shadowRoot!.querySelector('style')!.textContent!
+  expect(css).toContain(`var(--dsh-windows-titlebar-height, ${WINDOWS_TITLEBAR_HEIGHT}px)`)
+  expect(css).toContain('var(--dsh-windows-menu-start, 48px)')
+  expect(css).toContain('var(--dsw-font-family, system-ui, sans-serif)')
+  expect(css).toContain('var(--dsw-specific-sidebar-fill, Canvas)')
+  expect(css).toContain('var(--dsw-alias-label-secondary, CanvasText)')
+  expect(css).toContain('var(--dsw-alias-interactive-bg-hover, ButtonFace)')
+  expect(css).toContain('var(--dsw-alias-label-primary, ButtonText)')
+})
+
+it.each([
+  { language: 'zh-CN', dark: true, label: '应用', background: '#181818', foreground: '#eeeeee' },
+  { language: 'en', dark: false, label: 'Application', background: '#fafafa', foreground: '#222222' },
+])('retains one caption menu across $language locale and dark=$dark theme updates', ({ language, dark, label, background, foreground }) => {
+  document.body.replaceChildren()
+  menu = installWindowsMenu()
+  const host = document.querySelector('[data-windows-menu]')!
+  const style = host.shadowRoot!.querySelector('style')!
+  const rules = style.textContent
+  document.documentElement.lang = language
+  document.body.toggleAttribute('data-ds-dark-theme', dark)
+  document.body.style.setProperty('--dsw-specific-sidebar-fill', background)
+  document.body.style.setProperty('--dsw-alias-label-secondary', foreground)
+  menu.update()
+  expect(document.querySelectorAll('[data-windows-menu]')).toHaveLength(1)
+  expect(document.querySelector('[data-windows-menu]')).toBe(host)
+  expect(host.shadowRoot!.querySelector('button')!.textContent).toBe(label)
+  // Palette references stay live CSS; jsdom does not establish rendered shadow-tree contrast.
+  expect(host.shadowRoot!.querySelector('style')).toBe(style)
+  expect(style.textContent).toBe(rules)
+  expect(host.getAttribute('style')).toBeNull()
 })
 
 it('opens native menus without stealing pointer focus and resets popup state when closed', async () => {

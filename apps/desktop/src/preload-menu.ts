@@ -2,9 +2,11 @@
 import { ipcRenderer } from 'electron'
 import { DESKTOP_IPC } from './ipc.ts'
 import { resolveDesktopLocale } from './locale.ts'
+import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
 
 /**
- * Mount the Windows caption menubar without moving focus out of the active editor.
+ * Mount the Windows caption menubar during document loading, independently of Host or AppFrame readiness.
+ * The same menu remains mounted after application startup without moving focus out of the active editor.
  * @returns Language refresh and document teardown operations.
  */
 export function installWindowsMenu(): { update(): void; dispose(): void } {
@@ -14,15 +16,16 @@ export function installWindowsMenu(): { update(): void; dispose(): void } {
   const style = document.createElement('style')
   style.textContent = `
     :host { position: fixed; top: 0; left: var(--dsh-windows-menu-start, 48px); z-index: 1100;
-      height: var(--dsh-windows-titlebar-height); display: flex; align-items: center;
-      font-family: var(--dsw-font-family); -webkit-app-region: no-drag; }
+      height: var(--dsh-windows-titlebar-height, ${WINDOWS_TITLEBAR_HEIGHT}px); display: flex; align-items: center;
+      background: var(--dsw-specific-sidebar-fill, Canvas);
+      font-family: var(--dsw-font-family, system-ui, sans-serif); -webkit-app-region: no-drag; }
     [role=menubar] { display: flex; gap: 2px; }
     button { height: 28px; padding: 0 10px; border: 0; border-radius: 6px;
-      background: transparent; color: var(--dsw-alias-label-secondary);
+      background: transparent; color: var(--dsw-alias-label-secondary, CanvasText);
       font: inherit; font-size: 14px; cursor: default; }
-    button:hover, button[aria-expanded=true] { background: var(--dsw-alias-interactive-bg-hover);
-      color: var(--dsw-alias-label-primary); }
-    button:focus-visible { outline: 2px solid var(--dsw-alias-label-primary); outline-offset: -2px; }
+    button:hover, button[aria-expanded=true] { background: var(--dsw-alias-interactive-bg-hover, ButtonFace);
+      color: var(--dsw-alias-label-primary, ButtonText); }
+    button:focus-visible { outline: 2px solid var(--dsw-alias-label-primary, CanvasText); outline-offset: -2px; }
   `
   const bar = document.createElement('div')
   bar.setAttribute('role', 'menubar')
@@ -85,15 +88,8 @@ export function installWindowsMenu(): { update(): void; dispose(): void } {
   }
   const buttons = [createButton('application', 0), createButton('edit', 1)] as const
   shadow.append(style, bar)
-  const mount = (): void => {
-    // AppFrame owns this seat; boot readiness alone precedes the rendered application.
-    if (document.querySelector('[data-shell-overlay]') === null) return
-    document.body.append(host)
-    observer.disconnect()
-  }
-  const observer = new MutationObserver(mount)
-  observer.observe(document.body, { childList: true, subtree: true })
-  mount()
+  // The preload owns this body-level menu; replacing the application's loading root does not replace it.
+  document.body.append(host)
   const update = (): void => {
     const { messages } = resolveDesktopLocale(document.documentElement.lang)
     bar.setAttribute('aria-label', messages.menuBar)
@@ -104,7 +100,6 @@ export function installWindowsMenu(): { update(): void; dispose(): void } {
   return {
     update,
     dispose: () => {
-      observer.disconnect()
       document.removeEventListener('focusout', rememberEditor, true)
       host.remove()
     },

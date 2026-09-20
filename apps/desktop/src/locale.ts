@@ -2,7 +2,7 @@
 
 export const en = {
   application: 'Application',
-  aboutMenu: 'About DeepSeek Harness',
+  aboutMenu: 'About Desktop {version}…',
   edit: 'Edit',
   menuBar: 'Application menu',
   delete: 'Delete',
@@ -131,7 +131,7 @@ export type DesktopMessages = { readonly [Key in keyof typeof en]: string }
 
 export const zh = {
   application: '应用',
-  aboutMenu: '关于 DeepSeek Harness',
+  aboutMenu: '关于 Desktop {version}…',
   edit: '编辑',
   menuBar: '应用菜单',
   delete: '删除',
