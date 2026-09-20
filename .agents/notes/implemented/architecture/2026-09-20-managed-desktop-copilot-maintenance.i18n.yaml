@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-20-managed-desktop-copilot-maintenance.md
+2026-09-20-managed-desktop-copilot-maintenance.md: 94d3a25b56f9f89202150ef6a94e53fa77ab5a5c
+2026-09-20-managed-desktop-copilot-maintenance.zh.md: 247335cfe1f73df53ff966c86bbf94b7ec468f7e

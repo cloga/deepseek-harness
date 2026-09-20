@@ -16,14 +16,18 @@ function fixture(): { root: HTMLElement; settings: Locator } {
       <p role="status"></p>
     </section>
     <section data-dsh-web-search-routing>
-      <select data-dsh-web-search-mode>
-        <option value="auto" selected>Auto — follow Chat</option>
-        <option value="github-copilot-hosted">Copilot</option><option value="deepseek-official">DeepSeek</option>
-      </select>
-      <select data-dsh-web-search-provider>
-        <option value="none">None — no fallback</option>
-        <option value="deepseek-official" selected>DeepSeek</option><option value="github-copilot-hosted">Copilot</option>
-      </select>
+      <label><span>Search provider</span>
+        <select data-dsh-web-search-mode>
+          <option value="auto" selected>Auto — follow Chat</option>
+          <option value="github-copilot-hosted">Copilot</option><option value="deepseek-official">DeepSeek</option>
+        </select>
+      </label>
+      <label><span>Fallback provider</span>
+        <select data-dsh-web-search-provider>
+          <option value="none">None — no fallback</option>
+          <option value="deepseek-official" selected>DeepSeek</option><option value="github-copilot-hosted">Copilot</option>
+        </select>
+      </label>
       <p role="status"></p>
     </section>`
   document.body.append(root)
@@ -50,6 +54,8 @@ describe('read-only packaged Copilot settings acceptance', () => {
       modelRolesViewLoaded: true,
       currentWorkspaceReadOnly: true,
       searchProviderCatalogLoaded: true,
+      providerOnlySearchRouting: true,
+      fallbackProviderLabel: true,
       registeredSearchProviders: ['deepseek-official', 'github-copilot-hosted'],
       realSearch: false,
     })
@@ -81,6 +87,7 @@ describe('read-only packaged Copilot settings acceptance', () => {
   it.each([
     'missing-view', 'view-error', 'busy', 'enabled', 'save-disabled', 'create', 'models',
     'catalog-disabled', 'catalog-error', 'catalog-mismatch', 'duplicate', 'copilot-unavailable', 'legacy-fixed',
+    'legacy-fallback-label', 'model-prerequisite',
   ] as const)(
     'rejects %s instead of reporting successful Remote reads', async (damage) => {
       const { root, settings } = fixture()
@@ -111,8 +118,12 @@ describe('read-only packaged Copilot settings acceptance', () => {
         primary.insertAdjacentHTML('beforeend', '<option value="github-copilot-hosted">Duplicate</option>')
       } else if (damage === 'copilot-unavailable') {
         for (const option of root.querySelectorAll<HTMLOptionElement>('option[value="github-copilot-hosted"]')) option.disabled = true
-      } else {
+      } else if (damage === 'legacy-fixed') {
         primary.querySelector('option[value="auto"]')!.setAttribute('value', 'fixed')
+      } else if (damage === 'legacy-fallback-label') {
+        fallback.closest('label')!.querySelector('span')!.textContent = 'Default provider'
+      } else {
+        fallback.insertAdjacentHTML('afterend', '<input data-dsh-copilot-search-model>')
       }
       await expect(inspectPackagedCopilotSettings(settings)).rejects.toThrow()
     },
