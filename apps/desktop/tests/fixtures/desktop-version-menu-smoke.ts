@@ -106,10 +106,13 @@ export async function observeDesktopVersionMenu(
   let popupInstalled = false
   let lastMismatchedAnchor: { x: number; y: number } | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
-  const restore = (target: object, name: string, descriptor: PropertyDescriptor | undefined): void => {
-    if (descriptor === undefined) {
-      if (!Reflect.deleteProperty(target, name)) throw new Error(`Cannot restore ${name}`)
-    } else Object.defineProperty(target, name, descriptor)
+  // Method syntax avoids tsx's keepNames helper capture when this function is serialized into Electron.
+  const descriptors = {
+    restore(target: object, name: string, descriptor: PropertyDescriptor | undefined): void {
+      if (descriptor === undefined) {
+        if (!Reflect.deleteProperty(target, name)) throw new Error(`Cannot restore ${name}`)
+      } else Object.defineProperty(target, name, descriptor)
+    },
   }
   const state: ObserverState = {
     token: command.token,
@@ -120,7 +123,7 @@ export async function observeDesktopVersionMenu(
       completed = true
       clearTimeout(timer)
       if (popupInstalled) {
-        try { restore(Menu.prototype, 'popup', popupDescriptor) } catch (error) { errors.push(error) }
+        try { descriptors.restore(Menu.prototype, 'popup', popupDescriptor) } catch (error) { errors.push(error) }
         popupInstalled = false
       }
       resolveDone()
@@ -164,7 +167,7 @@ export async function observeDesktopVersionMenu(
           Reflect.apply(about.click, about, [{}, window, window.webContents])
         } catch (error) { errors.push(error) }
         finally {
-          try { restore(app, 'showAboutPanel', aboutDescriptor) } catch (error) { errors.push(error) }
+          try { descriptors.restore(app, 'showAboutPanel', aboutDescriptor) } catch (error) { errors.push(error) }
         }
         if (aboutDispatchCount !== 1) errors.push(new Error('The version menu must dispatch About exactly once'))
         state.evidence = {

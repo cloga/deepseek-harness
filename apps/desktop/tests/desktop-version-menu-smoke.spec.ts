@@ -1,4 +1,6 @@
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import type { ElectronApplication, Page } from 'playwright'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
@@ -72,6 +74,33 @@ describe('packaged Windows caption-menu observation', () => {
     expect(await serialized(f.electron, { action: 'read', token: f.arm.token })).toMatchObject({ desktopVersion: version })
     f.assertRestored()
   })
+
+  // The 60s case budget exceeds the owned 30s CLI deadline and leaves time for assertions and cleanup.
+  it('runs the real tsx CLI serialized observer without captured transform helpers', async () => {
+    // The packaged acceptance launches through tsx CLI, whose keepNames transform differs from Vitest.
+    const fixtureURL = new URL('./fixtures/desktop-version-menu-smoke.ts', import.meta.url).href
+    const environment = Object.fromEntries(Object.entries(process.env)
+      .filter(([name]) => !/KEY|SECRET|TOKEN|PASSWORD/iu.test(name)))
+    const result = spawnSync(process.execPath, [
+      fileURLToPath(import.meta.resolve('tsx/cli')), '--input-type=module', '--eval',
+      `import { observeDesktopVersionMenu } from ${JSON.stringify(fixtureURL)};`
+        + 'console.log(JSON.stringify(observeDesktopVersionMenu.toString()))',
+    ], { encoding: 'utf8', timeout: 30_000, env: { ...environment, TSX_DISABLE_CACHE: '1' } })
+    expect(result.error, 'tsx CLI must not fail to spawn or time out').toBeUndefined()
+    expect(result.signal).toBeNull()
+    expect(result.status, result.stderr).toBe(0)
+    const source: unknown = JSON.parse(result.stdout)
+    if (typeof source !== 'string') throw new Error('tsx CLI did not serialize the observer')
+    const serialized = runInNewContext(`(${source})`, { setTimeout, clearTimeout }) as typeof observeDesktopVersionMenu
+    const f = fixture()
+    await serialized(f.electron, f.arm)
+    new f.Menu().popup(f.popupOptions)
+    expect(await serialized(f.electron, { action: 'read', token: f.arm.token })).toMatchObject({
+      desktopVersion: version, aboutDispatchCount: 1, nativePopupOpened: false, nativeModalOpened: false,
+    })
+    expect(f.callback).toHaveBeenCalledOnce()
+    f.assertRestored()
+  }, 60_000)
 
   it.each(['0.1.6-alpha.2', '0.1.6-alpha.1.cloga.12'])('rejects unreviewed running version %s before mutation', async (wrongVersion) => {
     const f = fixture()
