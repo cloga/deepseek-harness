@@ -176,7 +176,7 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       const configureLater = page.getByRole('button', { name: 'Configure later', exact: true })
       let providerPromptVisible = false
       try {
-        await configureLater.waitFor({ state: 'visible', timeout: 5_000 })
+        await configureLater.waitFor({ state: 'visible', timeout: phase === 'initial' ? 30_000 : 5_000 })
         providerPromptVisible = true
       } catch (error: unknown) {
         if (!(error instanceof Error) || error.name !== 'TimeoutError') throw error
