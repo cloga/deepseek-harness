@@ -95,10 +95,13 @@ function retainedHandoffIdentity(
   let normalized = value
   const capability = value.capability
   if (typeof capability === 'object' && capability !== null && !Array.isArray(capability)
-    && 'schemaVersion' in capability && capability.schemaVersion === 2) {
+    && 'schemaVersion' in capability && (capability.schemaVersion === 2 || capability.schemaVersion === 3)) {
     const historical = capability as Record<string, unknown>
-    exactKeys(historical, ['schemaVersion', 'mode', 'owner', 'tagPrefix', 'manifestAsset', 'currentSequence',
-      'minimumSequence', ...(historical.migration === undefined ? [] : ['migration'])], 'historical capability')
+    const schema2 = historical.schemaVersion === 2
+    if (schema2) {
+      exactKeys(historical, ['schemaVersion', 'mode', 'owner', 'tagPrefix', 'manifestAsset', 'currentSequence',
+        'minimumSequence', ...(historical.migration === undefined ? [] : ['migration'])], 'historical capability')
+    }
     let migration = historical.migration
     if (migration !== undefined) {
       if (typeof migration !== 'object' || migration === null || Array.isArray(migration)) {
@@ -110,17 +113,19 @@ function retainedHandoffIdentity(
         throw new Error('desktop managed update: historical migration source must be an object')
       }
       const expectedSource = source as Record<string, unknown>
-      exactKeys(expectedSource, ['version', 'commit'], 'historical migration source')
-      if (typeof expectedSource.commit !== 'string' || !/^[a-f0-9]{40}$/u.test(expectedSource.commit)) {
-        throw new Error('desktop managed update: historical migration source commit is invalid')
+      if (schema2 || 'commit' in expectedSource) {
+        exactKeys(expectedSource, ['version', 'commit'], 'historical migration source')
+        if (typeof expectedSource.commit !== 'string' || !/^[a-f0-9]{40}$/u.test(expectedSource.commit)) {
+          throw new Error('desktop managed update: historical migration source commit is invalid')
+        }
+        migration = { ...legacy, expectedSource: {
+          version: expectedSource.version, tag: `dsh-v${String(expectedSource.version)}`,
+        } }
       }
-      migration = { ...legacy, expectedSource: {
-        version: expectedSource.version, tag: `dsh-v${String(expectedSource.version)}`,
-      } }
     }
     // Supply only parser metadata missing from schema 2; never return this synthetic capability.
     normalized = { ...value, capability: {
-      ...historical, schemaVersion: 3, provisioning: currentCapability.provisioning,
+      ...historical, schemaVersion: 3, ...(schema2 ? { provisioning: currentCapability.provisioning } : {}),
       ...(migration === undefined ? {} : { migration }),
     } }
   }

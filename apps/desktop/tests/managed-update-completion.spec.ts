@@ -110,9 +110,13 @@ async function patchRecord(path: string, fields: Record<string, unknown>): Promi
   await writeFile(path, JSON.stringify({ ...value, ...fields }))
 }
 
-function historicalCapability(current: ReturnType<typeof managedCapability>, migration = false): Record<string, unknown> {
-  const value: Record<string, unknown> = { ...current, schemaVersion: 2 }
-  delete value.provisioning
+function historicalCapability(
+  current: ReturnType<typeof managedCapability>,
+  migration = false,
+  schemaVersion: 2 | 3 = 2,
+): Record<string, unknown> {
+  const value: Record<string, unknown> = { ...current, schemaVersion }
+  if (schemaVersion === 2) delete value.provisioning
   if (migration) value.migration = {
     owner: 'cloga/dsh-windows-ops',
     manifestUrl: 'https://github.com/cloga/dsh-windows-ops/releases/download/dsh-v1.2.3/release.json',
@@ -143,6 +147,85 @@ it.each([false, true])('retains verified completed schema2 history without rewri
   await expect(fixture.complete(2)).resolves.toEqual({ status: 'none' })
   expect(await readFile(fixture.completionPath, 'utf8')).toBe(receipt)
 })
+
+it.each(['cancelled', 'completed', 'pending'] as const)(
+  'reads a schema3 commit-based migration handoff for a %s operation without launch eligibility', async (state) => {
+    const fixture = await completionFixture()
+    const operation = await fixture.operation('a', state === 'cancelled' ? 'legacy-pre-install' : 'success')
+    if (state === 'completed') await expect(fixture.complete()).resolves.toMatchObject({ status: 'complete', sequence: 2 })
+    await patchRecord(join(operation, 'handoff.json'), { capability: historicalCapability(fixture.capability, true, 3) })
+    if (state === 'cancelled') {
+      await writeFile(join(operation, 'cancelled.json'), JSON.stringify({ schemaVersion: 1, token: 'a'.repeat(64) }))
+    }
+    const handoff = await readFile(join(operation, 'handoff.json'), 'utf8')
+    const receipt = state === 'completed' ? await readFile(fixture.completionPath, 'utf8') : undefined
+    expect(() => parseDesktopManagedUpdateHandoff(JSON.parse(handoff))).toThrow(/expectedSource/u)
+    await expect(fixture.complete(state === 'completed' ? 2 : 0)).resolves.toMatchObject(
+      state === 'pending' ? { status: 'complete', sequence: 2 } : { status: 'none' },
+    )
+    expect(await readFile(join(operation, 'handoff.json'), 'utf8')).toBe(handoff)
+    if (state === 'cancelled') await expect(readFile(fixture.completionPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    if (state === 'completed') expect(await readFile(fixture.completionPath, 'utf8')).toBe(receipt)
+    if (state === 'pending') {
+      expect(JSON.parse(await readFile(fixture.completionPath, 'utf8'))).toMatchObject({ status: 'complete', sequence: 2 })
+    }
+  },
+)
+
+it.each(['blocked', 'interrupted'] as const)(
+  'preserves the installer failure for a %s schema3 commit-based migration handoff', async (state) => {
+    const fixture = await completionFixture()
+    const operation = await fixture.operation('a', state)
+    await patchRecord(join(operation, 'handoff.json'), { capability: historicalCapability(fixture.capability, true, 3) })
+    await expect(fixture.complete()).resolves.toMatchObject({
+      status: 'recovery-required',
+      message: state === 'blocked' ? 'installer-exit-1' : /interrupted/u,
+    })
+    await expect(readFile(fixture.completionPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  },
+)
+
+it('reports the current installer failure after reading completed schema3 commit-based migration history', async () => {
+  const fixture = await completionFixture(18)
+  const previous = managedManifest({ sequence: 11 })
+  const operation = await fixture.operation('a', 'success', previous)
+  await patchRecord(join(operation, 'handoff.json'), {
+    capability: historicalCapability(managedCapability({ currentSequence: 6 }), true, 3),
+  })
+  const receipt = JSON.stringify({
+    schemaVersion: 1, status: 'complete', sequence: 11, manifestSha256: previous.manifestSha256,
+  })
+  await writeFile(fixture.completionPath, receipt)
+  const current = await fixture.operation('b', 'blocked')
+  await patchRecord(join(current, 'stage', 'helper-result.json'), {
+    reason: 'installer-exit--805306369', installerExitCode: -805306369,
+  })
+  await expect(fixture.complete(11)).resolves.toMatchObject({
+    status: 'recovery-required', message: 'installer-exit--805306369',
+  })
+  expect(await readFile(fixture.completionPath, 'utf8')).toBe(receipt)
+})
+
+it.each(['commit', 'version', 'extra-source', 'missing-provisioning', 'invalid-provisioning', 'owner', 'extra-capability'] as const)(
+  'rejects malformed schema3 commit-based migration history: %s', async (kind) => {
+    const fixture = await completionFixture()
+    const operation = await fixture.operation('a', 'legacy-pre-install')
+    const capability = historicalCapability(fixture.capability, true, 3)
+    const migration = capability.migration as Record<string, unknown>
+    const source = migration.expectedSource as Record<string, unknown>
+    if (kind === 'commit') source.commit = 'invalid'
+    if (kind === 'version') source.version = 'invalid'
+    if (kind === 'extra-source') source.tag = 'dsh-v1.2.3'
+    if (kind === 'missing-provisioning') delete capability.provisioning
+    if (kind === 'invalid-provisioning') capability.provisioning = { ...fixture.capability.provisioning, planSha256: 'invalid' }
+    if (kind === 'owner') capability.owner = 'untrusted/repository'
+    if (kind === 'extra-capability') capability.extra = true
+    await patchRecord(join(operation, 'handoff.json'), { capability })
+    await writeFile(join(operation, 'cancelled.json'), JSON.stringify({ schemaVersion: 1, token: 'a'.repeat(64) }))
+    await expect(fixture.complete()).resolves.toMatchObject({ status: 'recovery-required' })
+    await expect(readFile(fixture.completionPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  },
+)
 
 it('recognizes two old-schema pre-install failures without promoting the installed sequence', async () => {
   const fixture = await completionFixture()

@@ -46,7 +46,7 @@ Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须�
 
 ## 失败事务与恢复
 
-最终 stage 提升前的 helper 失败不可能已经启动 installer：旧版和当前 helper 都先提升 stage。Completion 验证 operation 身份、acknowledgement、cancellation 与结果证据，然后才将此类失败归为终态，不推进已完成 sequence。当前 helper 在 acknowledgement 前保留已验证 manifest，并在调用 launcher 前标记安装可能开始。Cancellation 绝不覆盖最终 stage 或 installer 证据。保留的记录仍可用于诊断。Completion 将 schema-2 历史 handoff 身份读取与当前启动资格分开，包括其旧版迁移源字段；规范化的 capability 元数据随即丢弃，绝不用于授权安装。未知 schema 和格式错误记录仍然 fail closed。
+最终 stage 提升前的 helper 失败不可能已经启动 installer：旧版和当前 helper 都先提升 stage。Completion 验证 operation 身份、acknowledgement、cancellation 与结果证据，然后才将此类失败归为终态，不推进已完成 sequence。当前 helper 在 acknowledgement 前保留已验证 manifest，并在调用 launcher 前标记安装可能开始。Cancellation 绝不覆盖最终 stage 或 installer 证据。保留的记录仍可用于诊断。Completion 将历史 handoff 身份读取与当前启动资格分开：schema 2 和早期 schema 3 都包含字段严格为 `version`/`commit` 的迁移源。只读规范化先验证 commit，再构造仅供 parser 使用的 tag 元数据，保留 schema-3 provisioning 验证，并丢弃规范化的 capability，不授权安装，也不改写保留文件。仅按 capability schema 判断兼容性会拒绝已发布的 schema-3 历史，因为迁移字段在该 schema 内发生过变化。未知 schema 和格式错误记录仍然 fail closed。
 
 已经暂存的失败保持未解决状态，除非独立候选核验了同一或更高版本的实际安装。已确认但尚未记录终态的 helper 若仍存活，则不允许取代该事务；存活检查不会结束它。Completion 将保留的 manifest 字节绑定到 handoff asset hash，检查 executable/runtime hash，要求当前打包 sequence 与插件清单匹配，并拒绝更高序号或同序号冲突的已暂存事务。补充的安装前 manifest 只能标识当前打包 release；未开始安装的未来下载不能阻止有效的当前安装完成。验证已完成历史时，不会追溯应用后来提高的 discovery 下限。
 
