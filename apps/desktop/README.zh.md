@@ -245,6 +245,8 @@ Rehearsal 要求 checkout 等于所选远端分支的当前 head，执行构建�
 
 Preparation 和 remote verification 使用步骤专属的只读 `DSH_DESKTOP_RELEASE_GITHUB_TOKEN` 为允许的元数据 GET 请求认证；该适配器的产物下载保持匿名。独立的已验证安装器基线获取步骤使用步骤专属的只读 `GH_TOKEN` 获取 GitHub 元数据与资产。两种凭据均不传入打包或应用启动步骤，也不记录到打包资源与 receipt。因此不能把整个构建与验收 workflow 称为无凭据流程。[Fork 发布决策](../../.agents/notes/implemented/architecture/2026-09-15-fork-owned-windows-desktop-release-channel.zh.md)定义认证限制。
 
+应用的 GitHub HTTP 拒绝诊断保留状态码、已验证的下载／API 主机及固定操作类别，不记录原始 URL、查询参数、响应正文或任意响应头。仅包含规范的非负十进制 rate-limit remaining／limit／reset 与 retry-after 值，且最多十位；缺失或无效字段会被省略。这些观察不会把所有 403 都判定为限流，也不改变匿名请求、重定向、截止时间、重试行为或产物验证。
+
 每个 release 包含交互式 NSIS installer、`release.json`、`build-receipt.json`、`SHA256SUMS` 与 `SHA512SUMS`。Manifest 与 receipt 锁定源码 commit 与 tree、lockfile 与 plan hash、构建工具与依赖 registry、fork package identity、installer size 与 hash、插件 capability 与结构化 source/receipt 版本、允许的 origin 与 redirect，以及重启后 completion 语义。独立的[已安装升级验收](tests/windows-installer-upgrade.ps1)只在一次性的 GitHub 托管 Windows runner 上执行经过验证的基线与候选安装器；这不授权在工作站上安装或重启。
 
 在 finalization 前，[打包 Copilot 验收](tests/fixtures/copilot-release-smoke.ts) 使用全新的 Harness 与 Electron 数据目录启动 unpacked Electron 应用。它要求真实 Settings > Models 账户、登录入口、不再包含已移除 compatibility disclosure 的展开 Manage 面板、成功加载的只读 Model roles 视图、仅提供方级别的 Search provider 与 Fallback provider 控件，以及已注册搜索提供方目录。它验证已安装插件依赖图和 provisioning 清单，再在退出后重新启动时重复这些观察。独立的七天 workflow artifact 记录截图、安全的设置观察、receipt、打包 runtime/capability/plan 记录、可执行文件元数据与精确源码身份。失败运行保留脱敏启动诊断和 receipt/state 是否存在，不保留凭据或 profile 副本。夹具绝不保存设置、创建 Session、登录、打开验证地址或调用模型与搜索提供方。目录注册不等于提供方可用；这些检查不证明 OAuth 成功、模型可用、搜索路由或回退行为，也不证明旧版本到新版本的 installer 升级。Rehearsal artifact 不是不可变 Release。

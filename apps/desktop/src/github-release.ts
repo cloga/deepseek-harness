@@ -34,6 +34,26 @@ function validateRequestUrl(url: URL, download: boolean, subject: string): void 
   if (!allowed.has(url.hostname)) throw new Error(`${subject}: rejected redirect host ${url.hostname}`)
 }
 
+/** HTTP refusal context from an already validated host; remote text and URL paths never enter diagnostics. */
+function httpFailureContext(url: URL, response: Response): string {
+  const path = url.pathname
+  const operation = url.hostname !== API_HOST ? 'asset-download'
+    : /^\/repos\/[^/]+\/[^/]+\/releases(?:\/tags\/[^/]+|\/\d+)?$/u.test(path) ? 'release-metadata'
+      : /^\/repos\/[^/]+\/[^/]+\/git\/ref\/tags\/[^/]+$/u.test(path) ? 'tag-reference'
+        : /^\/repos\/[^/]+\/[^/]+\/git\/tags\/[a-f0-9]{40}$/u.test(path) ? 'tag-object'
+          : /^\/repos\/[^/]+\/[^/]+\/releases\/assets\/\d+$/u.test(path) ? 'release-asset' : 'other-api'
+  const fields = [`host=${url.hostname}`, `operation=${operation}`]
+  for (const [header, label] of [
+    ['x-ratelimit-remaining', 'remaining'], ['x-ratelimit-limit', 'limit'],
+    ['x-ratelimit-reset', 'reset'], ['retry-after', 'retryAfter'],
+  ] as const) {
+    const value = response.headers.get(header)
+    // Canonical nonnegative decimal values only; omit arbitrary text and oversized remote fields.
+    if (value !== null && /^(?:0|[1-9]\d{0,9})$/u.test(value)) fields.push(`${label}=${value}`)
+  }
+  return fields.join('; ')
+}
+
 /**
  * Fetch one GitHub API or asset response through the fixed Desktop redirect policy.
  * @param initial - Initial GitHub URL.
@@ -64,7 +84,9 @@ export async function requestDesktopGithubRelease(
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
     if (!REDIRECTS.has(response.status)) {
-      if (!response.ok) throw new Error(`${subject}: GitHub request failed with ${String(response.status)}`)
+      if (!response.ok) {
+        throw new Error(`${subject}: GitHub request failed with ${String(response.status)} (${httpFailureContext(url, response)})`)
+      }
       return response
     }
     if (redirect === MAX_REDIRECTS) throw new Error(`${subject}: GitHub redirect limit exceeded`)
