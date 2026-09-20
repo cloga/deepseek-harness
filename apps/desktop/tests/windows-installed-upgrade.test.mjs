@@ -169,8 +169,14 @@ test('native driver requires hosted runner before mutation and never silently in
   assert.doesNotMatch(source, /\(Get-Command node[^\n]+\)\.Source/u)
   const install = source.split('function Start-Installer')[1].split('function Finish-Installer')[0]
   assert.ok(install.includes("$arguments = '/THEME=light'"))
-  assert.ok(install.includes("$arguments += ' /D=' + $installPath"))
+  assert.doesNotMatch(install, /\/D=/u)
   assert.doesNotMatch(install, /\/S|--updated|RunAs|ExecutionPolicy/)
+  const legacy = source.split('function Start-LegacyInstaller')[1].split('function Start-Installer')[0]
+  assert.ok(legacy.includes("Start-Owned $path ('/currentuser /D=' + $installPath)"))
+  assert.ok(legacy.includes('Wait-StockControl $process $window 1019'))
+  assert.ok(legacy.includes('Wait-StockControl $Process $window 1204 600'))
+  assert.ok(source.includes("$baselineAppFilename = 'cloga-deepseek-harness-desktop'"))
+  assert.ok(source.includes('Finish-LegacyInstaller (Start-LegacyInstaller $validated.previous)'))
   assert.ok(source.includes("throw 'Installer unexpectedly launched the product'"))
   assert.ok(source.includes('draftAttachmentRefusalVerified = $false'))
   assert.ok(source.includes('pluginUserChoicesVerified = $false'))
@@ -180,7 +186,7 @@ test('native driver requires hosted runner before mutation and never silently in
 test('cleanup admission precedes Finish and rechecks actual registration before uninstalling', () => {
   const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
   assert.doesNotMatch(source, /\$installed\b/)
-  assert.ok(source.indexOf('$installationAttempted = $true') < source.indexOf('Finish-Installer (Start-Installer $validated.previous'))
+  assert.ok(source.indexOf('$installationAttempted = $true') < source.indexOf('Finish-LegacyInstaller (Start-LegacyInstaller $validated.previous)'))
   const cleanup = source.split('    if ($installationAttempted) {')[1]
   assert.ok(cleanup)
   assert.ok(cleanup.includes('$hasRegistration = @(Product-Registrations).Count -ne 0'))

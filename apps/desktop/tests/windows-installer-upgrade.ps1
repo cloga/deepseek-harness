@@ -29,10 +29,11 @@ while ($cursor) {
     if ($parent -eq $cursor) { break }
     $cursor = $parent
 }
-$installPath = Join-Path $root 'Installed App'
+$product = 'DeepSeek Harness (cloga)'
+$baselineAppFilename = 'cloga-deepseek-harness-desktop'
+$installPath = Join-Path $root ('Installed App\' + $baselineAppFilename)
 if ($installPath.Length -gt 180 -or $installPath -match '["\r\n\t]') { throw 'Unsupported NSIS custom path' }
 $application = Join-Path $installPath 'cloga-deepseek-harness.exe'
-$product = 'DeepSeek Harness (cloga)'
 $uninstaller = Join-Path $installPath ('Uninstall ' + $product + '.exe')
 $baseline = [IO.Path]::GetFullPath($BaselineDirectory).TrimEnd('\')
 $candidate = [IO.Path]::GetFullPath($CandidateDirectory).TrimEnd('\')
@@ -133,14 +134,62 @@ function Wait-Control([Diagnostics.Process]$Process, [string]$Text, [int]$Second
     } while ($timer.Elapsed.TotalSeconds -lt $Seconds)
     throw "Installer control deadline: $Text"
 }
-function Start-Installer($Release, [switch]$First) {
+function Wait-StockWindow([Diagnostics.Process]$Process, [int]$Seconds = 120) {
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        if ($Process.HasExited) { throw "Stock installer exited before its directory page ($($Process.ExitCode))" }
+        $window = [InstallerCapture]::FindStockWindow($Process.Id)
+        if ($window -ne [IntPtr]::Zero) { return $window }
+        Start-Sleep -Milliseconds 50
+    } while ($timer.Elapsed.TotalSeconds -lt $Seconds)
+    throw 'Owned stock installer window did not appear'
+}
+function Wait-StockControl([Diagnostics.Process]$Process, [IntPtr]$Window, [int]$Id, [int]$Seconds = 120) {
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        if ($Process.HasExited) { throw "Stock installer exited before control $Id ($($Process.ExitCode))" }
+        $control = [InstallerCapture]::FindControlById($Window, $Id)
+        if ($control -ne [IntPtr]::Zero -and [InstallerCapture]::IsWindowEnabled($control)) { return $control }
+        Start-Sleep -Milliseconds 50
+    } while ($timer.Elapsed.TotalSeconds -lt $Seconds)
+    throw "Owned stock installer control $Id did not appear"
+}
+function Start-LegacyInstaller($Release) {
+    $path = [string]$Release.installer
+    $stream = [IO.File]::Open($path, 'Open', 'Read', 'Read')
+    try {
+        if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Release.manifest.installer.sha256) { throw 'Baseline installer bytes changed after validation' }
+        if ((Get-AuthenticodeSignature -LiteralPath $path).Status -ne 'NotSigned') { throw 'Unexpected baseline installer signature state' }
+        $process = Start-Owned $path ('/currentuser /D=' + $installPath)
+    } finally { $stream.Dispose() }
+    $window = Wait-StockWindow $process
+    $directory = Wait-StockControl $process $window 1019
+    if ([IO.Path]::GetFullPath([InstallerCapture]::Text($directory)).TrimEnd('\') -cne $installPath) { throw 'Baseline installer custom path changed before installation' }
+    [void][InstallerCapture]::Save($window, (Join-Path $root ('evidence/baseline-directory-' + $process.Id + '.png')))
+    [InstallerCapture]::Click((Wait-StockControl $process $window 1))
+    return $process
+}
+function Finish-LegacyInstaller([Diagnostics.Process]$Process) {
+    $window = Wait-StockWindow $Process 600
+    $checkbox = Wait-StockControl $Process $window 1204 600
+    if ([InstallerCapture]::SendMessage($checkbox, 0xF0, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32() -ne 1) { throw 'Baseline launch checkbox default changed' }
+    [InstallerCapture]::Click($checkbox)
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while ([InstallerCapture]::SendMessage($checkbox, 0xF0, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32() -ne 0) {
+        if ($timer.Elapsed.TotalSeconds -gt 5) { throw 'Could not disable baseline automatic launch' }
+        Start-Sleep -Milliseconds 25
+    }
+    [void][InstallerCapture]::Save($window, (Join-Path $root ('evidence/baseline-finish-' + $Process.Id + '.png')))
+    [InstallerCapture]::Click((Wait-StockControl $Process $window 1))
+    Wait-Exit $Process 30
+}
+function Start-Installer($Release) {
     $path = [string]$Release.installer
     $stream = [IO.File]::Open($path, 'Open', 'Read', 'Read')
     try {
         if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Release.manifest.installer.sha256) { throw 'Installer bytes changed after validation' }
         if ((Get-AuthenticodeSignature -LiteralPath $path).Status -ne 'NotSigned') { throw 'Unexpected installer signature state' }
         $arguments = '/THEME=light'
-        if ($First) { $arguments += ' /D=' + $installPath }
         $process = Start-Owned $path $arguments
     } finally { $stream.Dispose() }
     $timer = [Diagnostics.Stopwatch]::StartNew()
@@ -206,7 +255,7 @@ try {
     $validated = Get-Content -LiteralPath (Join-Path $root 'validated.json') -Raw | ConvertFrom-Json
     if ($validated.ownerToken -ne $token) { throw 'Validation does not belong to this run' }
     $installationAttempted = $true
-    Finish-Installer (Start-Installer $validated.previous -First)
+    Finish-LegacyInstaller (Start-LegacyInstaller $validated.previous)
     $registration = Read-Registration
     if ((Get-FileHash -LiteralPath $application -Algorithm SHA256).Hash.ToLowerInvariant() -ne $validated.previous.manifest.installedEvidence.executableSha256) { throw 'Installed baseline executable differs from verified release' }
     $before = Installation-Inventory

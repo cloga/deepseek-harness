@@ -1,4 +1,4 @@
-﻿Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Drawing
 if (-not ('InstallerCapture' -as [type])) {
     # Drawing's implementation and interface assemblies vary between .NET Framework and Core.
     $installerCaptureReferences = @(
@@ -29,6 +29,7 @@ public static class InstallerCapture {
     [DllImport("user32.dll")] static extern bool EnumWindows(WindowCallback callback, IntPtr data);
     [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, WindowCallback callback, IntPtr data);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr window);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetProp(IntPtr window, string name);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
@@ -49,6 +50,7 @@ public static class InstallerCapture {
     [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr window);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder text, int count);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wparam, string text);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr wparam, StringBuilder text, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool SetWindowText(IntPtr window, string text);
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
     [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
@@ -119,6 +121,40 @@ public static class InstallerCapture {
 
     public static IntPtr FindText(int process, string expected) { return FindTextCore(process, expected, false); }
     public static IntPtr FindDialogText(int process, string expected) { return FindTextCore(process, expected, true); }
+    public static string Text(IntPtr control) {
+        var text = new StringBuilder(512);
+        IntPtr result;
+        if (SendMessageTimeout(control, 0xD, (IntPtr)text.Capacity, text, 0x2, 5000, out result) == IntPtr.Zero) {
+            throw new InvalidOperationException("Could not read owned native control text");
+        }
+        return text.ToString();
+    }
+    public static IntPtr FindControlById(IntPtr parent, int id) {
+        IntPtr result = IntPtr.Zero;
+        EnumChildWindows(parent, delegate(IntPtr child, IntPtr unused) {
+            if (GetDlgCtrlID(child) == id && IsWindowVisible(child)) {
+                if (result != IntPtr.Zero) throw new InvalidOperationException("Multiple visible controls share one expected stock ID");
+                result = child;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return result;
+    }
+    public static IntPtr FindStockWindow(int process) {
+        IntPtr result = IntPtr.Zero;
+        EnumWindows(delegate(IntPtr window, IntPtr data) {
+            uint owner;
+            GetWindowThreadProcessId(window, out owner);
+            var title = new StringBuilder(256);
+            GetWindowText(window, title, title.Capacity);
+            if (owner == process && IsWindowVisible(window) && title.ToString().Contains(ProductName)) {
+                if (result != IntPtr.Zero) throw new InvalidOperationException("Multiple stock installer windows in owned process");
+                result = window;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return result;
+    }
     public static IntPtr FindButton(int process, string expected) {
         IntPtr result = IntPtr.Zero;
         EnumWindows(delegate(IntPtr window, IntPtr data) {
