@@ -12,7 +12,7 @@ interface ObservedMenu {
     readonly label: string
     readonly enabled: boolean
     readonly visible: boolean
-    readonly role?: string
+    readonly role?: string | null
     readonly click?: MenuItem['click']
   }[]
 }
@@ -154,12 +154,21 @@ export async function observeDesktopVersionMenu(
         const about = this.items[0]
         const expectedLabel = command.applicationMenuLabel === '应用'
           ? `关于 Desktop ${desktopVersion}…` : `About Desktop ${desktopVersion}…`
+        const matchingAboutCount = this.items.filter(item => /^(?:About Desktop |关于 Desktop )/u.test(item.label)).length
+        // Native Electron MenuItem normalizes an absent role to null, unlike the template's undefined.
         if (about === undefined || about.label !== expectedLabel || !about.enabled || !about.visible
-          || about.role !== undefined || typeof about.click !== 'function'
-          || this.items.filter(item => /^(?:About Desktop |关于 Desktop )/u.test(item.label)).length !== 1) {
-          throw new Error('The first Application menu item must expose the full running Desktop version with an explicit callback')
+          || (about.role !== undefined && about.role !== null) || typeof about.click !== 'function'
+          || matchingAboutCount !== 1) {
+          const observed = {
+            expectedLabel, label: about?.label ?? null, enabled: about?.enabled ?? null,
+            visible: about?.visible ?? null, role: about?.role ?? null,
+            clickType: typeof about?.click, matchingAboutCount,
+          }
+          throw new Error('The first Application menu item must expose the full running Desktop version'
+            + ` with an explicit callback; observed ${JSON.stringify(observed)}`)
         }
         if (typeof options.callback !== 'function') throw new Error('Caption popup completion callback is missing')
+        // Native click exists even without a template callback; require the actual About dispatch below.
         const aboutDescriptor = Object.getOwnPropertyDescriptor(app, 'showAboutPanel')
         let aboutDispatchCount = 0
         try {
