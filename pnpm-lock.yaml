@@ -526,9 +526,21 @@ importers:
       '@aws-sdk/client-s3':
         specifier: 3.1067.0
         version: 3.1067.0
+      '@deepseek-ai/dsh-commands':
+        specifier: workspace:^
+        version: link:../../packages/interaction/commands
       '@deepseek-ai/dsh-home-paths':
         specifier: workspace:^
         version: link:../../packages/util/home-paths
+      '@deepseek-ai/dsh-session':
+        specifier: workspace:^
+        version: link:../../packages/core/session
+      '@deepseek-ai/dsh-session-format':
+        specifier: workspace:^
+        version: link:../../packages/session/session-format
+      '@deepseek-ai/dsh-win32-process':
+        specifier: workspace:^
+        version: link:../../packages/subprocess/win32-process
       '@electron/notarize':
         specifier: 2.5.0
         version: 2.5.0

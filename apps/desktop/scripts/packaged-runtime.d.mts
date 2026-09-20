@@ -18,9 +18,10 @@ export function packagedDesktopRuntimeEnvironment(environment?: NodeJS.ProcessEn
  * Read the original descriptor bytes through Electron's ASAR filesystem.
  * @param executable - Packaged Electron executable, never bundled upstream Node.
  * @param runtimeRoot - ASAR-backed runtime directory.
+ * @param environment - Optional caller-owned inspection environment; no ambient variables are merged into it.
  * @returns Exact packaged bytes used by release receipts and installed evidence.
  */
-export function readPackagedDesktopRuntimeDescriptor(executable: string, runtimeRoot: string): Buffer
+export function readPackagedDesktopRuntimeDescriptor(executable: string, runtimeRoot: string, environment?: NodeJS.ProcessEnv): Buffer
 
 /**
  * Verify every packed and unpacked runtime file after the Desktop build.
@@ -28,9 +29,11 @@ export function readPackagedDesktopRuntimeDescriptor(executable: string, runtime
  * @param runtimeRoot - ASAR-backed runtime directory.
  * @param version - Expected upstream shell/runtime version.
  * @param target - Required runtime target.
+ * @param environment - Optional caller-owned environment with an absolute TMPDIR, TEMP or TMP for materialization.
  * @returns Resolves after successful verification and child exit.
  */
 export function verifyPackagedDesktopRuntime(
   executable: string, runtimeRoot: string, version: string,
   target: { platform: NodeJS.Platform; arch: string },
+  environment?: NodeJS.ProcessEnv,
 ): Promise<void>

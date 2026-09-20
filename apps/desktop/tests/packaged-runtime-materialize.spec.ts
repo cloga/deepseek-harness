@@ -35,6 +35,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
   for (const result of vi.mocked(mkdtempSync).mock.results) {
     if (result.type === 'return' && typeof result.value === 'string') expect(existsSync(result.value)).toBe(false)
   }
@@ -55,6 +56,32 @@ describe('ASAR verification materialization', () => {
       callback(null, '', '')
     })
     await verifyPackagedDesktopRuntime('Electron', runtime, '1.0.0', { platform: 'darwin', arch: 'arm64' })
+  })
+
+  it('contains verifier environment, cwd and materialization within the caller-owned home', async () => {
+    vi.stubEnv('DSH_HOME', 'production-home')
+    vi.stubEnv('AMBIENT_ONLY', 'must-not-inherit')
+    const privateTemp = join(root, 'private-temp')
+    mkdirSync(privateTemp)
+    const environment = { DSH_HOME: root, HOME: root, USERPROFILE: root, APPDATA: root, LOCALAPPDATA: root,
+      TEMP: privateTemp, TMP: privateTemp, PRIVATE_SECRET: 'must-not-forward' }
+    state.child.mockImplementation((_executable, _args, options, callback) => {
+      const materialized = vi.mocked(mkdtempSync).mock.results[0]!.value as string
+      expect(materialized.startsWith(join(privateTemp, 'dsh-asar-verification-'))).toBe(true)
+      expect(options.cwd).toBe(root)
+      expect(options.env).toEqual({ DSH_HOME: root, HOME: root, USERPROFILE: root, APPDATA: root, LOCALAPPDATA: root,
+        TEMP: privateTemp, TMP: privateTemp, ELECTRON_RUN_AS_NODE: '1' })
+      callback(null, '', '')
+    })
+    await verifyPackagedDesktopRuntime('Electron', runtime, '1.0.0', { platform: 'win32', arch: 'x64' }, environment)
+    expect(process.env.DSH_HOME).toBe('production-home')
+  })
+
+  it.each([{}, { TEMP: 'relative-temp' }])('refuses ambiguous temporary paths for an explicit environment: %j', async (environment) => {
+    await expect(verifyPackagedDesktopRuntime('Electron', runtime, '1.0.0', { platform: 'win32', arch: 'x64' }, environment))
+      .rejects.toThrow('explicit inspection environment requires an absolute temporary directory')
+    expect(mkdtempSync).not.toHaveBeenCalled()
+    expect(state.child).not.toHaveBeenCalled()
   })
 
   it.each(['..', '../outside', '..\\outside', 'C:outside', ''])('rejects unsafe archive segment %j before creating files', async (name) => {
