@@ -245,58 +245,83 @@ try {
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
     $mainHwnd = [IntPtr]([long]$ownership.mainHwnd)
-    [uint32]$windowPid = 0
-    $deadline = [DateTime]::UtcNow.AddSeconds(45)
-    $dialog = $null
-    $title = 'Apply Plugin Change'
-    while ($null -eq $dialog -and [DateTime]::UtcNow -lt $deadline) {
-        if ($mainProcess.HasExited -or $hostProcess.HasExited) { throw 'Owned application exited before native Cancel' }
+    function Read-OwnedConfirmation([int]$ProcessId, [IntPtr]$MainHwnd) {
+        [uint32]$windowPid = 0
+        $matches = @()
         $windows = [Windows.Automation.AutomationElement]::RootElement.FindAll(
             [Windows.Automation.TreeScope]::Children,
-            [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty, [int]$ownership.main.pid))
+            [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty, $ProcessId))
+        if ($windows.Count -gt 256) { throw 'Owned confirmation window enumeration exceeded bound' }
         foreach ($candidate in $windows) {
-            if ($candidate.Current.Name -ceq $title) {
-                if ($null -ne $dialog) { throw 'Ambiguous owned confirmation windows' }
-                $dialog = $candidate
+            $candidateHwnd = [IntPtr]$candidate.Current.NativeWindowHandle
+            if ($candidateHwnd -eq [IntPtr]::Zero -or $candidateHwnd -eq $MainHwnd -or
+                ![OwnedDialogWin32]::IsWindow($candidateHwnd)) { continue }
+            $null = [OwnedDialogWin32]::GetWindowThreadProcessId($candidateHwnd, [ref]$windowPid)
+            if ($windowPid -ne $ProcessId -or [OwnedDialogWin32]::GetAncestor($candidateHwnd, 3) -ne $MainHwnd) { continue }
+            $elements = $candidate.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+            if ($elements.Count -gt 2048) { throw 'Owned confirmation control enumeration exceeded bound' }
+            $cancel = @($elements | Where-Object {
+                $_.Current.ControlType -eq [Windows.Automation.ControlType]::Button -and $_.Current.Name -ceq 'Cancel'
+            })
+            $apply = @($elements | Where-Object {
+                $_.Current.ControlType -eq [Windows.Automation.ControlType]::Button -and $_.Current.Name -ceq 'Apply and Restart Host'
+            })
+            $message = @($elements | Where-Object { $_.Current.Name -ceq 'Restart the Desktop Host to apply this change?' })
+            if ($cancel.Count -eq 1 -and $apply.Count -eq 1 -and $message.Count -ge 1) {
+                # Descendant traversal can race destruction or handle reuse; native identity must still match afterward.
+                if (![OwnedDialogWin32]::IsWindow($candidateHwnd) -or
+                    [IntPtr]$candidate.Current.NativeWindowHandle -ne $candidateHwnd) { throw 'Owned confirmation changed during control enumeration' }
+                $null = [OwnedDialogWin32]::GetWindowThreadProcessId($candidateHwnd, [ref]$windowPid)
+                if ($windowPid -ne $ProcessId -or [OwnedDialogWin32]::GetAncestor($candidateHwnd, 3) -ne $MainHwnd) {
+                    throw 'Owned confirmation identity changed during control enumeration'
+                }
+                $title = [Text.StringBuilder]::new(1026)
+                $length = [OwnedDialogWin32]::GetWindowText($candidateHwnd, $title, $title.Capacity)
+                if ($length -gt 1024) { throw 'Owned confirmation title exceeded bound' }
+                $matches += @{ dialog = $candidate; hwnd = $candidateHwnd; title = $title.ToString();
+                    cancel = $cancel[0]; apply = $apply[0]; messageCount = $message.Count }
             }
         }
-        if ($null -eq $dialog) { Start-Sleep -Milliseconds 100 }
+        if ($matches.Count -gt 1) { throw 'Ambiguous owned confirmation windows with exact controls' }
+        if ($matches.Count -eq 1) { return $matches[0] }
+        return $null
     }
-    if ($null -eq $dialog) { throw 'Verified owned native confirmation did not appear' }
-    $hwnd = [IntPtr]$dialog.Current.NativeWindowHandle
-    $null = [OwnedDialogWin32]::GetWindowThreadProcessId($hwnd, [ref]$windowPid)
-    $text = [Text.StringBuilder]::new(256)
-    $null = [OwnedDialogWin32]::GetWindowText($hwnd, $text, $text.Capacity)
-    if ($windowPid -ne $ownership.main.pid -or $text.ToString() -cne $title -or
-        [OwnedDialogWin32]::GetAncestor($hwnd, 3) -ne $mainHwnd) { throw 'Native HWND/title/owner identity failed' }
-    $elements = $dialog.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
-    $cancel = @($elements | Where-Object { $_.Current.ControlType -eq [Windows.Automation.ControlType]::Button -and $_.Current.Name -ceq 'Cancel' })
-    $apply = @($elements | Where-Object { $_.Current.ControlType -eq [Windows.Automation.ControlType]::Button -and $_.Current.Name -ceq 'Apply and Restart Host' })
-    $message = @($elements | Where-Object { $_.Current.Name -ceq 'Restart the Desktop Host to apply this change?' })
-    if ($cancel.Count -ne 1 -or $apply.Count -ne 1 -or $message.Count -lt 1) { throw 'Native message and exact button identities were not verified' }
-    if (!$cancel[0].Current.IsEnabled -or $cancel[0].Current.IsOffscreen -or $cancel[0].Current.ProcessId -ne $ownership.main.pid) { throw 'Cancel is not an enabled owned visible control' }
-    $focused = $cancel[0].Current.HasKeyboardFocus
-    $invoke = $cancel[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
+    $deadline = [DateTime]::UtcNow.AddSeconds(45)
+    $confirmation = $null
+    while ($null -eq $confirmation -and [DateTime]::UtcNow -lt $deadline) {
+        if ($mainProcess.HasExited -or $hostProcess.HasExited) { throw 'Owned application exited before native Cancel' }
+        $confirmation = Read-OwnedConfirmation ([int]$ownership.main.pid) $mainHwnd
+        if ($null -eq $confirmation) { Start-Sleep -Milliseconds 100 }
+    }
+    if ($null -eq $confirmation) { throw 'Verified owned native confirmation did not appear' }
+    $hwnd = $confirmation.hwnd
+    $cancel = $confirmation.cancel
+    if (!$cancel.Current.IsEnabled -or $cancel.Current.IsOffscreen -or $cancel.Current.ProcessId -ne $ownership.main.pid) {
+        throw 'Cancel is not an enabled owned visible control'
+    }
+    $focused = $cancel.Current.HasKeyboardFocus
+    $invoke = $cancel.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
     if ($null -eq $invoke) { throw 'Cancel has no native InvokePattern' }
-    # Recheck the retained process handles and exact root before the only dialog action: Cancel.
+    # Recheck the retained process handles, exact root and structurally matched dialog before Cancel.
     $currentRoot = Read-VerifiedRoot $mainProcess $ownership.mainWindow.title $ownership.mainHwnd
     if (!$currentRoot.selected.visible -or $currentRoot.selected.minimized) { throw 'Owned root visibility changed before Cancel' }
-    if ($mainProcess.HasExited -or $hostProcess.HasExited -or ![OwnedDialogWin32]::IsWindow($hwnd)) { throw 'Dialog ownership expired before invocation' }
-    $null = [OwnedDialogWin32]::GetWindowThreadProcessId($hwnd, [ref]$windowPid)
-    $null = $text.Clear()
-    $null = [OwnedDialogWin32]::GetWindowText($hwnd, $text, $text.Capacity)
-    if ($windowPid -ne $ownership.main.pid -or $text.ToString() -cne $title -or
-        [OwnedDialogWin32]::GetAncestor($hwnd, 3) -ne $mainHwnd -or
-        $cancel[0].Current.Name -cne 'Cancel' -or $cancel[0].Current.ProcessId -ne $ownership.main.pid -or
-        !$cancel[0].Current.IsEnabled -or $cancel[0].Current.IsOffscreen) { throw 'Cancel identity changed before invocation' }
+    if ($mainProcess.HasExited -or $hostProcess.HasExited) { throw 'Dialog ownership expired before invocation' }
+    $currentConfirmation = Read-OwnedConfirmation ([int]$ownership.main.pid) $mainHwnd
+    if ($null -eq $currentConfirmation -or $currentConfirmation.hwnd -ne $hwnd -or
+        !$currentConfirmation.cancel.Current.IsEnabled -or
+        $currentConfirmation.cancel.Current.IsOffscreen -or
+        $currentConfirmation.cancel.Current.ProcessId -ne $ownership.main.pid) { throw 'Cancel identity changed before invocation' }
+    $invoke = $currentConfirmation.cancel.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
+    if ($null -eq $invoke) { throw 'Cancel lost native InvokePattern' }
     $invoke.Invoke()
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     while ([OwnedDialogWin32]::IsWindow($hwnd) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
     if ([OwnedDialogWin32]::IsWindow($hwnd)) { throw 'Native dialog did not close after Cancel' }
     $afterCancelRoot = Read-VerifiedRoot $mainProcess $ownership.mainWindow.title $ownership.mainHwnd
-    [ordered]@{ action = 'Cancel'; dialogHwnd = $hwnd.ToInt64().ToString(); title = $title;
+    [ordered]@{ action = 'Cancel'; dialogHwnd = $hwnd.ToInt64().ToString(); observedTitle = $confirmation.title;
         mainHwnd = $ownership.mainHwnd; mainWindow = $afterCancelRoot.selected;
-        messageVerified = $true; cancelHadKeyboardFocus = $focused; defaultFocusAsserted = $false; closed = $true } | ConvertTo-Json -Depth 5 -Compress
+        messageVerified = $true; exactButtonsVerified = $true; cancelHadKeyboardFocus = $focused;
+        defaultFocusAsserted = $false; closed = $true } | ConvertTo-Json -Depth 5 -Compress
 } finally {
     if ($null -ne $hostProcess) { $hostProcess.Dispose() }
     $mainProcess.Dispose()
