@@ -1243,7 +1243,7 @@ describe('Issue lifecycle workflow', () => {
     expect(policyPullRequest.types).toContain('ready_for_review')
   })
 
-  it('scopes upstream preflight to its repository before minting credentials and revalidating metadata', () => {
+  it('scopes trusted preflight to supported repositories before minting credentials and revalidating metadata', () => {
     const policy = loadWorkflow('.github/workflows/issue-policy.yml')
     const policyJob = workflowJob(policy, 'policy')
     if (!Array.isArray(policyJob.steps)) throw new TypeError('Issue policy job must define steps')
@@ -1254,12 +1254,11 @@ describe('Issue lifecycle workflow', () => {
     expect(preflightStep).toMatchObject({ shell: 'bash' })
     expect(preflightStep?.run).toContain('if [ -f .github/issue-management/selective-preflight.json ]; then')
     expect(preflightStep?.run).toContain('node .github/issue-management/policy.mjs pr-preflight')
-    expect(preflightStep?.if).toBe("github.repository == 'deepseek-ai/deepseek-harness'")
     expect(policyJob.if).toBeUndefined()
-    const projectGate =
-      "github.repository == 'deepseek-ai/deepseek-harness' && steps.preflight.outputs.needs-project == 'true'"
-    const validationGate =
-      "github.repository == 'deepseek-ai/deepseek-harness' && steps.preflight.outputs.legacy-automated != 'true'"
+    const repositoryGate = "(github.repository == 'deepseek-ai/deepseek-harness' || github.repository == 'cloga/deepseek-harness')"
+    expect(preflightStep?.if).toBe(repositoryGate)
+    const projectGate = `${repositoryGate} && steps.preflight.outputs.needs-project == 'true'`
+    const validationGate = `${repositoryGate} && steps.preflight.outputs.legacy-automated != 'true'`
 
     expect(tokenStep).toMatchObject({
       id: 'app-token',

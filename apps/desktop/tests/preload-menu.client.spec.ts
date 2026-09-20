@@ -89,7 +89,7 @@ it('localizes caption entries and removes the menu on disposal', () => {
 it('provides caption geometry, system font and paired system colors before theme delivery', () => {
   document.body.replaceChildren()
   menu = installWindowsMenu()
-  const css = document.querySelector('[data-windows-menu]')!.shadowRoot!.querySelector('style')!.textContent!
+  const css = document.querySelector('[data-windows-menu]')!.shadowRoot!.querySelector('style')!.textContent
   expect(css).toContain(`var(--dsh-windows-titlebar-height, ${WINDOWS_TITLEBAR_HEIGHT}px)`)
   expect(css).toContain('var(--dsh-windows-menu-start, 48px)')
   expect(css).toContain('var(--dsw-font-family, system-ui, sans-serif)')

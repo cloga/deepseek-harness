@@ -1,4 +1,6 @@
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import type { ElectronApplication, Page } from 'playwright'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
@@ -72,6 +74,33 @@ describe('packaged Windows caption-menu observation', () => {
     expect(await serialized(f.electron, { action: 'read', token: f.arm.token })).toMatchObject({ desktopVersion: version })
     f.assertRestored()
   })
+
+  // The 60s case budget exceeds the owned 30s CLI deadline and leaves time for assertions and cleanup.
+  it('runs the real tsx CLI serialized observer without captured transform helpers', async () => {
+    // The packaged acceptance launches through tsx CLI, whose keepNames transform differs from Vitest.
+    const fixtureURL = new URL('./fixtures/desktop-version-menu-smoke.ts', import.meta.url).href
+    const environment = Object.fromEntries(Object.entries(process.env)
+      .filter(([name]) => !/KEY|SECRET|TOKEN|PASSWORD/iu.test(name)))
+    const result = spawnSync(process.execPath, [
+      fileURLToPath(import.meta.resolve('tsx/cli')), '--input-type=module', '--eval',
+      `import { observeDesktopVersionMenu } from ${JSON.stringify(fixtureURL)};`
+        + 'console.log(JSON.stringify(observeDesktopVersionMenu.toString()))',
+    ], { encoding: 'utf8', timeout: 30_000, env: { ...environment, TSX_DISABLE_CACHE: '1' } })
+    expect(result.error, 'tsx CLI must not fail to spawn or time out').toBeUndefined()
+    expect(result.signal).toBeNull()
+    expect(result.status, result.stderr).toBe(0)
+    const source: unknown = JSON.parse(result.stdout)
+    if (typeof source !== 'string') throw new Error('tsx CLI did not serialize the observer')
+    const serialized = runInNewContext(`(${source})`, { setTimeout, clearTimeout }) as typeof observeDesktopVersionMenu
+    const f = fixture()
+    await serialized(f.electron, f.arm)
+    new f.Menu().popup(f.popupOptions)
+    expect(await serialized(f.electron, { action: 'read', token: f.arm.token })).toMatchObject({
+      desktopVersion: version, aboutDispatchCount: 1, nativePopupOpened: false, nativeModalOpened: false,
+    })
+    expect(f.callback).toHaveBeenCalledOnce()
+    f.assertRestored()
+  }, 60_000)
 
   it.each(['0.1.6-alpha.2', '0.1.6-alpha.1.cloga.12'])('rejects unreviewed running version %s before mutation', async (wrongVersion) => {
     const f = fixture()
@@ -251,10 +280,10 @@ describe('packaged Windows caption-menu observation', () => {
   it('expires and restores even when the caller never reads the missing popup', async () => {
     vi.useFakeTimers()
     const f = fixture()
-    const original = f.Menu.prototype.popup
+    const original = Object.getOwnPropertyDescriptor(f.Menu.prototype, 'popup')
     await observeDesktopVersionMenu(f.electron, f.arm)
     await vi.advanceTimersByTimeAsync(15_000)
-    expect(f.Menu.prototype.popup).toBe(original)
+    expect(Object.getOwnPropertyDescriptor(f.Menu.prototype, 'popup')).toEqual(original)
     await expect(f.dispose()).rejects.toThrow('Timed out')
     f.assertRestored()
   })
@@ -262,11 +291,11 @@ describe('packaged Windows caption-menu observation', () => {
   it('rejects overlapping owners and wrong tokens without taking over the interceptor', async () => {
     const f = fixture()
     await observeDesktopVersionMenu(f.electron, f.arm)
-    const installed = f.Menu.prototype.popup
+    const installed = Object.getOwnPropertyDescriptor(f.Menu.prototype, 'popup')
     await expect(observeDesktopVersionMenu(f.electron, { ...f.arm, token: 'other' })).rejects.toThrow('already has an owner')
     for (const action of ['read', 'dispose'] as const) {
       await expect(observeDesktopVersionMenu(f.electron, { action, token: 'other' })).rejects.toThrow('owner mismatch')
-      expect(f.Menu.prototype.popup).toBe(installed)
+      expect(Object.getOwnPropertyDescriptor(f.Menu.prototype, 'popup')).toEqual(installed)
     }
     await f.dispose()
     await f.dispose()
