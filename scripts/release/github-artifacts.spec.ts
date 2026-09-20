@@ -15,7 +15,7 @@ import {
 const sha = 'a'.repeat(40)
 const tree = 'b'.repeat(40)
 const head = 'c'.repeat(40)
-const version = '0.1.6-alpha.4'
+const version = '0.1.6-alpha.5'
 const selection: Selection = {
   repository: 'cloga/deepseek-harness', event: 'workflow_dispatch', publish: 'true',
   ref: `refs/tags/dsh-v${version}`, source: sha, version, reviewedHead: head, mergedCommit: sha,
@@ -56,7 +56,7 @@ describe('dispatch and checkout evidence', () => {
   it('admits only the approved existing tag dispatch and first attempt', () => {
     expect(() => { assertDispatch(selection) }).not.toThrow()
   })
-  it.each(['0.1.6-alpha.2.20260919.1', '0.1.6-alpha.3'])('rejects previous candidate %s even when its tag matches', (previous) => {
+  it.each(['0.1.6-alpha.2.20260919.1', '0.1.6-alpha.3', '0.1.6-alpha.4'])('rejects previous candidate %s even when its tag matches', (previous) => {
     expect(() => { assertDispatch({ ...selection, version: previous, ref: `refs/tags/dsh-v${previous}` }) }).toThrow()
   })
   it.each([
