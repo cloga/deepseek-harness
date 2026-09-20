@@ -1130,14 +1130,15 @@ describe('npm release workflows', () => {
       const workflow = loadWorkflow('.github/workflows/release.yml')
       const pack = workflowJob(workflow, 'pack')
       if (!isRecord(workflow.on) || !isRecord(workflow.jobs) || !Array.isArray(pack.steps)) throw new TypeError('Release workflow missing jobs')
+      const steps = pack.steps
       if (variant === 'input') workflow.on.workflow_dispatch = { inputs: { publish_github_artifacts: { type: 'boolean', default: false } } }
       if (variant === 'writer-job') workflow.jobs['github-artifacts'] = { steps: [] }
       if (variant === 'permission') pack.permissions = { contents: 'write' }
       if (variant === 'guard') pack.steps.unshift({ run: 'node scripts/release/github-artifacts.ts guard' })
       if (variant === 'seal') pack.steps.unshift({ run: 'node scripts/release/github-artifacts-prepare.ts dist/npm' })
       if (variant === 'token') pack.env = { GITHUB_TOKEN: '${{ github.token }}' }
-      if (variant === 'missing-build') pack.steps = pack.steps.filter(step => !isRecord(step) || step.run !== 'pnpm run build:official')
-      if (variant === 'missing-verification') pack.steps = pack.steps.filter(step => !isRecord(step) || step.name !== 'Verify packed install')
+      if (variant === 'missing-build') pack.steps = steps.filter(step => !isRecord(step) || step.run !== 'pnpm run build:official')
+      if (variant === 'missing-verification') pack.steps = steps.filter(step => !isRecord(step) || step.name !== 'Verify packed install')
       expect(() => { assertPackOnly(workflow) }).toThrow()
     },
   )
