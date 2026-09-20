@@ -826,9 +826,19 @@ async function main(): Promise<void> {
     void pluginWindow.loadURL(`${SCHEME}://shell/plugin-manager.html`)
   }
 
+  const desktopVersion = app.getVersion()
+  app.setAboutPanelOptions({
+    applicationName: messages.aboutDesktopTitle,
+    applicationVersion: desktopVersion,
+  })
   Menu.setApplicationMenu(Menu.buildFromTemplate([{
     label: process.platform === 'darwin' ? app.name : messages.application,
     submenu: [
+      {
+        label: formatDesktopMessage(messages.aboutDesktopMenu, { version: desktopVersion }),
+        click: () => { app.showAboutPanel() },
+      },
+      { type: 'separator' },
       {
         label: development === undefined ? messages.pluginsMenu : messages.pluginsMenuPackagedOnly,
         accelerator: 'CmdOrCtrl+,',
