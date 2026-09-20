@@ -1,5 +1,5 @@
 /** Non-GUI guards for the independent packaged command acceptance fixture. */
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { closeSync, fstatSync, mkdtempSync, mkdirSync, readFileSync, readSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -14,6 +14,7 @@ vi.mock('node:child_process', () => ({ spawn: () => { throw new Error('Import sa
 
 import {
   canRemoveDesktopPluginHome,
+  openDesktopPluginInput,
   runPackagedDesktopPluginCommandAcceptance,
   snapshotDesktopPluginProfile,
   validateDesktopPluginTranscript,
@@ -49,6 +50,30 @@ const auditNames = ['@example/a', '@example/b']
 const validateAudit = (values: unknown[]): void => { validateDesktopPluginCancelAudit(values, '@example/a', auditNames) }
 
 describe('packaged desktop-plugin command fixture (no GUI)', () => {
+  it('supplies real EOF stdin from an exclusive private file rather than a DOS device name', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desktop-plugin-input-'))
+    let fd: number | undefined
+    try {
+      fd = openDesktopPluginInput(home)
+      expect(fstatSync(fd).isFile()).toBe(true)
+      expect(readFileSync(join(home, 'electron.stdin')).length).toBe(0)
+      expect(readSync(fd, Buffer.alloc(1), 0, 1, null)).toBe(0)
+      expect(() => openDesktopPluginInput(home)).toThrow()
+    } finally {
+      if (fd !== undefined) closeSync(fd)
+      removeOwnedDirectory(home)
+    }
+  })
+
+  it('does not truncate an existing input path', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desktop-plugin-input-existing-'))
+    try {
+      const file = join(home, 'electron.stdin')
+      writeFileSync(file, 'preserve')
+      expect(() => openDesktopPluginInput(home)).toThrow()
+      expect(readFileSync(file, 'utf8')).toBe('preserve')
+    } finally { removeOwnedDirectory(home) }
+  })
   it('retains home after spawn throws without returning ownership, even with a stale quiescence flag', () => {
     for (const jobQuiescent of [false, true]) {
       expect(canRemoveDesktopPluginHome({ spawnAttempted: true, jobOwned: false,

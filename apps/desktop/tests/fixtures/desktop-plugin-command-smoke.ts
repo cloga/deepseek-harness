@@ -46,6 +46,15 @@ interface ExpectedCommand { readonly line: string; readonly execution: CommandEx
 interface HelperLifecycle { helperTreeUncertain: boolean }
 
 /**
+ * Provide EOF stdin without depending on Windows device-name normalization.
+ * @param home - Existing fixture-owned private directory.
+ * @returns Exclusively created empty-file descriptor; the caller must close it.
+ */
+export function openDesktopPluginInput(home: string): number {
+  return openSync(join(home, 'electron.stdin'), 'wx+', 0o600)
+}
+
+/**
  * Admit home deletion only when every attempted launch has known, settled ownership.
  * @param state - App Job proof plus the independent native-helper uncertainty latch.
  * @returns Whether all fixture process ownership is sufficiently proved for home removal.
@@ -304,7 +313,9 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
       descriptors.push(fd)
       return fd
     }
-    const stdio = { stdin: descriptor('NUL', 'r'), stdout: descriptor(join(home, 'electron.stdout'), 'wx'),
+    const stdin = openDesktopPluginInput(home)
+    descriptors.push(stdin)
+    const stdio = { stdin, stdout: descriptor(join(home, 'electron.stdout'), 'wx'),
       stderr: descriptor(stderrPath, 'wx') }
     const args = [`--user-data-dir=${userData}`, '--lang=en-US', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0']
     const commandLine = buildCommandLine(application, args)
