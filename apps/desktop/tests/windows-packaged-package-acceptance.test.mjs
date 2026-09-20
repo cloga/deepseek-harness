@@ -2,9 +2,9 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { installedUpgradeApplication } from './fixtures/windows-installed-upgrade-contract.mjs'
@@ -14,11 +14,25 @@ const source = readFileSync(new URL('./fixtures/windows-packaged-package-accepta
 const native = readFileSync(new URL('./windows-desktop-ui.ps1', import.meta.url), 'utf8')
 const id = '11111111-1111-4111-8111-111111111111'
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
-function directory(t) {
-  const root = mkdtempSync(join(tmpdir(), 'package-acceptance-unit-'))
+function directory(t, base = tmpdir()) {
+  let root = mkdtempSync(join(base, 'package-acceptance-unit-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
+  // Establish the physical identity of a newly owned fixture, not an untrusted application input.
+  root = realpathSync.native(root)
   return root
 }
+
+test('fixture allocation resolves an aliased temporary base before ownership checks', t => {
+  const parent = directory(t)
+  const physical = join(parent, 'physical')
+  const alias = join(parent, 'temporary-alias')
+  mkdirSync(physical)
+  symlinkSync(physical, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  const root = directory(t, alias)
+  assert.equal(dirname(root), realpathSync.native(physical))
+  assert.equal(root, realpathSync.native(root))
+  assert.equal(installedUpgradeApplication(root), join(root, 'Installed App', 'cloga-deepseek-harness-desktop', 'cloga-deepseek-harness.exe'))
+})
 
 test('installed observers agree on the driver-owned nested application path', t => {
   const root = directory(t)

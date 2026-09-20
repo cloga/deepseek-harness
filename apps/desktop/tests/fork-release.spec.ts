@@ -387,17 +387,22 @@ describe('Desktop fork release plan', () => {
     expect(steps[guards]).not.toHaveProperty('if')
   })
 
-  it('requires actual installer qualification after finalization and before release asset sealing', () => {
+  it('runs source installer guards before packaging and actual upgrade before release sealing', () => {
     const workflow = readReleaseWorkflow()
     const steps = workflow.jobs.build!.steps
+    const install = steps.findIndex(step => step.name === 'Install from frozen lockfile')
+    const build = steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')
     const finalize = steps.findIndex(step => step.name === 'Finalize release manifest and receipts')
     const acquire = steps.findIndex(step => step.name === 'Acquire the verified installer-upgrade baseline')
     const guards = steps.findIndex(step => step.name === 'Verify installer-upgrade guard tests')
     const upgrade = steps.findIndex(step => step.name === 'Verify real installed Desktop upgrade')
     const seal = steps.findIndex(step => step.name === 'Verify release asset checksums')
-    expect(finalize).toBeGreaterThanOrEqual(0)
+    expect(install).toBeGreaterThanOrEqual(0)
+    expect(guards).toBeGreaterThan(install)
+    expect(build).toBeGreaterThan(guards)
+    expect(finalize).toBeGreaterThan(build)
     expect(acquire).toBeGreaterThan(finalize)
-    expect(guards).toBeGreaterThan(acquire)
+    expect(upgrade).toBeGreaterThan(acquire)
     expect(upgrade).toBeGreaterThan(guards)
     expect(seal).toBeGreaterThan(upgrade)
     expect(steps[acquire]?.run).toContain('$release.immutable -isnot [bool]')
