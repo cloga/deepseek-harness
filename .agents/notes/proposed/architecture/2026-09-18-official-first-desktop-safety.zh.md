@@ -26,6 +26,7 @@ Core#67 集成官方基于 Web 的 Host 和共享 `runProfile` 拓扑。官方 P
 | 祖先 SDK/包约束 | 运行时解析代际本身不约束祖先包查找 | 保留 profile/共享包与继承 Worker 约束；退役前要求等效原生解析及拒绝逃逸用例。 |
 | Windows 文件系统 birthtime | 通用文件身份检查不证明能检测 Windows 上的删除再创建 | 保留 birthtime 差异，直到 Windows 替换回归证明官方等效。 |
 | 多行 Goal 编辑 | 官方 Goal 控件不证明具备多行目标编辑的等效行为 | 保留多行行为，直到换行保留与现有 Goal 操作通过等效 UI 覆盖。 |
+| 手动 compaction 模型选择 | 部分支持：精确官方 `0.1.6-alpha.2` 与合并前候选使用持久化的先前请求路由，而非维护操作获准时的当前选择器快照；证据所属文件为 `packages/compaction/compaction-basic/src/index.ts` 和 `packages/core/agent/src/model-selection.ts` | 保留 PR #92 的修复：维护操作获准时一次性捕获 owner-scoped 选择，用于策略和默认摘要目标；显式摘要覆盖仍优先，自动压力／溢出路径仍使用持久化路由。仅在官方等效选择、作用域、取消、错误、UI 和 replay 覆盖经过验证后退役。 |
 
 ### 保留的理由与部分取代
 
@@ -54,6 +55,7 @@ Core#67 集成官方基于 Web 的 Host 和共享 `runProfile` 拓扑。官方 P
 - 恶意归档、钩子、来源漂移、损坏的保留产物、peer 身份冲突、祖先 SDK 查找和 Worker 继承保留拒绝测试。Windows birthtime 与产物锁分隔符用例在 Windows 上执行。
 - 显式授权的壳激活验证暂存健康、最终位置就绪、实际清单与 receipt，以及失败回滚。可选失败或仅完成准备都不记录成功 receipt。
 - 官方更新 UI 与 InputHub 迁移取得已挂载输入框、独立发送、陈旧报告、资源释放和多行 Goal 的浏览器证据。安装绝不把标量影响报告当作同意。
+- 手动 compaction 使用获准时的选择，不消耗待处理的聊天选择。`MAX_TOKENS` / `summary-truncated` 失败关闭，不提高输出上限、不重试，也不提交不完整 checkpoint。作用域、取消、错误、UI 和 replay 检查不证明超大历史救援、真实提供方验收或 alpha2 候选已通过验收。
 - 文档配对、归档封存、针对性单元测试、集成构建/类型检查和隔离打包发布验收在精确选定源码上通过。验收期间不触碰现有安装、活动 Session 或不可变发布。
 
 ## 风险
