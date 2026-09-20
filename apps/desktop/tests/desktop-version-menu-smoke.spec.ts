@@ -251,10 +251,10 @@ describe('packaged Windows caption-menu observation', () => {
   it('expires and restores even when the caller never reads the missing popup', async () => {
     vi.useFakeTimers()
     const f = fixture()
-    const original = f.Menu.prototype.popup
+    const original = Object.getOwnPropertyDescriptor(f.Menu.prototype, 'popup')
     await observeDesktopVersionMenu(f.electron, f.arm)
     await vi.advanceTimersByTimeAsync(15_000)
-    expect(f.Menu.prototype.popup).toBe(original)
+    expect(Object.getOwnPropertyDescriptor(f.Menu.prototype, 'popup')).toEqual(original)
     await expect(f.dispose()).rejects.toThrow('Timed out')
     f.assertRestored()
   })
@@ -262,11 +262,11 @@ describe('packaged Windows caption-menu observation', () => {
   it('rejects overlapping owners and wrong tokens without taking over the interceptor', async () => {
     const f = fixture()
     await observeDesktopVersionMenu(f.electron, f.arm)
-    const installed = f.Menu.prototype.popup
+    const installed = Object.getOwnPropertyDescriptor(f.Menu.prototype, 'popup')
     await expect(observeDesktopVersionMenu(f.electron, { ...f.arm, token: 'other' })).rejects.toThrow('already has an owner')
     for (const action of ['read', 'dispose'] as const) {
       await expect(observeDesktopVersionMenu(f.electron, { action, token: 'other' })).rejects.toThrow('owner mismatch')
-      expect(f.Menu.prototype.popup).toBe(installed)
+      expect(Object.getOwnPropertyDescriptor(f.Menu.prototype, 'popup')).toEqual(installed)
     }
     await f.dispose()
     await f.dispose()

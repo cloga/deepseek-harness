@@ -1,6 +1,6 @@
 /** Packaged Windows caption-menu model observation, not rendered native popup/dialog acceptance. */
 import { randomUUID } from 'node:crypto'
-import type { MenuItem } from 'electron'
+import type { BrowserWindow, MenuItem } from 'electron'
 import type { ElectronApplication, Page } from 'playwright'
 
 interface ObservedWindow {
@@ -98,6 +98,7 @@ export async function observeDesktopVersionMenu(
   const y = Math.round(command.y * zoom)
   if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) throw new Error('Invalid caption anchor')
   const popupDescriptor = Object.getOwnPropertyDescriptor(Menu.prototype, 'popup')
+  // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply supplies each popup's actual Menu receiver.
   const originalPopup = Menu.prototype.popup
   const errors: unknown[] = []
   let resolveDone!: () => void
@@ -143,7 +144,8 @@ export async function observeDesktopVersionMenu(
           && Number.isFinite(options.x) && Number.isFinite(options.y)) {
           lastMismatchedAnchor = { x: options.x, y: options.y }
         }
-        return Reflect.apply(originalPopup, this, [options])
+        Reflect.apply(originalPopup, this, [options])
+        return
       }
       try {
         const about = this.items[0]
@@ -222,7 +224,7 @@ export async function inspectDesktopVersionMenu(
   const handle = await app.browserWindow(page)
   let windowId: number
   let windowFailure: unknown
-  try { windowId = await handle.evaluate(window => window.id) }
+  try { windowId = await handle.evaluate((window: BrowserWindow) => window.id) }
   catch (error) { windowFailure = error; throw error }
   finally {
     try { await handle.dispose() }
