@@ -21,7 +21,8 @@ import {
 } from './fixtures/desktop-plugin-command-smoke.ts'
 
 import {
-  parseDesktopDevToolsPort, remainingDeadline, validateDesktopPluginCancelAudit, waitForOwnedJobExit, withinDeadline,
+  parseDesktopDevToolsPort, remainingDeadline, selectOwnedDesktopWindow, validateDesktopPageTitle,
+  validateDesktopPluginCancelAudit, validateDesktopWindowCapture, waitForOwnedJobExit, withinDeadline,
 } from './fixtures/desktop-plugin-command-guards.ts'
 
 const sessionId = 'command-only-test'
@@ -50,6 +51,79 @@ const auditNames = ['@example/a', '@example/b']
 const validateAudit = (values: unknown[]): void => { validateDesktopPluginCancelAudit(values, '@example/a', auditNames) }
 
 describe('packaged desktop-plugin command fixture (no GUI)', () => {
+  const rootWindow = { hwnd: '1234', pid: 123, title: 'Actual app title', owner: '0', rootOwner: '1234',
+    width: 1000, height: 700, visible: true, minimized: false }
+  const selectWindow = (candidates: unknown) => selectOwnedDesktopWindow(candidates, rootWindow.pid, rootWindow.title)
+  const capture = () => ({ hwnd: rootWindow.hwnd, title: rootWindow.title, showRequested: false,
+    initialCandidates: [rootWindow], readyCandidates: [rootWindow] })
+  const validateCapture = (value: unknown): void => {
+    validateDesktopWindowCapture(value, rootWindow.pid, rootWindow.title, rootWindow.hwnd)
+  }
+
+  it('requires bounded nonempty actual title without trimming or normalizing identity', () => {
+    for (const title of [undefined, null, 123, '', '   ', '\n', 'App\u0000title', 'App\rtitle', 'a'.repeat(1025)]) {
+      expect(() => { validateDesktopPageTitle(title) }).toThrow('bounded nonempty')
+    }
+    expect(() => { validateDesktopPageTitle('a'.repeat(1024)) }).not.toThrow()
+    expect(() => { validateDesktopPageTitle('应用程序 – Actual title') }).not.toThrow()
+    expect(selectWindow([{ ...rootWindow, title: ` ${rootWindow.title} ` }])).toBeUndefined()
+    expect(selectWindow([{ ...rootWindow, title: rootWindow.title.toUpperCase() }])).toBeUndefined()
+  })
+
+  it('selects only exact PID/title, unowned root-owner self and nonempty client rectangle', () => {
+    const unrelated = [
+      { ...rootWindow, pid: 999 }, { ...rootWindow, title: 'Other title' },
+      { ...rootWindow, owner: '5678' }, { ...rootWindow, rootOwner: '5678' },
+      { ...rootWindow, width: 0 }, { ...rootWindow, height: -1 }, { ...rootWindow, hwnd: '0' },
+    ]
+    expect(selectWindow(unrelated)).toBeUndefined()
+    expect(selectWindow([...unrelated, rootWindow])).toEqual(rootWindow)
+    expect(selectWindow([rootWindow, ...unrelated])).toEqual(rootWindow)
+    expect(selectWindow([])).toBeUndefined() // No inference of hidden vs not yet observable.
+  })
+
+  it('does not filter hidden/minimized roots or choose a visible/first candidate amid ambiguity', () => {
+    for (const visibility of [{ visible: false, minimized: false }, { visible: true, minimized: true }]) {
+      const hiddenOrMinimized = { ...rootWindow, ...visibility }
+      expect(selectWindow([hiddenOrMinimized])).toEqual(hiddenOrMinimized)
+      const other = { ...hiddenOrMinimized, hwnd: '5678', rootOwner: '5678' }
+      for (const windows of [[rootWindow, other], [other, rootWindow]]) {
+        expect(() => selectWindow(windows)).toThrow('Ambiguous')
+      }
+    }
+    expect(() => selectWindow([rootWindow, rootWindow])).toThrow('Ambiguous')
+  })
+
+  it('bounds and validates helper observation evidence rather than trusting missing fields', () => {
+    for (const candidates of [null, {}, Array.from({ length: 257 }, () => rootWindow),
+      [{ ...rootWindow, visible: undefined }], [{ ...rootWindow, minimized: 'false' }],
+      [{ ...rootWindow, hwnd: 'guess' }], [{ ...rootWindow, width: null }],
+      [{ ...rootWindow, pid: 1.5 }], [{ ...rootWindow, title: 'a'.repeat(1025) }]]) {
+      expect(() => selectWindow(candidates)).toThrow()
+    }
+  })
+
+  it('retains initial hidden/minimized observations while requiring the same visible ready HWND', () => {
+    expect(() => { validateCapture(capture()) }).not.toThrow()
+    for (const visibility of [{ visible: false, minimized: false }, { visible: true, minimized: true }]) {
+      const value = { ...capture(), showRequested: true, initialCandidates: [{ ...rootWindow, ...visibility }] }
+      expect(() => { validateCapture(value) }).not.toThrow()
+      expect(value.initialCandidates[0]).toMatchObject(visibility)
+      expect(() => { validateCapture({ ...value, readyCandidates: value.initialCandidates }) }).toThrow('not visible')
+    }
+  })
+
+  it('rejects missing, replaced, ambiguous or differently titled captured window evidence', () => {
+    const replacement = { ...rootWindow, hwnd: '5678', rootOwner: '5678' }
+    for (const value of [null, { ...capture(), title: 'Guessed title' }, { ...capture(), hwnd: '5678' },
+      { ...capture(), showRequested: undefined }, { ...capture(), initialCandidates: [] },
+      { ...capture(), readyCandidates: [] }, { ...capture(), readyCandidates: [replacement] },
+      { ...capture(), initialCandidates: [replacement] },
+      { ...capture(), readyCandidates: [rootWindow, replacement] }]) {
+      expect(() => { validateCapture(value) }).toThrow()
+    }
+  })
+
   it('supplies real EOF stdin from an exclusive private file rather than a DOS device name', () => {
     const home = mkdtempSync(join(tmpdir(), 'desktop-plugin-input-'))
     let fd: number | undefined

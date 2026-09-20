@@ -11,7 +11,10 @@ import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import type { Browser, Page } from 'playwright'
 import type { SpawnedJobProcess } from '@deepseek-ai/dsh-win32-process/src/index.ts'
-import { parseDesktopDevToolsPort, remainingDeadline, validateDesktopPluginCancelAudit, waitForOwnedJobExit, withinDeadline } from './desktop-plugin-command-guards.ts'
+import {
+  parseDesktopDevToolsPort, remainingDeadline, validateDesktopPageTitle, validateDesktopPluginCancelAudit,
+  validateDesktopWindowCapture, waitForOwnedJobExit, withinDeadline,
+} from './desktop-plugin-command-guards.ts'
 import type { CommandDescriptor, CommandExecution } from '@deepseek-ai/dsh-commands/types'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import { parseSessionFormatLogFilename } from '@deepseek-ai/dsh-session-format/src/filename.ts'
@@ -38,6 +41,7 @@ interface Ownership {
   readonly main: ProcessIdentity
   readonly host: ProcessIdentity
   readonly mainHwnd: string
+  readonly mainWindow: unknown
   readonly home: string
   readonly hostEntry: string
   readonly profile: string
@@ -358,10 +362,14 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     }, undefined, { timeout: remainingDeadline(startupDeadline) })
     remainingDeadline(startupDeadline)
     assert.equal(page.url(), APPLICATION_URL, 'Packaged application did not reach app-ready')
+    const pageTitle = await withinDeadline(startupDeadline, () => page!.title())
+    validateDesktopPageTitle(pageTitle)
+    evidence.pageTitle = pageTitle
     ownership = await nativeHelper<Ownership>(home, environment, { action: 'capture', ...launchIdentity,
-      main: listener.main, profile, home,
+      main: listener.main, pageTitle, profile, home,
       hostEntry: join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js') }, helperLifecycle, startupDeadline)
     assert.deepEqual(ownership.main, listener.main)
+    validateDesktopWindowCapture(ownership.mainWindow, owned.pid, pageTitle, ownership.mainHwnd)
     assert.equal(win32.pollProcessExit(api, owned.process), undefined, 'Owned root must remain alive at capture')
     evidence.userDataIdentity = { userData, argv: args, listenerPid: owned.pid, endpoint: devtools.endpoint,
       basis: 'exact owned launch command line, private DevToolsActivePort and verified root listener' }
@@ -433,7 +441,7 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     save('profile-hashes.json', { before: baseline, after })
     save('cancel-audit.json', records)
     const closeDeadline = performance.now() + 60_000
-    await nativeHelper(home, environment, { action: 'close', ownership }, helperLifecycle, closeDeadline)
+    evidence.normalClose = await nativeHelper(home, environment, { action: 'close', ownership }, helperLifecycle, closeDeadline)
     const exitCode = await waitForOwnedJobExit(closeDeadline,
       () => win32.pollProcessExit(api, owned!.process), () => win32.isJobEmpty(api, owned!.job))
     quiescent = true

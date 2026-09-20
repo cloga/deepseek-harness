@@ -45,6 +45,78 @@ export function parseDesktopDevToolsPort(text: string): { port: number; path: st
   return { port, path, endpoint: `ws://127.0.0.1:${port}${path}` }
 }
 
+/** Bounded leaf observations from the native helper's complete owned EnumWindows scan. */
+export interface OwnedDesktopWindow {
+  readonly hwnd: string
+  readonly pid: number
+  readonly title: string
+  readonly owner: string
+  readonly rootOwner: string
+  readonly width: number
+  readonly height: number
+  readonly visible: boolean
+  readonly minimized: boolean
+}
+
+/**
+ * Require an actual bounded title; never normalize it into a different HWND identity.
+ * @param title - Value read from the already-owned CDP app page.
+ */
+export function validateDesktopPageTitle(title: unknown): asserts title is string {
+  assert(typeof title === 'string' && title.trim().length > 0 && title.length <= 1024 &&
+    !/[\u0000-\u001f\u007f]/u.test(title), 'Expected bounded nonempty actual CDP page title')
+}
+
+/**
+ * Select from native observations without treating visibility or enumeration order as identity.
+ * This validates helper evidence, not a replacement for native re-enumeration before actions.
+ * @param candidates - Complete bounded observations returned by the owned native enumeration.
+ * @param pid - Retained Job-created root PID, already checked against creation/executable identity.
+ * @param title - Exact title observed on its owned CDP page.
+ * @returns Unique unowned root with a nonempty client area, or undefined while none is observable.
+ */
+export function selectOwnedDesktopWindow(candidates: unknown, pid: number, title: string): OwnedDesktopWindow | undefined {
+  validateDesktopPageTitle(title)
+  assert(Array.isArray(candidates) && candidates.length <= 256, 'Expected bounded window observations')
+  const windows = candidates.map((value: unknown) => {
+    assert(value !== null && typeof value === 'object', 'Expected native window observation')
+    const window = value as OwnedDesktopWindow
+    for (const handle of [window.hwnd, window.owner, window.rootOwner]) {
+      assert(typeof handle === 'string' && /^(?:0|[1-9][0-9]{0,18})$/u.test(handle), 'Invalid observed HWND')
+    }
+    assert(Number.isSafeInteger(window.pid) && window.pid > 0, 'Invalid observed PID')
+    assert(typeof window.title === 'string' && window.title.length <= 1024, 'Invalid observed title')
+    assert(Number.isSafeInteger(window.width) && Number.isSafeInteger(window.height), 'Invalid observed client rectangle')
+    assert(typeof window.visible === 'boolean' && typeof window.minimized === 'boolean', 'Missing observed visibility')
+    return window
+  })
+  const matches = windows.filter(window => window.pid === pid && window.title === title && window.hwnd !== '0' &&
+    window.owner === '0' && window.rootOwner === window.hwnd && window.width > 0 && window.height > 0)
+  assert(matches.length <= 1, 'Ambiguous owned root windows matching actual CDP page title')
+  return matches[0]
+}
+
+/**
+ * Bind capture evidence to both the actual CDP title and the same initially observed HWND.
+ * @param evidence - Untrusted JSON returned by the native capture helper.
+ * @param pid - Verified root PID.
+ * @param title - Actual CDP app title, not an application-name guess.
+ * @param hwnd - Exact HWND retained for later verify, Cancel and close requests.
+ */
+export function validateDesktopWindowCapture(evidence: unknown, pid: number, title: string, hwnd: string): void {
+  assert(evidence !== null && typeof evidence === 'object', 'Missing native window evidence')
+  const capture = evidence as Record<string, unknown>
+  assert.equal(capture.title, title, 'Captured title differs from CDP page title')
+  assert.equal(capture.hwnd, hwnd, 'Captured HWND evidence mismatch')
+  assert.equal(typeof capture.showRequested, 'boolean', 'Missing show-request evidence')
+  const initial = selectOwnedDesktopWindow(capture.initialCandidates, pid, title)
+  const ready = selectOwnedDesktopWindow(capture.readyCandidates, pid, title)
+  assert(initial !== undefined && ready !== undefined, 'Missing unique owned root observation')
+  assert.equal(initial.hwnd, hwnd, 'Initial HWND differs from captured HWND')
+  assert.equal(ready.hwnd, hwnd, 'Ready HWND differs from initially observed HWND')
+  assert(ready.visible && !ready.minimized, 'Captured owned root is not visible and unminimized')
+}
+
 function record(value: unknown): asserts value is Record<string, unknown> {
   assert(value !== null && typeof value === 'object' && !Array.isArray(value), 'Expected audit object')
 }

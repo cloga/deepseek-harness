@@ -40,19 +40,130 @@ function Assert-Launch($main, $process) {
     if ($process.HasExited) { throw 'Owned root exited during CDP identity check' }
 }
 
-function Read-OnlyMainWindow($process) {
-    Add-Type -AssemblyName UIAutomationClient
-    Add-Type -AssemblyName UIAutomationTypes
-    $process.Refresh()
-    $hwnd = $process.MainWindowHandle
-    if ($hwnd -eq [IntPtr]::Zero) { throw 'Owned main has no main HWND after app-ready' }
-    $windows = [Windows.Automation.AutomationElement]::RootElement.FindAll(
-        [Windows.Automation.TreeScope]::Children,
-        [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id))
-    if ($windows.Count -ne 1 -or [long]$windows[0].Current.NativeWindowHandle -ne $hwnd.ToInt64()) {
-        throw 'Cannot identify exactly one owned root main window'
+function Assert-PageTitle($title) {
+    if ($title -isnot [string] -or [string]::IsNullOrWhiteSpace($title) -or $title.Length -gt 1024 -or
+        $title -match '[\x00-\x1f\x7f]') { throw 'Expected bounded nonempty actual CDP page title' }
+}
+
+# EnumWindows includes hidden top-level windows. Visibility is evidence, never identity.
+function Initialize-WindowApi {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public sealed class OwnedWindowObservation {
+    public string hwnd, title, owner, rootOwner;
+    public uint pid;
+    public int width, height;
+    public bool visible, minimized;
+}
+public static class OwnedDialogWin32 {
+    public delegate bool EnumWindowProc(IntPtr hwnd, IntPtr parameter);
+    [StructLayout(LayoutKind.Sequential)] public struct Rect { public int left, top, right, bottom; }
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool EnumWindows(EnumWindowProc callback, IntPtr parameter);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hwnd, uint command);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int count);
+    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hwnd, int command);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessage(IntPtr hwnd, uint message, IntPtr wparam, IntPtr lparam);
+    public static OwnedWindowObservation[] Enumerate(uint processId) {
+        var windows = new List<OwnedWindowObservation>();
+        Exception failure = null;
+        int count = 0;
+        EnumWindowProc callback = delegate(IntPtr hwnd, IntPtr parameter) {
+            try {
+                if (++count > 8192) throw new InvalidOperationException("Desktop window enumeration exceeded bound");
+                uint pid;
+                GetWindowThreadProcessId(hwnd, out pid);
+                if (pid != processId) return true;
+                if (windows.Count >= 256) throw new InvalidOperationException("Owned window enumeration exceeded bound");
+                var text = new StringBuilder(1026);
+                int length = GetWindowText(hwnd, text, text.Capacity);
+                if (length > 1024) throw new InvalidOperationException("Owned window title exceeded bound");
+                Rect rect;
+                if (!GetClientRect(hwnd, out rect)) throw new InvalidOperationException("Owned window client rectangle unavailable");
+                var observation = new OwnedWindowObservation {
+                    hwnd = hwnd.ToInt64().ToString(), pid = pid, title = text.ToString(),
+                    owner = GetWindow(hwnd, 4).ToInt64().ToString(),
+                    rootOwner = GetAncestor(hwnd, 3).ToInt64().ToString(),
+                    width = rect.right - rect.left, height = rect.bottom - rect.top,
+                    visible = IsWindowVisible(hwnd), minimized = IsIconic(hwnd)
+                };
+                uint currentPid;
+                GetWindowThreadProcessId(hwnd, out currentPid);
+                if (!IsWindow(hwnd) || currentPid != processId) throw new InvalidOperationException("Owned window changed during enumeration");
+                windows.Add(observation);
+                return true;
+            } catch (Exception error) { failure = error; return false; }
+        };
+        bool complete = EnumWindows(callback, IntPtr.Zero);
+        if (failure != null) throw failure;
+        if (!complete) throw new InvalidOperationException("EnumWindows did not complete");
+        return windows.ToArray();
     }
-    return $hwnd.ToInt64().ToString()
+}
+'@
+}
+
+function Read-OwnedWindows($process) {
+    if ($process.HasExited) { throw 'Owned process exited before enumeration' }
+    $windows = [OwnedDialogWin32]::Enumerate([uint32]$process.Id)
+    if ($process.HasExited) { throw 'Owned process exited during enumeration' }
+    return ,$windows
+}
+function Select-OwnedRoot($windows, [int]$ProcessId, [string]$title) {
+    Assert-PageTitle $title
+    $matches = @($windows | Where-Object {
+        $_.pid -eq $ProcessId -and $_.title -ceq $title -and $_.hwnd -cne '0' -and
+        $_.owner -ceq '0' -and $_.rootOwner -ceq $_.hwnd -and $_.width -gt 0 -and $_.height -gt 0
+    })
+    if ($matches.Count -gt 1) { throw 'Ambiguous owned root windows matching actual CDP page title' }
+    if ($matches.Count -eq 1) { return $matches[0] }
+    return $null
+}
+function Read-VerifiedRoot($process, [string]$title, [string]$hwnd) {
+    $windows = Read-OwnedWindows $process
+    $selected = Select-OwnedRoot $windows $process.Id $title
+    if ($null -eq $selected -or $selected.hwnd -cne $hwnd) { throw 'Exact owned root HWND/title/owner identity changed' }
+    return @{ candidates = $windows; selected = $selected }
+}
+function Capture-OwnedRoot($process, [string]$title) {
+    Assert-PageTitle $title
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $windows = Read-OwnedWindows $process
+        $selected = Select-OwnedRoot $windows $process.Id $title
+        if ($null -ne $selected) { break }
+        Start-Sleep -Milliseconds 100
+    } while ($clock.Elapsed.TotalSeconds -lt 30)
+    if ($null -eq $selected -or $clock.Elapsed.TotalSeconds -ge 30) { throw 'Timed out discovering unique owned root window' }
+    $initial = $windows
+    $hwnd = $selected.hwnd
+    $current = Read-VerifiedRoot $process $title $hwnd
+    $showRequested = $false
+    if (!$current.selected.visible -or $current.selected.minimized) {
+        # No global focus/keys: restore/show only this identity-revalidated HWND.
+        $command = if ($current.selected.minimized) { 9 } else { 4 }
+        if (![OwnedDialogWin32]::ShowWindowAsync([IntPtr]([long]$hwnd), $command)) { throw 'Owned root show request was rejected' }
+        $showRequested = $true
+    }
+    $clock.Restart()
+    do {
+        $current = Read-VerifiedRoot $process $title $hwnd
+        if ($current.selected.visible -and !$current.selected.minimized) { break }
+        Start-Sleep -Milliseconds 100
+    } while ($clock.Elapsed.TotalSeconds -lt 15)
+    if (!$current.selected.visible -or $current.selected.minimized -or $clock.Elapsed.TotalSeconds -ge 15) {
+        throw 'Owned root did not become visible and unminimized within bound'
+    }
+    return @{ title = $title; initialCandidates = $initial; readyCandidates = $current.candidates;
+        showRequested = $showRequested; hwnd = $hwnd }
 }
 
 if ($request.action -eq 'listener' -or $request.action -eq 'capture') {
@@ -66,7 +177,10 @@ if ($request.action -eq 'listener' -or $request.action -eq 'capture') {
         }
         if ($main.pid -ne $request.main.pid -or $main.created -cne $request.main.created -or
             $main.executable -cne $request.main.executable) { throw 'Root identity changed after CDP attach' }
-        $mainHwnd = Read-OnlyMainWindow $verifiedMain
+        Assert-PageTitle $request.pageTitle
+        Initialize-WindowApi
+        $mainWindow = Capture-OwnedRoot $verifiedMain $request.pageTitle
+        $mainHwnd = $mainWindow.hwnd
         $hostCandidates = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($main.pid)" | Where-Object {
             $_.ExecutablePath -eq $main.executable -and $null -ne $_.CommandLine -and
             $_.CommandLine.Contains($request.hostEntry) -and $_.CommandLine.Contains($request.profile)
@@ -83,20 +197,28 @@ if ($request.action -eq 'listener' -or $request.action -eq 'capture') {
                 throw 'Actual Host identity changed during capture'
             }
         } finally { $verifiedHost.Dispose() }
-        [ordered]@{ main = $main; host = $hostIdentity; mainHwnd = $mainHwnd;
+        $finalWindow = Read-VerifiedRoot $verifiedMain $mainWindow.title $mainHwnd
+        if (!$finalWindow.selected.visible -or $finalWindow.selected.minimized) { throw 'Owned root visibility changed during capture' }
+        $mainWindow.readyCandidates = $finalWindow.candidates
+        [ordered]@{ main = $main; host = $hostIdentity; mainHwnd = $mainHwnd; mainWindow = $mainWindow;
             home = $request.home; hostEntry = $request.hostEntry; profile = $request.profile } | ConvertTo-Json -Depth 8 -Compress
         exit 0
     } finally { $verifiedMain.Dispose() }
 }
 
 $ownership = $request.ownership
+Assert-PageTitle $ownership.mainWindow.title
+if ($ownership.mainWindow.hwnd -cne $ownership.mainHwnd) { throw 'Captured main HWND evidence mismatch' }
+Initialize-WindowApi
 if ($request.action -eq 'close') {
     $main = Open-Verified $ownership.main
     try {
-        if ((Read-OnlyMainWindow $main) -cne $ownership.mainHwnd) { throw 'Main HWND changed before normal close' }
-        if (!$main.CloseMainWindow()) { throw 'Normal CloseMainWindow request was rejected' }
-        # Only a close request: the caller must prove root exit AND empty Job before cleanup.
-        @{ closeRequested = $true } | ConvertTo-Json -Compress
+        $current = Read-VerifiedRoot $main $ownership.mainWindow.title $ownership.mainHwnd
+        if (![OwnedDialogWin32]::PostMessage([IntPtr]([long]$ownership.mainHwnd), 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) {
+            throw 'Exact owned root WM_CLOSE request was rejected'
+        }
+        # Only a close request: the caller must prove root exit AND empty Job within its deadline.
+        @{ closeRequested = $true; mainHwnd = $ownership.mainHwnd; mainWindow = $current.selected } | ConvertTo-Json -Depth 5 -Compress
         exit 0
     } finally { $main.Dispose() }
 }
@@ -106,34 +228,24 @@ $hostProcess = $null
 try {
     $hostProcess = Open-Verified $ownership.host
     $hostCim = Get-CimInstance Win32_Process -Filter "ProcessId = $($ownership.host.pid)"
-    if ($hostCim.ParentProcessId -ne $ownership.main.pid) { throw 'Host no longer belongs to the owned Electron main' }
+    if ($null -eq $hostCim -or $hostCim.ParentProcessId -ne $ownership.main.pid) { throw 'Host no longer belongs to the owned Electron main' }
+    $currentRoot = Read-VerifiedRoot $mainProcess $ownership.mainWindow.title $ownership.mainHwnd
+    if (!$currentRoot.selected.visible -or $currentRoot.selected.minimized) { throw 'Owned root is no longer visible and unminimized' }
     if ($request.action -eq 'verify') {
         $currentHosts = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($ownership.main.pid)" | Where-Object {
             $_.ExecutablePath -eq $ownership.main.executable -and $null -ne $_.CommandLine -and
             $_.CommandLine.Contains($ownership.hostEntry) -and $_.CommandLine.Contains($ownership.profile)
         })
         if ($currentHosts.Count -ne 1 -or $currentHosts[0].ProcessId -ne $ownership.host.pid) { throw 'The actual owned Host child changed' }
-        @{ main = $ownership.main; host = $ownership.host } | ConvertTo-Json -Depth 5 -Compress
+        @{ main = $ownership.main; host = $ownership.host; mainHwnd = $ownership.mainHwnd;
+            mainWindow = $currentRoot.selected } | ConvertTo-Json -Depth 5 -Compress
         exit 0
     }
     if ($request.action -ne 'cancel') { throw 'Unknown fixture helper action' }
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
-    Add-Type -TypeDefinition @'
-using System;
-using System.Text;
-using System.Runtime.InteropServices;
-public static class OwnedDialogWin32 {
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
-    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int count);
-    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
-}
-'@
     $mainHwnd = [IntPtr]([long]$ownership.mainHwnd)
     [uint32]$windowPid = 0
-    $null = [OwnedDialogWin32]::GetWindowThreadProcessId($mainHwnd, [ref]$windowPid)
-    if ($windowPid -ne $ownership.main.pid -or ![OwnedDialogWin32]::IsWindow($mainHwnd)) { throw 'Owned main HWND identity failed' }
     $deadline = [DateTime]::UtcNow.AddSeconds(45)
     $dialog = $null
     $title = 'Apply Plugin Change'
@@ -166,18 +278,25 @@ public static class OwnedDialogWin32 {
     $focused = $cancel[0].Current.HasKeyboardFocus
     $invoke = $cancel[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
     if ($null -eq $invoke) { throw 'Cancel has no native InvokePattern' }
-    # Recheck the retained process handles and HWND immediately before the one allowed UI action.
+    # Recheck the retained process handles and exact root before the only dialog action: Cancel.
+    $currentRoot = Read-VerifiedRoot $mainProcess $ownership.mainWindow.title $ownership.mainHwnd
+    if (!$currentRoot.selected.visible -or $currentRoot.selected.minimized) { throw 'Owned root visibility changed before Cancel' }
     if ($mainProcess.HasExited -or $hostProcess.HasExited -or ![OwnedDialogWin32]::IsWindow($hwnd)) { throw 'Dialog ownership expired before invocation' }
     $null = [OwnedDialogWin32]::GetWindowThreadProcessId($hwnd, [ref]$windowPid)
     $null = $text.Clear()
     $null = [OwnedDialogWin32]::GetWindowText($hwnd, $text, $text.Capacity)
     if ($windowPid -ne $ownership.main.pid -or $text.ToString() -cne $title -or
-        $cancel[0].Current.Name -cne 'Cancel' -or $cancel[0].Current.ProcessId -ne $ownership.main.pid) { throw 'Cancel identity changed before invocation' }
+        [OwnedDialogWin32]::GetAncestor($hwnd, 3) -ne $mainHwnd -or
+        $cancel[0].Current.Name -cne 'Cancel' -or $cancel[0].Current.ProcessId -ne $ownership.main.pid -or
+        !$cancel[0].Current.IsEnabled -or $cancel[0].Current.IsOffscreen) { throw 'Cancel identity changed before invocation' }
     $invoke.Invoke()
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     while ([OwnedDialogWin32]::IsWindow($hwnd) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
     if ([OwnedDialogWin32]::IsWindow($hwnd)) { throw 'Native dialog did not close after Cancel' }
-    [ordered]@{ action = 'Cancel'; dialogHwnd = $hwnd.ToInt64().ToString(); title = $title; messageVerified = $true; cancelHadKeyboardFocus = $focused; defaultFocusAsserted = $false; closed = $true } | ConvertTo-Json -Compress
+    $afterCancelRoot = Read-VerifiedRoot $mainProcess $ownership.mainWindow.title $ownership.mainHwnd
+    [ordered]@{ action = 'Cancel'; dialogHwnd = $hwnd.ToInt64().ToString(); title = $title;
+        mainHwnd = $ownership.mainHwnd; mainWindow = $afterCancelRoot.selected;
+        messageVerified = $true; cancelHadKeyboardFocus = $focused; defaultFocusAsserted = $false; closed = $true } | ConvertTo-Json -Depth 5 -Compress
 } finally {
     if ($null -ne $hostProcess) { $hostProcess.Dispose() }
     $mainProcess.Dispose()
