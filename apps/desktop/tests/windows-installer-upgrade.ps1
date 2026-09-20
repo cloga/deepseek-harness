@@ -34,7 +34,7 @@ $baselineAppFilename = 'cloga-deepseek-harness-desktop'
 $installPath = Join-Path $root ('Installed App\' + $baselineAppFilename)
 if ($installPath.Length -gt 180 -or $installPath -match '["\r\n\t]') { throw 'Unsupported NSIS custom path' }
 $application = Join-Path $installPath 'cloga-deepseek-harness.exe'
-$uninstaller = Join-Path $installPath ('Uninstall ' + $product + '.exe')
+$uninstaller = Join-Path $installPath 'Uninstall cloga-deepseek-harness.exe'
 $baseline = [IO.Path]::GetFullPath($BaselineDirectory).TrimEnd('\')
 $candidate = [IO.Path]::GetFullPath($CandidateDirectory).TrimEnd('\')
 $token = [guid]::NewGuid().ToString()
