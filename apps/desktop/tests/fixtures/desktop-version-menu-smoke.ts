@@ -12,7 +12,7 @@ interface ObservedMenu {
     readonly label: string
     readonly enabled: boolean
     readonly visible: boolean
-    readonly role?: string
+    readonly role?: string | null
     readonly click?: MenuItem['click']
   }[]
 }
@@ -154,10 +154,13 @@ export async function observeDesktopVersionMenu(
         const about = this.items[0]
         const expectedLabel = command.applicationMenuLabel === '应用'
           ? `关于 Desktop ${desktopVersion}…` : `About Desktop ${desktopVersion}…`
+        // Constructed Electron MenuItems use null for an omitted role, not template-level undefined.
         if (about === undefined || about.label !== expectedLabel || !about.enabled || !about.visible
-          || about.role !== undefined || typeof about.click !== 'function'
+          || about.role !== null || typeof about.click !== 'function'
           || this.items.filter(item => /^(?:About Desktop |关于 Desktop )/u.test(item.label)).length !== 1) {
-          throw new Error('The first Application menu item must expose the full running Desktop version with an explicit callback')
+          throw new Error('The first Application menu item must expose the full running Desktop version with an explicit callback'
+            + `; label=${JSON.stringify(about?.label)}, role=${JSON.stringify(about?.role)}, click=${typeof about?.click}`
+            + `, enabled=${String(about?.enabled)}, visible=${String(about?.visible)}`)
         }
         if (typeof options.callback !== 'function') throw new Error('Caption popup completion callback is missing')
         const aboutDescriptor = Object.getOwnPropertyDescriptor(app, 'showAboutPanel')

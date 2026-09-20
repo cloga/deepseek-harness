@@ -18,7 +18,8 @@ function fixture(chinese = false) {
     label: chinese ? `关于 Desktop ${version}…` : `About Desktop ${version}…`,
     enabled: true,
     visible: true,
-    role: undefined as string | undefined,
+    // Electron MenuItem construction normalizes an omitted role to null.
+    role: null as string | null | undefined,
     click: vi.fn(() => { app.showAboutPanel() }) as (() => void) | undefined,
   }
   const originalPopup = vi.fn()
@@ -140,6 +141,17 @@ describe('packaged Windows caption-menu observation', () => {
     await observeDesktopVersionMenu(f.electron, f.arm)
     menu.popup(f.popupOptions)
     await expect(f.read()).rejects.toThrow('full running Desktop version')
+    expect(f.callback).toHaveBeenCalledOnce()
+    f.assertRestored()
+  })
+
+  it.each([undefined, '', 'about', 'quit'])('rejects a non-null constructed menu role: %s', async (role) => {
+    const f = fixture()
+    f.about.role = role
+    await observeDesktopVersionMenu(f.electron, f.arm)
+    new f.Menu().popup(f.popupOptions)
+    await expect(f.read()).rejects.toThrow(`role=${JSON.stringify(role)}, click=function, enabled=true, visible=true`)
+    expect(f.about.click).not.toHaveBeenCalled()
     expect(f.callback).toHaveBeenCalledOnce()
     f.assertRestored()
   })

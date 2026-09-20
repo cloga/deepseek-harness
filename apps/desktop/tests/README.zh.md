@@ -60,6 +60,8 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 ## 托管 runner 安装器与包验收
 
+[标题栏菜单观测器](fixtures/desktop-version-menu-smoke.ts)在真实点击预加载层的 Application 按钮后，检查已构造的 Electron 菜单。Electron 将省略的菜单项 role 规范化为 `null`；观测器要求该确切值、经过评审的完整 Desktop 版本，以及恰好一次 About 分派。模板层的 `undefined` 或基于 role 的动作不能满足此检查。拦截会恢复自有方法并完成弹出菜单回调，不打开原生弹出菜单或 About 对话框；这属于菜单模型与分派证据，不是原生渲染验收。
+
 [cloga 发布工作流](../../../.github/workflows/desktop-fork-release.yml)仅在一次性的 GitHub 托管 Windows runner 上运行[安装器验收](windows-installer-upgrade.ps1)。选择经过评审的分支，设置 `rehearsal: true` 并填写精确的[发布计划版本](../release/cloga-windows-x64.json)；演练不能发布。驱动会拒绝已有的产品安装，并在调用真实交互式安装器前验证基线与候选版本的身份。它关闭自动启动，使用隔离数据启动已安装应用，检查自定义安装路径和重启，最后卸载。获取产物所用的凭据不会传给应用或原生辅助程序。
 
 注册验证和清理绑定自有目录中的确切 `Uninstall cloga-deepseek-harness.exe`：原版 NSIS 根据已验证的 `executableName` 派生这个文件名，而不是使用显示名称或安装目录名称。注册表命令必须是带引号的自有路径，随后为 `/currentuser`；`QuietUninstallString` 只能再追加确切的 ` /S`。其他可执行文件名、模式或尾随参数仍被拒绝；一致的 HKCU 注册表视图别名不会放宽源码、版本、可执行文件哈希或文件系统祖先检查。纯注册 fixture 验证该命名规则，不读取注册表，也不启动卸载器；托管环境中的真实安装升级验收仍须单独执行。
