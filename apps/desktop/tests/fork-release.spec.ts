@@ -19,8 +19,10 @@ function planValue(): unknown {
 type ReleaseWorkflow = {
   on: { workflow_dispatch: { inputs: Record<string, { required: boolean; type: string; default?: unknown }> } }
   permissions: Record<string, string>
+  concurrency: { group: string; 'cancel-in-progress': boolean }
   env?: Record<string, string>
   jobs: Record<string, {
+    'runs-on'?: string
     needs?: string | string[]
     if?: string
     environment?: string
@@ -78,6 +80,20 @@ function assertMetadataAuthScope(workflow: ReleaseWorkflow): void {
   expect(baselineAcquisitions).toEqual(['build'])
 }
 
+function assertRehearsalConcurrency(workflow: ReleaseWorkflow): void {
+  expect(workflow.concurrency).toEqual({
+    group: "${{ inputs.rehearsal && format('desktop-fork-rehearsal-{0}', github.ref) || 'desktop-fork-release' }}",
+    'cancel-in-progress': false,
+  })
+  expect(workflow.on.workflow_dispatch.inputs.rehearsal).toMatchObject({ type: 'boolean', default: false })
+  expect(workflow.permissions).toEqual({ contents: 'read' })
+  expect(workflow.jobs.build!['runs-on']).toBe('windows-2025')
+  expect(workflow.jobs.build!.permissions).toBeUndefined()
+  for (const name of ['release', 'remote-check']) {
+    expect(workflow.jobs[name]!.if).toBe("${{ !inputs.rehearsal && github.ref == 'refs/heads/master' }}")
+  }
+}
+
 function assertReviewedSourcePin(workflow: ReleaseWorkflow): string {
   expect(workflow.on.workflow_dispatch.inputs.expected_source_sha).toMatchObject({ required: true, type: 'string' })
   expect(workflow.on.workflow_dispatch.inputs.expected_source_sha).not.toHaveProperty('default')
@@ -133,6 +149,27 @@ function assertProjectFixtureSelection(workflow: ReleaseWorkflow): void {
 }
 
 describe('Desktop fork release plan', () => {
+  it('isolates read-only rehearsals by branch while keeping publication globally serialized', () => {
+    assertRehearsalConcurrency(readReleaseWorkflow())
+  })
+
+  it.each([
+    'global-rehearsal', 'split-formal', 'cancel-running', 'string-input', 'publish-default',
+    'writable-rehearsal', 'self-hosted-rehearsal', 'unguarded-release', 'unguarded-remote-check',
+  ])('rejects a %s concurrency or publication boundary', (damage) => {
+    const workflow = readReleaseWorkflow()
+    if (damage === 'global-rehearsal') workflow.concurrency.group = 'desktop-fork-release'
+    else if (damage === 'split-formal') workflow.concurrency.group = 'desktop-fork-release-${{ github.ref }}'
+    else if (damage === 'cancel-running') workflow.concurrency['cancel-in-progress'] = true
+    else if (damage === 'string-input') workflow.on.workflow_dispatch.inputs.rehearsal!.type = 'string'
+    else if (damage === 'publish-default') workflow.on.workflow_dispatch.inputs.rehearsal!.default = true
+    else if (damage === 'writable-rehearsal') workflow.jobs.build!.permissions = { contents: 'write' }
+    else if (damage === 'self-hosted-rehearsal') workflow.jobs.build!['runs-on'] = 'self-hosted'
+    else if (damage === 'unguarded-release') delete workflow.jobs.release!.if
+    else delete workflow.jobs['remote-check']!.if
+    expect(() => { assertRehearsalConcurrency(workflow) }).toThrow()
+  })
+
   it('requires a step-local exact reviewed source pin before dependencies and packaging in both modes', () => {
     assertReviewedSourcePin(readReleaseWorkflow())
   })
@@ -387,17 +424,22 @@ describe('Desktop fork release plan', () => {
     expect(steps[guards]).not.toHaveProperty('if')
   })
 
-  it('requires actual installer qualification after finalization and before release asset sealing', () => {
+  it('runs source installer guards before packaging and actual upgrade before release sealing', () => {
     const workflow = readReleaseWorkflow()
     const steps = workflow.jobs.build!.steps
+    const install = steps.findIndex(step => step.name === 'Install from frozen lockfile')
+    const build = steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')
     const finalize = steps.findIndex(step => step.name === 'Finalize release manifest and receipts')
     const acquire = steps.findIndex(step => step.name === 'Acquire the verified installer-upgrade baseline')
     const guards = steps.findIndex(step => step.name === 'Verify installer-upgrade guard tests')
     const upgrade = steps.findIndex(step => step.name === 'Verify real installed Desktop upgrade')
     const seal = steps.findIndex(step => step.name === 'Verify release asset checksums')
-    expect(finalize).toBeGreaterThanOrEqual(0)
+    expect(install).toBeGreaterThanOrEqual(0)
+    expect(guards).toBeGreaterThan(install)
+    expect(build).toBeGreaterThan(guards)
+    expect(finalize).toBeGreaterThan(build)
     expect(acquire).toBeGreaterThan(finalize)
-    expect(guards).toBeGreaterThan(acquire)
+    expect(upgrade).toBeGreaterThan(acquire)
     expect(upgrade).toBeGreaterThan(guards)
     expect(seal).toBeGreaterThan(upgrade)
     expect(steps[acquire]?.run).toContain('$release.immutable -isnot [bool]')
