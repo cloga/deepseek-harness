@@ -38,7 +38,7 @@ export function inspectCopilotUsageCapability(profile: string): CopilotUsageCapa
   assert('evidenceScope' in capability
     && capability.evidenceScope === 'synthetic-quota-and-public-remote-ui-contracts-not-live-account-access')
   assert('tests' in capability && Array.isArray(capability.tests))
-  const names = capability.tests.map(test => typeof test === 'object' && test !== null && 'name' in test ? test.name : undefined)
+  const names = capability.tests.map((test: unknown) => typeof test === 'object' && test !== null && 'name' in test ? test.name : undefined)
   assert(names.includes('quota Remote reaches the actual Host gateway without startup or signed-out network requests'))
   assert(names.includes('uses real Cordis Remote tracing and reversible public SlotRegistry registration'))
   return {
