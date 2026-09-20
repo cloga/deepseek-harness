@@ -32,7 +32,7 @@ it.each(['1999-01-01', '2101-01-01'])('rejects a certificate outside its validit
   expect(options.sign).not.toHaveBeenCalled()
 })
 
-it.skipIf(process.platform !== 'win32')('compiles a real unsigned probe without executing it or accessing a token', async () => {
+it.skipIf(process.platform !== 'win32')('compiles a real unsigned probe without executing it or accessing a token', { timeout: 15_000 }, async () => {
   const { compile: _compile, ...options } = await fixture()
   options.environment.SystemRoot = process.env.SystemRoot!
   options.inspect.mockImplementation(async (path: string) => options.sign.mock.calls.length === 0

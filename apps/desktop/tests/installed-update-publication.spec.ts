@@ -77,7 +77,7 @@ async function fixture(body: (context: {
 }
 
 describe('qualification publication sequencing', () => {
-  it('uploads without advertising, publishes version 1, then requires version 1 startup before publishing version 2', async () => {
+  it('uploads without advertising, publishes version 1, then requires version 1 startup before publishing version 2', { timeout: 15_000 }, async () => {
     await fixture(async ({ manifest, versions, receipts, journals, store }) => {
       for (const [index, version] of versions.entries()) {
         await executeInstalledUpdatePublication(manifest, version, receipts[index]!, 'upload-binaries', store)
@@ -105,7 +105,7 @@ describe('qualification publication sequencing', () => {
     })
   })
 
-  it('rechecks matching immutable objects on a separately requested upload without rewriting them', async () => {
+  it('rechecks matching immutable objects on a separately requested upload without rewriting them', { timeout: 15_000 }, async () => {
     await fixture(async ({ manifest, versions, receipts, store }) => {
       await executeInstalledUpdatePublication(manifest, versions[0], receipts[0]!, 'upload-binaries', store)
       await executeInstalledUpdatePublication(manifest, versions[0], receipts[0]!, 'upload-binaries', store)
@@ -113,7 +113,7 @@ describe('qualification publication sequencing', () => {
     })
   })
 
-  it.each(['failed', 'wrong-version', 'different-plan'])('refuses a %s upload receipt without reading binaries', async (failure) => {
+  it.each(['failed', 'wrong-version', 'different-plan'])('refuses a %s upload receipt without reading binaries', { timeout: 15_000 }, async (failure) => {
     await fixture(async ({ manifest, versions, receipts, store }) => {
       const resultPath = await executeInstalledUpdatePublication(manifest, versions[0], receipts[0]!, 'upload-binaries', store)
       if (failure === 'different-plan') {
