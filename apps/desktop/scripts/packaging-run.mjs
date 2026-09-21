@@ -5,6 +5,21 @@ import { join, resolve } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 
 const FATAL_NOTIFICATION = 'DSH_DESKTOP_PACKAGING_FATAL'
+// Forced-stop completion/reaping budget, separate from the stage's execution deadline.
+const PROCESS_GROUP_EXIT_TIMEOUT_MS = 10_000
+const PROCESS_GROUP_EXIT_POLL_MS = 25
+
+/** Request group termination once, then require kernel-observed absence before settling. */
+async function terminateProcessGroup(pid) {
+  try { process.kill(-pid, 'SIGKILL') } catch (error) { return error.code === 'ESRCH' }
+  const deadline = performance.now() + PROCESS_GROUP_EXIT_TIMEOUT_MS
+  for (;;) {
+    try { process.kill(-pid, 0) } catch (error) { return error.code === 'ESRCH' }
+    const remaining = deadline - performance.now()
+    if (remaining <= 0) return false
+    await new Promise(resolvePoll => setTimeout(resolvePoll, Math.min(PROCESS_GROUP_EXIT_POLL_MS, remaining)))
+  }
+}
 
 /**
  * Append one credential-free event before its corresponding operation starts.
@@ -104,8 +119,10 @@ export function createPackagingRun(root, metadata) {
           })
         })
       } else {
-        try { process.kill(-child.pid, 'SIGKILL') } catch (error) { if (error.code !== 'ESRCH') terminationError = true }
-        termination = Promise.resolve()
+        // Direct-child close does not imply that descendants have exited or been reaped.
+        termination = terminateProcessGroup(child.pid).then((absent) => {
+          if (!absent) terminationError = true
+        })
       }
     }
     const interrupted = () => stop()

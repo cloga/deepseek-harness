@@ -33,6 +33,15 @@ it('imports the reusable acceptance without parsing CLI arguments or starting ru
   expect(effects.inspectRuntime).not.toHaveBeenCalled()
 })
 
+it('rejects an expected observer canary without a callback before inspecting or launching an application', async () => {
+  const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+  await expect(runPackagedCopilotAcceptance({
+    application: 'not-launched.exe', output: 'not-created', expectedObserverFailure: new Error('canary'),
+  })).rejects.toThrow('An expected observer failure requires an observer')
+  expect(effects.launch).not.toHaveBeenCalled()
+  expect(effects.inspectRuntime).not.toHaveBeenCalled()
+})
+
 it('prepares isolated home and ancestor SDK without precreating the shell-owned profile', async () => {
   const { preparePackagedCopilotHome } = await import('./fixtures/copilot-release-smoke.ts')
   const root = mkdtempSync(join(tmpdir(), 'copilot-acceptance-home-'))

@@ -31,6 +31,7 @@ import {
 } from '../../scripts/packaged-runtime.mjs'
 import { inspectPackagedGraphResolution, packagedGraphCheckArguments } from './packaged-graph-check.ts'
 import { inspectPackagedCopilotSettings } from './copilot-settings-smoke.ts'
+import { inspectPackagedCopilotProfile, runPackagedCopilotObserverCanary } from './copilot-observer-smoke.ts'
 import {
   inspectCopilotUsageCapability,
   inspectSignedOutCopilotUsage,
@@ -54,6 +55,8 @@ export interface PackagedCopilotAcceptanceOptions {
   readonly output: string
   /** Runs once after both Desktop processes close and restart receipts match, before owned cleanup. */
   readonly inspectProfile?: (paths: PackagedCopilotProfileInspection) => void | Promise<void>
+  /** When present, the observer must throw this exact canary object; every other failure still rejects. */
+  readonly expectedObserverFailure?: Error
 }
 
 /**
@@ -97,6 +100,8 @@ export function packagedCopilotStartupReady(): boolean {
  * @returns Resolves after acceptance, any observer, and owned cleanup; no installed application qualification is implied.
  */
 export async function runPackagedCopilotAcceptance(options: PackagedCopilotAcceptanceOptions): Promise<void> {
+  assert(options.expectedObserverFailure === undefined || options.inspectProfile !== undefined,
+    'An expected observer failure requires an observer')
   const application = resolve(options.application)
   const output = resolve(options.output)
   const resources = join(dirname(application), 'resources')
@@ -289,8 +294,11 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
     assert.equal(inventories[0], inventories[1], 'Restart must reuse the verified plugin receipts')
     assert.deepEqual(usageCapabilities[0], usageCapabilities[1], 'Restart must preserve the required usage capability')
     assert.deepEqual(signedOutUsage[0], signedOutUsage[1], 'Restart must preserve the absent signed-out usage surface')
-    await options.inspectProfile?.(Object.freeze({ application, runtimeRoot, home, profile, output }))
+    const observerCleanupCanary = await inspectPackagedCopilotProfile(options,
+      Object.freeze({ application, runtimeRoot, home, profile, output }))
+    if (observerCleanupCanary !== undefined) record('observer:canary-contained')
     writeFileSync(join(output, 'acceptance.json'), JSON.stringify({
+      observerCleanupCanary,
       sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
       desktopVersion: reviewed.version,
       versionMenus,
@@ -368,9 +376,13 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
 
 if (import.meta.main) {
   const { values } = parseArgs({
-    options: { application: { type: 'string' }, output: { type: 'string' } },
+    options: {
+      application: { type: 'string' }, output: { type: 'string' }, 'observer-cleanup-canary': { type: 'boolean' },
+    },
     allowPositionals: false,
   })
   assert(values.application && values.output, 'Packaged application and evidence directory are required')
-  await runPackagedCopilotAcceptance({ application: values.application, output: values.output })
+  const options = { application: values.application, output: values.output }
+  if (values['observer-cleanup-canary']) await runPackagedCopilotObserverCanary(options, runPackagedCopilotAcceptance)
+  else await runPackagedCopilotAcceptance(options)
 }

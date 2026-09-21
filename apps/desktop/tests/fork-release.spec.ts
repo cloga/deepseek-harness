@@ -355,7 +355,7 @@ describe('Desktop fork release plan', () => {
     expect(script).not.toMatch(/process\.env\.(?:GH_TOKEN|GITHUB_TOKEN)/u)
   })
 
-  it.each(['workflow', 'job', 'package', 'account', 'observer', 'helper', 'upgrade', 'baseline'])('rejects metadata token propagation to %s scope', (scope) => {
+  it.each(['workflow', 'job', 'package', 'account', 'helper', 'upgrade', 'baseline'])('rejects metadata token propagation to %s scope', (scope) => {
     const workflow = readReleaseWorkflow()
     const build = workflow.jobs.build!
     const env = { [metadataTokenEnv]: '${{ github.token }}' }
@@ -365,7 +365,6 @@ describe('Desktop fork release plan', () => {
       const names: Record<string, string> = {
         package: 'Build unsigned interactive NSIS installer',
         account: 'Verify packaged Copilot account and restart',
-        observer: 'Verify real acceptance observer failure cleanup',
         helper: 'Verify copied helper bootstrap and acknowledgement',
         upgrade: 'Verify real installed Desktop upgrade',
         baseline: 'Acquire the verified installer-upgrade baseline',
@@ -376,7 +375,7 @@ describe('Desktop fork release plan', () => {
     expect(() => { assertMetadataAuthScope(workflow) }).toThrow()
   })
 
-  it.each(['Build unsigned interactive NSIS installer', 'Verify real installed Desktop upgrade', 'Verify copied helper bootstrap and acknowledgement'])(
+  it.each(['Build unsigned interactive NSIS installer', 'Verify real installed Desktop upgrade', 'Verify copied helper bootstrap and acknowledgement', 'Verify packaged Copilot account and restart'])(
     'does not forward the baseline acquisition token to %s', (name) => {
       const workflow = readReleaseWorkflow()
       const step = workflow.jobs.build!.steps.find(candidate => candidate.name === name)!
@@ -562,10 +561,25 @@ describe('Desktop fork release plan', () => {
     expect(runtimeCanaries).toBeGreaterThan(packaging)
     expect(finalize).toBeGreaterThan(runtimeCanaries)
     const acceptance = steps.findIndex(step => step.name === 'Verify packaged Copilot account and restart')
-    const observerCleanup = steps.findIndex(step => step.name === 'Verify real acceptance observer failure cleanup')
-    expect(observerCleanup).toBeGreaterThan(acceptance)
-    expect(finalize).toBeGreaterThan(observerCleanup)
-    expect(steps[observerCleanup]?.run).toContain('apps/desktop/tests/fixtures/copilot-observer-smoke.ts')
+    expect(acceptance).toBeGreaterThan(runtimeCanaries)
+    expect(finalize).toBeGreaterThan(acceptance)
+    expect(steps.filter(step => step.run?.includes('fixtures/copilot-release-smoke.ts'))).toHaveLength(1)
+    expect(steps[acceptance]?.run?.trim()).toBe([
+      'pnpm exec tsx apps/desktop/tests/fixtures/copilot-release-smoke.ts',
+      '--application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe',
+      '--output dist/desktop-copilot-acceptance', '--observer-cleanup-canary',
+    ].join(' '))
+    expect(steps[acceptance]).not.toHaveProperty('continue-on-error')
+    expect(steps[acceptance]).not.toHaveProperty('if')
+    expect(steps.some(step => step.id === 'observer_cleanup' || step.run?.includes('fixtures/copilot-observer-smoke.ts'))).toBe(false)
+    expect(steps.some(step => typeof step.with?.name === 'string' && step.with.name.includes('desktop-copilot-observer-canary'))).toBe(false)
+    const combinedEvidence = steps.findIndex(step => step.with?.name === 'desktop-copilot-acceptance-${{ steps.plan.outputs.version }}')
+    expect(combinedEvidence).toBeGreaterThan(acceptance)
+    expect(finalize).toBeGreaterThan(combinedEvidence)
+    expect(steps[combinedEvidence]).toMatchObject({
+      if: "${{ !cancelled() && (steps.copilot_acceptance.outcome == 'success' || steps.copilot_acceptance.outcome == 'failure') }}",
+      with: { path: 'dist/desktop-copilot-acceptance/*', 'if-no-files-found': 'error', 'retention-days': 7 },
+    })
     expect(steps[runtimeCanaries]?.run?.trim()).toBe(
       'node apps/desktop/tests/fixtures/packaged-runtime-smoke.mjs '
       + 'apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe',
