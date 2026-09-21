@@ -127,7 +127,11 @@ Windows Ops 每次选择并锁定一个受支持的 upstream baseline。`cloga/d
 
 ## 开发
 
+<a id="isolated-provisioning-acceptance"></a>
+
 ### 隔离 provisioning 验收
+
+Fork release smoke 保留首次启动及重启后的未登录、无 Session 检查，并要求[用量正向验收](tests/fixtures/copilot-usage-positive-smoke.ts)。正向 fixture 使用打包的 module loader、未改动的 Core renderer、真实 Session selector 与 Slot 错误边界，以及已安装的已发布 Copilot Client。独立 Cordis context 拥有合成 Session/model-selection observable 和 quota 响应，不提供 Host transport 或凭据。标准及 preview Copilot route 必须显示用量、响应 Session 删除与重新打开、在其他 provider 下隐藏，并在释放时移除订阅且不影响应用挂载节点。证据绑定已验证 runtime 与已安装 Client 的 hash。这是使用合成数据的打包 renderer 验收，不证明已认证账户 quota、原生持久化 Session 或用户已安装 profile 的资格。
 
 在 Windows 上，下列命令构建当前 checkout，并在全新的 headless Edge context 中针对隔离的 workspace-linked Desktop Host 运行真实 Models UI。它们不启动已安装 Desktop，也不使用 live 凭据。Runner 把 provider-card、授权结果、恢复状态截图与运行证据写入 `output/desktop-provisioning-fixes/`。合成授权 receipt 证明通用组合，不证明不可变 artifact integrity、实际 account/model discovery 或已安装 unified-0.1.6 release。打包 runtime smoke 使用 Playwright Chromium；fork release workflow 在 packaging 前准备该浏览器。
 
@@ -245,9 +249,9 @@ pnpm run package:desktop:win:x64:unsigned
 
 每个 release 包含交互式 NSIS installer、`release.json`、`build-receipt.json`、`SHA256SUMS` 与 `SHA512SUMS`。Manifest 与 receipt 锁定源码 commit 与 tree、lockfile 与 plan hash、构建工具与依赖 registry、fork package identity、installer size 与 hash、插件 capability 与结构化 source/receipt 版本、允许的 origin 与 redirect，以及重启后 completion 语义。Workflow 不会启动 installer。
 
-在 finalization 前，[打包 Copilot 验收](tests/fixtures/copilot-release-smoke.ts) 使用全新的 Harness 与 Electron 数据目录启动 unpacked Electron 应用。它要求真实 Settings > Models 账户、登录入口、不再包含已移除 compatibility disclosure 的展开 Manage 面板、成功加载的只读 Model roles 视图、仅提供方级别的 Search provider 与 Fallback provider 控件，以及已注册搜索提供方目录。它验证已安装插件依赖图和 provisioning 清单，再在退出后重新启动时重复这些观察。独立的七天 workflow artifact 记录截图、安全的设置观察、receipt、打包 runtime/capability/plan 记录、可执行文件元数据与精确源码身份。失败运行保留脱敏启动诊断和 receipt/state 是否存在，不保留凭据或 profile 副本。夹具绝不保存设置、创建 Session、登录、打开验证地址或调用模型与搜索提供方。目录注册不等于提供方可用；这些检查不证明 OAuth 成功、模型可用、搜索路由或回退行为，也不证明旧版本到新版本的 installer 升级。Rehearsal artifact 不是不可变 Release。
+在 finalization 前，[打包 Copilot 验收](tests/fixtures/copilot-release-smoke.ts) 使用全新的 Harness 与 Electron 数据目录启动 unpacked Electron 应用。它要求真实 Settings > Models 账户、登录入口、不再包含已移除 compatibility disclosure 的展开 Manage 面板、成功加载的只读 Model roles 视图、仅提供方级别的 Search provider 与 Fallback provider 控件，以及已注册搜索提供方目录。它验证已安装插件依赖图和 provisioning 清单，再在退出后重新启动时重复这些观察。独立的七天 workflow artifact 记录截图、安全的设置观察、receipt、打包 runtime/capability/plan 记录、可执行文件元数据与精确源码身份。失败运行保留脱敏启动诊断和 receipt/state 是否存在，不保留凭据或 profile 副本。夹具绝不保存设置、创建持久化 Session、登录、打开验证地址或调用模型与搜索提供方。目录注册不等于提供方可用；这些检查不证明 OAuth 成功、模型可用、搜索路由或回退行为，也不证明旧版本到新版本的 installer 升级。Rehearsal artifact 不是不可变 Release。
 
-当前维护计划保留 Core `0.1.6-alpha.1` 并固定 Copilot `0.4.0-alpha.32`。只读验收保留 alpha.29 的仅提供方设置和 alpha.30 的登出 Manage 状态，再绑定 alpha.32 必需的账户用量 capability，并验证全新登出初始与重启页面不输出额度控件或 credit summary。打包 smoke 没有 Host request instrumentation；不可变插件的 gateway regression 拥有无启动/登出网络请求证据，且两类证据都不声称实时 quota access。Alpha.31 HTTP 401 recovery 也仅保留 source 与 plugin CI 证据，因为执行它需要实时模型拒绝。[托管 Copilot 维护决策](../../.agents/notes/implemented/architecture/2026-09-20-managed-desktop-copilot-maintenance.zh.md)记录精确发布证据、官方 Core alpha.2 重叠、保留缺口和迁移条件。
+当前维护计划保留 Core `0.1.6-alpha.1` 并固定 Copilot `0.4.0-alpha.33`，后者提供未改动 Core hook 所要求的 Session selector。验收保留仅提供方设置、登出 Manage 以及初始/重启缺失检查，并新增[隔离正向 renderer 检查](#isolated-provisioning-acceptance)。打包 smoke 没有 Host request instrumentation；不可变插件的 gateway regression 拥有无启动/登出网络请求证据，且两类证据都不声称实时 quota access。Alpha.31 HTTP 401 recovery 也仅保留 source 与 plugin CI 证据，因为执行它需要实时模型拒绝。[托管 Copilot 维护决策](../../.agents/notes/implemented/architecture/2026-09-20-managed-desktop-copilot-maintenance.zh.md)记录精确发布证据、官方 Core alpha.2 重叠、保留缺口和迁移条件。
 
 独立依赖图检查以打包 Electron 的 Node 模式针对 `app.asar/dsh` 运行构建后的验证器，选择运行时解析，并以活动 profile 为工作目录。它移除继承的 `NODE_PATH`、`NODE_OPTIONS` 与 ASAR 覆盖项，不使用 tsx loader，并将结果绑定到原始运行时描述文件哈希。这只验证包清单；真实 Host 验收单独验证模块加载。源码 runner 的查找路径仅用于诊断。缺失的可选 peer，以及仅在 profile 之外找到的可选非宿主 peer，均被视为缺失；profile 之外的必需依赖仍会报错。
 

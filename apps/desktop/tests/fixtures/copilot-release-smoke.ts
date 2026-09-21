@@ -38,6 +38,11 @@ import {
   type SignedOutCopilotUsageEvidence,
 } from './copilot-usage-smoke.ts'
 import { inspectDesktopVersionMenu, type DesktopVersionMenuEvidence } from './desktop-version-menu-smoke.ts'
+import {
+  capturePackagedUsageModules,
+  inspectPositiveCopilotUsage,
+  type PositiveCopilotUsageEvidence,
+} from './copilot-usage-positive-smoke.ts'
 
 /** Paths available only during the awaited, read-only post-acceptance inspection. */
 export interface PackagedCopilotProfileInspection {
@@ -115,6 +120,7 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
   const versionMenus: DesktopVersionMenuEvidence[] = []
   const usageCapabilities: CopilotUsageCapabilityEvidence[] = []
   const signedOutUsage: SignedOutCopilotUsageEvidence[] = []
+  const positiveUsage: PositiveCopilotUsageEvidence[] = []
   const started = performance.now()
   const timeline: { event: string; milliseconds: number }[] = []
   const record = (event: string): void => { timeline.push({ event, milliseconds: performance.now() - started }) }
@@ -176,14 +182,6 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
         throw new Error(`Packaged Desktop startup failed: ${safeDiagnostic(await page.locator('#error').innerText())}`)
       }
       record(`${phase}:application`)
-      const usageCapability = inspectCopilotUsageCapability(profile)
-      const usageEvidence = await inspectSignedOutCopilotUsage(page)
-      usageCapabilities.push(usageCapability)
-      signedOutUsage.push(usageEvidence)
-      writeFileSync(join(output, `${phase}-usage-readonly.json`), JSON.stringify({
-        capability: usageCapability, signedOut: usageEvidence,
-      }, undefined, 2) + '\n')
-      record(`${phase}:usage-readonly`)
       await page.getByRole('button', { name: 'Settings', exact: true }).click()
       const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
       await settings.getByRole('button', { name: 'Models', exact: true }).click()
@@ -194,6 +192,14 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       record(`${phase}:account`)
       assert(await signIn.isEnabled(), 'The account must expose a writable device-authorization entry')
       assert.equal(await account.locator('[data-dsh-github-copilot-account-error]').count(), 0)
+      const usageCapability = inspectCopilotUsageCapability(profile)
+      const usageEvidence = await inspectSignedOutCopilotUsage(page)
+      usageCapabilities.push(usageCapability)
+      signedOutUsage.push(usageEvidence)
+      writeFileSync(join(output, `${phase}-usage-readonly.json`), JSON.stringify({
+        capability: usageCapability, signedOut: usageEvidence,
+      }, undefined, 2) + '\n')
+      record(`${phase}:usage-readonly`)
       await page.screenshot({ path: join(output, `${phase}-models.png`) })
       await account.getByRole('button', { name: 'Manage', exact: true }).click()
       const management = account.getByRole('region', { name: 'GitHub Copilot account management', exact: true })
@@ -253,6 +259,29 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       'Packaged Electron Node mode must validate the ASAR runtime graph without source-runner overrides')
       assert(!existsSync(legacySdkLoaded), 'Packaged Host must not load the ancestor MCP SDK')
       record(`${phase}:packaged-graph`)
+      if (phase === 'restart') {
+        await capturePackagedUsageModules(page)
+        for (const provider of ['github-copilot', 'github-copilot-preview']) {
+          positiveUsage.push(await inspectPositiveCopilotUsage(page, provider))
+        }
+        assert.equal(await page.locator('[data-desktop-usage-acceptance]').count(), 0)
+        await page.getByRole('button', { name: 'Settings', exact: true }).click()
+        const restoredSettings = page.getByRole('dialog', { name: 'Settings', exact: true })
+        await restoredSettings.getByRole('button', { name: 'Models', exact: true }).click()
+        assert.deepEqual(await inspectSignedOutCopilotUsage(page), usageEvidence)
+        await page.screenshot({ path: join(output, 'positive-usage-cleanup.png') })
+        writeFileSync(join(output, 'positive-usage.json'), JSON.stringify({
+          runtimeSha256,
+          installedClientSha256: createHash('sha256').update(readFileSync(join(
+            profile, 'node_modules', 'dsh-github-copilot', 'lib', 'client.js',
+          ))).digest('hex'),
+          pluginSource: copilot.source,
+          cases: positiveUsage,
+          originalSignedOutApplicationRestored: true,
+          hostTransport: 'not-provided-to-isolated-fixture',
+        }, undefined, 2) + '\n')
+        record(`${phase}:positive-usage`)
+      }
       const receipts = readFileSync(join(profile, 'desktop-plugin-receipts.json'))
       inventories.push(createHash('sha256').update(receipts).digest('hex'))
       for (const file of ['desktop-plugin-receipts.json', 'desktop-plugin-provisioning-state.json', 'package.json']) {
@@ -289,6 +318,8 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       fallbackProviderLabel: true,
       copilotUsageCapability: usageCapabilities[0],
       signedOutCopilotUsage: signedOutUsage,
+      positiveCopilotUsage: positiveUsage,
+      positiveUsageHostTransport: 'not-provided-to-isolated-fixture',
       hostQuotaNoNetworkEvidence: 'immutable-plugin-ci-regression-only',
       liveAccountQuota: false,
       realOAuth: false,
