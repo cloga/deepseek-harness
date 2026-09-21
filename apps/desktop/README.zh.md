@@ -29,6 +29,8 @@ Electron 根据应用 locale 选择类型化的英文或中文桌面壳文案，
 
 应用菜单（macOS 上为应用名称菜单）的首项是 **关于 Desktop {version}…**，直接显示正在运行的 Electron 应用的完整版本号，保留预发布和 fork 后缀；点击后打开显示相同 Desktop 版本的原生“关于”面板。Host 就绪前即可查看，无需检查更新或访问网络；这里不会显示可用的新版本或独立安装的 CLI 版本。
 
+Desktop 自有窗口请求打开的 HTTP 和 HTTPS 链接交给系统浏览器。弹出窗口仍被拒绝，外部导航不会替换应用文档，其他外部 URI scheme 仍被阻止。`dsh-app:` 导航保留在应用内；`dsh-recovery:` 仍受现有恢复检查约束。浏览器交接失败时显示本地化建议，不暴露 URL 或底层错误。此策略不改变 Web 客户端的浏览器预览行为；[外链决策](../../.agents/notes/implemented/bug-fix/2026-09-20-desktop-external-links.zh.md)说明安全和验证边界。
+
 Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.png)，它是共享[鲸鱼 favicon](../web/public/favicon.svg) 的 256 像素透明栅格图。打包会把该图片放入应用归档，并用于可执行文件和安装器创建的快捷方式图标；图片缺失或格式错误时拒绝打包。单独修改快捷方式不会改变运行中窗口的图标。应先保存当前工作，再安装更新并重新打开 Desktop。
 
 ### 运行时与插件激活

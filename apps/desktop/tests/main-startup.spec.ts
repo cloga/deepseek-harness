@@ -116,6 +116,7 @@ const harness = await vi.hoisted(async () => {
     setRendererImpacts(value: unknown[]) { rendererImpacts = [...value] },
     launchUpdate: vi.fn(async (_options: DesktopManagedUpdateLaunch) => { throw new Error('helper fixture stopped') }),
     dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn() },
+    openExternal: vi.fn<(url: string) => Promise<void>>(async () => {}),
     menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn() },
     publishUpdate: (state: DesktopUpdateState) => updatePublisher(state),
     setUpdatePublisher(publish: typeof updatePublisher) { updatePublisher = publish },
@@ -163,6 +164,7 @@ vi.mock('electron', () => ({
   app: harness.app,
   BrowserWindow: harness.FakeWindow,
   dialog: harness.dialog,
+  shell: { openExternal: harness.openExternal },
   ipcMain: {
     handle: (channel: string, handler: (event: { senderFrame: { url: string } }, ...args: unknown[]) => unknown) => {
       harness.handlers.set(channel, handler)
@@ -295,6 +297,7 @@ beforeEach(() => {
   harness.runMutationHealthCheck = false
   harness.completeUpdate.mockReset().mockResolvedValue({ status: 'none' })
   harness.dialog.showMessageBox.mockReset()
+  harness.openExternal.mockReset().mockResolvedValue(undefined)
   harness.managedCheck.mockReset().mockResolvedValue({ phase: 'available', mode: 'github-release-managed', version: '1.2.3' })
   harness.managedInstall.mockReset().mockResolvedValue({ phase: 'installing', mode: 'github-release-managed', version: '1.2.3' })
   vi.stubEnv('DSH_DESKTOP_NODE_BINARY', 'test-node')
@@ -315,6 +318,60 @@ afterEach(async () => {
   vi.useRealTimers()
   vi.unstubAllEnvs()
   vi.unstubAllGlobals()
+})
+
+describe('external links in Desktop windows', () => {
+  it.each(['https://example.com/document', 'http://example.com/document'])('opens a popup link externally without creating a window: %s', async (url) => {
+    await startApplication()
+    const window = harness.windows[0]!
+    const before = [...window.urls]
+    const open = window.webContents.setWindowOpenHandler.mock.calls.at(-1)![0] as
+      (details: { url: string }) => { action: string }
+    expect(open({ url })).toEqual({ action: 'deny' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.openExternal).toHaveBeenCalledExactlyOnceWith(url)
+    expect(window.urls).toEqual(before)
+    expect(harness.windows).toHaveLength(1)
+  })
+
+  it.each(['https://example.com/document', 'http://example.com/document'])('opens an external navigation without replacing the application: %s', async (url) => {
+    await startApplication()
+    const window = harness.windows[0]!
+    const before = [...window.urls]
+    const event = { preventDefault: vi.fn() }
+    window.webContents.emit('will-navigate', event, url)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(harness.openExternal).toHaveBeenCalledExactlyOnceWith(url)
+    expect(window.urls).toEqual(before)
+  })
+
+  it.each([
+    ['en-US', 'Could not open the browser', 'Check that a default browser is configured, then try opening the link again.'],
+    ['zh-CN', '无法打开浏览器', '请检查系统是否已设置默认浏览器，然后重新打开链接。'],
+  ])('reports an external-browser failure in %s without exposing the rejected URL', async (locale, title, advice) => {
+    vi.spyOn(harness.app, 'getLocale').mockReturnValue(locale)
+    await startApplication()
+    harness.openExternal.mockRejectedValueOnce(new Error('https://example.com/?private=must-not-escape'))
+    harness.windows[0]!.webContents.emit('will-navigate', { preventDefault: vi.fn() }, 'https://example.com/?private=must-not-escape')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showErrorBox).toHaveBeenCalledExactlyOnceWith(title, advice)
+    expect(harness.openExternal).toHaveBeenCalledOnce()
+  })
+
+  it('does not report a delayed browser failure after the originating window closes', async () => {
+    await startApplication()
+    let reject!: (error: Error) => void
+    harness.openExternal.mockReturnValueOnce(new Promise<void>((_resolve, decline) => { reject = decline }))
+    const window = harness.windows[0]!
+    window.webContents.emit('will-navigate', { preventDefault: vi.fn() }, 'https://example.com/document')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.openExternal).toHaveBeenCalledOnce()
+    window.close()
+    reject(new Error('browser unavailable'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showErrorBox).not.toHaveBeenCalled()
+  })
 })
 
 describe('Desktop version menu', () => {

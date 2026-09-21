@@ -29,6 +29,8 @@ Electron chooses typed English or Chinese shell copy from its application locale
 
 The Application menu (the application-name menu on macOS) starts with **About Desktop {version}…**. It displays the running Electron application's complete version, including prerelease and fork suffixes, and opens the native About panel with that same Desktop version. It is available before Host readiness and requires no update check or network access; it does not display a newer available release or an independently installed CLI version.
 
+HTTP and HTTPS links requested by an owned Desktop window open in the system browser. Popup windows remain denied, external navigation does not replace the application document, and other external URI schemes remain blocked. `dsh-app:` navigation stays internal; `dsh-recovery:` remains subject to the existing recovery checks. A failed browser handoff shows localized advice without exposing the URL or underlying error. This policy does not change Web-client browser previews; the [external-link decision](../../.agents/notes/implemented/bug-fix/2026-09-20-desktop-external-links.md) owns the safety and verification limits.
+
 Windows packaging and every application window use [assets/whale.png](assets/whale.png), a 256-pixel transparent rendering of the shared [whale favicon](../web/public/favicon.svg). Packaging includes this asset inside the application archive and uses it for the executable and installer-generated shortcut icons; a missing or malformed image fails packaging. Changing a shortcut alone does not replace a running window's icon. Install the updated release and reopen Desktop only after saving active work.
 
 ### Runtime and plugin activation
