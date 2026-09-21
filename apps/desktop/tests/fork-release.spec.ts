@@ -376,7 +376,11 @@ describe('Desktop fork release plan', () => {
     expect(() => { assertMetadataAuthScope(workflow) }).toThrow()
   })
 
-  it.each(['Build unsigned interactive NSIS installer', 'Verify real installed Desktop upgrade', 'Verify copied helper bootstrap and acknowledgement'])(
+  it.each([
+    'Build unsigned interactive NSIS installer', 'Verify real installed Desktop upgrade',
+    'Verify copied helper bootstrap and acknowledgement', 'Verify packaged Copilot account and restart',
+    'Verify real acceptance observer failure cleanup',
+  ])(
     'does not forward the baseline acquisition token to %s', (name) => {
       const workflow = readReleaseWorkflow()
       const step = workflow.jobs.build!.steps.find(candidate => candidate.name === name)!
@@ -528,7 +532,13 @@ describe('Desktop fork release plan', () => {
       jobs: Record<string, {
         permissions?: Record<string, string>
         environment?: string
-        steps?: Array<{ name?: string; run?: string; env?: Record<string, string> }>
+        steps?: Array<{
+          id?: string
+          name?: string
+          run?: string
+          env?: Record<string, string>
+          with?: { name?: string; path?: string; 'if-no-files-found'?: string; 'retention-days'?: number }
+        }>
       }>
     }
     expect(workflow.permissions).toEqual({ contents: 'read' })
@@ -562,10 +572,37 @@ describe('Desktop fork release plan', () => {
     expect(runtimeCanaries).toBeGreaterThan(packaging)
     expect(finalize).toBeGreaterThan(runtimeCanaries)
     const acceptance = steps.findIndex(step => step.name === 'Verify packaged Copilot account and restart')
+    expect(acceptance).toBeGreaterThan(runtimeCanaries)
+    expect(finalize).toBeGreaterThan(acceptance)
+    expect(steps.filter(step => step.run?.includes('fixtures/copilot-release-smoke.ts'))).toHaveLength(1)
+    expect(steps[acceptance]?.run?.trim()).toBe([
+      'pnpm exec tsx apps/desktop/tests/fixtures/copilot-release-smoke.ts',
+      '--application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe',
+      '--output dist/desktop-copilot-acceptance',
+    ].join(' '))
+    expect(steps[acceptance]).not.toHaveProperty('continue-on-error')
+    expect(steps[acceptance]).not.toHaveProperty('if')
     const observerCleanup = steps.findIndex(step => step.name === 'Verify real acceptance observer failure cleanup')
     expect(observerCleanup).toBeGreaterThan(acceptance)
     expect(finalize).toBeGreaterThan(observerCleanup)
-    expect(steps[observerCleanup]?.run).toContain('apps/desktop/tests/fixtures/copilot-observer-smoke.ts')
+    expect(steps[observerCleanup]?.run).toContain('fixtures/copilot-observer-smoke.ts')
+    expect(steps[observerCleanup]).not.toHaveProperty('continue-on-error')
+    expect(steps[observerCleanup]).not.toHaveProperty('if')
+    expect(steps.some(step => step.run?.includes('--observer-cleanup-canary'))).toBe(false)
+    const observerEvidence = steps.findIndex(step => step.with?.name === 'desktop-copilot-observer-canary-${{ steps.plan.outputs.version }}')
+    expect(observerEvidence).toBeGreaterThan(observerCleanup)
+    expect(finalize).toBeGreaterThan(observerEvidence)
+    expect(steps[observerEvidence]).toMatchObject({
+      if: "${{ !cancelled() && (steps.observer_cleanup.outcome == 'success' || steps.observer_cleanup.outcome == 'failure') }}",
+      with: { path: 'dist/desktop-copilot-observer-canary/*', 'if-no-files-found': 'error', 'retention-days': 7 },
+    })
+    const acceptanceEvidence = steps.findIndex(step => step.with?.name === 'desktop-copilot-acceptance-${{ steps.plan.outputs.version }}')
+    expect(acceptanceEvidence).toBeGreaterThan(acceptance)
+    expect(finalize).toBeGreaterThan(acceptanceEvidence)
+    expect(steps[acceptanceEvidence]).toMatchObject({
+      if: "${{ !cancelled() && (steps.copilot_acceptance.outcome == 'success' || steps.copilot_acceptance.outcome == 'failure') }}",
+      with: { path: 'dist/desktop-copilot-acceptance/*', 'if-no-files-found': 'error', 'retention-days': 7 },
+    })
     expect(steps[runtimeCanaries]?.run?.trim()).toBe(
       'node apps/desktop/tests/fixtures/packaged-runtime-smoke.mjs '
       + 'apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe',

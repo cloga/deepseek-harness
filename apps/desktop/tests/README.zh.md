@@ -66,7 +66,7 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 安装升级与同版本包操作的观察器均使用[已安装运行时读取器](fixtures/windows-installed-runtime.mjs)。CDP 求值只返回运行中应用的身份字段；描述文件通过维护中的 `readPackagedDesktopRuntimeDescriptor` 载体在 CDP 之外读取。在以 Node 模式启动打包 Electron 之前，读取器重新检查自有安装中的可执行文件哈希，并将观察到的 resources 目录绑定到该安装。描述文件校验对原始 ASAR 字节计算哈希，不使用解析或重新序列化的 JSON。此检查仅针对一次性的托管安装，绝不针对操作者的 Desktop。
 
-基线就绪凭据绑定由同一次运行中身份求值返回的正安全整数主进程 PID。Playwright 启动器 PID 只是独立的可空诊断，不作为选择进程的依据。驱动仍获取该精确主 PID，并要求可执行文件路径匹配已验证的安装。身份失败只保留有界的相等性、可用性、退出与可读性标志，然后重新抛出原始错误；不查找同名进程，也不改变清理行为。
+基线就绪凭据绑定由同一次运行中身份求值返回的正安全整数主进程 PID。Playwright 启动器 PID 只是独立的可空诊断，不作为选择进程的依据。驱动获取该精确主 PID，将存活的普通物理可执行文件绑定到精确且规范化的安装目录、固定文件名、普通祖先和已验证的 SHA-256，并在计算哈希前后检查存活状态。路径字面拼写仅作诊断；物理绑定允许合法的大小写／分隔符规范化，不寻找替代进程。身份失败只保留有界的相等性、可用性、退出与可读性标志，然后重新抛出原始错误；不查找同名进程，也不改变清理行为。
 
 不可变的 `0.1.6-alpha.1.cloga.2` 基线使用 sequence 12 和 Copilot alpha.24；只有验证该安装的锁定身份后，才使用其[基线设置检查器](fixtures/baseline-copilot-settings-smoke.ts)。它保留该版本原有的只读模型角色与提供方目录检查，不要求后续版本的工作区或仅提供方 UI。候选及其重启仍使用针对 Copilot alpha.32 的严格[当前设置检查器](fixtures/copilot-settings-smoke.ts)。基线检查不能作为候选检查失败时的回退；两种检查器都不发起认证、保存设置或执行模型／搜索调用。
 
@@ -80,9 +80,11 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 仅在失败后执行的[副本 worker 观察](fixtures/windows-uninstall-observation.ps1)只使用调用方保留的执行句柄和已验证副本描述。采样前后重新检查进程具体实例、精确启动参数、受保护的原始字节与自有临时目录的普通祖先；已退出句柄仍由调用方拥有，不是发现后接纳的 PID。不确定或变化的身份记为未知，并丢弃状态叶字段。旧的迁移子进程发现路径已移除：该辅助程序不执行 CIM、HWND、窗口文本、类或控件枚举，也不等待、释放或操作保留的句柄。两秒软准入预算在读取前检查剩余时间；本地元数据读取不可取消，因此不是严格的墙钟截止时间。既有收集器的独立进程快照不套用该预算。执行／删除门禁与原始失败保持不变。
 
-打包监督器测试先检查阶段结束日志，再检查后代进程是否还能执行。文件内私有判断只将进程不存在或 Linux `/proc` 僵尸状态视为停止；活动／暂停状态、不可读取或格式错误的观察不能变成成功。它不增加重试或延迟，不修改生产进程组终止机制或后代 fixture。不单独识别 PID 复用，此判断修正也不能确定历史失败 PID 当时的具体状态。
+打包监督器测试先检查阶段结束日志，再检查后代进程是否还能执行。文件内私有判断只将进程不存在或 Linux `/proc` 僵尸状态视为停止；活动／暂停状态、不可读取或格式错误的观察不能变成成功。测试判断不增加重试或延迟，后代 fixture 保持不变。生产 POSIX 终止另行发送一次进程组 SIGKILL，最多等待十秒，每 25 毫秒探测负进程组 ID 是否已被内核移除；只有 ESRCH 证明不存在，权限错误或截止时间耗尽仍记录 terminationError。这比直接子进程关闭或识别僵尸的测试判断更严格，不证明历史失败 PID 的状态，也不是已证实的僵尸问题修复。不单独识别 PID 复用。
 
 [打包 skill canary](fixtures/packaged-skills-smoke.mjs) 从指定产物挂载最小 Cordis 服务，并读取其中真实的 ASAR preset 与 skill。其子进程仅接收明确的操作系统环境白名单，用户状态目录全部私有；它自己的清理保留主要失败，只有清理失败时也会判定失败。这些保证仅适用于该 canary，不适用于其他 runtime-smoke 子进程。它通过四次真实 skill 工具调用检查随附 skill 与合成用户 skill，不代表生产 Host 或 profile 验证。[纯 helper 回归](packaged-skills-smoke.test.mjs) 在产物构建前执行，不证明打包行为已通过。
+
+[打包 Copilot 验收](fixtures/copilot-release-smoke.ts)在自己的全新 profile 中完成初次启动／重启 alpha.32 检查。独立的[观察器失败 canary](fixtures/copilot-observer-smoke.ts)在另一个全新 profile 中重复完整验收，然后抛出其精确的观察器标记。错误必须经过外层失败路径，保留 `failure.json`、抑制 `acceptance.json`，并删除自有 home 与祖先 canary 后才写入 `observer-cleanup.json`。工作流保留两个必需步骤，分别上传各自限定范围的产物；没有组合 canary 选项或局部吞入失败后成功的模式。这些只读检查不证明实时额度访问、OAuth、模型调用或搜索。
 
 独立的[包操作场景](fixtures/windows-packaged-package-acceptance.mjs)使用另一个私有 home，以及真实的 Plugin Manager 控件、标题栏菜单、shell 确认和替代 Host。它将现有的私有测试组合包原样归档。安装首先提升一个仍禁用该组合包的图；必须经过官方 Enable 开关和另一次正常重启，才能报告行状态为 Running。通过真实设置配置的自定义提供方使用回环测试端点；场景断言不发出模型请求。组合输入、仅附件和仅草稿输入都必须阻止激活，同时保留实时输入。Copilot 的禁用与移除选择在同版本重启后检查；确认移除后不存在时，还必须看到已正确加载的保留 fixture。
 

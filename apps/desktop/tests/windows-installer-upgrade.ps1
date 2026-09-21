@@ -46,6 +46,7 @@ $success = $false
 $packageAcceptanceSuccess = $false
 $packageAcceptanceAttempted = $false
 $registration = $null
+$baselineProcessBinding = $null
 $monitor = $null
 $installationAttempted = $false
 $uninstallerCopy = $null
@@ -231,6 +232,36 @@ function Wait-NoProductProcesses {
         Start-Sleep -Milliseconds 100
     }
 }
+function Assert-BaselineProcessBinding($Process, [string]$ExpectedSha256) {
+    $script:baselineProcessBinding = [ordered]@{
+        pathAvailable = $false; providerNormalized = $false
+        directParentMatches = $null; basenameMatches = $null; hashMatches = $null
+    }
+    if ($ExpectedSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Baseline process requires a verified SHA-256 identity' }
+    $exited = $Process.HasExited
+    if ($exited -isnot [bool] -or $exited) { throw 'Baseline process is exited or its liveness is unavailable' }
+    $observedPath = $Process.Path
+    $baselineProcessBinding.pathAvailable = $observedPath -is [string] -and -not [string]::IsNullOrWhiteSpace($observedPath)
+    if (-not $baselineProcessBinding.pathAvailable) { throw 'Baseline process executable path is unavailable' }
+    try { $file = Get-Item -LiteralPath $observedPath -Force }
+    catch { throw 'Baseline process executable metadata is unavailable' }
+    $path = [IO.Path]::GetFullPath($file.FullName)
+    $baselineProcessBinding.providerNormalized = $true
+    $baselineProcessBinding.directParentMatches = [IO.Path]::GetDirectoryName($path) -ieq [IO.Path]::GetFullPath($installPath)
+    $baselineProcessBinding.basenameMatches = $file.Name -ieq 'cloga-deepseek-harness.exe'
+    if ($file -isnot [IO.FileInfo] -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Baseline process executable is not a regular physical file' }
+    try { Assert-InstallerOwnedPath $installPath $path }
+    catch { throw 'Baseline process executable is outside the exact installation or traverses an alias' }
+    if (-not $baselineProcessBinding.directParentMatches -or -not $baselineProcessBinding.basenameMatches) {
+        throw 'Baseline process is not the exact installation executable'
+    }
+    try { $digest = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
+    catch { throw 'Baseline process executable could not be verified' }
+    $baselineProcessBinding.hashMatches = $digest -ceq $ExpectedSha256
+    if (-not $baselineProcessBinding.hashMatches) { throw 'Baseline process executable differs from the verified release' }
+    $exited = $Process.HasExited
+    if ($exited -isnot [bool] -or $exited) { throw 'Baseline process exited or became unobservable during executable verification' }
+}
 function Read-Registration([object[]]$Identities = $registrationIdentities) {
     $entry = Resolve-InstallerRegistration @(Product-Registrations) $Identities $installPath
     foreach ($path in @($installPath, $application, $uninstaller)) {
@@ -401,7 +432,7 @@ function Write-UninstallFailureDiagnostics($UninstallerProcess, $Errors, $Copy =
 }
 function Write-BaselineProcessIdentityDiagnostic($Ready, $Live, $Errors) {
     $record = [ordered]@{ schemaVersion = 1; sourceCommit = $ExpectedSourceCommit
-        pathAvailable = $null; exactPathMatch = $null; pidMatchesRequested = $null; launcherMatchesMain = $null
+        pathAvailable = $null; literalPathMatch = $null; pidMatchesRequested = $null; launcherMatchesMain = $null
         exited = $null; category = 'process-unavailable'; observationErrors = @() }
     $issues = [Collections.Generic.List[string]]::new()
     if ($Ready.launcherPid -is [int] -or $Ready.launcherPid -is [long]) { $record.launcherMatchesMain = $Ready.launcherPid -eq $Ready.pid }
@@ -416,8 +447,8 @@ function Write-BaselineProcessIdentityDiagnostic($Ready, $Live, $Errors) {
             $path = $Live.Path
             $record.pathAvailable = $path -is [string] -and -not [string]::IsNullOrWhiteSpace($path)
             if ($record.pathAvailable) {
-                $record.exactPathMatch = $path -eq $application
-                if (-not $record.exactPathMatch) { $record.category = 'executable-mismatch' }
+                $record.literalPathMatch = $path -eq $application
+                if (-not $record.literalPathMatch) { $record.category = 'literal-path-difference' }
             } else { $record.category = 'path-unavailable' }
         } catch { $issues.Add('path-unreadable'); $record.category = 'path-unavailable' }
         try {
@@ -473,7 +504,7 @@ try {
     $live = $null
     try {
         $live = Get-Process -Id $ready.pid -ErrorAction Stop
-        if ($live.Path -ne $application) { throw 'Baseline PID does not own the installed executable' }
+        Assert-BaselineProcessBinding $live $baselineIdentity.ExecutableSha256
     } catch {
         $identityFailure = $_
         try { Write-BaselineProcessIdentityDiagnostic $ready $live $secondaryErrors }
@@ -576,7 +607,8 @@ try {
             retainedHomeFileVerified = $success; pluginUserChoicesVerified = $false; draftAttachmentRefusalVerified = $false
             promotionFailureRollbackVerified = $false; managedHandoffVerified = $false; postSuccessDowngradeVerified = $false
             separateSameVersionPackagedPluginAcceptanceVerified = $packageAcceptanceSuccess
-            installationRoot = $installPath; cleanupErrors = @($cleanupErrors); secondaryErrors = @($secondaryErrors)
+            installationRoot = $installPath; baselineProcessBinding = $baselineProcessBinding
+            cleanupErrors = @($cleanupErrors); secondaryErrors = @($secondaryErrors)
             failure = $(if ($null -ne $failure) { $failure.Exception.Message } else { $null })
         } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $root 'evidence/installer-upgrade.json') -Encoding utf8NoBOM
     } catch {
