@@ -60,6 +60,14 @@ The manual Windows workflow requires the reviewed plan version and source commit
 
 A publication run requires current `master`. The protected release job is the only job with `contents: write`. It downloads the build artifact, cross-checks the complete asset set, creates the exact source commit tag as a draft, uploads every asset, and publishes only after the asset set is complete. It then requires GitHub to report the release immutable, the tag and release target to resolve to the build commit, and every remote asset digest to match the local bytes. A final read-only job uses the build-only metadata adapter to run the shipped discovery against GitHub and requires it to select the reviewed version, sequence, commit, and tree.
 
+<a id="positive-packaged-plugin-acceptance"></a>
+
+## Positive packaged plugin acceptance
+
+An absent usage control on a signed-out page cannot prove that an eligible Session renders successfully: Core's Slot error boundary may retire a crashing contribution while the application stays usable. The packaged smoke therefore retains the negative startup checks and adds a separate synthetic Session context using the actual packaged module loader, renderer, Session selector, Slot registry, and installed released Client. It delegates and restores the public bootstrap method without modifying Core implementation or application services. Browser fixture source is type-stripped before evaluation rather than serialized through a source loader that may introduce closure helpers.
+
+Synthetic quota responses and model-selection observables belong only to the acceptance context, which has no Host transport or credential service. Positive rendering, removal/reopening, provider changes, sibling preservation, and disposal are required on both Copilot routes; errors cannot become absence-only success. Runtime inventory and Client hashes identify the exercised artifacts. This deliberately sacrifices live account and native persisted-Session coverage to keep release qualification credential-free. [Desktop acceptance documentation](../../../../apps/desktop/README.md#isolated-provisioning-acceptance) states the limits; real account use and operator installation remain separate qualifications.
+
 ## Workflow publication policy
 
 The [fork publication policy](../../../../.github/AGENTS.md#fork-publication-policy) makes Desktop the default public deliverable, including Core/Web changes. Issue #90 exposed that checksum-valid package tarballs can still violate the approved product and channel. Release titles and asset counts cannot establish installer delivery.
