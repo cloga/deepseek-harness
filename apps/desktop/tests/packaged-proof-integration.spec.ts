@@ -1,6 +1,6 @@
 /** Actual packaged receipt producers feed the real verifier; native/UI and installed evidence remain inert unit boundaries. */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -15,7 +15,8 @@ import { runPackagedCopilotObserverCanary } from './fixtures/copilot-observer-sm
 
 const boundary = vi.hoisted(() => ({
   pin: '', temporaryBase: '', launch: vi.fn(), exec: vi.fn(), runtimeRoot: vi.fn(), runtimeBytes: vi.fn(), environment: vi.fn(),
-  menu: vi.fn(), settings: vi.fn(), usage: vi.fn(), capability: vi.fn(), allocated: [] as string[],
+  menu: vi.fn(), settings: vi.fn(), usage: vi.fn(), capability: vi.fn(),
+  captureUsage: vi.fn(), positiveUsage: vi.fn(), allocated: [] as string[],
 }))
 vi.mock('node:fs', async (original) => {
   const fs = await original<typeof import('node:fs')>()
@@ -47,6 +48,9 @@ vi.mock('../scripts/smoke-environment.ts', () => ({ desktopSmokeEnvironment: bou
 vi.mock('../src/plugin-receipts.ts', () => ({ assertDesktopProvisioningInventory: vi.fn() }))
 vi.mock('./fixtures/desktop-version-menu-smoke.ts', () => ({ inspectDesktopVersionMenu: boundary.menu }))
 vi.mock('./fixtures/copilot-settings-smoke.ts', () => ({ inspectPackagedCopilotSettings: boundary.settings }))
+vi.mock('./fixtures/copilot-usage-positive-smoke.ts', () => ({
+  capturePackagedUsageModules: boundary.captureUsage, inspectPositiveCopilotUsage: boundary.positiveUsage,
+}))
 vi.mock('./fixtures/copilot-usage-smoke.ts', () => ({ inspectCopilotUsageCapability: boundary.capability, inspectSignedOutCopilotUsage: boundary.usage }))
 
 const source = 'a'.repeat(40)
@@ -136,6 +140,13 @@ function integrationFixture() {
   boundary.settings.mockResolvedValue(settings)
   boundary.capability.mockReturnValue(capabilityEvidence)
   boundary.usage.mockResolvedValue(signedOut)
+  boundary.captureUsage.mockResolvedValue(undefined)
+  boundary.positiveUsage.mockImplementation(async (_page: unknown, provider: string) => ({
+    scope: 'packaged-renderer-released-client-synthetic-session-and-quota', provider, usageText: 'Copilot credits: 7 used', quotaReads: 2,
+    sessionSubscribed: true, removedSessionHidesUsage: true, otherProviderHidesUsage: true, clientDisposalRemovesUsage: true,
+    selectorErrors: 0, forbiddenRemoteCalls: 0, hostTransport: 'not-provided-to-isolated-fixture',
+    applicationMountPreserved: true, syntheticSiblingPreserved: true,
+  }))
   type Locator = {
     waitFor(): Promise<void>
     click(): Promise<void>
@@ -154,6 +165,8 @@ function integrationFixture() {
   boundary.launch.mockImplementation(async () => {
     rounds++
     mkdirSync(profile, { recursive: true })
+    mkdirSync(join(profile, 'node_modules/dsh-github-copilot/lib'), { recursive: true })
+    writeFileSync(join(profile, 'node_modules/dsh-github-copilot/lib/client.js'), 'inert installed client.js')
     save(join(profile, 'desktop-plugin-receipts.json'), { schemaVersion: 1, receipts: { [plugin.packageName]: pluginReceipt }, owners: { [plugin.packageName]: 'release' } })
     save(join(profile, 'desktop-plugin-provisioning-state.json'), provisionedState)
     save(join(profile, 'package.json'), { dependencies: { [plugin.packageName]: `file:.desktop-plugin-artifacts/${plugin.sha256}.tgz` }, dsh: { profile: { bundles: [plugin.packageName] } } })
@@ -290,6 +303,12 @@ describe('actual owner/wrapper receipt producer to real qualification consumer',
     const summary = verifyForkQualification(fixture.options)
     expect(summary.inputs['ordinary.acceptance']).toBe(originalOrdinary['acceptance.json'])
     expect(summary.inputs['ordinary.helper']).toBe(originalOrdinary['helper-acceptance.json'])
+    expect(summary.inputs['ordinary.positiveUsage']).toBe(originalOrdinary['positive-usage.json'])
+    expect(summary.inputs['packaged.positiveUsage']).toBe(original['positive-usage.json'])
+    expect(boundary.captureUsage).toHaveBeenCalledTimes(2)
+    expect(boundary.positiveUsage.mock.calls.map(call => call[1])).toEqual([
+      'github-copilot', 'github-copilot-preview', 'github-copilot', 'github-copilot-preview',
+    ])
     expect(packagedHashes(fixture.options.ordinaryEvidence)).toEqual(originalOrdinary)
     expect(summary).toMatchObject({
       packagedFunctionalVerified: true, unexpectedObserverFailureCleanupVerified: true,
@@ -299,6 +318,24 @@ describe('actual owner/wrapper receipt producer to real qualification consumer',
       expect(summary.inputs[`packaged.${name}`]).toBe(original[file])
     }
     expect(packagedHashes(fixture.options.packagedEvidence)).toEqual(original)
+  })
+
+  it.each(['ordinary', 'packaged'])('rejects absent or mismatched original %s positive evidence after real producers succeed', async (label) => {
+    const fixture = integrationFixture()
+    await runPackagedCopilotAcceptance({ ...fixture.ownerOptions, output: fixture.options.ordinaryEvidence })
+    await runPackagedCopilotObserverCanary(fixture.ownerOptions, runPackagedCopilotAcceptance)
+    expect(verifyForkQualification(fixture.options).unexpectedObserverFailureCleanupVerified).toBe(true)
+    const root = label === 'ordinary' ? fixture.options.ordinaryEvidence : fixture.options.packagedEvidence
+    const path = join(root, 'positive-usage.json')
+    const original = readFileSync(path)
+    const positive = JSON.parse(original.toString('utf8')) as Record<string, unknown>
+    save(path, { ...positive, installedClientSha256: 'e'.repeat(64) })
+    expect(() => verifyForkQualification(fixture.options)).toThrow()
+    save(path, { ...positive, cases: [] })
+    expect(() => verifyForkQualification(fixture.options)).toThrow()
+    writeFileSync(path, original)
+    unlinkSync(path)
+    expect(() => verifyForkQualification(fixture.options)).toThrow()
   })
 
   it.each(['functional-results.json', 'failure.json', 'observer-cleanup.json'])('rejects a changed real-producer %s without accepting a reconstructed expected receipt', async (file) => {

@@ -156,6 +156,16 @@ function fixture(temporaryRoot = tmpdir()) {
     save(join(packagedEvidence, `${phase}-desktop-plugin-provisioning-state.json`), buildDesktopProvisioningState(plan.desktopProvisioning, parseDesktopPluginProvisionReceipt(pluginReceipt)))
     save(join(packagedEvidence, `${phase}-package.json`), { dependencies: { [copilot.packageName]: `file:.desktop-plugin-artifacts/${copilot.sha256}.tgz` }, dsh: { profile: { bundles: [copilot.packageName] } } })
   }
+  const positiveCases = ['github-copilot', 'github-copilot-preview'].map(provider => ({
+    scope: 'packaged-renderer-released-client-synthetic-session-and-quota', provider, usageText: 'Copilot credits: 7 used', quotaReads: 2,
+    sessionSubscribed: true, removedSessionHidesUsage: true, otherProviderHidesUsage: true, clientDisposalRemovesUsage: true,
+    selectorErrors: 0, forbiddenRemoteCalls: 0, hostTransport: 'not-provided-to-isolated-fixture',
+    applicationMountPreserved: true, syntheticSiblingPreserved: true,
+  }))
+  for (const root of [ordinaryEvidence, packagedEvidence]) save(join(root, 'positive-usage.json'), {
+    runtimeSha256, installedClientSha256: sha('inert installed client.js'), pluginSource: copilot, cases: positiveCases,
+    originalSignedOutApplicationRestored: true, hostTransport: 'not-provided-to-isolated-fixture',
+  })
   const identity = { evidenceId: token, sourceCommit: source, sourceTree: tree, runId: '123', runAttempt: '2', planSha256: rawHash(planPath), runtimeSha256, executableSha256,
     provisioningSha256: rawHash(join(packagedEvidence, 'provisioning-plan.json')), capabilitySha256: rawHash(join(packagedEvidence, 'capability.json')) }
   save(join(packagedEvidence, 'functional-results.json'), { schemaVersion: 1, scope: 'packaged-functional-observations', ...identity, functionalAssertionsCompleted: true, normalAcceptanceCompleted: false, cleanupVerified: false,
@@ -163,7 +173,8 @@ function fixture(temporaryRoot = tmpdir()) {
     runtimeVersion: plan.upstreamVersion, versionMenus: menus, plugin: copilot,
     transport: 'official Web-backed Desktop Host with packaged Electron dsh-app origin bridge', restartReceiptSha256: rawHash(join(packagedEvidence, 'initial-desktop-plugin-receipts.json')),
     copilotUsageCapability: usageCapability, signedOutCopilotUsage: [signedOut, signedOut], hostQuotaNoNetworkEvidence: 'immutable-plugin-ci-regression-only',
-    timeline: ['package-identity', ...['initial', 'restart'].flatMap(phase => ['launch', 'version-menu', 'application', 'account', 'usage-readonly', 'settings-readonly', 'packaged-graph', 'closed'].map(event => `${phase}:${event}`))].map((event, milliseconds) => ({ event, milliseconds })) })
+    positiveCopilotUsage: positiveCases, positiveUsageHostTransport: 'not-provided-to-isolated-fixture',
+    timeline: ['package-identity', ...['initial', 'restart'].flatMap(phase => ['launch', 'version-menu', 'application', 'account', 'usage-readonly', 'settings-readonly', 'packaged-graph', ...(phase === 'restart' ? ['positive-usage'] : []), 'closed'].map(event => `${phase}:${event}`))].map((event, milliseconds) => ({ event, milliseconds })) })
   save(join(packagedEvidence, 'failure.json'), { schemaVersion: 2, scope: 'packaged-acceptance-failure', ...identity, error: `Error: packaged observer cleanup canary ${token}`, cleanupCompleted: true, cleanupVerified: true, cleanupErrors: [], diagnosticErrors: [] })
   save(join(packagedEvidence, 'observer-cleanup.json'), { schemaVersion: 3, scope: 'unexpected-observer-failure-cleanup', ...identity,
     ...truths(['observerInvokedOnce', 'errorPropagationVerified', 'ordinaryAcceptanceWithheld', 'cleanupVerified', 'ownedHomeRemoved', 'ownedProfileRemoved', 'ownedLegacySdkRemoved']), normalAcceptanceCompleted: false, functionalSha256: '', failureSha256: '' })
@@ -210,6 +221,79 @@ function inventory(directory: string): Record<string, string> {
   }
   return result
 }
+
+describe('positive usage evidence in both original directories', () => {
+  const roots = () => [current.options.ordinaryEvidence, current.options.packagedEvidence]
+  const casesInAllReceipts = (change: (cases: unknown[]) => void): void => {
+    const cases = array(json(packaged('positive-usage.json')).cases)
+    change(cases)
+    for (const root of roots()) current.edit(join(root, 'positive-usage.json'), (value) => { value.cases = cases })
+    current.edit(join(current.options.ordinaryEvidence, 'acceptance.json'), (value) => { value.positiveCopilotUsage = cases })
+    current.edit(packaged('functional-results.json'), (value) => { value.positiveCopilotUsage = cases })
+    current.seal()
+  }
+  it.each([0, 1])('hashes and requires the original positive artifact in directory %i', (index) => {
+    const file = join(roots()[index]!, 'positive-usage.json')
+    expect(verify().inputs[`${index === 0 ? 'ordinary' : 'packaged'}.positiveUsage`]).toBe(rawHash(file))
+    rmSync(file)
+    expect(verify).toThrow()
+  })
+  it.each([0, 1])('rejects unknown positive artifact keys in directory %i', (index) => {
+    mutate(join(roots()[index]!, 'positive-usage.json'), (value) => { value.liveAccountVerified = true })
+    expect(verify).toThrow(/Unknown evidence field/u)
+  })
+  for (const field of ['runtimeSha256', 'installedClientSha256', 'pluginSource', 'cases', 'originalSignedOutApplicationRestored', 'hostTransport']) {
+    it.each([0, 1])(`rejects missing positive ${field} in directory %i`, (index) => {
+      mutate(join(roots()[index]!, 'positive-usage.json'), (value) => { Reflect.deleteProperty(value, field) })
+      expect(verify).toThrow(/Missing evidence field/u)
+    })
+    it.each([0, 1])(`rejects altered positive ${field} in directory %i`, (index) => {
+      mutate(join(roots()[index]!, 'positive-usage.json'), (value) => { value[field] = 'foreign' })
+      expect(verify).toThrow()
+    })
+  }
+  it('rejects distinct valid observed client hashes without equating either to the archive digest', () => {
+    mutate(packaged('positive-usage.json'), (value) => { value.installedClientSha256 = 'e'.repeat(64) })
+    expect(verify).toThrow()
+  })
+  it.each(['scope', 'provider', 'usageText', 'quotaReads', 'sessionSubscribed', 'removedSessionHidesUsage', 'otherProviderHidesUsage',
+    'clientDisposalRemovesUsage', 'selectorErrors', 'forbiddenRemoteCalls', 'hostTransport', 'applicationMountPreserved', 'syntheticSiblingPreserved'])('rejects missing case field %s even in matching receipts', (field) => {
+    casesInAllReceipts((cases) => { Reflect.deleteProperty(object(cases[0]), field) })
+    expect(verify).toThrow(/Missing evidence field/u)
+  })
+  it.each(['scope', 'provider', 'usageText', 'quotaReads', 'sessionSubscribed', 'removedSessionHidesUsage', 'otherProviderHidesUsage',
+    'clientDisposalRemovesUsage', 'selectorErrors', 'forbiddenRemoteCalls', 'hostTransport', 'applicationMountPreserved', 'syntheticSiblingPreserved'])('rejects invalid case field %s even in matching receipts', (field) => {
+    casesInAllReceipts((cases) => { const row = object(cases[1]); row[field] = typeof row[field] === 'boolean' ? false : 'foreign' })
+    expect(verify).toThrow()
+  })
+  it.each(['extra-key', 'missing-route', 'third-route', 'reversed', 'duplicate'])('rejects %s cases even in matching receipts', (mode) => {
+    casesInAllReceipts((cases) => {
+      if (mode === 'extra-key') object(cases[0]).liveAccountVerified = true
+      if (mode === 'missing-route') cases.pop()
+      if (mode === 'third-route') cases.push(cases[0])
+      if (mode === 'reversed') cases.reverse()
+      if (mode === 'duplicate') cases[1] = cases[0]
+    })
+    expect(verify).toThrow()
+  })
+  for (const field of ['positiveCopilotUsage', 'positiveUsageHostTransport']) {
+    it.each(['ordinary', 'packaged'])(`requires primary ${field} in %s evidence`, (label) => {
+      const file = label === 'ordinary' ? join(current.options.ordinaryEvidence, 'acceptance.json') : packaged('functional-results.json')
+      mutate(file, (value) => { Reflect.deleteProperty(value, field) })
+      expect(verify).toThrow()
+    })
+  }
+  it.each(['ordinary', 'packaged'])('rejects positive cases not matching the %s primary receipt', (label) => {
+    const root = label === 'ordinary' ? current.options.ordinaryEvidence : current.options.packagedEvidence
+    mutate(join(root, 'positive-usage.json'), (value) => { object(array(value.cases)[0]).usageText = 'Other 7 used observation' })
+    expect(verify).toThrow()
+  })
+  it.each(['ordinary', 'packaged'])('requires the exact restart positive timeline event in %s evidence', (label) => {
+    const file = label === 'ordinary' ? join(current.options.ordinaryEvidence, 'acceptance.json') : packaged('functional-results.json')
+    mutate(file, (value) => { value.timeline = array(value.timeline).filter(event => object(event).event !== 'restart:positive-usage') })
+    expect(verify).toThrow()
+  })
+})
 
 describe('CI-only fork qualification from retained evidence', () => {
   it('canonicalizes newly owned allocations before constructing evidence paths through a temporary-root alias', () => {

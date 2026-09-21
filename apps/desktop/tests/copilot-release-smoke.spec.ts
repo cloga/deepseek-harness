@@ -9,7 +9,7 @@ const effects = vi.hoisted(() => ({
   parseArgs: vi.fn(() => { throw new Error('Import must not parse CLI arguments') }),
   launch: vi.fn(), runtimeRoot: vi.fn(), runtimeBytes: vi.fn(), verifyRuntime: vi.fn(),
   exec: vi.fn(), menu: vi.fn(), settings: vi.fn(), usage: vi.fn(), capability: vi.fn(),
-  environment: vi.fn(), graph: vi.fn(), inventory: vi.fn(),
+  environment: vi.fn(), graph: vi.fn(), inventory: vi.fn(), captureUsage: vi.fn(), positiveUsage: vi.fn(),
   fault: undefined as ((operation: string, path: unknown) => void) | undefined,
   removed: [] as string[], allocated: [] as string[], descriptors: new Map<number, string>(),
 }))
@@ -60,6 +60,9 @@ vi.mock('../src/plugin-receipts.ts', () => ({ assertDesktopProvisioningInventory
 vi.mock('../scripts/smoke-environment.ts', () => ({ desktopSmokeEnvironment: effects.environment }))
 vi.mock('./fixtures/desktop-version-menu-smoke.ts', () => ({ inspectDesktopVersionMenu: effects.menu }))
 vi.mock('./fixtures/copilot-settings-smoke.ts', () => ({ inspectPackagedCopilotSettings: effects.settings }))
+vi.mock('./fixtures/copilot-usage-positive-smoke.ts', () => ({
+  capturePackagedUsageModules: effects.captureUsage, inspectPositiveCopilotUsage: effects.positiveUsage,
+}))
 vi.mock('./fixtures/copilot-usage-smoke.ts', () => ({ inspectCopilotUsageCapability: effects.capability, inspectSignedOutCopilotUsage: effects.usage }))
 vi.mock('./fixtures/packaged-graph-check.ts', () => ({ inspectPackagedGraphResolution: () => ({}), packagedGraphCheckArguments: effects.graph }))
 vi.mock('../src/owned-directory.ts', async (original) => {
@@ -120,6 +123,13 @@ function ownerFixture() {
   effects.capability.mockReturnValue({ id: 'account-quota-composer-usage' })
   effects.usage.mockResolvedValue({ usageSurfaceAbsent: true })
   effects.inventory.mockReturnValue(undefined)
+  effects.captureUsage.mockResolvedValue(undefined)
+  effects.positiveUsage.mockImplementation(async (_page: unknown, provider: string) => ({
+    scope: 'packaged-renderer-released-client-synthetic-session-and-quota', provider, usageText: 'Copilot credits: 7 used', quotaReads: 2,
+    sessionSubscribed: true, removedSessionHidesUsage: true, otherProviderHidesUsage: true, clientDisposalRemovesUsage: true,
+    selectorErrors: 0, forbiddenRemoteCalls: 0, hostTransport: 'not-provided-to-isolated-fixture',
+    applicationMountPreserved: true, syntheticSiblingPreserved: true,
+  }))
   let profile = ''
   let home = ''
   let launches = 0
@@ -150,6 +160,8 @@ function ownerFixture() {
   effects.launch.mockImplementation(async () => {
     launches++
     mkdirSync(profile, { recursive: true })
+    mkdirSync(join(profile, 'node_modules/dsh-github-copilot/lib'), { recursive: true })
+    writeFileSync(join(profile, 'node_modules/dsh-github-copilot/lib/client.js'), 'inert installed client.js')
     for (const file of ['desktop-plugin-receipts.json', 'desktop-plugin-provisioning-state.json', 'package.json']) {
       writeFileSync(join(profile, file), '{}')
     }
@@ -291,10 +303,41 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     }
     await runPackagedCopilotAcceptance({ ...fixture.options, inspectProfile: observer })
     expect(observer).toHaveBeenCalledTimes(1)
+    expect(effects.captureUsage).toHaveBeenCalledTimes(1)
+    expect(effects.positiveUsage.mock.calls.map(call => call[1])).toEqual(['github-copilot', 'github-copilot-preview'])
+    const positive = receipt(fixture.options.output, 'positive-usage.json')
+    const accepted = receipt(fixture.options.output, 'acceptance.json')
+    expect(positive).toMatchObject({ installedClientSha256: hash('inert installed client.js'), runtimeSha256: accepted.runtimeSha256,
+      pluginSource: accepted.plugin, cases: accepted.positiveCopilotUsage, originalSignedOutApplicationRestored: true,
+      hostTransport: 'not-provided-to-isolated-fixture' })
     expect(receipt(fixture.options.output, 'acceptance.json')).toMatchObject({ normalAcceptanceCompleted: true, cleanupVerified: true })
     expect(existsSync(join(fixture.options.output, 'failure.json'))).toBe(false)
     const metadataCall = effects.exec.mock.calls.find(([file]) => String(file).endsWith('powershell.exe'))
     expect(metadataCall?.[2]).toMatchObject({ timeout: 120_000 })
+  })
+
+  it.each(['capture', 'canonical', 'preview', 'restored-signed-out', 'artifact-write'] as const)('withholds functional and normal acceptance after positive %s failure', async (mode) => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    const primary = new Error('positive fixture boundary failed')
+    if (mode === 'capture') effects.captureUsage.mockRejectedValueOnce(primary)
+    if (mode === 'canonical') effects.positiveUsage.mockRejectedValueOnce(primary)
+    if (mode === 'preview') {
+      const original = effects.positiveUsage.getMockImplementation()!
+      effects.positiveUsage.mockImplementationOnce(original).mockRejectedValueOnce(primary)
+    }
+    if (mode === 'restored-signed-out') effects.usage.mockResolvedValueOnce({ usageSurfaceAbsent: true })
+      .mockResolvedValueOnce({ usageSurfaceAbsent: true }).mockRejectedValueOnce(primary)
+    if (mode === 'artifact-write') effects.fault = (operation, path) => {
+      if (operation === 'write' && basename(String(path)) === 'positive-usage.json') throw primary
+    }
+    const observer = vi.fn()
+    await expect(runPackagedCopilotAcceptance({ ...fixture.options, inspectProfile: observer })).rejects.toBe(primary)
+    expect(observer).not.toHaveBeenCalled()
+    for (const file of ['functional-results.json', 'acceptance.json', 'packaged-suite.json']) {
+      expect(existsSync(join(fixture.options.output, file))).toBe(false)
+    }
+    expect(receipt(fixture.options.output, 'failure.json')).toMatchObject({ cleanupCompleted: true, cleanupVerified: true })
   })
 
   it.each(['sync', 'async', 'undefined'] as const)('preserves the %s observer failure through real catch and cleanup', async (mode) => {
@@ -478,6 +521,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     const fixture = ownerFixture()
     const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
     effects.usage.mockResolvedValueOnce({ usageSurfaceAbsent: true }).mockResolvedValueOnce({ usageSurfaceAbsent: false })
+      .mockResolvedValueOnce({ usageSurfaceAbsent: false })
     const observer = vi.fn()
     await expect(runPackagedCopilotAcceptance({ ...fixture.options, inspectProfile: observer })).rejects.toThrow('Restart must preserve')
     expect(observer).not.toHaveBeenCalled()

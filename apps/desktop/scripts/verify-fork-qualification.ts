@@ -223,7 +223,7 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
   assert.notEqual(physical(options.ordinaryEvidence), physical(options.packagedEvidence), 'Independent evidence directories are required')
   const ordinary = input(options.ordinaryEvidence, 'acceptance.json', 'ordinary.acceptance').value
   keys(ordinary, ['schemaVersion', 'scope', ...identityKeys, 'functionalAssertionsCompleted', 'normalAcceptanceCompleted', 'cleanupVerified',
-    ...packagedTrue, ...packagedFalse, 'desktopVersion', 'runtimeVersion', 'versionMenus', 'plugin', 'transport', 'restartReceiptSha256', 'copilotUsageCapability', 'signedOutCopilotUsage', 'hostQuotaNoNetworkEvidence', 'timeline'])
+    ...packagedTrue, ...packagedFalse, 'desktopVersion', 'runtimeVersion', 'versionMenus', 'plugin', 'transport', 'restartReceiptSha256', 'copilotUsageCapability', 'signedOutCopilotUsage', 'positiveCopilotUsage', 'positiveUsageHostTransport', 'hostQuotaNoNetworkEvidence', 'timeline'])
   assert.equal(ordinary.schemaVersion, 1)
   assert.equal(ordinary.scope, 'packaged-acceptance')
   assert.match(text(ordinary.evidenceId), uuid)
@@ -231,12 +231,12 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
     assert.deepEqual(ordinary[field], object(identity)[field], `Ordinary identity differs: ${field}`)
   }
   flags(ordinary, [...packagedTrue, 'functionalAssertionsCompleted', 'normalAcceptanceCompleted', 'cleanupVerified'], packagedFalse)
-  for (const field of ['desktopVersion', 'runtimeVersion', 'plugin', 'transport', 'copilotUsageCapability', 'signedOutCopilotUsage', 'hostQuotaNoNetworkEvidence']) {
+  for (const field of ['desktopVersion', 'runtimeVersion', 'plugin', 'transport', 'copilotUsageCapability', 'signedOutCopilotUsage', 'positiveCopilotUsage', 'positiveUsageHostTransport', 'hostQuotaNoNetworkEvidence']) {
     assert.deepEqual(ordinary[field], functional.value[field], `Ordinary business evidence differs: ${field}`)
   }
   const f = functional.value
   keys(f, ['schemaVersion', 'scope', ...identityKeys, 'functionalAssertionsCompleted', 'normalAcceptanceCompleted', 'cleanupVerified',
-    ...packagedTrue, ...packagedFalse, 'desktopVersion', 'runtimeVersion', 'versionMenus', 'plugin', 'transport', 'restartReceiptSha256', 'copilotUsageCapability', 'signedOutCopilotUsage', 'hostQuotaNoNetworkEvidence', 'timeline'])
+    ...packagedTrue, ...packagedFalse, 'desktopVersion', 'runtimeVersion', 'versionMenus', 'plugin', 'transport', 'restartReceiptSha256', 'copilotUsageCapability', 'signedOutCopilotUsage', 'positiveCopilotUsage', 'positiveUsageHostTransport', 'hostQuotaNoNetworkEvidence', 'timeline'])
   assert.equal(f.schemaVersion, 1)
   assert.equal(f.scope, 'packaged-functional-observations')
   flags(f, [...packagedTrue, 'functionalAssertionsCompleted'], [...packagedFalse, 'normalAcceptanceCompleted', 'cleanupVerified'])
@@ -251,19 +251,56 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
   const signedOut = { usageTriggerCount: 0, accountUsageTextCount: 0, usageSurfaceAbsent: true, hostQuotaRequestInstrumentation: 'not-available-in-packaged-smoke' }
   assert.deepEqual(f.copilotUsageCapability, usageCapability)
   assert.deepEqual(f.signedOutCopilotUsage, [signedOut, signedOut])
+  let installedClientSha256: string | undefined
+  for (const [root, record, label] of [[options.ordinaryEvidence, ordinary, 'ordinary'], [options.packagedEvidence, f, 'packaged']] as const) {
+    const positive = input(root, 'positive-usage.json', `${label}.positiveUsage`).value
+    keys(positive, ['runtimeSha256', 'installedClientSha256', 'pluginSource', 'cases', 'originalSignedOutApplicationRestored', 'hostTransport'])
+    assert.equal(positive.runtimeSha256, runtime.sha256)
+    assert.deepEqual(positive.pluginSource, copilot.source)
+    assert.match(text(positive.installedClientSha256), /^[a-f0-9]{64}$/u)
+    // This is the observed installed client.js digest, not an independently verified archive-member digest.
+    if (installedClientSha256 !== undefined) assert.equal(positive.installedClientSha256, installedClientSha256)
+    installedClientSha256 = text(positive.installedClientSha256)
+    flags(positive, ['originalSignedOutApplicationRestored'])
+    assert.equal(positive.hostTransport, 'not-provided-to-isolated-fixture')
+    assert.equal(record.positiveUsageHostTransport, positive.hostTransport)
+    assert.deepEqual(positive.cases, record.positiveCopilotUsage)
+    const cases = array(positive.cases)
+    assert.equal(cases.length, 2)
+    for (const [index, provider] of ['github-copilot', 'github-copilot-preview'].entries()) {
+      const usage = object(cases[index])
+      keys(usage, ['scope', 'provider', 'usageText', 'quotaReads', 'sessionSubscribed', 'removedSessionHidesUsage', 'otherProviderHidesUsage',
+        'clientDisposalRemovesUsage', 'selectorErrors', 'forbiddenRemoteCalls', 'hostTransport', 'applicationMountPreserved', 'syntheticSiblingPreserved'])
+      assert.equal(usage.scope, 'packaged-renderer-released-client-synthetic-session-and-quota')
+      assert.equal(usage.provider, provider)
+      assert.equal(usage.hostTransport, positive.hostTransport)
+      assert.match(text(usage.usageText), /7 used/u)
+      assert.equal(usage.quotaReads, 2)
+      assert.equal(usage.selectorErrors, 0)
+      assert.equal(usage.forbiddenRemoteCalls, 0)
+      flags(usage, ['sessionSubscribed', 'removedSessionHidesUsage', 'otherProviderHidesUsage', 'clientDisposalRemovesUsage',
+        'applicationMountPreserved', 'syntheticSiblingPreserved'])
+    }
+  }
   const menus = array(f.versionMenus)
   assert.equal(menus.length, 2)
   const phases = ['initial', 'restart']
+  const events = ['launch', 'version-menu', 'application', 'account', 'usage-readonly', 'settings-readonly', 'packaged-graph']
+  const expectedTimeline = ['package-identity', ...phases.flatMap(phase =>
+    [...events, ...(phase === 'restart' ? ['positive-usage'] : []), 'closed'].map(event => `${phase}:${event}`))]
+  // Canary runs last; its terminal timestamp also bounds the retained failure event below.
   let milliseconds = -1
-  const timeline = array(f.timeline).map((value) => {
-    const event = object(value)
-    keys(event, ['event', 'milliseconds'])
-    assert(typeof event.milliseconds === 'number' && Number.isFinite(event.milliseconds) && event.milliseconds >= milliseconds)
-    milliseconds = event.milliseconds
-    return text(event.event)
-  })
-  const events = ['launch', 'version-menu', 'application', 'account', 'usage-readonly', 'settings-readonly', 'packaged-graph', 'closed']
-  assert.deepEqual(timeline.filter(event => !phases.some(phase => event === `${phase}:provider-deferred`)), ['package-identity', ...phases.flatMap(phase => events.map(event => `${phase}:${event}`))])
+  for (const record of [ordinary, f]) {
+    milliseconds = -1
+    const timeline = array(record.timeline).map((value) => {
+      const event = object(value)
+      keys(event, ['event', 'milliseconds'])
+      assert(typeof event.milliseconds === 'number' && Number.isFinite(event.milliseconds) && event.milliseconds >= milliseconds)
+      milliseconds = event.milliseconds
+      return text(event.event)
+    })
+    assert.deepEqual(timeline.filter(event => !phases.some(phase => event === `${phase}:provider-deferred`)), expectedTimeline)
+  }
   let previousGraph: RecordValue | undefined
   for (const [index, phase] of phases.entries()) {
     const menu = input(options.packagedEvidence, `${phase}-version-menu.json`, `packaged.${phase}.menu`).value

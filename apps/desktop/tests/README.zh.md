@@ -74,7 +74,7 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 驱动将该精确主 PID 绑定到存活的普通物理可执行文件，其规范化安装目录、固定文件名、普通祖先与已验证 SHA-256 必须匹配，并在哈希计算前后检查存活状态。路径字面拼写仍仅作诊断。失败时只保留有界的相等性、可用性、退出与可读性叶字段，然后重抛原始错误；物理守卫允许合法大小写／分隔符规范化，不选择替代进程。
 
-不可变的 `0.1.6-alpha.1.cloga.2` 基线使用 sequence 12 和 Copilot alpha.24；只有验证该安装的锁定身份后，才使用其[基线设置检查器](fixtures/baseline-copilot-settings-smoke.ts)。它保留该版本原有的只读模型角色与提供方目录检查，不要求后续版本的工作区或仅提供方 UI。候选及其重启仍使用针对 Copilot alpha.32 的严格[当前设置检查器](fixtures/copilot-settings-smoke.ts)。基线检查不能作为候选检查失败时的回退；两种检查器都不发起认证、保存设置或执行模型／搜索调用。
+不可变的 `0.1.6-alpha.1.cloga.2` 基线使用 sequence 12 和 Copilot alpha.24；只有验证该安装的锁定身份后，才使用其[基线设置检查器](fixtures/baseline-copilot-settings-smoke.ts)。它保留该版本原有的只读模型角色与提供方目录检查，不要求后续版本的工作区或仅提供方 UI。候选及其重启仍使用针对 Copilot alpha.33 的严格[当前设置检查器](fixtures/copilot-settings-smoke.ts)。基线检查不能作为候选检查失败时的回退；两种检查器都不发起认证、保存设置或执行模型／搜索调用。
 
 安装轮次失败后，[启动诊断](fixtures/installed-startup-diagnostics.ts)在关闭自有应用之前运行，写入独立的 round-startup 记录。自包含回调只读取已识别的文档类别、DOM 状态标志和现有只读 backend status。消息前缀最多检查 4096 个字符，转换为固定类别；未知仍记为未知。不保留原始后端文本、URL、私有路径、profile 或 stdout。桥接与外层传输观察分别采用一秒和两秒预算，不改变就绪、恢复或原始失败。当前候选缺少该桥接时仍记为不可用，而非就绪；不恢复已移除的 IPC 或恢复动作。这项隐私规则适用于新增记录，不代表旧版通用错误格式化器具备同样保证。
 
@@ -90,13 +90,15 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 [打包 skill canary](fixtures/packaged-skills-smoke.mjs) 从指定产物挂载最小 Cordis 服务，并读取其中真实的 ASAR preset 与 skill。其子进程仅接收明确的操作系统环境白名单，用户状态目录全部私有；它自己的清理保留主要失败，只有清理失败时也会判定失败。这些保证仅适用于该 canary，不适用于其他 runtime-smoke 子进程。它通过四次真实 skill 工具调用检查随附 skill 与合成用户 skill，不代表生产 Host 或 profile 验证。[纯 helper 回归](packaged-skills-smoke.test.mjs) 在产物构建前执行，不证明打包行为已通过。
 
-[打包 Copilot 验收](fixtures/copilot-release-smoke.ts)在同一个已配置插件的 profile 中完成初次启动／重启两轮 Copilot alpha.32 断言后，才写入临时的 `functional-results.json` 观察记录。随后观察器针对真实 profile 运行一次，其异常经过实际验收所有者的非预期错误路径；所有者不会局部处理所谓预期标记。它先将清理与诊断结果写入最终的 `failure.json`，再传播原始错误。普通模式仅在清理和 receipt 操作成功后写入 `acceptance.json`；组合观察器 canary 模式必须让该文件保持不存在。初始化、诊断、清理或 receipt 失败均不能生成成功的套件证据。
+[打包 Copilot 验收](fixtures/copilot-release-smoke.ts)在同一个已配置插件的 profile 中完成初次启动／重启两轮 Copilot alpha.33 断言后，才写入临时的 `functional-results.json` 观察记录。随后观察器针对真实 profile 运行一次，其异常经过实际验收所有者的非预期错误路径；所有者不会局部处理所谓预期标记。它先将清理与诊断结果写入最终的 `failure.json`，再传播原始错误。普通模式仅在清理和 receipt 操作成功后写入 `acceptance.json`；组合观察器 canary 模式必须让该文件保持不存在。初始化、诊断、清理或 receipt 失败均不能生成成功的套件证据。
 
 [观察器包装器](fixtures/copilot-observer-smoke.ts)要求精确的私有错误对象传播出来，最终失败证据中不存在诊断或清理错误，且自有 home、profile 和祖先 canary 均已删除。随后它写入 `observer-cleanup.json`，最后以原子且独占的方式发布 `packaged-suite.json`，作为套件提交标记。最后这个文件通过哈希及共享的源码／tree／运行／尝试／plan／产物身份绑定原始功能、失败和观察器 receipt，并明确不宣称普通验收完成。仅有临时功能观察不代表套件成功。合成所有者／包装器测试不证明真实托管运行、实时额度访问、OAuth、模型调用或搜索。
 
 必需的只读[验收验证器](../scripts/verify-fork-qualification.ts)在真实安装升级之后、发布资产校验和封存及已验收产物上传之前运行。它将 receipt 关系与精确身份对照已定稿发布元数据、升级归属及已验证输入、候选／重启记录、独立同版本包验收和清理证据进行检查。仅用于 CI 的摘要不进入保持不变的六个公开资产。仅 rehearsal 使用的 `desktop-unqualified-candidate-*` artifact 在验收前保留内部诊断字节；它不是 publisher 输入、release 或验收证据。这些内部记录不扩大公开资产清单，也不将同版本插件选择提升为跨版本升级证明。
 
 工作流保留两次完整且必需的插件配置：先在 `dist/desktop-copilot-acceptance` 完成普通验收，再以 `copilot-release-smoke.ts --observer-cleanup-canary` 在 `dist/desktop-copilot-observer-canary` 运行 canary。仅导出函数的 observer 模块不是 CLI。验收要求 `--ordinary-evidence` 和 `--packaged-evidence`：从第一个目录读取原始 helper 和已完成的普通 receipt，从第二个目录读取失败／canary 套件，不复制或改标证据。普通验收要求功能、正常验收和清理标志全部为真；共享的源码／tree／运行／尝试／plan／runtime／可执行文件／provisioning／capability 身份必须一致，而各自的证据 UUID 独立验证有效。canary 目录不得存在普通验收 receipt。两个原始目录均保持只读。
+
+每次运行还在重启 graph 检查之后、收集 receipt 与执行观察器之前运行[用量正向 fixture](fixtures/copilot-usage-positive-smoke.ts)。真实打包 renderer 与已发布 alpha.33 Client 仅针对标准和 preview 两条 route 渲染合成 Session／quota 数据；这不验收实时账户访问。验证器独立计算每个原始 `positive-usage.json` 的哈希，要求恰好六个字段和两个有序的十三字段 case，并与该轮普通或功能 receipt 匹配。Runtime 与插件锁必须一致，每条 route 恰好两次合成 quota 读取，不允许 selector 错误或禁止的 Remote 调用，且确认恢复、订阅和释放。两次观察到的已安装 `client.js` digest 必须有效且相同；这不是独立的归档成员验证，digest 也不是插件 tarball 哈希。缺失正向产物、未知字段、未通过的观察或时间线漂移都会阻止验收。原有 cloga.2／sequence12 安装器基线保持不变；本流程不证明从当前 cloga.16／sequence27 或其间每个版本升级通过。
 
 跨仓库导入必须提供 `expectedCoreSource`，包含 `commit`、`tree`、`version`、`upstreamVersion`、`executableSha256`、`runtimeSha256` 和 `planSha256`。应用／观察器工作之前，检查真实 Core checkout、发布 plan 字节、打包 runtime 描述、可执行文件字节及版本元数据；调用成功后返回实际观察到的 Core 事实。Ops 分别从 `desktop.source.commit/tree`、`desktop.version`、`desktop.releaseChannel.upstreamVersion`、`desktop.installedExecutable.sha256`、`desktop.installedRuntimeDescriptor.sha256` 和 `desktop.releaseChannel.build.planSha256`（发布 plan，而非原生 provisioning plan）映射这些字段。绝不改写调用方真实的仓库、GitHub SHA 或运行环境。同 Core 调用和普通 CLI 即使传入显式预期，也必须匹配真实 `GITHUB_SHA`。不假定存在未提供的内嵌 source 元数据。
 
