@@ -1,0 +1,106 @@
+name: Alpha24 public GitHub reachability probe (temporary, nonpublishing)
+
+# Remove after reviewing one result. This observes the external public endpoint only;
+# it is not retry logic, baseline acceptance, Desktop qualification, or publication.
+on:
+  push:
+    branches: [cloga-official-first-016a2]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alpha24-public-github-probe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: github.repository == 'cloga/deepseek-harness' && github.ref == 'refs/heads/cloga-official-first-016a2'
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      BOUND_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      BOUND_WORKFLOW_REF: ${{ github.workflow_ref }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          clean: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.13.0'
+          package-manager-cache: false
+      - name: Observe one credential-free product metadata request
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_SHA -cnotmatch '\A[0-9a-f]{40}\z' -or $env:GITHUB_REF -cne 'refs/heads/cloga-official-first-016a2') { throw 'Unexpected source identity' }
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA -or $env:BOUND_WORKFLOW_SHA -cne $head `
+              -or $env:BOUND_WORKFLOW_REF -cne 'cloga/deepseek-harness/.github/workflows/alpha24-public-github-probe.yml@refs/heads/cloga-official-first-016a2') {
+            throw 'Probe workflow is not bound to its event source'
+          }
+          if (@(git status --porcelain).Count -ne 0) { throw 'Probe requires a clean source checkout' }
+          foreach ($name in @('GH_TOKEN','GITHUB_TOKEN','DSH_DESKTOP_RELEASE_GITHUB_TOKEN')) {
+            if ([Environment]::GetEnvironmentVariable($name)) { throw "Credential variable reached public probe: $name" }
+          }
+          $root = Join-Path $env:RUNNER_TEMP "alpha24-public-probe-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if (Test-Path -LiteralPath $root) { throw 'Probe directory must be new' }
+          New-Item -ItemType Directory -Path $root | Out-Null
+          @'
+          import { writeFileSync } from 'node:fs'
+          import { join } from 'node:path'
+          const root = process.argv[2]
+          const endpoint = 'https://api.github.com/repos/cloga/dsh-github-copilot/releases/tags/v0.4.0-alpha.24'
+          const allowedHeaders = ['x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset', 'x-ratelimit-resource', 'retry-after']
+          const report = {
+            schemaVersion: 1, scope: 'one-credential-free-public-metadata-observation',
+            sourceCommit: process.env.GITHUB_SHA, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            endpoint, request: { method: 'GET', authorization: false, credentials: 'omit', redirect: 'manual', timeoutMs: 30000 },
+            completed: false, status: null, ok: false, headers: {}, message: null,
+            releaseQualified: false, baselineAccepted: false, retryAuthorized: false, installerExecuted: false,
+          }
+          let technical
+          try {
+            const response = await fetch(endpoint, {
+              headers: { accept: 'application/vnd.github+json', 'user-agent': 'deepseek-harness-desktop', 'x-github-api-version': '2026-03-10' },
+              redirect: 'manual', credentials: 'omit', signal: AbortSignal.timeout(30000),
+            })
+            report.completed = true
+            report.status = response.status
+            report.ok = response.ok
+            for (const name of allowedHeaders) {
+              const value = response.headers.get(name)
+              if (value !== null && value.length <= 128 && /^[A-Za-z0-9_.:/ -]+$/u.test(value)) report.headers[name] = value
+            }
+            if (!response.ok) {
+              try {
+                const value = await response.json()
+                if (typeof value?.message === 'string') report.message = value.message.replace(/https?:\/\/[^\s?]+\?[^\s]*/gu, '[redacted-url]').slice(0, 256)
+              } catch { report.message = 'non-JSON error response' }
+            } else await response.body?.cancel()
+          } catch (error) {
+            technical = error
+            report.message = `technical-${String(error?.name ?? 'error').slice(0, 64)}`
+          } finally {
+            writeFileSync(join(root, 'public-github-probe.json'), JSON.stringify(report, null, 2) + '\n', { flag: 'wx' })
+          }
+          if (technical !== undefined) throw technical
+          console.log(JSON.stringify({ status: report.status, ok: report.ok, headers: report.headers }))
+          '@ | Set-Content -LiteralPath (Join-Path $root 'probe.mjs') -Encoding utf8NoBOM
+          node --check (Join-Path $root 'probe.mjs')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node (Join-Path $root 'probe.mjs') $root
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $receipt = Get-Content -LiteralPath (Join-Path $root 'public-github-probe.json') -Raw | ConvertFrom-Json
+          if ($receipt.sourceCommit -cne $head -or $receipt.runId -cne $env:GITHUB_RUN_ID -or $receipt.runAttempt -cne $env:GITHUB_RUN_ATTEMPT `
+              -or $receipt.releaseQualified -ne $false -or $receipt.baselineAccepted -ne $false -or $receipt.retryAuthorized -ne $false `
+              -or $receipt.installerExecuted -ne $false -or $receipt.completed -ne $true) { throw 'Invalid probe receipt' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: alpha24-public-github-probe-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/alpha24-public-probe-${{ github.run_id }}-${{ github.run_attempt }}/public-github-probe.json
+          if-no-files-found: error
+          retention-days: 7
