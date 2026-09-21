@@ -66,7 +66,7 @@ describe('packaged native composer fixture navigation', () => {
   })
 
   it('waits for the seeded row rather than closing an expanded group while its contents load', async () => {
-    const ready = Promise.withResolvers<void>()
+    const ready = Promise.withResolvers<undefined>()
     const bench = fixture(false, true, ready.promise)
     const opening = openNativeComposerFixture(bench.page)
     try {
