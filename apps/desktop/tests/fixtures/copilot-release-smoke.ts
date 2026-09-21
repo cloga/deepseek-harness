@@ -57,6 +57,41 @@ export interface PackagedCopilotProfileInspection {
   readonly output: string
 }
 
+/** Core checkout and artifact facts observed independently of the caller's repository identity. */
+export interface ExpectedCoreSource {
+  readonly commit: string
+  readonly tree: string
+  readonly version: string
+  readonly upstreamVersion: string
+  readonly executableSha256: string
+  readonly runtimeSha256: string
+  readonly planSha256: string
+}
+
+const coreSourceFields = ['commit', 'tree', 'version', 'upstreamVersion', 'executableSha256', 'runtimeSha256', 'planSha256'] as const
+
+function snapshotExpectedCoreSource(value: unknown): ExpectedCoreSource {
+  assert(value !== null && typeof value === 'object' && !Array.isArray(value), 'expectedCoreSource must contain exactly seven facts')
+  assert(Reflect.ownKeys(value).length === coreSourceFields.length && coreSourceFields.every(field => Object.hasOwn(value, field)),
+    'expectedCoreSource must contain exactly seven own facts')
+  const leaf = (field: typeof coreSourceFields[number]): string => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, field)
+    assert(descriptor?.enumerable === true && Object.hasOwn(descriptor, 'value'), 'expectedCoreSource requires enumerable data fields')
+    const entry: unknown = descriptor.value
+    assert(typeof entry === 'string', 'expectedCoreSource facts must be strings')
+    return entry
+  }
+  const snapshot = {
+    commit: leaf('commit'), tree: leaf('tree'), version: leaf('version'), upstreamVersion: leaf('upstreamVersion'),
+    executableSha256: leaf('executableSha256'), runtimeSha256: leaf('runtimeSha256'), planSha256: leaf('planSha256'),
+  }
+  for (const field of ['commit', 'tree'] as const) assert.match(snapshot[field], /^[a-f0-9]{40}$/u)
+  for (const field of ['executableSha256', 'runtimeSha256', 'planSha256'] as const) assert.match(snapshot[field], /^[a-f0-9]{64}$/u)
+  assert.match(snapshot.version, /^0\.1\.6(?:-[A-Za-z0-9.-]+)?$/u)
+  assert.equal(snapshot.upstreamVersion, '0.1.6-alpha.2')
+  return Object.freeze(snapshot)
+}
+
 /** Actual packaged application, evidence destination, and an optional read-only profile observer. */
 export interface PackagedCopilotAcceptanceOptions {
   readonly application: string
@@ -102,10 +137,28 @@ export function packagedCopilotStartupReady(): boolean {
 
 /**
  * Exercise actual packaged Copilot UI and restart acceptance with an isolated, temporary profile.
- * @param options - Application and evidence paths; the optional observer must finish all read-only work before returning.
- * @returns Resolves after acceptance, any observer, and owned cleanup; no installed application qualification is implied.
+ * @param options - Application, evidence paths and optional verified Core facts;
+ * the observer must finish all read-only work before returning.
+ * @returns Explicit calls receive independently observed Core facts after cleanup and receipt publication;
+ * ordinary calls return no value. Neither qualifies an installed application.
  */
-export async function runPackagedCopilotAcceptance(options: PackagedCopilotAcceptanceOptions): Promise<void> {
+export function runPackagedCopilotAcceptance(
+  options: PackagedCopilotAcceptanceOptions & { readonly expectedCoreSource: ExpectedCoreSource },
+): Promise<ExpectedCoreSource>
+/**
+ * Exercise ordinary packaged acceptance without changing its existing void result.
+ * @param options - Application, evidence paths and optional read-only profile observer.
+ * @returns Resolves after owned cleanup and ordinary acceptance receipt publication.
+ */
+export function runPackagedCopilotAcceptance(
+  options: PackagedCopilotAcceptanceOptions & { readonly expectedCoreSource?: undefined },
+): Promise<void>
+export async function runPackagedCopilotAcceptance(
+  options: PackagedCopilotAcceptanceOptions & { readonly expectedCoreSource?: ExpectedCoreSource | undefined },
+): Promise<ExpectedCoreSource | void> {
+  const coreCheckout = resolve(import.meta.dirname, '../../../..')
+  let expectedCoreSource: ExpectedCoreSource | undefined
+  let observedCoreSource: ExpectedCoreSource | undefined
   const application = resolve(options.application)
   const output = resolve(options.output)
   mkdirSync(output, { recursive: true })
@@ -161,27 +214,45 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
     }
   }
   try {
+    const suppliedCoreSource: unknown = options.expectedCoreSource
+    expectedCoreSource = suppliedCoreSource === undefined ? undefined : snapshotExpectedCoreSource(suppliedCoreSource)
     const resources = join(dirname(application), 'resources')
     const runtimeRoot = packagedDesktopRuntimeRoot(resources)
-    const planBytes = readFileSync(resolve('apps/desktop/release/cloga-windows-x64.json'))
+    const planBytes = readFileSync(join(coreCheckout, 'apps/desktop/release/cloga-windows-x64.json'))
     const reviewed = parseDesktopForkReleasePlan(JSON.parse(planBytes.toString('utf8')))
     const plan = readDesktopPluginProvisioningPlan(join(resources, 'desktop-provisioning', 'plan.json'))
     assert.deepEqual(plan, reviewed.desktopProvisioning)
     const copilot = plan.plugins.find(entry => entry.source.packageName === 'dsh-github-copilot')
     assert(copilot?.required, 'This acceptance requires a release-owned Copilot package')
+    const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: coreCheckout, encoding: 'utf8' }).trim()
+    const sourceTree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: coreCheckout, encoding: 'utf8' }).trim()
+    assert(/^[a-f0-9]{40}$/u.test(sourceCommit) && /^[a-f0-9]{40}$/u.test(sourceTree))
+    if (process.env.GITHUB_REPOSITORY !== undefined && process.env.GITHUB_REPOSITORY !== 'cloga/deepseek-harness') {
+      assert(expectedCoreSource !== undefined, 'Cross-repository acceptance requires expectedCoreSource')
+    } else if (process.env.GITHUB_SHA !== undefined) assert.equal(sourceCommit, process.env.GITHUB_SHA)
+    const digest = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex')
+    const observed = {
+      commit: sourceCommit, tree: sourceTree, version: reviewed.version, upstreamVersion: reviewed.upstreamVersion,
+      executableSha256: digest(readFileSync(application)), planSha256: digest(planBytes),
+    }
+    if (expectedCoreSource !== undefined) {
+      for (const field of ['commit', 'tree', 'version', 'upstreamVersion', 'executableSha256', 'planSha256'] as const) {
+        assert.equal(observed[field], expectedCoreSource[field], `Expected Core source differs: ${field}`)
+      }
+    }
     await verifyPackagedDesktopRuntime(application, runtimeRoot, reviewed.upstreamVersion, { platform: 'win32', arch: 'x64' })
     const runtimeBytes = readPackagedDesktopRuntimeDescriptor(application, runtimeRoot)
     // The production verifier validates this immutable descriptor through Electron's ASAR filesystem.
     const runtime = JSON.parse(runtimeBytes.toString('utf8')) as DesktopRuntimeDescriptor
-    const digest = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex')
+    assert.equal(runtime.release.version, reviewed.upstreamVersion, 'Observed Core runtime differs from the reviewed plan')
     const runtimeSha256 = digest(runtimeBytes)
-    const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
-    const sourceTree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim()
-    assert(/^[a-f0-9]{40}$/u.test(sourceCommit) && /^[a-f0-9]{40}$/u.test(sourceTree))
-    if (process.env.GITHUB_SHA !== undefined) assert.equal(sourceCommit, process.env.GITHUB_SHA)
+    observedCoreSource = Object.freeze({
+      ...observed, upstreamVersion: runtime.release.version, executableSha256: digest(readFileSync(application)), runtimeSha256,
+    })
+    if (expectedCoreSource !== undefined) assert.deepEqual(observedCoreSource, expectedCoreSource, 'Observed Core facts differ from expectedCoreSource')
     identity = {
-      ...identity, sourceCommit, sourceTree, planSha256: digest(planBytes), runtimeSha256,
-      executableSha256: digest(readFileSync(application)),
+      ...identity, sourceCommit, sourceTree, planSha256: observedCoreSource.planSha256, runtimeSha256,
+      executableSha256: observedCoreSource.executableSha256,
       provisioningSha256: digest(readFileSync(join(resources, 'desktop-provisioning', 'plan.json'))),
       capabilitySha256: digest(readFileSync(join(resources, 'managed-update', 'capability.json'))),
     }
@@ -485,9 +556,11 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
   }
   assert(functional !== undefined, 'Functional observations must precede ordinary acceptance')
   try {
+    assert(observedCoreSource !== undefined, 'Observed Core facts must precede ordinary acceptance')
     writePackagedProof(output, 'acceptance.json', {
       ...functional, scope: 'packaged-acceptance', normalAcceptanceCompleted: true, cleanupVerified: true,
     })
+    return expectedCoreSource === undefined ? undefined : observedCoreSource
   } catch (error) {
     retain(error)
     writeFailure(true)

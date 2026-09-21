@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { PackagedCopilotProfileInspection } from './fixtures/copilot-release-smoke.ts'
+import type { ExpectedCoreSource, PackagedCopilotProfileInspection } from './fixtures/copilot-release-smoke.ts'
 import type { PositiveCopilotUsageEvidence } from './fixtures/copilot-usage-positive-smoke.ts'
 
 const effects = vi.hoisted(() => ({
@@ -107,6 +107,7 @@ beforeEach(() => {
   vi.stubEnv('GITHUB_RUN_ID', '123')
   vi.stubEnv('GITHUB_RUN_ATTEMPT', '2')
   vi.stubEnv('GITHUB_SHA', 'a'.repeat(40))
+  vi.stubEnv('GITHUB_REPOSITORY', 'cloga/deepseek-harness')
 })
 afterEach(async () => {
   effects.fault = undefined
@@ -216,6 +217,231 @@ function ownerFixture() {
     get clientPath() { return join(profile, 'node_modules', 'dsh-github-copilot', 'lib', 'client.js') },
   }
 }
+
+function expectedCoreFacts(): ExpectedCoreSource {
+  const planPath = resolve(import.meta.dirname, '../release/cloga-windows-x64.json')
+  const plan = readObject(planPath)
+  assert(typeof plan.version === 'string' && typeof plan.upstreamVersion === 'string')
+  return {
+    commit: 'a'.repeat(40), tree: 'b'.repeat(40), version: plan.version, upstreamVersion: plan.upstreamVersion,
+    executableSha256: hash('inert unit fixture bytes'),
+    runtimeSha256: hash(Buffer.from(JSON.stringify({ release: { version: plan.upstreamVersion } }))),
+    planSha256: hash(readFileSync(planPath)),
+  }
+}
+function opsCaller(): Record<string, string | undefined> {
+  vi.stubEnv('GITHUB_REPOSITORY', 'cloga/dsh-windows-ops')
+  vi.stubEnv('GITHUB_SHA', 'c'.repeat(40))
+  return callerIdentity()
+}
+function callerIdentity(): Record<string, string | undefined> {
+  return Object.fromEntries(['GITHUB_REPOSITORY', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT']
+    .map(field => [field, process.env[field]]))
+}
+
+describe('explicit Core source facts through the actual acceptance owner', () => {
+  it('keeps genuine Ops identity throughout acceptance and returns only independent frozen facts after cleanup and publication', async () => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    const before = opsCaller()
+    const expected = Object.freeze(expectedCoreFacts())
+    let committed = false
+    let resolved = false
+    effects.verifyRuntime.mockImplementation(async () => { expect(callerIdentity()).toEqual(before); await Promise.resolve() })
+    effects.fault = (operation, path) => {
+      expect(callerIdentity()).toEqual(before)
+      expect(resolved).toBe(false)
+      if (committed) throw new Error('Filesystem operation after acceptance publication')
+      if (operation === 'publish' && basename(String(path)) === 'acceptance.json') {
+        expect(effects.allocated.every(directory => !existsSync(directory))).toBe(true)
+        expect(fixture.close).toHaveBeenCalledTimes(2)
+        committed = true
+      }
+    }
+    const result = await runPackagedCopilotAcceptance({ ...fixture.options, expectedCoreSource: expected, async inspectProfile() {
+      expect(callerIdentity()).toEqual(before)
+      expect(existsSync(join(fixture.options.output, 'acceptance.json'))).toBe(false)
+      await Promise.resolve()
+      expect(callerIdentity()).toEqual(before)
+    } })
+    resolved = true
+    expect(committed).toBe(true)
+    expect(Object.isFrozen(result)).toBe(true)
+    expect(result).toEqual(expected)
+    expect(result).not.toBe(expected)
+    expect(Reflect.ownKeys(result).sort()).toEqual(Object.keys(expected).sort())
+    expect(callerIdentity()).toEqual(before)
+    expect(receipt(fixture.options.output, 'acceptance.json')).toMatchObject({
+      sourceCommit: result.commit, sourceTree: result.tree, planSha256: result.planSha256,
+      executableSha256: result.executableSha256, runtimeSha256: result.runtimeSha256,
+      desktopVersion: result.version, runtimeVersion: result.upstreamVersion, runId: '123', runAttempt: '2',
+    })
+  })
+
+  it.each(['matching', 'absent'] as const)('preserves the ordinary void result with %s Core SHA', async (mode) => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    if (mode === 'absent') vi.stubEnv('GITHUB_SHA', undefined)
+    const ordinary: Promise<void> = runPackagedCopilotAcceptance(fixture.options)
+    await expect(ordinary).resolves.toBeUndefined()
+  })
+
+  it.each([false, true])('keeps same-Core SHA binding even when explicit=%s', async (explicit) => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    vi.stubEnv('GITHUB_SHA', 'c'.repeat(40))
+    const run = explicit ? runPackagedCopilotAcceptance({ ...fixture.options, expectedCoreSource: expectedCoreFacts() })
+      : runPackagedCopilotAcceptance(fixture.options)
+    await expect(run).rejects.toThrow()
+    expect(effects.verifyRuntime).not.toHaveBeenCalled()
+    expect(effects.launch).not.toHaveBeenCalled()
+  })
+
+  it('requires explicit foreign-repository facts even when its SHA happens to equal Core', async () => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    vi.stubEnv('GITHUB_REPOSITORY', 'cloga/dsh-windows-ops')
+    const observer = vi.fn()
+    await expect(runPackagedCopilotAcceptance({ ...fixture.options, inspectProfile: observer })).rejects.toThrow('expectedCoreSource')
+    expect(effects.verifyRuntime).not.toHaveBeenCalled()
+    expect(effects.launch).not.toHaveBeenCalled()
+    expect(observer).not.toHaveBeenCalled()
+  })
+
+  it.each(Object.keys(expectedCoreFacts()) as (keyof ExpectedCoreSource)[])('rejects different observed %s before profile or UI work', async (field) => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    const before = opsCaller()
+    const different = field === 'version' ? '0.1.6-alpha.2.cloga.999' : field === 'upstreamVersion' ? '0.1.6-alpha.1'
+      : 'f'.repeat(field.endsWith('Sha256') ? 64 : 40)
+    const observer = vi.fn()
+    await expect(runPackagedCopilotAcceptance({ ...fixture.options,
+      expectedCoreSource: { ...expectedCoreFacts(), [field]: different }, inspectProfile: observer })).rejects.toThrow()
+    if (field !== 'runtimeSha256') expect(effects.verifyRuntime).not.toHaveBeenCalled()
+    expect(effects.allocated).toHaveLength(0)
+    expect(effects.launch).not.toHaveBeenCalled()
+    expect(observer).not.toHaveBeenCalled()
+    expect(callerIdentity()).toEqual(before)
+  })
+
+  it.each((Object.keys(expectedCoreFacts()) as (keyof ExpectedCoreSource)[]).flatMap(field =>
+    ['missing', 'wrong-type', 'malformed'].map(mode => ({ field, mode }))))('rejects $mode expected $field before runtime work', async ({ field, mode }) => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    const before = opsCaller()
+    const value: Record<string, unknown> = { ...expectedCoreFacts() }
+    if (mode === 'missing') Reflect.deleteProperty(value, field)
+    else value[field] = mode === 'wrong-type' ? 123 : 'malformed'
+    // Invalid external JavaScript options exercise the runtime parser, not the typed caller.
+    await expect(runPackagedCopilotAcceptance({ ...fixture.options,
+      expectedCoreSource: value as unknown as ExpectedCoreSource })).rejects.toThrow()
+    expect(effects.verifyRuntime).not.toHaveBeenCalled()
+    expect(effects.exec).not.toHaveBeenCalled()
+    expect(effects.launch).not.toHaveBeenCalled()
+    expect(callerIdentity()).toEqual(before)
+  })
+
+  it.each(['null', 'array', 'extra', 'symbol', 'inherited', 'accessor', 'non-enumerable'] as const)('rejects %s source-fact records without reading accessors', async (mode) => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    opsCaller()
+    const getter = vi.fn(() => 'a'.repeat(40))
+    const facts = expectedCoreFacts()
+    let value: unknown = facts
+    if (mode === 'null') value = null
+    else if (mode === 'array') value = Object.values(facts)
+    else if (mode === 'extra') value = { ...facts, caller: 'foreign' }
+    else if (mode === 'symbol') value = { ...facts, [Symbol('extra')]: 'foreign' }
+    else if (mode === 'inherited') value = Object.create(facts) as unknown
+    else if (mode === 'accessor') Object.defineProperty(facts, 'commit', { enumerable: true, get: getter })
+    else Object.defineProperty(facts, 'commit', { value: facts.commit, enumerable: false })
+    await expect(runPackagedCopilotAcceptance({ ...fixture.options, expectedCoreSource: value as ExpectedCoreSource })).rejects.toThrow()
+    expect(getter).not.toHaveBeenCalled()
+    expect(effects.verifyRuntime).not.toHaveBeenCalled()
+    expect(effects.exec).not.toHaveBeenCalled()
+  })
+
+  it('owns expectations before the first await and never returns a mutable caller object', async () => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    opsCaller()
+    const expected = expectedCoreFacts()
+    const original = { ...expected }
+    effects.verifyRuntime.mockImplementation(async () => {
+      Object.assign(expected, { commit: 'f'.repeat(40), runtimeSha256: 'f'.repeat(64) })
+      await Promise.resolve()
+    })
+    const result = await runPackagedCopilotAcceptance({ ...fixture.options, expectedCoreSource: expected })
+    expect(result).toEqual(original)
+    expect(result).not.toEqual(expected)
+  })
+
+  it('rejects a descriptor upstream version that differs from the reviewed plan before profile allocation', async () => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    opsCaller()
+    const runtimeBytes = Buffer.from(JSON.stringify({ release: { version: '0.1.6-alpha.1' } }))
+    effects.runtimeBytes.mockReturnValue(runtimeBytes)
+    await expect(runPackagedCopilotAcceptance({ ...fixture.options, expectedCoreSource: { ...expectedCoreFacts(), runtimeSha256: hash(runtimeBytes) } })).rejects.toThrow('Observed Core runtime')
+    expect(effects.allocated).toHaveLength(0)
+    expect(effects.launch).not.toHaveBeenCalled()
+  })
+
+  it('anchors Git and reviewed plan reads to the imported Core fixture rather than caller cwd', async () => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    opsCaller()
+    const expected = expectedCoreFacts()
+    const previous = process.cwd()
+    const callerRoot = mkdtempSync(join(tmpdir(), 'copilot-caller-'))
+    directories.push(callerRoot)
+    effects.allocated = []
+    try {
+      process.chdir(callerRoot)
+      const observed = await runPackagedCopilotAcceptance({ ...fixture.options, expectedCoreSource: expected })
+      expect(observed).toEqual(expected)
+      expect(process.cwd()).toBe(realpathSync.native(callerRoot))
+      const calls = effects.exec.mock.calls.filter(([file]) => file === 'git')
+      expect(calls).toEqual([
+        ['git', ['rev-parse', 'HEAD'], { cwd: resolve(import.meta.dirname, '../../..'), encoding: 'utf8' }],
+        ['git', ['rev-parse', 'HEAD^{tree}'], { cwd: resolve(import.meta.dirname, '../../..'), encoding: 'utf8' }],
+      ])
+    } finally { process.chdir(previous) }
+  })
+
+  it.each(['observer-sync', 'observer-async', 'observer-undefined', 'home-cleanup', 'ancestor-cleanup', 'close',
+    'functional-write', 'acceptance-write', 'initial-diagnostic', 'final-diagnostic', 'primary-and-cleanup'] as const)(
+    'never returns Core facts after %s failure and preserves the original exception', async (stage) => {
+      const fixture = ownerFixture()
+      const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+      const before = opsCaller()
+      const primary = stage === 'observer-undefined' ? undefined : new Error(stage)
+      const observerFailure = stage.startsWith('observer-') || stage.includes('diagnostic') || stage === 'primary-and-cleanup'
+      const inspectProfile = observerFailure ? (stage === 'observer-async' ? async () => { throw primary } : () => { throw primary }) : undefined
+      if (stage === 'close') fixture.close.mockRejectedValue(primary)
+      let injected = false
+      effects.fault = (operation, path) => {
+        expect(callerIdentity()).toEqual(before)
+        const file = basename(String(path))
+        if ((stage === 'home-cleanup' && operation === 'remove' && String(path).includes('packaged-copilot-'))
+          || (stage === 'ancestor-cleanup' && operation === 'remove' && String(path).includes('legacy-mcp-sdk-'))
+          || (stage === 'functional-write' && operation === 'publish' && file === 'functional-results.json')
+          || (stage === 'acceptance-write' && operation === 'publish' && file === 'acceptance.json')) throw primary
+        if (stage === 'primary-and-cleanup' && (operation === 'remove' || (operation === 'publish' && file === 'failure.json'))) throw new Error('secondary failure')
+        if (!injected && ((stage === 'initial-diagnostic' && operation === 'publish' && file === 'failure.json')
+          || (stage === 'final-diagnostic' && operation === 'finalize' && file === 'failure.json'))) {
+          injected = true
+          throw new Error('secondary diagnostic failure')
+        }
+      }
+      await expect(runPackagedCopilotAcceptance({ ...fixture.options, expectedCoreSource: expectedCoreFacts(),
+        ...(inspectProfile === undefined ? {} : { inspectProfile }) })).rejects.toBe(primary)
+      expect(existsSync(join(fixture.options.output, 'acceptance.json'))).toBe(false)
+      expect(callerIdentity()).toEqual(before)
+      if (stage.includes('diagnostic')) expect(injected).toBe(true)
+    },
+  )
+})
 
 it('imports acceptance without parsing CLI arguments or starting runtime work', async () => {
   const fixture = await import('./fixtures/copilot-release-smoke.ts')
