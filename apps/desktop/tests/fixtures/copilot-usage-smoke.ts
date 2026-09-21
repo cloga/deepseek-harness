@@ -1,4 +1,4 @@
-/** Read-only packaged evidence for the alpha32 Copilot account-usage capability. */
+/** Read-only packaged evidence for the required Copilot account-usage capability. */
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -24,7 +24,7 @@ export interface SignedOutCopilotUsageEvidence {
 /**
  * Read the installed plugin's immutable capability declaration without loading its code.
  * @param profile - Isolated packaged Desktop profile after provisioning.
- * @returns Minimal owned evidence for the required alpha32 capability and its regressions.
+ * @returns Minimal owned evidence for the required account-usage capability and its regressions.
  */
 export function inspectCopilotUsageCapability(profile: string): CopilotUsageCapabilityEvidence {
   const raw: unknown = JSON.parse(readFileSync(join(
@@ -56,12 +56,15 @@ export function inspectCopilotUsageCapability(profile: string): CopilotUsageCapa
 }
 
 /**
- * Assert that a fresh signed-out, no-Session page emits no account-usage presentation.
+ * Await the signed-out plugin account, then check the whole no-Session page for usage presentation.
  * The immutable capability regression owns the Host no-network claim; this DOM check has no Host-request instrumentation.
- * @param page - Actual packaged Desktop application page.
+ * @param page - Actual packaged Desktop application page with Settings > Models opened.
  * @returns Actual emitted DOM counts and the explicit no-invocation boundary.
  */
 export async function inspectSignedOutCopilotUsage(page: Page): Promise<SignedOutCopilotUsageEvidence> {
+  const account = page.locator('[data-dsh-github-copilot-compact-account]')
+  await account.waitFor({ state: 'visible' })
+  await account.getByRole('button', { name: 'Sign in with GitHub', exact: true }).waitFor({ state: 'visible' })
   const usageTriggerCount = await page.locator('[data-copilot-usage-trigger]').count()
   assert.equal(usageTriggerCount, 0, 'Signed-out startup without a Session must not mount the Copilot usage control')
   const accountUsageTextCount = await page.getByText(/^(?:Copilot credits|Premium requests|Copilot usage)$/u).count()

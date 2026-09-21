@@ -60,6 +60,14 @@ Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须�
 
 Publication run 必须使用当前 `master`。受保护 release job 是唯一具有 `contents: write` 的 job。它下载 build artifact，交叉检查完整 asset set，以精确 source commit tag 创建 draft，上传每个 asset，并只在 asset set 完整后发布。随后它要求 GitHub 报告 release immutable，tag 与 release target 解析到 build commit，并且每个 remote asset digest 匹配本地 bytes。最后一个只读 job 通过仅用于构建的元数据适配器针对 GitHub 运行已发布 discovery，并要求它选择经过评审的 version、sequence、commit 与 tree。
 
+<a id="positive-packaged-plugin-acceptance"></a>
+
+## 打包插件正向验收
+
+未登录页面没有用量控件，不能证明符合条件的 Session 能成功渲染：Core 的 Slot 错误边界可能停用崩溃的贡献，而应用仍可使用。因此打包 smoke 保留启动负向检查，并新增独立的合成 Session context，使用实际打包的 module loader、renderer、Session selector、Slot registry 及已安装的已发布 Client。它委托并恢复公开 bootstrap 方法，不修改 Core 实现或应用服务。浏览器 fixture 源码先移除类型再求值，而不是经可能引入闭包 helper 的 source loader 序列化。
+
+合成 quota 响应与 model-selection observable 只属于验收 context，该 context 没有 Host transport 或凭据服务。两条 Copilot route 都必须通过正向渲染、删除与重新打开、provider 切换、兄弟节点保留及释放检查；错误不能变成仅凭缺失的成功。Runtime 清单与 Client hash 标识实际验收产物。此方案明确舍弃 live account 和原生持久化 Session 覆盖，以保持 release qualification 不需要凭据。[Desktop 验收文档](../../../../apps/desktop/README.zh.md#isolated-provisioning-acceptance) 说明限制；真实账户使用与操作者安装仍是独立资格检查。
+
 ## Workflow 发布策略
 
 [fork 发布策略](../../../../.github/AGENTS.md#fork-publication-policy) 将 Desktop 确定为默认公开交付物，也涵盖 Core/Web 变更。Issue #90 表明，checksum 有效的包 tarball 仍可能违反用户批准的产品与通道要求。Release 标题和资产数量不能证明交付了 installer。

@@ -12,6 +12,7 @@ import {
   ipcMain,
   Menu,
   protocol,
+  shell,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
 } from 'electron'
@@ -45,6 +46,7 @@ import { desktopErrorState } from './startup-error.ts'
 import { startupFailureDocument } from './startup-document.ts'
 import { confirmDesktopPluginMutation, DesktopPluginMutationCancelled } from './plugin-mutation-confirmation.ts'
 import { requestDesktopRendererImpact } from './renderer-impact.ts'
+import { installDesktopWindowNavigation } from './window-navigation.ts'
 
 const SCHEME = 'dsh-app'
 class DesktopOperationBusy extends Error {}
@@ -144,18 +146,23 @@ function createWindow(preload: string, show = false): BrowserWindow {
       webSecurity: true,
     },
   })
-  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  window.webContents.on('will-navigate', (event, url) => {
-    if (new URL(url).protocol !== `${SCHEME}:`) event.preventDefault()
-    const page = emergencyPages.get(window)
-    if (page === undefined || page.busy || window.webContents.getURL() !== page.url) return
-    const action = new URL(url)
-    if (action.protocol !== 'dsh-recovery:' || !['restart', 'plugins', 'reset'].includes(action.hostname)) return
-    if (action.hostname !== 'restart' && !profileRecoveryAvailable()) return
-    page.busy = true
-    void recoverApplication(action.hostname as RecoveryAction).catch(async (error: unknown) => {
-      if (!(error instanceof DesktopOperationBusy) && !window.isDestroyed()) await showEmergencyDocument(window, `${page.message}\n${desktopErrorState(error).message}`)
-    }).catch((error: unknown) => { console.error(error) }).finally(() => { page.busy = false })
+  installDesktopWindowNavigation(window.webContents, {
+    openExternal: url => shell.openExternal(url),
+    openFailed: () => {
+      if (window.isDestroyed()) return
+      const messages = resolveDesktopLocale(app.getLocale()).messages
+      dialog.showErrorBox(messages.externalLinkFailedTitle, messages.externalLinkFailedAdvice)
+    },
+    recover: (action) => {
+      const page = emergencyPages.get(window)
+      if (page === undefined || page.busy || window.webContents.getURL() !== page.url) return
+      if (!['restart', 'plugins', 'reset'].includes(action.hostname)) return
+      if (action.hostname !== 'restart' && !profileRecoveryAvailable()) return
+      page.busy = true
+      void recoverApplication(action.hostname as RecoveryAction).catch(async (error: unknown) => {
+        if (!(error instanceof DesktopOperationBusy) && !window.isDestroyed()) await showEmergencyDocument(window, `${page.message}\n${desktopErrorState(error).message}`)
+      }).catch((error: unknown) => { console.error(error) }).finally(() => { page.busy = false })
+    },
   })
   return window
 }
