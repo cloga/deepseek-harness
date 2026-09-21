@@ -56,6 +56,7 @@ The [fork release-channel decision](../../implemented/architecture/2026-09-15-fo
 - Explicitly authorized shell activation verifies staged health, final-location readiness, actual inventory and receipts, and rollback on failure. No successful receipt is recorded for an optional failure or preparation alone.
 - Official update UI and InputHub migration receive mounted-composer, detached-send, stale-report, disposal, and multiline Goal browser evidence. Installation never accepts scalar impact reporting as consent.
 - Manual compaction uses the accepted selection without consuming a pending chat selection. `MAX_TOKENS` / `summary-truncated` fails closed without increasing the output cap, retrying, or committing an incomplete checkpoint. Scoped cancellation, error, UI, and replay checks do not establish oversized-history rescue, live-provider acceptance, or qualification of the alpha2 candidate.
+- [Own-input scroll following](../../../../packages/client/ui-chat/README.md#scroll-ownership) survives an ordered local-echo/durable-append transition while a reader sample is pending, without weakening first-open restoration, paging anchors or later reader intent. Real browser acceptance remains required; a truncated historical trace cannot establish the internal ordering.
 - Documentation pairing, archive seals, focused unit tests, integrated build/type checks, and isolated packaged release qualification pass on the exact selected source. Existing installations, active Sessions, and immutable releases remain untouched during qualification.
 
 ## Risks
