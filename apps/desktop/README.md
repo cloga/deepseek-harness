@@ -127,6 +127,12 @@ Windows Ops selects and locks one supported upstream baseline at a time. `cloga/
 
 ## Develop
 
+<a id="plugin-acquisition-diagnostic"></a>
+
+The manual [plugin acquisition diagnostic](../../.github/workflows/desktop-plugin-acquisition-diagnostic.yml) uses `windows-2025`, Node 24.13.0, pnpm 11.7.0, and a frozen lockfile. Required `expected_source_sha` and `expected_plan_sha256` bind the reviewed diagnostic checkout and the raw-byte SHA-256 of the release-plan JSON before acquisition network access; the plan pins exact alpha.35 and product source stays unchanged. The coordinating operator dispatches it only after the merged workflow is registered. The [collector](scripts/diagnose-plugin-acquisition.ts) calls the unchanged `src/plugin-source` helper `acquireDesktopPluginArtifact` once in a credential-free child launched through `desktopSmokeEnvironment`. It preserves anonymous requests and all real release, tag, asset, SHA-256, SRI, and archive validation; it performs no retries, plugin installation, downloaded-code execution, application restart, Model/OAuth/account operations, or publication.
+
+The fetch observer delegates the original input/init unchanged and retains at most 30 request observations: route class, host, status, and strictly format-validated `x-ratelimit-remaining`, `x-ratelimit-reset`, `retry-after`, and `x-github-request-id` headers. The diagnostic additionally restricts expected API routes, queries, ports, authentication, and request count; these are diagnostic bounds, not changes to product policy. `observerRejection` records a fixed refusal category separately from observed HTTP status, so an internal refusal is not mislabeled as HTTP 403. It persists no URL queries, `Location`, response bodies, raw errors, or tokens. The workflow uploads only the exact sanitized JSON report with one-day retention, including after a failed acquisition step; acquisition or owned-temporary-directory cleanup failure fails the run. This is a source-helper observation under hosted Node, not the packaged Electron carrier; the runner IP can also differ. Even success does not qualify a release, and HTTP 403 alone does not prove rate limiting. The [maintenance decision](../../.agents/notes/implemented/architecture/2026-09-20-managed-desktop-copilot-maintenance.md) owns the evidence limits.
+
 <a id="isolated-provisioning-acceptance"></a>
 
 ### Isolated provisioning acceptance

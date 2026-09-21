@@ -127,6 +127,12 @@ Windows Ops 每次选择并锁定一个受支持的 upstream baseline。`cloga/d
 
 ## 开发
 
+<a id="plugin-acquisition-diagnostic"></a>
+
+手动[插件获取诊断](../../.github/workflows/desktop-plugin-acquisition-diagnostic.yml)使用 `windows-2025`、Node 24.13.0、pnpm 11.7.0 和冻结 lockfile。必填的 `expected_source_sha` 与 `expected_plan_sha256` 在获取过程访问网络前绑定经过评审的诊断 checkout 和 release-plan JSON 原始字节的 SHA-256；plan 固定精确 alpha.35，产品源码保持不变。协调操作者仅在合并后的 workflow 完成注册后发起 dispatch。[采集器](scripts/diagnose-plugin-acquisition.ts)在通过 `desktopSmokeEnvironment` 启动的无凭据子进程中，仅调用一次未修改的 `src/plugin-source` helper `acquireDesktopPluginArtifact`。它保留匿名请求及全部真实 Release、tag、asset、SHA-256、SRI 与归档验证；不重试、不安装插件、不执行下载的代码、不重启应用、不进行 Model/OAuth/账户操作，也不发布。
+
+Fetch 观察器原样转交原始 input/init，最多保留 30 条请求观察：路由类别、主机、状态，以及经过严格格式验证的 `x-ratelimit-remaining`、`x-ratelimit-reset`、`retry-after` 和 `x-github-request-id` header。诊断额外限制预期 API 路由、query、端口、身份认证和请求次数；这些是诊断边界，不改变产品策略。`observerRejection` 单独记录固定拒绝类别，不与已观察的 HTTP 状态混淆，因此内部拒绝不会被误标为 HTTP 403。它不持久化 URL query、`Location`、响应正文、原始错误或 token。Workflow 只上传精确指定的脱敏 JSON 报告，保留一天，获取步骤失败后也上传；获取失败或自有临时目录清理失败都会使运行失败。这是在托管 Node 下对源码 helper 的观察，不是打包的 Electron 载体；runner IP 也可能不同。即使成功也不构成发布验收，单独的 HTTP 403 不能证明限流。[维护决策](../../.agents/notes/implemented/architecture/2026-09-20-managed-desktop-copilot-maintenance.zh.md)负责说明证据限制。
+
 <a id="isolated-provisioning-acceptance"></a>
 
 ### 隔离 provisioning 验收
