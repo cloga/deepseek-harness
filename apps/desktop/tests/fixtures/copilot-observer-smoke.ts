@@ -129,7 +129,7 @@ export async function runPackagedCopilotObserverCanary(
   try { await runAcceptance({
     application,
     output,
-    expectedCoreSource: options.expectedCoreSource,
+    ...(options.expectedCoreSource === undefined ? {} : { expectedCoreSource: options.expectedCoreSource }),
     inspectProfile(paths) {
       assert.equal(captures.length, 0, 'Observer must run once')
       assert(Object.isFrozen(paths), 'Observer paths must be immutable')
