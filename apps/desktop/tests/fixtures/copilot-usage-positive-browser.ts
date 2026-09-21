@@ -20,7 +20,7 @@ interface FixtureContext {
 }
 interface FixturePlugin {
   inject?: unknown
-  apply: (this: void, context: FixtureContext) => unknown
+  apply: (context: FixtureContext) => unknown
 }
 interface FixtureObservable {
   getSnapshot(): unknown
@@ -42,7 +42,7 @@ interface FixtureSlots {
   installScope(name: string, adapter: FixtureScope): unknown
   register(
     definition: { name: string; children: Record<string, { kind: string; scope: string }> },
-    component: (props: { renderSlot: (this: void, name: string, props: object) => unknown; SessionProvider: unknown }) => unknown,
+    component: (props: { renderSlot: (name: string, props: object) => unknown; SessionProvider: unknown }) => unknown,
   ): unknown
   entriesOfSlot(name: string): readonly unknown[]
 }
