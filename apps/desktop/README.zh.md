@@ -114,9 +114,9 @@ Windows Ops 验证 `resources/managed-update/capability.json` 中的 `desktopNat
 
 <a id="isolated-provisioning-acceptance"></a>
 
-### 隔离 provisioning 验收
+### 隔离打包插件验收
 
-Fork release smoke 保留首次启动及重启后的未登录、无 Session 检查，并要求[用量正向验收](tests/fixtures/copilot-usage-positive-smoke.ts)。正向 fixture 使用打包的 module loader、未改动的 Core renderer、真实 Session selector 与 Slot 错误边界，以及已安装的已发布 Copilot Client。独立 Cordis context 拥有合成 Session/model-selection observable 和 quota 响应，不提供 Host transport 或凭据。标准及 preview Copilot route 必须显示用量、响应 Session 删除与重新打开、在其他 provider 下隐藏，并在释放时移除订阅且不影响应用挂载节点。证据绑定已验证 runtime 与已安装 Client 的 hash。这是使用合成数据的打包 renderer 验收，不证明已认证账户 quota、原生持久化 Session 或用户已安装 profile 的资格。
+Fork release smoke 保留首次启动及重启后的未登录、无 Session 检查，并要求[用量正向验收](tests/fixtures/copilot-usage-positive-smoke.ts)。正向 fixture 使用打包的 module loader、未改动的官方 alpha2 renderer、真实 Session selector 与 Slot 错误边界，以及已安装的已发布 Copilot Client。独立 Cordis context 拥有合成 Session/model-selection observable 和 quota 响应，不提供 Host transport 或凭据。标准及 preview Copilot route 必须显示用量、处理继承与显式缺席的 Session binding、响应 Session 删除与重新打开、在其他 provider 下隐藏，并彻底释放订阅和 Slot 注册，恢复原始登出应用。证据绑定已验证 runtime 与原始已发布 Client 的 hash。这是使用合成数据的打包 renderer 验收，不证明已认证账户 quota、原生持久化 Session 或用户已安装 profile 的资格。[测试参考](tests/README.zh.md#verification-hosted)负责证明顺序与独立的真实安装升级要求。
 
 ### 开发应用
 

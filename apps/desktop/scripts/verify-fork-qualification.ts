@@ -6,6 +6,8 @@ import { closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, rea
 import { dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path'
 import { parseArgs } from 'node:util'
 import { createDesktopForkReleaseCapability, parseDesktopForkReleasePlan } from './fork-release.ts'
+import { assertReviewedCopilotUsageClient } from './copilot-usage-client-policy.ts'
+import { assertPositiveCopilotUsageEvidence } from '../tests/fixtures/copilot-usage-positive-smoke.ts'
 import { managedUpdateJsonSha256, parseDesktopManagedUpdateCapability, parseDesktopManagedUpdateManifest } from '../src/managed-update-protocol.ts'
 import { desktopPluginProvisioningPlanSha256, parseDesktopPluginProvisioningPlan, parseDesktopPluginProvisioningState } from '../src/plugin-provisioning.ts'
 import { parseDesktopPluginProvisionReceipt } from '../src/plugin-source.ts'
@@ -224,7 +226,7 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
   const ordinary = input(options.ordinaryEvidence, 'acceptance.json', 'ordinary.acceptance').value
   keys(ordinary, ['schemaVersion', 'scope', ...identityKeys, 'functionalAssertionsCompleted', 'normalAcceptanceCompleted', 'cleanupVerified',
     ...packagedTrue, ...packagedFalse, 'desktopVersion', 'runtimeVersion', 'versionMenus', 'plugin', 'transport', 'restartReceiptSha256', 'copilotUsageCapability', 'signedOutCopilotUsage', 'positiveCopilotUsage', 'positiveUsageHostTransport', 'hostQuotaNoNetworkEvidence', 'timeline'])
-  assert.equal(ordinary.schemaVersion, 1)
+  assert.equal(ordinary.schemaVersion, 2)
   assert.equal(ordinary.scope, 'packaged-acceptance')
   assert.match(text(ordinary.evidenceId), uuid)
   for (const field of identityKeys.filter(field => field !== 'evidenceId')) {
@@ -237,7 +239,7 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
   const f = functional.value
   keys(f, ['schemaVersion', 'scope', ...identityKeys, 'functionalAssertionsCompleted', 'normalAcceptanceCompleted', 'cleanupVerified',
     ...packagedTrue, ...packagedFalse, 'desktopVersion', 'runtimeVersion', 'versionMenus', 'plugin', 'transport', 'restartReceiptSha256', 'copilotUsageCapability', 'signedOutCopilotUsage', 'positiveCopilotUsage', 'positiveUsageHostTransport', 'hostQuotaNoNetworkEvidence', 'timeline'])
-  assert.equal(f.schemaVersion, 1)
+  assert.equal(f.schemaVersion, 2)
   assert.equal(f.scope, 'packaged-functional-observations')
   flags(f, [...packagedTrue, 'functionalAssertionsCompleted'], [...packagedFalse, 'normalAcceptanceCompleted', 'cleanupVerified'])
   assert.equal(f.desktopVersion, plan.version)
@@ -258,7 +260,8 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
     assert.equal(positive.runtimeSha256, runtime.sha256)
     assert.deepEqual(positive.pluginSource, copilot.source)
     assert.match(text(positive.installedClientSha256), /^[a-f0-9]{64}$/u)
-    // This is the observed installed client.js digest, not an independently verified archive-member digest.
+    assertReviewedCopilotUsageClient(copilot.source, text(positive.installedClientSha256))
+    // Retain independent-run equality in addition to the fixed reviewed source/Client policy.
     if (installedClientSha256 !== undefined) assert.equal(positive.installedClientSha256, installedClientSha256)
     installedClientSha256 = text(positive.installedClientSha256)
     flags(positive, ['originalSignedOutApplicationRestored'])
@@ -268,26 +271,13 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
     const cases = array(positive.cases)
     assert.equal(cases.length, 2)
     for (const [index, provider] of ['github-copilot', 'github-copilot-preview'].entries()) {
-      const usage = object(cases[index])
-      keys(usage, ['scope', 'provider', 'usageText', 'quotaReads', 'sessionSubscribed', 'removedSessionHidesUsage', 'otherProviderHidesUsage',
-        'clientDisposalRemovesUsage', 'selectorErrors', 'forbiddenRemoteCalls', 'hostTransport', 'applicationMountPreserved', 'syntheticSiblingPreserved'])
-      assert.equal(usage.scope, 'packaged-renderer-released-client-synthetic-session-and-quota')
-      assert.equal(usage.provider, provider)
-      assert.equal(usage.hostTransport, positive.hostTransport)
-      assert.match(text(usage.usageText), /7 used/u)
-      assert.equal(usage.quotaReads, 2)
-      assert.equal(usage.selectorErrors, 0)
-      assert.equal(usage.forbiddenRemoteCalls, 0)
-      flags(usage, ['sessionSubscribed', 'removedSessionHidesUsage', 'otherProviderHidesUsage', 'clientDisposalRemovesUsage',
-        'applicationMountPreserved', 'syntheticSiblingPreserved'])
+      assertPositiveCopilotUsageEvidence(cases[index], provider)
     }
   }
   const menus = array(f.versionMenus)
   assert.equal(menus.length, 2)
   const phases = ['initial', 'restart']
-  const events = ['launch', 'version-menu', 'application', 'account', 'usage-readonly', 'settings-readonly', 'packaged-graph']
-  const expectedTimeline = ['package-identity', ...phases.flatMap(phase =>
-    [...events, ...(phase === 'restart' ? ['positive-usage'] : []), 'closed'].map(event => `${phase}:${event}`))]
+  const events = ['launch', 'version-menu', 'application', 'account', 'usage-readonly', 'settings-readonly', 'packaged-graph', 'closed']
   // Canary runs last; its terminal timestamp also bounds the retained failure event below.
   let milliseconds = -1
   for (const record of [ordinary, f]) {
@@ -299,7 +289,15 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
       milliseconds = event.milliseconds
       return text(event.event)
     })
-    assert.deepEqual(timeline.filter(event => !phases.some(phase => event === `${phase}:provider-deferred`)), expectedTimeline)
+    const expectedTimeline = ['package-identity']
+    for (const phase of phases) {
+      for (const event of events) {
+        expectedTimeline.push(`${phase}:${event}`)
+        if (event === 'application' && timeline.includes(`${phase}:provider-deferred`)) expectedTimeline.push(`${phase}:provider-deferred`)
+        if (phase === 'restart' && event === 'packaged-graph') expectedTimeline.push('restart:positive-usage')
+      }
+    }
+    assert.deepEqual(timeline, expectedTimeline)
   }
   let previousGraph: RecordValue | undefined
   for (const [index, phase] of phases.entries()) {

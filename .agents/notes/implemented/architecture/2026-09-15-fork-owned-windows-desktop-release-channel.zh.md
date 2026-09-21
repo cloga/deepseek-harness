@@ -74,7 +74,7 @@ Publication run 必须使用当前 `master`。受保护 release job 是唯一具
 
 未登录页面没有用量控件，不能证明符合条件的 Session 能成功渲染：Core 的 Slot 错误边界可能停用崩溃的贡献，而应用仍可使用。因此打包 smoke 保留启动负向检查，并新增独立的合成 Session context，使用实际打包的 module loader、renderer、Session selector、Slot registry 及已安装的已发布 Client。它委托并恢复公开 bootstrap 方法，不修改 Core 实现或应用服务。浏览器 fixture 源码先移除类型再求值，而不是经可能引入闭包 helper 的 source loader 序列化。
 
-合成 quota 响应与 model-selection observable 只属于验收 context，该 context 没有 Host transport 或凭据服务。两条 Copilot route 都必须通过正向渲染、删除与重新打开、provider 切换、兄弟节点保留及释放检查；错误不能变成仅凭缺失的成功。Runtime 清单与 Client hash 标识实际验收产物。此方案明确舍弃 live account 和原生持久化 Session 覆盖，以保持 release qualification 不需要凭据。[Desktop 验收文档](../../../../apps/desktop/README.zh.md#isolated-provisioning-acceptance) 说明限制；真实账户使用与操作者安装仍是独立资格检查。
+合成 quota 响应与 model-selection observable 只属于验收 context，该 context 没有 Host transport 或凭据服务。官方 alpha2 的 observable Session binding 保留继承与显式缺席语义，而非模拟旧版仅 resolve 的 API。两条 Copilot route 都必须通过正向渲染、删除与重新打开、provider 切换、兄弟节点保留、原始 Slot 注册移除及订阅释放检查；成功前必须恢复 bootstrap／全局／错误监听器和原始未登录应用。错误不能变成仅凭缺失的成功。经过评审的 Copilot alpha.33 来源／产物元组与原始 Client hash，连同 runtime 清单，绑定实际验收字节。此方案明确将 live account 和原生持久化 Session 覆盖排除在正向 context 之外，但不表示完整发布 workflow 不需要凭据。[Desktop 验收文档](../../../../apps/desktop/README.zh.md#isolated-provisioning-acceptance) 说明限制；真实账户使用与操作者安装仍是独立资格检查。
 
 ## Workflow 发布策略
 

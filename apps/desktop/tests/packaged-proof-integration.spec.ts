@@ -16,9 +16,8 @@ import type { PositiveCopilotUsageEvidence } from './fixtures/copilot-usage-posi
 
 const boundary = vi.hoisted(() => ({
   pin: '', temporaryBase: '', launch: vi.fn(), exec: vi.fn(), runtimeRoot: vi.fn(), runtimeBytes: vi.fn(), environment: vi.fn(),
-  menu: vi.fn(), settings: vi.fn(), usage: vi.fn(), capability: vi.fn(),
-  captureUsage: vi.fn(), positiveUsage: vi.fn<(page: unknown, provider: string) => Promise<PositiveCopilotUsageEvidence>>(),
-  allocated: [] as string[],
+  menu: vi.fn(), settings: vi.fn(), usage: vi.fn(), capability: vi.fn(), allocated: [] as string[],
+  reviewedPlugin: undefined as unknown, installedClientSha256: '',
 }))
 vi.mock('node:fs', async (original) => {
   const fs = await original<typeof import('node:fs')>()
@@ -35,6 +34,13 @@ vi.mock('node:fs', async (original) => {
     },
   }
 })
+vi.mock('../scripts/copilot-usage-client-policy.ts', () => ({
+  // Admit only this explicitly inert Client's real digest, retaining the original reviewed plan tuple.
+  assertReviewedCopilotUsageClient(source: unknown, installedClientSha256: string): void {
+    expect(source).toEqual(boundary.reviewedPlugin)
+    expect(installedClientSha256).toBe(boundary.installedClientSha256)
+  },
+}))
 vi.mock('node:os', async (original) => {
   const os = await original<typeof import('node:os')>()
   return { ...os, tmpdir: () => boundary.temporaryBase || os.tmpdir() }
@@ -50,9 +56,6 @@ vi.mock('../scripts/smoke-environment.ts', () => ({ desktopSmokeEnvironment: bou
 vi.mock('../src/plugin-receipts.ts', () => ({ assertDesktopProvisioningInventory: vi.fn() }))
 vi.mock('./fixtures/desktop-version-menu-smoke.ts', () => ({ inspectDesktopVersionMenu: boundary.menu }))
 vi.mock('./fixtures/copilot-settings-smoke.ts', () => ({ inspectPackagedCopilotSettings: boundary.settings }))
-vi.mock('./fixtures/copilot-usage-positive-smoke.ts', () => ({
-  capturePackagedUsageModules: boundary.captureUsage, inspectPositiveCopilotUsage: boundary.positiveUsage,
-}))
 vi.mock('./fixtures/copilot-usage-smoke.ts', () => ({ inspectCopilotUsageCapability: boundary.capability, inspectSignedOutCopilotUsage: boundary.usage }))
 
 const source = 'a'.repeat(40)
@@ -62,6 +65,11 @@ const token = '11111111-2222-4333-8444-555555555555'
 const hash = (bytes: string | Uint8Array): string => createHash('sha256').update(bytes).digest('hex')
 const rawHash = (path: string): string => hash(readFileSync(path))
 const save = (path: string, value: unknown): void => { writeFileSync(path, JSON.stringify(value, undefined, 2) + '\n') }
+function readRecord(path: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(readFileSync(path, 'utf8'))
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected emitted receipt object')
+  return value as Record<string, unknown>
+}
 const flags = (names: readonly string[], value: boolean): Record<string, boolean> => Object.fromEntries(names.map(name => [name, value]))
 const settings = {
   modelRolesViewLoaded: true, currentWorkspaceReadOnly: true, searchProviderCatalogLoaded: true,
@@ -72,6 +80,17 @@ const capabilityEvidence = {
   signedOutNetworkRegressionDeclared: true, lifecycleRegressionDeclared: true,
 }
 const signedOut = { usageTriggerCount: 0, accountUsageTextCount: 0, usageSurfaceAbsent: true, hostQuotaRequestInstrumentation: 'not-available-in-packaged-smoke' }
+
+function positiveCase(provider: string): PositiveCopilotUsageEvidence {
+  return {
+    scope: 'packaged-renderer-released-client-synthetic-session-and-quota', provider, usageText: '7 used · 13 left',
+    quotaReads: 4, selectorErrors: 0, forbiddenRemoteCalls: 0, hostTransport: 'not-provided-to-isolated-fixture',
+    sessionSubscribed: true, removedSessionHidesUsage: true, otherProviderHidesUsage: true, clientDisposalRemovesUsage: true,
+    applicationMountPreserved: true, syntheticSiblingPreserved: true, inheritedSessionScopeVerified: true,
+    explicitUndefinedSessionScopeAbsent: true, removedSessionRestoresUsage: true, closedSessionHidesUsage: true,
+    closedSessionRestoresUsage: true, restoredProviderShowsUsage: true, subscriptionsReleased: true, syntheticContextDisposed: true,
+  }
+}
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -85,7 +104,7 @@ afterEach(() => {
 })
 
 /** Assemble only preconditions and non-packaged evidence; production functions alone emit the packaged proof graph. */
-function integrationFixture() {
+function integrationFixture(alteredClientBytes?: string) {
   // Resolve the newly owned root before deriving identities; Windows tmpdir may use an 8.3 parent spelling.
   const directory = realpathSync.native(mkdtempSync(join(tmpdir(), 'packaged-proof-integration-')))
   const application = join(directory, 'unpacked', 'cloga-deepseek-harness.exe')
@@ -122,6 +141,11 @@ function integrationFixture() {
     companyName: 'GitHub, Inc.', productName: plan.identity.productName, fileDescription: plan.identity.productName, signature: 'NotSigned',
   }
   const plugin = plan.desktopProvisioning.plugins[0]!.source
+  const inertClientPath = join(directory, 'inert-original-client.js')
+  writeFileSync(inertClientPath, '// INERT actual-owner Client identity bytes; never imported or executed.\n')
+  boundary.reviewedPlugin = plugin
+  boundary.installedClientSha256 = rawHash(inertClientPath)
+  const installedClientBytes = alteredClientBytes ?? readFileSync(inertClientPath)
   const pluginReceipt = parseDesktopPluginProvisionReceipt({
     schemaVersion: 1, capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, source: plugin, releaseId: 123,
     assetId: plugin.assetId, packageName: plugin.packageName, version: plugin.version, artifactSha256: plugin.sha256,
@@ -142,13 +166,6 @@ function integrationFixture() {
   boundary.settings.mockResolvedValue(settings)
   boundary.capability.mockReturnValue(capabilityEvidence)
   boundary.usage.mockResolvedValue(signedOut)
-  boundary.captureUsage.mockResolvedValue(undefined)
-  boundary.positiveUsage.mockImplementation(async (_page: unknown, provider: string) => ({
-    scope: 'packaged-renderer-released-client-synthetic-session-and-quota', provider, usageText: 'Copilot credits: 7 used', quotaReads: 2,
-    sessionSubscribed: true, removedSessionHidesUsage: true, otherProviderHidesUsage: true, clientDisposalRemovesUsage: true,
-    selectorErrors: 0, forbiddenRemoteCalls: 0, hostTransport: 'not-provided-to-isolated-fixture',
-    applicationMountPreserved: true, syntheticSiblingPreserved: true,
-  }))
   type Locator = {
     waitFor(): Promise<void>
     click(): Promise<void>
@@ -163,12 +180,36 @@ function integrationFixture() {
     waitFor: async () => {}, click: async () => {}, isEnabled: async () => true, count: async () => 0,
     innerText: async () => '', screenshot: async () => {}, locator: () => locator, getByRole: () => locator,
   }
-  const page = { ...locator, setDefaultTimeout() {}, waitForFunction: async () => {}, url: () => 'dsh-app://app/', isClosed: () => false }
+  const positiveRoutes: string[] = []
+  let captureDisposed = false
+  let captureRestored = false
+  const page = {
+    ...locator, setDefaultTimeout() {}, waitForFunction: async () => {}, url: () => 'dsh-app://app/', isClosed: () => false,
+    addInitScript: async (script: string) => {
+      captureDisposed = false; captureRestored = false
+      expect(script.endsWith('\ncaptureUsageModulesInBrowser()')).toBe(true)
+      return { dispose: async () => { captureDisposed = true } }
+    },
+    reload: async () => {},
+    evaluate: async (script: string): Promise<unknown> => {
+      if (script.endsWith('\nrestoreUsageModulesInBrowser()')) {
+        expect(captureDisposed).toBe(true)
+        captureRestored = true
+        return undefined
+      }
+      const match = /\nrunPositiveUsageInBrowser\("(github-copilot(?:-preview)?)"\)$/u.exec(script)
+      const provider = match?.[1]
+      if (provider === undefined) throw new Error('Unexpected isolated Page evaluation')
+      positiveRoutes.push(provider)
+      return positiveCase(provider)
+    },
+  }
   boundary.launch.mockImplementation(async () => {
     rounds++
     mkdirSync(profile, { recursive: true })
-    mkdirSync(join(profile, 'node_modules/dsh-github-copilot/lib'), { recursive: true })
-    writeFileSync(join(profile, 'node_modules/dsh-github-copilot/lib/client.js'), 'inert installed client.js')
+    const clientDirectory = join(profile, 'node_modules', plugin.packageName, 'lib')
+    mkdirSync(clientDirectory, { recursive: true })
+    writeFileSync(join(clientDirectory, 'client.js'), installedClientBytes)
     save(join(profile, 'desktop-plugin-receipts.json'), { schemaVersion: 1, receipts: { [plugin.packageName]: pluginReceipt }, owners: { [plugin.packageName]: 'release' } })
     save(join(profile, 'desktop-plugin-provisioning-state.json'), provisionedState)
     save(join(profile, 'package.json'), { dependencies: { [plugin.packageName]: `file:.desktop-plugin-artifacts/${plugin.sha256}.tgz` }, dsh: { profile: { bundles: [plugin.packageName] } } })
@@ -263,9 +304,12 @@ function integrationFixture() {
     ...flags(['newlyInstalledTargetHealthyAtFirstConsent', 'verifiedGithubReleaseReceiptForFixture', 'choicesAcrossInstallerUpgradeVerified', 'draftPersistedAcrossQuitVerified', 'promotionFailureRollbackVerified', 'managedHandoffVerified'], false),
     checkpoints: ['synthetic-checkpoint'], shellIncarnations: [{ launchId: token, pid: 12, launcherPid: 13, launchReturned: true, bound: true, exited: true, launcherExited: true }], pageErrors: [], cleanupErrors: [], secondaryErrors: [],
   })
-  return { ownerOptions: { application, output: packagedEvidence }, get rounds() { return rounds }, options: {
-    planPath, releaseAssets, ordinaryEvidence, packagedEvidence, upgradeRoot, baselineDirectory, expectedSource: source, runId: '123', runAttempt: '2',
-  } }
+  return {
+    ownerOptions: { application, output: packagedEvidence }, get rounds() { return rounds },
+    positiveRoutes, get captureDisposed() { return captureDisposed }, get captureRestored() { return captureRestored }, options: {
+      planPath, releaseAssets, ordinaryEvidence, packagedEvidence, upgradeRoot, baselineDirectory, expectedSource: source, runId: '123', runAttempt: '2',
+    },
+  }
 }
 
 function packagedHashes(directory: string): Record<string, string> {
@@ -296,8 +340,14 @@ describe('actual owner/wrapper receipt producer to real qualification consumer',
   it('verifies original emitted receipts and before-cleanup diagnostics without rewriting any packaged evidence', async () => {
     const fixture = integrationFixture()
     await runPackagedCopilotAcceptance({ ...fixture.ownerOptions, output: fixture.options.ordinaryEvidence })
+    expect(fixture.captureDisposed).toBe(true)
+    expect(fixture.captureRestored).toBe(true)
+    expect(fixture.positiveRoutes).toEqual(['github-copilot', 'github-copilot-preview'])
     await runPackagedCopilotObserverCanary(fixture.ownerOptions, runPackagedCopilotAcceptance)
     expect(fixture.rounds).toBe(4)
+    expect(fixture.positiveRoutes).toEqual(['github-copilot', 'github-copilot-preview', 'github-copilot', 'github-copilot-preview'])
+    expect(fixture.captureDisposed).toBe(true)
+    expect(fixture.captureRestored).toBe(true)
     expect(existsSync(join(fixture.options.packagedEvidence, 'acceptance.json'))).toBe(false)
     const original = packagedHashes(fixture.options.packagedEvidence)
     const originalOrdinary = packagedHashes(fixture.options.ordinaryEvidence)
@@ -307,16 +357,22 @@ describe('actual owner/wrapper receipt producer to real qualification consumer',
     expect(summary.inputs['ordinary.helper']).toBe(originalOrdinary['helper-acceptance.json'])
     expect(summary.inputs['ordinary.positiveUsage']).toBe(originalOrdinary['positive-usage.json'])
     expect(summary.inputs['packaged.positiveUsage']).toBe(original['positive-usage.json'])
-    expect(boundary.captureUsage).toHaveBeenCalledTimes(2)
-    expect(boundary.positiveUsage.mock.calls.map(call => call[1])).toEqual([
-      'github-copilot', 'github-copilot-preview', 'github-copilot', 'github-copilot-preview',
-    ])
     expect(packagedHashes(fixture.options.ordinaryEvidence)).toEqual(originalOrdinary)
+    for (const [root, file] of [[fixture.options.ordinaryEvidence, 'acceptance.json'], [fixture.options.packagedEvidence, 'functional-results.json']]) {
+      const functional = readRecord(join(root!, file!))
+      const positive = readRecord(join(root!, 'positive-usage.json'))
+      expect(functional.schemaVersion).toBe(2)
+      expect(functional.positiveCopilotUsage).toEqual(positive.cases)
+      expect(positive.installedClientSha256).toBe(boundary.installedClientSha256)
+    }
     expect(summary).toMatchObject({
       packagedFunctionalVerified: true, unexpectedObserverFailureCleanupVerified: true,
       normalPackagedAcceptanceCompleted: true, canaryNormalAcceptanceCompleted: false,
     })
-    for (const [name, file] of [['functional', 'functional-results.json'], ['failure', 'failure.json'], ['observer', 'observer-cleanup.json'], ['suite', 'packaged-suite.json']] as const) {
+    for (const [name, file] of [
+      ['functional', 'functional-results.json'], ['failure', 'failure.json'], ['observer', 'observer-cleanup.json'],
+      ['suite', 'packaged-suite.json'], ['positiveUsage', 'positive-usage.json'],
+    ] as const) {
       expect(summary.inputs[`packaged.${name}`]).toBe(original[file])
     }
     expect(packagedHashes(fixture.options.packagedEvidence)).toEqual(original)
@@ -337,6 +393,27 @@ describe('actual owner/wrapper receipt producer to real qualification consumer',
     expect(() => verifyForkQualification(fixture.options)).toThrow()
     writeFileSync(path, original)
     unlinkSync(path)
+    expect(() => verifyForkQualification(fixture.options)).toThrow()
+  })
+
+  it('rejects contradictory original positive evidence after a successful actual owner run', async () => {
+    const fixture = integrationFixture()
+    await runPackagedCopilotAcceptance({ ...fixture.ownerOptions, output: fixture.options.ordinaryEvidence })
+    await runPackagedCopilotObserverCanary(fixture.ownerOptions, runPackagedCopilotAcceptance)
+    expect(verifyForkQualification(fixture.options).packagedFunctionalVerified).toBe(true)
+    const path = join(fixture.options.packagedEvidence, 'positive-usage.json')
+    const positive = readRecord(path)
+    positive.hostTransport = 'unexpected-live-transport'
+    save(path, positive)
+    expect(() => verifyForkQualification(fixture.options)).toThrow()
+  })
+
+  it('rejects altered inert installed Client bytes through the real owner hash and shared policy boundary', async () => {
+    const fixture = integrationFixture('// ALTERED INERT Client bytes; never executed.\n')
+    await expect(runPackagedCopilotObserverCanary(fixture.ownerOptions, runPackagedCopilotAcceptance)).rejects.toThrow()
+    for (const file of ['positive-usage.json', 'functional-results.json', 'packaged-suite.json', 'acceptance.json']) {
+      expect(existsSync(join(fixture.options.packagedEvidence, file))).toBe(false)
+    }
     expect(() => verifyForkQualification(fixture.options)).toThrow()
   })
 

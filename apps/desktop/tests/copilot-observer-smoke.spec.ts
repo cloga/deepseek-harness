@@ -19,6 +19,7 @@ type Damage = 'skip-observer' | 'repeat-observer' | 'mutable-paths' | 'retain-ho
   | 'wrong-marker-text' | 'diagnostic-errors' | 'cleanup-errors' | 'cleanup-unfinalized' | 'cleanup-unverified'
   | 'foreign-identity' | 'foreign-functional-scope' | 'functional-not-complete' | 'functional-success'
   | 'functional-cleanup' | 'wrong-failure-schema' | 'invalid-identity' | 'linked-functional' | 'oversized-functional'
+  | 'legacy-functional-schema'
 
 /** Controlled runner tests only wrapper validation; real lifecycle tests live in copilot-release-smoke.spec.ts. */
 function isolatedRunner(damage?: Damage) {
@@ -46,7 +47,7 @@ function isolatedRunner(damage?: Damage) {
     catch (error) { marker = error }
     if (damage === 'repeat-observer') await actual.inspectProfile?.(Object.freeze(paths))
     const functional = {
-      ...identity, schemaVersion: 1,
+      ...identity, schemaVersion: damage === 'legacy-functional-schema' ? 1 : 2,
       scope: damage === 'foreign-functional-scope' ? 'other' : 'packaged-functional-observations',
       functionalAssertionsCompleted: damage !== 'functional-not-complete',
       normalAcceptanceCompleted: damage === 'functional-success', cleanupVerified: damage === 'functional-cleanup',
@@ -118,7 +119,7 @@ describe('separately scoped observer suite evidence', () => {
     'missing-functional', 'missing-failure', 'acceptance-present', 'wrong-error', 'return-after-error',
     'wrong-marker-text', 'diagnostic-errors', 'cleanup-errors', 'cleanup-unfinalized', 'cleanup-unverified',
     'foreign-identity', 'foreign-functional-scope', 'functional-not-complete', 'functional-success',
-    'functional-cleanup', 'wrong-failure-schema', 'invalid-identity', 'linked-functional', 'oversized-functional',
+    'functional-cleanup', 'wrong-failure-schema', 'invalid-identity', 'linked-functional', 'oversized-functional', 'legacy-functional-schema',
   ] as const)('rejects %s without committing suite evidence', async (damage) => {
     const fixture = isolatedRunner(damage)
     await expect(runPackagedCopilotObserverCanary(fixture.options, fixture.run)).rejects.toThrow()
@@ -136,7 +137,7 @@ describe('separately scoped observer suite evidence', () => {
     expect(existsSync(join(fixture.options.output, 'packaged-suite.json'))).toBe(false)
   })
 
-  it.each(['functional-results.json', 'acceptance.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json'])('rejects stale %s before invoking acceptance', async (file) => {
+  it.each(['positive-usage.json', 'functional-results.json', 'acceptance.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json'])('rejects stale %s before invoking acceptance', async (file) => {
     const fixture = isolatedRunner()
     mkdirSync(fixture.options.output)
     writeFileSync(join(fixture.options.output, file), '{}')
