@@ -12,7 +12,7 @@ it('retains one shared resource consumer in the Desktop Web profile', () => {
   const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-profile-mcp-'))
   try {
     const profileDir = join(home, 'profiles', 'desktop')
-    createPluginProfile(profileDir)
+    createPluginProfile({ profile: profileDir, legacyStateRoot: join(home, 'desktop') })
     const installAnchor = fileURLToPath(new URL('../../cli/package.json', import.meta.url))
     const profile = loadProfileDirectory('dsh desktop', profileDir, installAnchor)
     const warnings: string[] = []

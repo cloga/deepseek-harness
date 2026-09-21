@@ -23,6 +23,7 @@ import { desktopPackageReceiptPosition, desktopReceiptFileTransitions, desktopRe
 import { desktopPackageArtifactSpecifier, readDesktopPackageLocks, verifyDesktopPackageArtifact, writeDesktopPackageLocks, type DesktopPackageInstallLock } from './plugin-package-lock.ts'
 import { DESKTOP_RUNTIME_FILE, inventoryDesktopRuntime, readDesktopRuntime, runtimePath, type DesktopRuntimeDescriptor } from './runtime-tree.ts'
 import { readDesktopPackageActivationPhase } from './profile-package-activation.ts'
+import { assertNoLegacyDesktopActivation, type DesktopProfileSafetyPaths } from './legacy-profile-activation.ts'
 import { DESKTOP_PLUGIN_PROVISIONING_STATE_FILE, buildDesktopProvisioningState, desktopPluginProvisioningPlanSha256, parseDesktopPluginProvisioningPlan, parseDesktopPluginProvisioningState, type DesktopPluginProvisioningPlan, type DesktopPluginProvisioningEntry, type DesktopPluginProvisioningState } from './plugin-provisioning.ts'
 
 /** A runner must disable inherited environment and resolve only after the child has exited, including on abort. */
@@ -34,8 +35,7 @@ export interface DesktopStagingPnpmRequest {
 }
 
 /** Only the launcher supplies executable selection; no executable or callback arrives through Host IPC. */
-export interface DesktopProfilePackageStagingOptions {
-  readonly profile: string
+export interface DesktopProfilePackageStagingOptions extends DesktopProfileSafetyPaths {
   readonly runtimeDir: string
   readonly installAnchor: string
   /** Explicit launcher-resolved profile registry policy; this backend supplies no default. */
@@ -593,6 +593,8 @@ function environment(home: string): NodeJS.ProcessEnv {
  * while a later explicit cancel discards an unactivated candidate with a durable tombstone.
  */
 export function createDesktopProfilePackageTransactions(options: DesktopProfilePackageStagingOptions): DesktopProfilePackageTransactions {
+  const safety = { profile: options.profile, legacyStateRoot: options.legacyStateRoot }
+  assertNoLegacyDesktopActivation(safety)
   const missingProfile = lstatSync(options.profile, { throwIfNoEntry: false }) === undefined
   if (missingProfile && options.recoveryTransactionId === undefined) fail('active profile is missing; explicit owned recovery is required')
   if (!isAbsolute(options.profile)) fail('profile must be an absolute path')
@@ -711,7 +713,15 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
   const timeout = options.operationTimeoutMs ?? 120_000
   const wait = options.leaseWaitMs ?? 120_000
   if (!Number.isSafeInteger(timeout) || timeout <= 0 || !Number.isSafeInteger(wait) || wait < 0) fail('invalid operation limits')
+  const withLease = async <T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> => {
+    assertNoLegacyDesktopActivation(safety)
+    return withProfilePackageLease(profile, async () => {
+      assertNoLegacyDesktopActivation(safety)
+      return operation()
+    }, wait, signal)
+  }
   const checkIdentity = (recovery = false): void => {
+    assertNoLegacyDesktopActivation(safety)
     checkPlanResource()
     if (recovery && lstatSync(profile, { throwIfNoEntry: false }) === undefined) {
       if (join(canonical(dirname(profile), true), basename(profile)) !== owner.profile) fail('profile parent identity changed')
@@ -913,7 +923,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
     id: string, mutation: ProfilePackageMutation, key: string, signal: AbortSignal, provisioningRequested = false,
   ): Promise<ProfilePreparedPackageChange> => {
     // The common lease checks cancellation before/after its bounded wait. Never abandon its pending callback.
-    return withProfilePackageLease(profile, async () => {
+    return withLease(async () => {
       const previous = readPrepared(id, true)
       if (previous !== undefined) {
         if (readDesktopPackageActivationPhase(activationInput(id, previous)) !== undefined) fail('activation already owns this transaction')
@@ -1247,7 +1257,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
         }
         throw primary
       }
-    }, wait, signal)
+    }, signal)
   }
   const stageRequest = async (
     requestId: string, request: ProfilePackageMutation, externalSignal: AbortSignal, provisioningRequested: boolean,
@@ -1278,10 +1288,10 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
   }
   return {
     protocolVersion: 1,
-    async assessProvisioning() { return withProfilePackageLease(profile, assessLocked, wait) },
+    async assessProvisioning() { return withLease(assessLocked) },
     async commitSatisfiedProvisioning(expectedAssessmentFingerprint) {
       if (!/^[a-f0-9]{64}$/u.test(expectedAssessmentFingerprint)) fail('invalid exact-assessment fingerprint')
-      return withProfilePackageLease(profile, async () => {
+      return withLease(async () => {
         const assessment = await assessLocked()
         if (assessment.status !== 'exact-satisfied' || assessment.assessmentFingerprint !== expectedAssessmentFingerprint) fail('exact assessment is stale or no longer satisfied; re-assess and verify current Host health')
         if (fixedSource === undefined || planResource === undefined) fail('no packaged provisioning plan is configured')
@@ -1298,10 +1308,11 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
         const observed = readProvisioningEvidence(profile)
         if (observed === undefined || stable(observed) !== stable(state)) fail('qualified state write did not settle')
         return observed
-      }, wait)
+      })
     },
     stage(requestId, request, signal) { return stageRequest(requestId, request, signal, false) },
     async stageProvisioning(requestId, signal) {
+      assertNoLegacyDesktopActivation(safety)
       if (fixedSource === undefined || planResource === undefined) fail('no packaged provisioning plan is configured')
       checkPlanResource()
       return stageRequest(requestId, { kind: 'install', source: fixedSource }, signal, true)
@@ -1339,6 +1350,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
       return results
     }) },
     async cancel(transactionId) {
+      assertNoLegacyDesktopActivation(safety)
       const id = parseProfileTransactionId(transactionId)
       const control = running.get(id)
       if (control !== undefined) {
@@ -1351,7 +1363,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
       }
       const observed = readPrepared(id, true, true)
       if (observed !== undefined && readDesktopPackageActivationPhase(activationInput(id, observed)) !== undefined) fail('activation-owned transactions cannot be discarded')
-      await withProfilePackageLease(profile, () => synchronousResult(() => {
+      await withLease(() => synchronousResult(() => {
         const value = readPrepared(id, true, true)
         if (value === undefined) return
         if (readDesktopPackageActivationPhase(activationInput(id, value)) !== undefined) fail('activation-owned transactions cannot be discarded')
@@ -1364,7 +1376,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
         if (state === undefined) durableJson(path, { ...marker, state: 'discarding' }, `${path}.${randomUUID()}.tmp`)
         for (const name of ['profile', 'store', 'environment', 'acquisition', 'registry-resolution-cache']) removeOwnedTree(join(directory(id), name))
         durableJson(path, { ...marker, state: 'discarded' }, `${path}.${randomUUID()}.tmp`)
-      }), wait)
+      }))
     },
   }
 }

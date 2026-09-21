@@ -46,7 +46,7 @@ export async function smokeDesktopRuntime(
   )
   let acceptanceError: unknown
   try {
-    createPluginProfile(profile)
+    createPluginProfile({ profile, legacyStateRoot: join(home, 'desktop') })
     writeFileSync(join(home, '.env'), '')
     writeFileSync(join(profile, '.env'), '')
     const receipt = writeNeutralProviderFixture(profile, runtime)

@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { initProfile, PROFILE_ROOT_CONFIG, PROFILE_ROOT_FILENAME, withProfilePackageLease, writeProfileRootConfig } from '@deepseek-ai/dsh-app-boot'
 import { inventoryDesktopRuntime } from '../src/runtime-tree.ts'
 import { createDesktopProfilePackageTransactions, type DesktopProfilePackageStagingOptions, type DesktopStagingPnpmRequest } from '../src/profile-package-staging.ts'
+import { legacyActivationFixture, retainedTree } from './legacy-activation-fixture.ts'
 
 // Generated NONPRODUCTION loopback fixture material. The leaf key is INTENTIONALLY PUBLIC.
 // NEVER use these certificates/keys in production or add this CA to an OS/global trust store.
@@ -128,7 +129,8 @@ function fixture(overrides: Partial<DesktopProfilePackageStagingOptions> = {}) {
   })
   const fetcher = vi.fn<typeof fetch>(async () => { throw new Error('fixture forbids network') })
   const options: DesktopProfilePackageStagingOptions = {
-    profile, runtimeDir, installAnchor: join(runtimeDir, 'node_modules', '@deepseek-ai/dsh', 'package.json'),
+    profile, legacyStateRoot: join(root, 'desktop'), runtimeDir,
+    installAnchor: join(runtimeDir, 'node_modules', '@deepseek-ai/dsh', 'package.json'),
     dependencyRegistry: 'https://registry.example.invalid/', configPaths: [], pnpmRunner, packDirectory, fetcher, ...overrides,
   }
   const backend = createDesktopProfilePackageTransactions(options)
@@ -138,6 +140,52 @@ function fixture(overrides: Partial<DesktopProfilePackageStagingOptions> = {}) {
     .map(path => [path, readFileSync(join(profile, path), 'utf8')])
   return { root, profile, runtimeDir, source, options, backend, mutation, transaction, active, pnpmRunner, packDirectory, fetcher }
 }
+describe('legacy activation refusal in staging admission', () => {
+  it.each(['stage', 'provision', 'commit', 'cancel', 'assess'] as const)('refuses %s without changing active, legacy or stage bytes', async (operation) => {
+    const f = fixture()
+    mkdirSync(f.options.legacyStateRoot)
+    writeFileSync(join(f.options.legacyStateRoot, 'profile-activation.json'), legacyActivationFixture(2, 'activating'))
+    const before = retainedTree(f.root)
+    expect(() => createDesktopProfilePackageTransactions(f.options)).toThrow('desktop legacy activation')
+    const id = randomUUID()
+    const signal = new AbortController().signal
+    const result = operation === 'stage' ? f.backend.stage(id, f.mutation, signal)
+      : operation === 'provision' ? f.backend.stageProvisioning(id, signal)
+        : operation === 'commit' ? f.backend.commitSatisfiedProvisioning('a'.repeat(64))
+          : operation === 'cancel' ? f.backend.cancel(id) : f.backend.assessProvisioning()
+    await expect(result).rejects.toThrow('desktop legacy activation')
+    expect(retainedTree(f.root)).toEqual(before)
+    expect(f.pnpmRunner).not.toHaveBeenCalled()
+    expect(f.packDirectory).not.toHaveBeenCalled()
+    expect(f.fetcher).not.toHaveBeenCalled()
+  })
+
+  it.each(['stage', 'commit', 'cancel'] as const)('rechecks legacy records under the existing lease before %s', async (operation) => {
+    const f = fixture()
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const holder = withProfilePackageLease(f.profile, async () => { entered.resolve(undefined); await release.promise })
+    await entered.promise
+    const id = randomUUID()
+    const pending = operation === 'stage' ? f.backend.stage(id, f.mutation, new AbortController().signal)
+      : operation === 'commit' ? f.backend.commitSatisfiedProvisioning('a'.repeat(64)) : f.backend.cancel(id)
+    const rejection = expect(pending).rejects.toThrow('desktop legacy activation')
+    try {
+      mkdirSync(f.options.legacyStateRoot)
+      writeFileSync(join(f.options.legacyStateRoot, 'profile-activation.json'), legacyActivationFixture(1, 'committed'))
+    } finally { release.resolve(undefined) }
+    await holder
+    const before = retainedTree(f.profile)
+    await rejection
+    expect(retainedTree(f.profile)).toEqual(before)
+    expect(readFileSync(join(f.options.legacyStateRoot, 'profile-activation.json'), 'utf8')).toBe(legacyActivationFixture(1, 'committed'))
+    expect(existsSync(f.transaction(id))).toBe(false)
+    expect(f.pnpmRunner).not.toHaveBeenCalled()
+    expect(f.packDirectory).not.toHaveBeenCalled()
+    expect(f.fetcher).not.toHaveBeenCalled()
+  })
+})
+
 function receipt(name: string, bytes: Buffer) {
   const sha256 = createHash('sha256').update(bytes).digest('hex')
   const source = { schemaVersion: 1 as const, type: 'githubRelease' as const, owner: 'example', repo: 'plugin', tag: 'v1.0.0', asset: 'plugin.tgz',
@@ -597,7 +645,8 @@ describe('Desktop stage-only package transactions', () => {
     const f = fixture()
     const id = randomUUID()
     await f.backend.stage(id, f.mutation, new AbortController().signal)
-    const activation = createDesktopProfilePackageActivation({ profile: f.profile, backend: f.backend,
+    const activation = createDesktopProfilePackageActivation({
+      profile: f.profile, legacyStateRoot: f.options.legacyStateRoot, backend: f.backend,
       confirm: async () => true, acquireAdmission: async () => async () => {}, qualify: async () => {},
       stopHost: async () => {}, startHost: async () => {},
       verifyHost: async (_input, role) => { if (phase === 'rolled-back' && role === 'candidate') throw new Error('fixture health failure') },
@@ -617,7 +666,8 @@ describe('Desktop stage-only package transactions', () => {
     await f.backend.stage(id, f.mutation, new AbortController().signal)
     const entered = deferred<undefined>()
     const release = deferred<undefined>()
-    const activation = createDesktopProfilePackageActivation({ profile: f.profile, backend: f.backend,
+    const activation = createDesktopProfilePackageActivation({
+      profile: f.profile, legacyStateRoot: f.options.legacyStateRoot, backend: f.backend,
       confirm: async () => true, acquireAdmission: async () => async () => {}, qualify: async () => {},
       stopHost: async () => { entered.resolve(undefined); await release.promise },
       startHost: async () => {}, verifyHost: async () => {}, commitReceipt: async () => {},

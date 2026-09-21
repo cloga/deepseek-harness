@@ -5,6 +5,7 @@ import { createDesktopProfilePackageTransactions } from './profile-package-stagi
 import { packDesktopSourceDirectory, runDesktopPackagePnpm } from './profile-package-pnpm.ts'
 import { desktopPluginProvisioningPlanSha256, readDesktopPluginProvisioningPlan, type DesktopPluginProvisioningPlan } from './plugin-provisioning.ts'
 import type { DesktopManagedUpdateCapability } from './managed-update-protocol.ts'
+import type { DesktopProfileSafetyPaths } from './legacy-profile-activation.ts'
 
 /** Fixed packaged policy; the Host transport cannot supply or change this object. */
 export interface DesktopPackagePolicy {
@@ -38,21 +39,22 @@ export function loadDesktopPackagePolicy(resourcesPath: string, capability: Desk
 
 /**
  * Construct staging with fixed bundled executables, never renderer commands.
- * @param profile - Canonical Desktop profile.
+ * @param paths - Desktop profile and legacy state locations from the same launcher-owned home.
  * @param resources - Verified installed application runtimes.
  * @param policy - Fixed packaged plan and explicit registry, independent of Host requests.
  * @param recoveryTransactionId - Explicit owned journal identity when a crash left the active profile absent.
  * @param provisioningProfileCreated - Trusted successful initializer result for this launch, not an empty-dependency heuristic.
  * @returns Backend whose package processes operate only on private staging directories or data-only source packing.
  */
-export function createDesktopPackageBackend(profile: string, resources: {
+export function createDesktopPackageBackend(paths: DesktopProfileSafetyPaths, resources: {
   readonly node: string
   readonly pnpm: string
   readonly nodeBin: string
   readonly dsh: string
 }, policy: DesktopPackagePolicy, recoveryTransactionId?: string, provisioningProfileCreated = false) {
   return createDesktopProfilePackageTransactions({
-    profile,
+    profile: paths.profile,
+    legacyStateRoot: paths.legacyStateRoot,
     dependencyRegistry: policy.dependencyRegistry,
     provisioningPlan: policy.provisioningPlan,
     provisioningPlanFile: policy.provisioningPlanFile,

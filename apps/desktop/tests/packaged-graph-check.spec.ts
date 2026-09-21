@@ -58,7 +58,7 @@ function fixture() {
     dependencies: { '@deepseek-ai/dsh': runtime.release.version },
   })
   writeDesktopRuntime(runtimeRoot, runtime.release, runtime.sharedPackages.map(entry => entry.name))
-  createPluginProfile(profile)
+  createPluginProfile({ profile, legacyStateRoot: join(home, 'desktop') })
   const peer = `optional-peer-${randomUUID()}`
   writePackage(join(profile, 'node_modules'), 'plugin', {
     peerDependencies: { '@deepseek-ai/cordis': '^1.0.0', [peer]: '^1.0.0' },

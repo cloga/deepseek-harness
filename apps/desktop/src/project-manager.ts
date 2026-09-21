@@ -8,6 +8,7 @@ import {
   verifyDesktopCorePackageSet,
 } from './core-package-set.ts'
 import type { DesktopPaths } from './paths.ts'
+import { assertNoLegacyDesktopActivation, type DesktopProfileSafetyPaths } from './legacy-profile-activation.ts'
 import type { DesktopRelease } from './release.ts'
 import { readDesktopRuntime } from './runtime-tree.ts'
 import {
@@ -105,14 +106,16 @@ export class DesktopProjectManager {
       cleanProfileCorePackages(this.paths.profile, descriptor.sharedPackages.map(entry => entry.name), production)
       migrateProfileSettings(this.paths.profile)
       migrateDesktopProfileLinks(this.paths.profile)
-      createPluginProfile(this.paths.profile)
+      createPluginProfile(this.paths)
       writeProfileRootConfig(this.paths.profile)
       this.createdOnLastInitialization = created
     })
   }
 
   private async withLock<T>(operation: (created: boolean) => T | Promise<T>): Promise<T> {
+    assertNoLegacyDesktopActivation(this.paths)
     return withProfilePackageLease(this.paths.profile, async () => {
+      assertNoLegacyDesktopActivation(this.paths)
       if (pendingDesktopActivationTransactions(this.paths.profile).length > 0) {
         throw new Error('desktop project: unfinished package activation requires explicit recovery before profile initialization or cleanup')
       }
@@ -171,8 +174,9 @@ export function createDevelopmentProjectMetadata(projectDir: string, release: De
   writeFileSync(join(projectDir, 'pnpm-workspace.yaml'), workspaceFile(), { mode: 0o600 })
 }
 
-/** Initialize missing profile files without replacing an existing package inventory's lost manifest. */
-export function createPluginProfile(projectDir: string): void {
-  assertProfileInitialization(projectDir)
-  initProfile(projectDir, WEB_PROFILE.bundles)
+/** Initialize only after checking explicit legacy locations and the existing package inventory. */
+export function createPluginProfile(paths: DesktopProfileSafetyPaths): void {
+  assertNoLegacyDesktopActivation(paths)
+  assertProfileInitialization(paths.profile)
+  initProfile(paths.profile, WEB_PROFILE.bundles)
 }

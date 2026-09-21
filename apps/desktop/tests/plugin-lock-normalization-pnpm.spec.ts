@@ -75,7 +75,7 @@ it.each(['add', 'toggle', 'remove'] as const)('handles receipt-bound legacy sepa
     let capturing = false
     let invocations = 0
     const backend = (profile: string) => createDesktopProfilePackageTransactions({
-      profile, runtimeDir: dsh, installAnchor: join(dsh, 'node_modules/@deepseek-ai/dsh/package.json'),
+      profile, legacyStateRoot: join(root, '.dsh', 'desktop'), runtimeDir: dsh, installAnchor: join(dsh, 'node_modules/@deepseek-ai/dsh/package.json'),
       dependencyRegistry: 'https://registry.example.test/', configPaths: [], fetcher,
       operationTimeoutMs: 60000, leaseWaitMs: 0,
       packDirectory: (directory, output, signal) => packDesktopSourceDirectory(runtime, directory, output, signal),

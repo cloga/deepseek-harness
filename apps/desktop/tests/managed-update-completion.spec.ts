@@ -55,7 +55,7 @@ async function completionFixture(sequence = 2, reconcile = completeDesktopManage
   await writeFile(executable, 'installed desktop')
   await writeFile(runtime, 'installed runtime')
   await writeFile(planPath, JSON.stringify(plan))
-  createPluginProfile(profile)
+  createPluginProfile({ profile, legacyStateRoot: join(root, 'desktop') })
   await writeFile(join(profile, 'desktop-plugin-provisioning-state.json'), JSON.stringify({
     schemaVersion: 1, capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
     planSha256, composition: 'active', plugins: [], removed: [], rolledBack: false, verified: true,
@@ -665,7 +665,7 @@ it.each(inventories)('requires active inventory before completion: %s', async (i
   await writeFile(runtimePath, runtime)
   await writeFile(provisioningPath, JSON.stringify(provisioning))
   const profile = join(root, 'profile')
-  createPluginProfile(profile)
+  createPluginProfile({ profile, legacyStateRoot: join(root, 'desktop') })
   const results: DesktopPluginProvisioningResult[] = []
   if (required) {
     const source = provisioning.plugins[0]!.source

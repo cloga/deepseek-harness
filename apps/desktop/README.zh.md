@@ -92,17 +92,17 @@ Desktop 在启动时把 release-owned 插件协调到打包 plan，同时保留�
 
 私有 receipt 存储将用户或发行版归属与来源验证分别记录。显式手动验证安装记录用户归属，包括对同一来源的重装；重建该精确来源时保留用户归属。只有 receipt 产物引用与声明匹配且不存在冲突来源快照时，release ownership 才能把该声明排除在用户保留检查之外。旧数据仅在先前一致的 provisioning state 中存在 active、相同 receipt 且 manifest 引用匹配时推断发行版归属，其他验证插件保留用户归属。旧记录无法区分留下完全相同 receipt 的手动重装。归属迁移与变更随暂存 profile 一起提交或回滚。[插件保留决策](../../.agents/notes/implemented/bug-fix/2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md)负责归属迁移；[用户清单决策](../../.agents/notes/implemented/bug-fix/2026-09-19-desktop-user-inventory-guards.zh.md)负责初始化与冲突检查。
 
-每次包事务在 prune 或包操作前捕获用户依赖 specifier、启用状态、receipt 身份与 owner、来源 lock 身份，以及经过校验的产物摘要。Receipt 和快照引用必须与声明的依赖一致；矛盾或并存的来源需要人工检查。事务冻结准备好的目标声明，在 staged 健康检查后及最终激活后核对保留的声明和产物字节，并在替换前确认活动声明仍匹配。显式 add、install、update 和 remove 只能替换其验证确定的目标名称；toggle 只能改变该目标的启用标记，disable-all 只能改变启用标记。这些检查不能恢复首次捕获前已经被一致清空的清单。带版本的激活证据和保留的私有操作记录支持后续恢复与归因，但不能识别更早且未被记录的操作方。
+每次包事务在 prune 或包操作前捕获用户依赖 specifier、启用状态、receipt 身份与 owner、来源 lock 身份，以及经过校验的产物摘要。Receipt 和快照引用必须与声明的依赖一致；矛盾或并存的来源需要人工检查。事务冻结准备好的目标声明，在 staged 健康检查后及最终激活后核对保留的声明和产物字节，并在替换前确认活动声明仍匹配。显式 add、install、update 和 remove 只能替换其验证确定的目标名称；toggle 只能改变该目标的启用标记，disable-all 只能改变启用标记。这些检查不能恢复首次捕获前已经被一致清空的清单。当前 prepared-graph 激活 journal 支持自身的显式恢复；历史 alpha1 操作 receipt 不证明当前仍有审计写入器，也不能识别更早且未记录的操作方。
 
 每次 staged 冻结 pnpm 安装前，Desktop 仅规范化产物 importer specifier 中的 Windows 分隔符差异；候选项必须精确匹配 manifest 中的规范引用，由已验证的来源快照 lock 或 verified-release receipt 支持，且产物 SHA-256 匹配。既有规范化器限制文件读取大小，拒绝不安全的文件和产物目录，并以原子替换方式写入 staged 锁文件。它不改变包解析结果、版本、integrity 或 manifest；无关漂移仍由冻结校验检查。
 
 Windows Ops 验证 `resources/managed-update/capability.json` 中的 `desktopNativePluginProvisioning`、打包和发布的 plan hash、`desktop-plugin-receipts.json` 中的 Release 与 artifact identity，以及 `$DSH_HOME/profiles/desktop/desktop-plugin-provisioning-state.json` 中每个插件的 `active` 或 `optional-failed` 结果和已删除包证据。托管更新 completion 仅在最终位置的 Host ready 后运行，并在记录 sequence 前独立核对实际安装清单、receipt 和打包 plan。仅 staging 健康检查通过不构成 completion 证据。
 
-保留的重置后端在中断 Host 前要求独立的原生破坏性操作确认，默认选择取消。它验证 `$DSH_HOME/desktop/profile-recovery/reset-*` 下的私有配置/产物副本，排除生成的 `node_modules`，并在破坏性写入前发布副本 receipt。配置链接或复制失败会拒绝重置；失败时尝试重新启动未改变的 Host。独立 outcome 记录最终就绪或失败。这些后端保护不重新引入以前的启动/应急重置页，也不向官方原生恢复 UI 添加重置操作。共享产品数据和 Harness-home `.env` 保持不变。恢复副本可能包含私有配置，不会上传或自动恢复，也不得附到公开报告中。
+alpha2 壳没有保留 alpha1 重置后端。`$DSH_HOME/desktop/profile-recovery/reset-*` 下的旧副本和 `$DSH_HOME/desktop/profile-operations` 下的审计 receipt 是历史证据，不是当前重置或审计能力。本版本既不回收它们，也不自动恢复它们。副本可能包含私有配置；不要上传或附到公开报告中。
 
-包事务持有 `$DSH_HOME/desktop/profile.lock`，直到 pnpm 退出并完成激活。版本 2 的 `profile-activation.json` 记录操作身份及前后清单指纹。恢复在重命名或清理前核对活动及保留的候选。版本 1 的 journal 不能授权手动清单不同或运行时、workspace、必需 lock 元数据不完整的恢复。孤立 rollback 阻止初始化空活动路径；健康 profile 仍可与孤立 staging 共存。验证失败会保留 journal 和事务目录供检查。不要删除这些副本，也不要在保留 profile 中运行 pnpm。运行时解析不改动旧链接；清理绝不跟随目录链接，原生构建继续使用经过审查的 `allowBuilds` 策略。
+当前包操作使用稳定的同级租约 `$DSH_HOME/profiles/.desktop.packages.lock`，以及带有 `ACTIVATION.json` 的私有 `.desktop.package-stage-<UUID>` 目录。既有当前格式恢复继续验证归属、依赖图和 receipt 身份。[旧激活拒绝保护](src/legacy-profile-activation.ts)单独使用启动器从与 profile 相同的 home 解析出的 `$DSH_HOME/desktop`。其中固定的 `profile-activation.json` 只要存在，就阻止初始化、原生 disable-all、暂存、提交、取消、激活及恢复，无论活动 profile 是否存在。Schema-1、schema-2、未知、损坏、目录和链接 journal 均不解析而直接拒绝。祖先路径必须为普通规范目录。Profile 父目录的单层扫描最多检查 1,024 个条目及 100 个旧 `.desktop-transaction-<字母数字>` 目录；任何固定 `rollback` 条目均阻止操作。旧前缀名称有歧义、链接、类型异常或超出上限时也拒绝。没有 rollback 的有效 staging-only 目录保持不变。检查在获取租约之前执行，并在当前租约内、修改之前再次执行；不宣称与旧 alpha1 锁互斥。
 
-`$DSH_HOME/desktop/profile-operations` 下的私有记录在激活 journal 清理后继续保留操作类型、验证确定的目标名称、事务身份、清单 hash/名称及结果。保留上限为 64 组记录，包括部分写入，每条最多 128 KiB；不删除未知文件。来源 URL、原始错误、提示词和配置内容不进入记录。原子发布记录之前同步文件数据，但不保证断电后的目录持久性。提交后审计失败会保留 committed journal 和 rollback，而不是撤销已提交 profile 或宣称成功。
+旧记录拒绝路径绝不跟随 journal 指定的路径，不重命名、删除、恢复、迁移，不启动旧应用，也不初始化替代的空 profile。保留 journal、活动 profile 和每个已有候选不变。恢复需要明确且单独评审的人工计划：先确认精确的所属安装与全部运行中工作，获得所需停止／重启授权，保留私有副本，再验证旧记录及完整清单后选择恢复操作。不要为绕过拒绝而清除标记、在保留 profile 中运行 pnpm 或启动旧二进制。惰性合成 schema fixture 和字节保留测试不证明对操作者 profile 或已发布安装器的恢复通过。运行时解析和原生构建策略保持不变。
 
 ### 保留的更新历史与手动安装恢复
 

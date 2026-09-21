@@ -27,7 +27,7 @@ async function fixture(root: string, fetcher: typeof fetch) {
   const manager = new DesktopProjectManager(resolveDesktopPaths(join(root, '.dsh')), { dsh })
   await manager.applyRelease()
   const backend = (profile: string) => createDesktopProfilePackageTransactions({
-    profile, runtimeDir: dsh, installAnchor: join(dsh, 'node_modules/@deepseek-ai/dsh/package.json'),
+    profile, legacyStateRoot: manager.paths.legacyStateRoot, runtimeDir: dsh, installAnchor: join(dsh, 'node_modules/@deepseek-ai/dsh/package.json'),
     dependencyRegistry: 'https://registry.example.test/', configPaths: [], fetcher,
     operationTimeoutMs: 60000, leaseWaitMs: 0,
     // Test transport is offline; production continues to use its explicit registry policy.

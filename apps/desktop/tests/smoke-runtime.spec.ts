@@ -15,7 +15,7 @@ const owned = vi.hoisted(() => ({
 }))
 
 vi.mock('../src/project-manager.ts', () => ({
-  createPluginProfile(profile: string) {
+  createPluginProfile({ profile }: { profile: string; legacyStateRoot: string }) {
     mkdirSync(profile, { recursive: true })
     writeFileSync(join(profile, 'package.json'), JSON.stringify({
       dependencies: {}, dsh: { profile: { bundles: [] } },

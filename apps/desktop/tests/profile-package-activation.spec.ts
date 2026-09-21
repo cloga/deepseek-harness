@@ -4,11 +4,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { profilePackageLeaseTarget } from '@deepseek-ai/dsh-app-boot'
+import { profilePackageLeaseTarget, withProfilePackageLease } from '@deepseek-ai/dsh-app-boot'
 import { createDesktopProfilePackageActivation, type DesktopProfilePackageActivationOptions } from '../src/profile-package-activation.ts'
 import type { DesktopPreparedPackageActivation } from '../src/profile-package-staging.ts'
 import { commitDesktopPackageReceipt, desktopPackageReceiptPosition } from '../src/profile-package-receipt.ts'
 import type { DesktopGithubReleasePluginSource } from '../src/plugin-source.ts'
+import { legacyActivationFixture, retainedTree } from './legacy-activation-fixture.ts'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -98,13 +99,50 @@ function fixture() {
   })
   const commitReceipt = vi.fn(async () => { expect(admissionHeld).toBe(true); events.push('receipt') })
   const options: DesktopProfilePackageActivationOptions = {
-    profile, backend, confirm, acquireAdmission, qualify, stopHost, startHost, verifyHost, commitReceipt, leaseWaitMs: 100,
+    profile, legacyStateRoot: join(root, 'legacy-state'), backend, confirm, acquireAdmission, qualify,
+    stopHost, startHost, verifyHost, commitReceipt, leaseWaitMs: 100,
   }
   const controller = createDesktopProfilePackageActivation(options)
   const journalPath = join(transactionDir, 'ACTIVATION.json')
   return { root, profile, transactionId, transactionDir, candidateDir, rollbackDir, input, events, release, backend,
     confirm, acquireAdmission, admissionBlocked, qualify, stopHost, startHost, verifyHost, commitReceipt, options, controller, journalPath }
 }
+describe('legacy refusal before activation or recovery', () => {
+  it.each(['activate', 'recover'] as const)('rejects %s before acquiring a lease or calling any lifecycle callback', async (operation) => {
+    const f = fixture()
+    mkdirSync(f.options.legacyStateRoot)
+    writeFileSync(join(f.options.legacyStateRoot, 'profile-activation.json'), legacyActivationFixture(2, 'committed'))
+    const before = retainedTree(f.root)
+    expect(() => createDesktopProfilePackageActivation(f.options)).toThrow('desktop legacy activation')
+    await expect(f.controller[operation](f.transactionId)).rejects.toThrow('desktop legacy activation')
+    expect(f.events).toEqual([])
+    expect(f.backend.readPreparedForActivation).not.toHaveBeenCalled()
+    expect(f.backend.readPreparedForRecovery).not.toHaveBeenCalled()
+    expect(retainedTree(f.root)).toEqual(before)
+  })
+
+  it.each(['activate', 'recover'] as const)('rechecks old evidence under the lease before %s callbacks', async (operation) => {
+    const f = fixture()
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const holder = withProfilePackageLease(f.profile, async () => { entered.resolve(undefined); await release.promise })
+    await entered.promise
+    const pending = f.controller[operation](f.transactionId)
+    const rejection = expect(pending).rejects.toThrow('desktop legacy activation')
+    try {
+      mkdirSync(f.options.legacyStateRoot)
+      writeFileSync(join(f.options.legacyStateRoot, 'profile-activation.json'), legacyActivationFixture(1, 'activating'))
+    } finally { release.resolve(undefined) }
+    await holder
+    await rejection
+    expect(f.events).toEqual([])
+    expect(fingerprint(f.profile)).toBe(f.input.baseGraphFingerprint)
+    expect(fingerprint(f.candidateDir)).toBe(f.input.candidateFingerprint)
+    expect(existsSync(f.journalPath)).toBe(false)
+    expect(existsSync(f.rollbackDir)).toBe(false)
+  })
+})
+
 async function interruptedBeforeRename(f: ReturnType<typeof fixture>): Promise<void> {
   f.stopHost.mockRejectedValueOnce(new Error('interrupted shell stop'))
   await expect(f.controller.activate(f.transactionId)).rejects.toThrow('interrupted shell stop')

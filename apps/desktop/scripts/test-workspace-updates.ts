@@ -28,7 +28,7 @@ try {
       { encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, windowsHide: true }).trim(),
     pnpmVersion: pnpm.version, hostProtocolVersion: DESKTOP_HOST_PROTOCOL_VERSION }
   createDevelopmentProjectMetadata(project, release)
-  createPluginProfile(profile)
+  createPluginProfile({ profile, legacyStateRoot: join(root, 'home', 'desktop') })
   await writeFile(join(project, 'desktop-runtime.json'), JSON.stringify({
     schemaVersion: 1, release, platform: process.platform, arch: process.arch, files: [],
     sharedPackages: ['@deepseek-ai/dsh', '@deepseek-ai/dsh-desktop-host']

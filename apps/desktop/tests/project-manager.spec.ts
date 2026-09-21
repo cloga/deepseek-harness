@@ -5,8 +5,9 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resolveDesktopPaths } from '../src/paths.ts'
 import { createPluginProfile, DesktopProjectManager } from '../src/project-manager.ts'
-import { profilePackageLeaseTarget, readProfilePlugins } from '@deepseek-ai/dsh-app-boot'
+import { profilePackageLeaseTarget, readProfilePlugins, withProfilePackageLease } from '@deepseek-ai/dsh-app-boot'
 import { runtimeFixture } from './runtime-fixture.ts'
+import { legacyActivationFixture, retainedTree } from './legacy-activation-fixture.ts'
 
 function lockPath(manager: DesktopProjectManager): string { return `${profilePackageLeaseTarget(manager.paths.profile)}.lock` }
 
@@ -45,6 +46,69 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
+describe('retained alpha1 activation admission', () => {
+  it.each([false, true])('refuses all initialization and recovery writes with active profile present=%s', async (active) => {
+    const { root, manager } = setup()
+    if (active) { await manager.applyRelease(); seedPlugin(manager) }
+    mkdirSync(manager.paths.legacyStateRoot, { recursive: true })
+    const journal = join(manager.paths.legacyStateRoot, 'profile-activation.json')
+    for (const schema of [1, 2] as const) for (const phase of ['activating', 'committed'] as const) {
+      writeFileSync(journal, legacyActivationFixture(schema, phase))
+      const before = retainedTree(root)
+      await expect(manager.applyRelease(true)).rejects.toThrow('desktop legacy activation')
+      await expect(manager.disableAllPlugins()).rejects.toThrow('desktop legacy activation')
+      expect(() => { createPluginProfile(manager.paths) }).toThrow('desktop legacy activation')
+      expect(retainedTree(root)).toEqual(before)
+      expect(manager.createdProfile).toBe(false)
+      expect(existsSync(manager.paths.profile)).toBe(active)
+    }
+  })
+
+  it('refuses an orphan rollback before the lease or absent active profile can be created', async () => {
+    const { root, manager } = setup()
+    const rollback = join(dirname(manager.paths.profile), '.desktop-transaction-Ab12Cd', 'rollback')
+    mkdirSync(rollback, { recursive: true })
+    writeFileSync(join(rollback, 'package.json'), 'retained previous package declarations')
+    const before = retainedTree(root)
+    await expect(manager.applyRelease(true)).rejects.toThrow('orphan alpha1 rollback')
+    await expect(manager.disableAllPlugins()).rejects.toThrow('orphan alpha1 rollback')
+    expect(() => { createPluginProfile(manager.paths) }).toThrow('orphan alpha1 rollback')
+    expect(retainedTree(root)).toEqual(before)
+    expect(existsSync(manager.paths.profile)).toBe(false)
+  })
+
+  it.each(['applyRelease', 'disableAllPlugins'] as const)('rechecks legacy evidence after waiting for the existing lease during %s', async (operation) => {
+    const { manager } = setup()
+    await manager.applyRelease()
+    seedPlugin(manager)
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const holder = withProfilePackageLease(manager.paths.profile, async () => { entered.resolve(undefined); await release.promise })
+    await entered.promise
+    const pending = manager[operation]()
+    const rejection = expect(pending).rejects.toThrow('desktop legacy activation')
+    const beforeProfile = retainedTree(manager.paths.profile)
+    try {
+      mkdirSync(manager.paths.legacyStateRoot, { recursive: true })
+      writeFileSync(join(manager.paths.legacyStateRoot, 'profile-activation.json'), legacyActivationFixture(2, 'activating'))
+    } finally { release.resolve(undefined) }
+    await holder
+    await rejection
+    expect(retainedTree(manager.paths.profile)).toEqual(beforeProfile)
+    expect(readFileSync(join(manager.paths.legacyStateRoot, 'profile-activation.json'), 'utf8')).toBe(legacyActivationFixture(2, 'activating'))
+  })
+
+  it('retains harmless legacy staging while ordinary initialization and native disable remain available', async () => {
+    const { manager } = setup()
+    const staging = join(dirname(manager.paths.profile), '.desktop-transaction-Ab12Cd', 'staging')
+    mkdirSync(staging, { recursive: true })
+    writeFileSync(join(staging, 'sentinel'), 'untouched old staging')
+    await manager.applyRelease()
+    await manager.disableAllPlugins()
+    expect(readFileSync(join(staging, 'sentinel'), 'utf8')).toBe('untouched old staging')
+  })
+})
+
 describe('desktop external plugin profile', () => {
   it.each([
     'pnpm-workspace.yaml', 'pnpm-lock.yaml', 'node_modules', 'desktop.cordis.yml',
@@ -64,7 +128,7 @@ describe('desktop external plugin profile', () => {
     const before = readdirSync(manager.paths.profile).sort()
     await expect(manager.applyRelease(true)).rejects.toThrow('manifest is missing from existing package inventory')
     await expect(manager.disableAllPlugins()).rejects.toThrow('manifest is missing from existing package inventory')
-    expect(() => { createPluginProfile(manager.paths.profile) }).toThrow('manifest is missing from existing package inventory')
+    expect(() => { createPluginProfile(manager.paths) }).toThrow('manifest is missing from existing package inventory')
     expect(readdirSync(manager.paths.profile).sort()).toEqual(before)
     expect(readFileSync(payload, 'utf8')).toBe('retained inventory bytes')
     expect(readFileSync(patch, 'utf8')).toBe('retain this patch')
@@ -83,7 +147,7 @@ describe('desktop external plugin profile', () => {
     }
     await expect(manager.applyRelease(true)).rejects.toThrow('regular unlinked file')
     await expect(manager.disableAllPlugins()).rejects.toThrow('regular unlinked file')
-    expect(() => { createPluginProfile(manager.paths.profile) }).toThrow('regular unlinked file')
+    expect(() => { createPluginProfile(manager.paths) }).toThrow('regular unlinked file')
     expect(readdirSync(manager.paths.profile)).toEqual(['package.json'])
     expect(lstatSync(manifest).isSymbolicLink()).toBe(kind !== 'directory')
     if (kind === 'link') expect(readFileSync(target, 'utf8')).toBe('{}')

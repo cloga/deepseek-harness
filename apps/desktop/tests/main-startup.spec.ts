@@ -20,6 +20,8 @@ import type { DesktopProfilePackageActivationOptions } from '../src/profile-pack
 import type { ProfilePackageHealth } from '@deepseek-ai/dsh-app-boot'
 
 const manifestRead = vi.hoisted(() => ({ read: undefined as (() => Promise<string>) | undefined }))
+const legacySafety = vi.hoisted(() => ({ check: vi.fn() }))
+vi.mock('../src/legacy-profile-activation.ts', () => ({ assertNoLegacyDesktopActivation: legacySafety.check }))
 
 const baseline = vi.hoisted(() => ({
   assess: vi.fn<() => Promise<DesktopProvisioningAssessment>>(),
@@ -296,7 +298,9 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   }) }
 })
 vi.mock('../src/runtime-tree.ts', () => ({ readDesktopRuntime: () => ({ release: { version: '1.0.0' } }) }))
-vi.mock('../src/paths.ts', () => ({ resolveDesktopPaths: () => ({ profile: 'desktop-test-profile' }) }))
+vi.mock('../src/paths.ts', () => ({ resolveDesktopPaths: () => ({
+  profile: 'desktop-test-profile', legacyStateRoot: 'desktop-test-legacy-state',
+}) }))
 vi.mock('../src/managed-update-state.ts', () => ({ loadDesktopManagedUpdateConfiguration: async () => managed.config }))
 vi.mock('../src/managed-update-node.ts', () => ({ resolveDesktopManagedNode: () => ({ path: 'verified-primary-node.exe', sha256: 'a'.repeat(64) }) }))
 vi.mock('../src/managed-update-launcher.ts', async (importOriginal) => {
@@ -374,6 +378,7 @@ function applicationMenuItems(): MenuItemConstructorOptions[] {
 }
 
 beforeEach(() => {
+  legacySafety.check.mockReset()
   manifestRead.read = undefined
   managed.config = undefined
   managed.messages = undefined
@@ -1342,6 +1347,38 @@ describe('desktop main startup', () => {
     return { kind: 'source', manifest, manifestUrl: `https://github.com/cloga/deepseek-harness/releases/download/${manifest.source.tag}/release.json`,
       manifestSha256: manifest.manifestSha256, assetSha256: 'b'.repeat(64) }
   }
+
+  it('refuses legacy activation evidence before initialization, staging or any Host starts', async () => {
+    managedFixture()
+    legacySafety.check.mockImplementation(() => { throw new Error('desktop legacy activation: retained journal') })
+    await import('../src/main.ts')
+    await harness.dialogShown.promise
+    expect(legacySafety.check).toHaveBeenCalledWith({
+      profile: 'desktop-test-profile', legacyStateRoot: 'desktop-test-legacy-state',
+    })
+    expect(harness.applyRelease).not.toHaveBeenCalled()
+    expect(harness.hosts).toHaveLength(0)
+    expect(baseline.create).not.toHaveBeenCalled()
+    expect(baseline.stage).not.toHaveBeenCalled()
+    expect(baseline.commit).not.toHaveBeenCalled()
+  })
+
+  it('does not fall back to a fresh Host when legacy evidence appears during baseline preparation', async () => {
+    managedFixture()
+    baseline.assess.mockResolvedValue({ status: 'provisionable', reason: 'fresh-profile', packageName: 'fixture-provider',
+      planSha256: 'a'.repeat(64), planResourceSha256: 'b'.repeat(64) })
+    baseline.stage.mockImplementation(async () => {
+      legacySafety.check.mockImplementation(() => { throw new Error('desktop legacy activation: retained rollback') })
+      throw new Error('desktop legacy activation: retained rollback')
+    })
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.dialogShown.promise
+    expect(baseline.stage).toHaveBeenCalledOnce()
+    expect(harness.hosts).toHaveLength(0)
+    expect(baseline.commit).not.toHaveBeenCalled()
+  })
 
   it.each(['ready', 'failed'] as const)('checks managed completion only after final Host readiness: %s', async (outcome) => {
     managedFixture()

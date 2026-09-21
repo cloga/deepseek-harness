@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { parseProfileTransactionId, withProfilePackageLease } from '@deepseek-ai/dsh-app-boot'
+import { assertNoLegacyDesktopActivation, type DesktopProfileSafetyPaths } from './legacy-profile-activation.ts'
 import type { DesktopPreparedPackageActivation, DesktopProfilePackageTransactions } from './profile-package-staging.ts'
 import {
   desktopPackageReceiptPosition, prepareDesktopPackageReceipt, validateDesktopReceiptTransition,
@@ -10,8 +11,7 @@ import {
 } from './profile-package-receipt.ts'
 
 /** Shell-owned lifecycle callbacks; none may be supplied by a renderer or package request. */
-export interface DesktopProfilePackageActivationOptions {
-  readonly profile: string
+export interface DesktopProfilePackageActivationOptions extends DesktopProfileSafetyPaths {
   readonly backend: Pick<DesktopProfilePackageTransactions,
     'readPreparedForActivation' | 'readPreparedForRecovery' | 'verifyActivationTree'>
   /** Native confirmation, including permission to interrupt the listed live Sessions. */
@@ -179,16 +179,26 @@ export function readDesktopPackageActivationPhase(input: DesktopPreparedPackageA
  * @returns Explicit activation/recovery operations, never exposed through package-manager RPC.
  */
 export function createDesktopProfilePackageActivation(options: DesktopProfilePackageActivationOptions): DesktopProfilePackageActivation {
+  const safety = { profile: options.profile, legacyStateRoot: options.legacyStateRoot }
+  assertNoLegacyDesktopActivation(safety)
   if (!isAbsolute(options.profile)) fail('profile must be absolute')
   const present = directory(resolve(options.profile), true)
   const profile = present ? realpathSync(options.profile) : join(realpathSync(dirname(options.profile)), basename(options.profile))
   const wait = options.leaseWaitMs ?? 120_000
   if (!Number.isSafeInteger(wait) || wait < 0) fail('invalid lease wait')
+  const withLease = async <T>(operation: () => Promise<T>): Promise<T> => {
+    assertNoLegacyDesktopActivation(safety)
+    return withProfilePackageLease(profile, async () => {
+      assertNoLegacyDesktopActivation(safety)
+      return operation()
+    }, wait)
+  }
   const paths = (id: string) => {
     const transactionDir = join(dirname(profile), `.${basename(profile)}.package-stage-${id}`)
     return { transactionDir, candidateDir: join(transactionDir, 'profile'), rollbackDir: join(transactionDir, 'rollback'), journal: join(transactionDir, journalName) }
   }
   const owned = (id: string, input: DesktopPreparedPackageActivation | undefined): DesktopPreparedPackageActivation => {
+    assertNoLegacyDesktopActivation(safety)
     if (input === undefined) fail('prepared transaction is unavailable')
     const expected = paths(id)
     if (input.prepared.transactionId !== id || input.owner.profile !== profile || input.transactionDir !== expected.transactionDir
@@ -300,7 +310,7 @@ export function createDesktopProfilePackageActivation(options: DesktopProfilePac
   return {
     activate(transactionId) {
       const id = parseProfileTransactionId(transactionId)
-      return withProfilePackageLease(profile, async () => {
+      return withLease(async () => {
         const input = owned(id, await options.backend.readPreparedForActivation(id))
         const location = paths(id)
         if (readJournal(location.journal) !== undefined) fail('an activation journal already exists; use explicit recovery')
@@ -336,11 +346,11 @@ export function createDesktopProfilePackageActivation(options: DesktopProfilePac
           await release()
           return { status: 'rolled-back', transactionId: id, diagnostic: message(error) }
         }
-      }, wait)
+      })
     },
     recover(transactionId) {
       const id = parseProfileTransactionId(transactionId)
-      return withProfilePackageLease(profile, () => recoverLocked(id), wait)
+      return withLease(() => recoverLocked(id))
     },
   }
 }

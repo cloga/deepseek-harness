@@ -20,6 +20,7 @@ import {
   type MenuItemConstructorOptions,
 } from 'electron'
 import { resolveDesktopPaths } from './paths.ts'
+import { assertNoLegacyDesktopActivation } from './legacy-profile-activation.ts'
 import { DesktopProjectManager } from './project-manager.ts'
 import { DesktopHostProcess, DesktopHostUncleanExitError } from './host-process.ts'
 import { installDesktopDirectoryPicker } from './directory-picker.ts'
@@ -297,7 +298,7 @@ async function main(): Promise<void> {
   const hasEverStartedHost = (): boolean => everStartedHost
   const backend = new DesktopBackendController((onFailure) => {
     if (packagePolicy !== undefined) {
-      packageTransactions ??= createDesktopPackageBackend(activeProject, resources, packagePolicy, undefined, manager.createdProfile)
+      packageTransactions ??= createDesktopPackageBackend(paths, resources, packagePolicy, undefined, manager.createdProfile)
     }
     const hostInspectPort = developmentHostInspectPort(development)
     let packageHealth: readonly ProfilePackageHealth[] | undefined
@@ -353,8 +354,9 @@ async function main(): Promise<void> {
       if (!initialRecovery && backend.host === undefined && packageAdmissionId === undefined) {
         throw new Error(messages.updateTasksUnavailable)
       }
+      assertNoLegacyDesktopActivation(paths)
       const recovering = pendingDesktopActivationTransactions(activeProject)
-      packageTransactions ??= createDesktopPackageBackend(activeProject, resources, packagePolicy, recovering[0])
+      packageTransactions ??= createDesktopPackageBackend(paths, resources, packagePolicy, recovering[0])
       const transactions = packageTransactions
       const ids = startupTransactionId === undefined
         ? recovering.length > 0 ? recovering : (await transactions.listPending()).map(item => item.transactionId)
@@ -372,7 +374,7 @@ async function main(): Promise<void> {
       // Once admitted, activation owns candidate/rollback teardown until it settles, even after quit intent.
       let admitted = false
       const activation = createDesktopProfilePackageActivation({
-        profile: activeProject, backend: transactions,
+        profile: activeProject, legacyStateRoot: paths.legacyStateRoot, backend: transactions,
         confirm: async (input) => {
           if (lifecycleUnavailable() || isMandatory()) return false
           const host = backend.host
@@ -461,7 +463,7 @@ async function main(): Promise<void> {
         },
         startHost: async () => {
           if (lifecycleUnavailable() && !admitted) throw new Error('Desktop is quitting before package admission')
-          await backend.start(async () => {})
+          await backend.start(() => { assertNoLegacyDesktopActivation(paths); return Promise.resolve() })
         },
         verifyHost: async (input, role) => {
           const current = backend.host
@@ -518,7 +520,7 @@ async function main(): Promise<void> {
       updateStoppedHost = false
       if (restoreHost) {
         // Only confirmed process exit permits replacement before another installation confirmation.
-        const hostReady = backend.start(async () => {})
+        const hostReady = backend.start(() => { assertNoLegacyDesktopActivation(paths); return Promise.resolve() })
         startup = hostReady
         const recovery = hostReady.then(async () => {
           if (quitting) return
@@ -671,6 +673,7 @@ async function main(): Promise<void> {
   const reconcileBackend = (): Promise<void> => {
     if (lifecycleUnavailable()) return Promise.resolve()
     startup ??= (async () => {
+      assertNoLegacyDesktopActivation(paths)
       await navigateMain(applicationUrl)
       if (lifecycleUnavailable()) return
       if (pendingDesktopActivationTransactions(activeProject).length > 0) {
@@ -680,7 +683,7 @@ async function main(): Promise<void> {
         // No Host has existed in this launch. Initialization authority is captured before any baseline staging.
         startupProvisioningAttempted = true
         await manager.applyRelease(app.isPackaged)
-        packageTransactions ??= createDesktopPackageBackend(activeProject, resources, packagePolicy, undefined, manager.createdProfile)
+        packageTransactions ??= createDesktopPackageBackend(paths, resources, packagePolicy, undefined, manager.createdProfile)
         const assessment = await assessBaseline()
         if (assessment?.status === 'provisionable') {
           try {
@@ -696,7 +699,7 @@ async function main(): Promise<void> {
         }
         if (backend.host === undefined) {
           if (assessment?.status === 'exact-satisfied') packageAdmissionId = randomUUID()
-          await backend.start(async () => {})
+          await backend.start(() => { assertNoLegacyDesktopActivation(paths); return Promise.resolve() })
         }
       } else {
         await backend.start(async () => { await manager.applyRelease(app.isPackaged) })
