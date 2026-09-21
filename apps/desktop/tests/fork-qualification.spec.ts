@@ -302,7 +302,8 @@ describe('positive usage evidence in both original directories', () => {
     it(`requires schema3 and precise optional deferred-event placement in directory ${index}`, () => {
       const file = index === 0 ? join(current.options.ordinaryEvidence, 'acceptance.json') : packaged('functional-results.json')
       mutate(file, (value) => { value.schemaVersion = 1 }); expect(verify).toThrow()
-      mutate(file, (value) => { value.schemaVersion = 2 })
+      mutate(file, (value) => { value.schemaVersion = 2 }); expect(verify).toThrow()
+      mutate(file, (value) => { value.schemaVersion = 3 })
       for (const damage of ['valid', 'misplaced', 'duplicate']) {
         mutate(file, (value) => {
           const events = array(value.timeline).map(event => String(object(event).event)).filter(event => event !== 'initial:provider-deferred')
