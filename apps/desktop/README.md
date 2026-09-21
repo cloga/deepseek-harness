@@ -125,6 +125,8 @@ Windows Ops selects and locks one supported upstream baseline at a time. `cloga/
 
 ## Develop
 
+<a id="isolated-provisioning-acceptance"></a>
+
 ### Isolated provisioning acceptance
 
 The fork release smoke retains initial and restart signed-out/no-Session checks and also requires [positive usage acceptance](tests/fixtures/copilot-usage-positive-smoke.ts). The positive fixture uses the packaged module loader, unchanged Core renderer, real Session selector and Slot error boundary, and the installed released Copilot Client. Its separate Cordis context owns synthetic Session/model-selection observables and quota responses; it supplies no Host transport or credentials. Canonical and preview Copilot routes must render usage, react to removed/reopened Sessions, hide on another provider, and dispose subscriptions without disturbing the application mount. Evidence binds the verified runtime and installed Client hashes. This is packaged-renderer acceptance with synthetic data, not authenticated account quota, a native persisted Session, or installed-user-profile qualification.

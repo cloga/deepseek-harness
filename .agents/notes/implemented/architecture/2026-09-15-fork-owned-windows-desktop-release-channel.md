@@ -60,6 +60,8 @@ The manual Windows workflow requires the reviewed plan version and source commit
 
 A publication run requires current `master`. The protected release job is the only job with `contents: write`. It downloads the build artifact, cross-checks the complete asset set, creates the exact source commit tag as a draft, uploads every asset, and publishes only after the asset set is complete. It then requires GitHub to report the release immutable, the tag and release target to resolve to the build commit, and every remote asset digest to match the local bytes. A final read-only job uses the build-only metadata adapter to run the shipped discovery against GitHub and requires it to select the reviewed version, sequence, commit, and tree.
 
+<a id="positive-packaged-plugin-acceptance"></a>
+
 ## Positive packaged plugin acceptance
 
 An absent usage control on a signed-out page cannot prove that an eligible Session renders successfully: Core's Slot error boundary may retire a crashing contribution while the application stays usable. The packaged smoke therefore retains the negative startup checks and adds a separate synthetic Session context using the actual packaged module loader, renderer, Session selector, Slot registry, and installed released Client. It delegates and restores the public bootstrap method without modifying Core implementation or application services. Browser fixture source is type-stripped before evaluation rather than serialized through a source loader that may introduce closure helpers.

@@ -18,7 +18,7 @@
 
 Alpha.28 保留插件拥有的独立 prompt 与 input/output 组合准入，同时向官方有界 compaction 路径发出信号。Alpha.29 保留仅提供方路由、一次 routing namespace compare-and-swap、一个不同的最终回退，以及无需模型前置条件的 Copilot 账户拥有搜索模型解析。Alpha.30 保留现有 Desktop 外部导航交接与可选择的手动验证地址。Alpha.31 将 OAuth renewal 与 credential persistence 交给原生实现，同时保留有界 managed-route HTTP 401 proof retirement。Alpha.32 增加规范化账户额度快照和可选 Session 级 composer 呈现，不替换原生 Context meter，也不虚构 Session credits。在官方 Core 尚未提供等价策略之处，这些行为继续由插件拥有。
 
-Alpha.33 修复 Client 必需的 `useSession(selector)` 调用，不改变 Core。正向合成 Session 验收使用实际打包 renderer 与已发布 Client，补充登出检查；[release-channel 决策](2026-09-15-fork-owned-windows-desktop-release-channel.zh.md#打包插件正向验收)拥有隔离与证据限制。Core alpha.1 与 alpha.2 已提供 selector hook 和 Slot 错误边界；插件遵循这些官方 API，而不是增加 Core fallback。
+Alpha.33 修复 Client 必需的 `useSession(selector)` 调用，不改变 Core。正向合成 Session 验收使用实际打包 renderer 与已发布 Client，补充登出检查；[release-channel 决策](2026-09-15-fork-owned-windows-desktop-release-channel.zh.md#positive-packaged-plugin-acceptance)拥有隔离与证据限制。Core alpha.1 与 alpha.2 已提供 selector hook 和 Slot 错误边界；插件遵循这些官方 API，而不是增加 Core fallback。
 
 ## 官方优先比较
 
