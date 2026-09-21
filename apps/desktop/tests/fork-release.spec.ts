@@ -527,7 +527,13 @@ describe('Desktop fork release plan', () => {
       jobs: Record<string, {
         permissions?: Record<string, string>
         environment?: string
-        steps?: Array<{ name?: string; run?: string; env?: Record<string, string> }>
+        steps?: Array<{
+          id?: string
+          name?: string
+          run?: string
+          env?: Record<string, string>
+          with?: { name?: string; path?: string; 'if-no-files-found'?: string; 'retention-days'?: number }
+        }>
       }>
     }
     expect(workflow.permissions).toEqual({ contents: 'read' })
