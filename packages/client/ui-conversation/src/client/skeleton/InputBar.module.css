@@ -10,11 +10,28 @@
   padding: 0 var(--dsh-composer-side-clearance) 8px;
 }
 
-/* A mounted stats row in the composer dock (data-composer-stats, ui-chat
-   StatsPills) brings its own 4px top pad, so the root's bottom clearance
-   tightens to keep the drawn B8 rhythm. */
+/* The dock owns the 4px top pad. Native stats retain their existing marker
+   so the composer's bottom clearance keeps the drawn B8 rhythm. */
 .root:has([data-composer-stats]) {
   padding-bottom: 4px;
+}
+
+.dock {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-width: 0;
+  max-width: var(--dsh-chat-content-width);
+  width: 100%;
+  margin: 0 auto;
+  box-sizing: border-box;
+  padding: 4px calc(var(--dsh-composer-side-clearance) + 16px) 0;
+}
+
+.dock:empty {
+  display: none;
 }
 
 .hero {

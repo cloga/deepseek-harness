@@ -39,6 +39,8 @@ Each nonempty appended `system/message` owns a collapsed prompt row, including a
 <a id="turn-token-usage"></a>
 ## Turn token usage
 
+Session statistics occupy an intrinsic-width, wrapping group in `conversation.composer.dock`. InputBar owns the shared row and outer spacing, so later public dock contributions follow the native time and token/cache-hit pills when space permits. Each native pill retains its own button, accessible label, and anchored dialog; a narrow viewport may wrap the group without changing accounting or dialog state.
+
 A completed Turn shows an expandable usage row only when the loaded window includes `turn/start` and every started model attempt reports safe, exact usage. The row omits unavailable optional buckets. Incomplete or contradictory accounting hides the complete disclosure instead of presenting a partial total.
 
 After Assistant replies settle, the completed-turn timing dialog omits TTFT and decoding speed, both after live replies and after reopening history. Elapsed turn time remains available. The Session Stats pill reads timing independently from its durable projection.

@@ -17,6 +17,14 @@ Status: implemented
 - **渲染纪律。** 该行只折叠已定稿节点（`chat.legacy.nodes` 身份），流式 chunk 帧零重渲染——由渲染计数单测钉住。无已完成步且无计费 token 的会话什么都不渲染。
 - **`data-composer-stats` 是跨包属性契约。** pill 行根元素携带它；ui-conversation 的 `InputBar.module.css` 用 `:has([data-composer-stats])` 在该行挂载时把输入框底部留白收紧到 4px。生产方在单测里钉住该属性，沿用 `data-trigger-menu` 先例。
 
+## 共享 dock 布局
+
+Composer 拥有居中、可换行的单个 dock 行；StatsPills 提供按内容宽度排列的分组，而不是全宽行。后续公开 dock entry 可紧随原生缓存命中 pill，无需导入 Chat 组件或操作其他插件的 DOM。外部行和原生分组在窄宽度下都可换行；各原生锚点与弹层保持独立。空 dock 内容不增加 padding，`data-composer-stats` 仍控制现有底部留白。
+
+官方 Core `0.1.6-alpha.2` 已提供共享 flex dock 和按内容宽度排列的统计分组。保留 alpha.1 的 Desktop 只采用这种呈现排列并增加换行，同时保留 alpha.1 的 ContextMeter 工具栏位置及 composer 渲染资格。它不升级 Core、不采用 alpha.2 的 ContextMeter 移位，也不改变 Session 投影或 token 记账。以后经过单独验收的 alpha.2 升级可在相同几何检查通过后移除此局部适配。
+
+现有有序公开 dock 已支持这种位置，因此不需要新的统计项 Slot。也不需要 `display: contents`：保留原生分组盒可保留其几何并避免改变可访问性分组。打包几何验收通过已发布应用打开测试拥有的持久化 Session，测量真实 InputBar、StatsPills 和已发布插件控件；合成历史与登出账户状态不代表模型推理或实时额度访问。
+
 ## 备选方案
 
 - **单行变体（StatsLine，A/B 落选方）。** 全部数字常驻一行文本，悬停提示只在截断时复述整行。败在拥挤与可达性：精确 token 计数无处可看（行内和提示里都只有紧凑总量），单行也无法给时间与计费数字分组。
