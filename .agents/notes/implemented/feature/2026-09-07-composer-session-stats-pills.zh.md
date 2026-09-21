@@ -23,7 +23,9 @@ Composer 拥有居中、可换行的单个 dock 行；StatsPills 提供按内容
 
 官方 Core `0.1.6-alpha.2` 已提供共享 flex dock 和按内容宽度排列的统计分组。保留 alpha.1 的 Desktop 只采用这种呈现排列并增加换行，同时保留 alpha.1 的 ContextMeter 工具栏位置及 composer 渲染资格。它不升级 Core、不采用 alpha.2 的 ContextMeter 移位，也不改变 Session 投影或 token 记账。以后经过单独验收的 alpha.2 升级可在相同几何检查通过后移除此局部适配。
 
-现有有序公开 dock 已支持这种位置，因此不需要新的统计项 Slot。也不需要 `display: contents`：保留原生分组盒可保留其几何并避免改变可访问性分组。打包几何验收通过已发布应用打开测试拥有的持久化 Session，测量真实 InputBar、StatsPills 和已发布插件控件；合成历史与登出账户状态不代表模型推理或实时额度访问。
+现有有序公开 dock 已支持这种位置，因此不需要新的统计项 Slot。也不需要将原生 StatsPills 组改为 `display: contents`：保留其盒可保留其几何并避免改变可访问性分组。打包几何验收通过已发布应用打开测试拥有的持久化 Session，测量真实 InputBar、StatsPills 和已发布插件控件；合成历史与登出账户状态不代表模型推理或实时额度访问。
+
+Renderer 稳定的公开 `[data-slot="conversation.composer.dock"]` outlet 本身使用 `display: contents`，在空、返回 null 和卸载状态下也保留。Shell 隐藏唯一的空 outlet，不会把纯文本内容或崩溃标记误当成空。几何验收一起测量有界查找得到的实体 flex 所有者及其真实控件，而不是 outlet 不存在的盒。只有缺失或暂未布局的控件可在现有期限内重置采样；错误锚点、错误所有者和歧义直接失败。
 
 ## 备选方案
 

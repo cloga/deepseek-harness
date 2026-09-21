@@ -36,7 +36,7 @@ Target packages declaration-merge their snapshot and Location data maps, then re
 <a id="shell-and-standard-props"></a>
 ## Shell and standard props
 
-`conversation.composer.dock` is a centered, wrapping row below the card, ordered by the existing public list registration. The shell owns its outer spacing; compact entries size to their content, while entries requiring a complete row can request full width themselves. An empty dock consumes no space. Eligibility remains restricted to the ordinary composer with input and Session identity; Hero and no-Session states do not add a dock. Native statistics retain their bottom-clearance marker, and ContextMeter remains in the card toolbar.
+`conversation.composer.dock` is a centered, wrapping row below the card, ordered by the existing public list registration. The shell owns its outer spacing; compact entries size to their content, while entries requiring a complete row can request full width themselves. An empty dock consumes no space, including when the renderer retains its sole empty public `data-slot` outlet. Text-only entries, other controls, and crash markers remain nonempty. Eligibility remains restricted to the ordinary composer with input and Session identity; Hero and no-Session states do not add a dock. Native statistics retain their bottom-clearance marker, and ContextMeter remains in the card toolbar.
 
 The composer registers the File command action and owns its label, availability, and native file-dialog callback. Menu availability and invocation both consult the mounted composer's current attachment-intake policy. Unmounting or locking the composer disables that action; disposing the plugin removes its registration. The callback binding stays inside the input module.
 

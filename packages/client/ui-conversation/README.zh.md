@@ -36,7 +36,7 @@ target package 通过 declaration merge 扩展 snapshot 与 Location data map，
 <a id="shell-and-standard-props"></a>
 ## Shell 与标准 props
 
-`conversation.composer.dock` 是卡片下方居中、可换行的共享行，顺序由现有公开列表注册决定。Shell 拥有外部间距；紧凑 entry 按内容确定宽度，需要独占一行的 entry 可自行请求全宽。空 dock 不占空间。渲染资格仍限定于具有 input 和 Session 身份的普通 composer；Hero 和无 Session 状态不增加 dock。原生统计保留底部留白 marker，ContextMeter 仍位于卡片工具栏。
+`conversation.composer.dock` 是卡片下方居中、可换行的共享行，顺序由现有公开列表注册决定。Shell 拥有外部间距；紧凑 entry 按内容确定宽度，需要独占一行的 entry 可自行请求全宽。空 dock 不占空间，包括 renderer 仍保留唯一的空公开 `data-slot` outlet 时。纯文本 entry、其他控件及崩溃标记仍视为非空。渲染资格仍限定于具有 input 和 Session 身份的普通 composer；Hero 和无 Session 状态不增加 dock。原生统计保留底部留白 marker，ContextMeter 仍位于卡片工具栏。
 
 输入框注册「文件」命令动作，负责其标题、可用性和原生文件选择器回调。菜单可用性与实际调用都读取已挂载输入框当前的附件接收策略。输入框卸载或锁定后该动作不可用，插件 dispose（资源释放）时移除注册。回调绑定留在输入模块内部。
 

@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import type { Locator, Page } from 'playwright'
+import { measureNativeComposerDock } from './native-composer-dock-browser.ts'
 
 interface Box { x: number; y: number; width: number; height: number }
 interface PillStyle { fontSize: string; lineHeight: string; color: string }
@@ -63,17 +64,21 @@ export function assertNativeComposerGeometry(geometry: NativeComposerGeometry, i
   }
 }
 
-async function rectangle(locator: Locator): Promise<Box> {
-  const box = await locator.boundingBox()
-  assert(box !== null, 'Expected an actual rendered statistics control')
-  return box
-}
-
-async function pillStyle(locator: Locator): Promise<PillStyle> {
-  return locator.evaluate((element) => {
-    const style = getComputedStyle(element)
-    return { fontSize: style.fontSize, lineHeight: style.lineHeight, color: style.color }
-  })
+/**
+ * Observe retired placeholder sections in the real signed-out Copilot dialog.
+ * @param dialog - Actual open Copilot usage dialog.
+ * @returns Observed counts; any retired label or epoch date rejects acceptance.
+ */
+export async function observeRetiredCopilotSections(dialog: Locator): Promise<{
+  sessionCreditsCount: number; resetCount: number; epochTextCount: number
+}> {
+  const sessionCreditsCount = await dialog.getByText(/^(?:This session|本会话|Session credits|会话额度)$/u).count()
+  const resetCount = await dialog.getByText(/^(?:Resets|重置时间):/u).count()
+  const epochTextCount = await dialog.getByText(/\b1970\b/u).count()
+  assert.equal(sessionCreditsCount, 0, 'Unavailable Session credits section must remain retired')
+  assert.equal(resetCount, 0, 'Signed-out usage must not invent a reset date')
+  assert.equal(epochTextCount, 0, 'Copilot usage must not display an epoch reset date')
+  return { sessionCreditsCount, resetCount, epochTextCount }
 }
 
 async function observeNativeDialog(page: Page, trigger: Locator, title: string, screenshot: string): Promise<DialogObservation> {
@@ -136,6 +141,8 @@ export async function inspectNativeComposerGeometry(page: Page, output: string):
   await time.waitFor({ state: 'visible' })
   await usage.waitFor({ state: 'visible' })
   await copilot.waitFor({ state: 'visible' })
+  const outlet = page.locator('[data-slot="conversation.composer.dock"]')
+  assert.equal(await outlet.count(), 1, 'Native statistics must belong to one public composer dock outlet')
   const result: NativeComposerGeometry[] = []
   for (const viewportWidth of [1280, 400]) {
     await page.setViewportSize({ width: viewportWidth, height: 900 })
@@ -148,9 +155,14 @@ export async function inspectNativeComposerGeometry(page: Page, output: string):
     while (settled < 3) {
       assert(performance.now() < deadline, 'Composer geometry must settle after viewport change')
       await page.evaluate(() => new Promise<void>((resolve) => { requestAnimationFrame(() => { resolve() }) }))
-      geometry = { viewportWidth, dock: await rectangle(stats.locator('..')),
-        time: await rectangle(time), usage: await rectangle(usage), copilot: await rectangle(copilot),
-        nativeStyle: await pillStyle(usage), copilotStyle: await pillStyle(copilot) }
+      const measured = await outlet.evaluate(measureNativeComposerDock)
+      if (measured === null || measured.viewportWidth !== viewportWidth) {
+        geometry = undefined
+        previous = ''
+        settled = 0
+        continue
+      }
+      geometry = measured
       const current = JSON.stringify(geometry)
       settled = current === previous ? settled + 1 : 0
       previous = current
@@ -172,12 +184,7 @@ export async function inspectNativeComposerGeometry(page: Page, output: string):
   await signedOut.waitFor({ state: 'visible' })
   const signedOutObserved = await signedOut.isVisible()
   assert.equal(signedOutObserved, true, 'Copilot dialog must report actual signed-out state')
-  const sessionCreditsCount = await copilotDialog.getByText(/Session credits|会话额度/u).count()
-  const resetCount = await copilotDialog.getByText(/^(?:Resets|重置时间):/u).count()
-  assert.equal(sessionCreditsCount, 0, 'Unavailable Session credits section must remain retired')
-  assert.equal(resetCount, 0, 'Signed-out usage must not invent a reset date')
-  const epochTextCount = await copilotDialog.getByText(/\b1970\b/u).count()
-  assert.equal(epochTextCount, 0, 'Copilot usage must not display an epoch reset date')
+  const { sessionCreditsCount, resetCount, epochTextCount } = await observeRetiredCopilotSections(copilotDialog)
   await page.screenshot({ path: join(output, 'native-composer-copilot-dialog.png') })
   await page.keyboard.press('Escape')
   await copilotDialog.waitFor({ state: 'hidden' })

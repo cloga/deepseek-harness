@@ -30,7 +30,8 @@
   padding: 4px calc(var(--dsh-composer-side-clearance) + 16px) 0;
 }
 
-.dock:empty {
+.dock:empty,
+.dock:has(> [data-slot="conversation.composer.dock"]:only-child:empty) {
   display: none;
 }
 
