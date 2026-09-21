@@ -130,6 +130,107 @@ public static class InstallerCapture {
         }
         return text.ToString();
     }
+    // Dedicated running-application refusal; no ID scanning or generic button fallback.
+    public sealed class RefusalElement {
+        public IntPtr Handle, Root;
+        public int ProcessId, ControlId;
+        public string ClassName, Text;
+        public bool Exists, Visible, Enabled, PushButton;
+    }
+    public sealed class RefusalAction {
+        public IntPtr Root, Body, Button;
+    }
+    public static RefusalAction SelectRefusalAcknowledgement(int process, string title, string body, RefusalElement[] items) {
+        if (process <= 0 || String.IsNullOrWhiteSpace(title) || String.IsNullOrWhiteSpace(body) || items == null || items.Length > 64)
+            throw new InvalidOperationException("Invalid owned refusal selector");
+        RefusalAction selected = null;
+        foreach (var root in items) {
+            if (!root.Exists || root.Handle == IntPtr.Zero || root.Handle != root.Root || root.ProcessId != process ||
+                !root.Visible || !root.Enabled || root.ClassName != "#32770" || root.Text == null || root.Text.TrimEnd(' ') != title) continue;
+            int bodies = 0, buttons = 0;
+            RefusalElement message = null, button = null;
+            foreach (var item in items) {
+                if (!item.Exists || item.Handle == root.Handle || item.Root != root.Handle || !item.Visible || !item.Enabled) continue;
+                if (item.ProcessId != process) throw new InvalidOperationException("Foreign refusal control");
+                if (item.ClassName == "Static" && item.Text == body) { bodies++; message = item; }
+                if (item.ClassName == "Button") { buttons++; button = item; }
+            }
+            if (bodies == 0) continue;
+            if (selected != null || bodies != 1 || buttons != 1 || button == null || !button.PushButton || button.ControlId != 2 ||
+                (button.Text != "OK" && button.Text != "&OK" && button.Text != "确定" && button.Text != "确定(&O)"))
+                throw new InvalidOperationException("Ambiguous or invalid refusal acknowledgement");
+            selected = new RefusalAction { Root = root.Handle, Body = message.Handle, Button = button.Handle };
+        }
+        if (selected == null) throw new InvalidOperationException("Owned refusal acknowledgement is missing");
+        return selected;
+    }
+    public static void AssertSameRefusalAction(RefusalAction before, RefusalAction after, IntPtr prompt) {
+        if (before == null || after == null || prompt == IntPtr.Zero || before.Body != prompt || after.Body != prompt ||
+            before.Root != after.Root || before.Button != after.Button || before.Button == IntPtr.Zero)
+            throw new InvalidOperationException("Owned refusal handles changed");
+    }
+    static RefusalElement[] ReadRefusalElements(int process) {
+        var items = new RefusalElement[64];
+        int count = 0;
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        Action<IntPtr, IntPtr> capture = delegate(IntPtr handle, IntPtr root) {
+            if (count >= items.Length || timer.ElapsedMilliseconds >= 2000) throw new InvalidOperationException("Refusal observation limit reached");
+            uint owner;
+            GetWindowThreadProcessId(handle, out owner);
+            if (!IsWindow(handle) || owner != process || TopLevel(handle) != root) throw new InvalidOperationException("Refusal control ownership changed");
+            var kind = new StringBuilder(128);
+            if (GetClassName(handle, kind, kind.Capacity) == 0) throw new InvalidOperationException("Refusal class unavailable");
+            var text = new StringBuilder(2048);
+            IntPtr result;
+            if (SendMessageTimeout(handle, 0xD, (IntPtr)text.Capacity, text, 0x2, 50, out result) == IntPtr.Zero)
+                throw new InvalidOperationException("Refusal text unavailable");
+            GetWindowThreadProcessId(handle, out owner);
+            if (!IsWindow(handle) || owner != process || TopLevel(handle) != root) throw new InvalidOperationException("Refusal control became stale");
+            int buttonStyle = GetWindowLong(handle, -16) & 0xf;
+            items[count++] = new RefusalElement { Handle = handle, Root = root, ProcessId = (int)owner,
+                ControlId = GetDlgCtrlID(handle), ClassName = kind.ToString(), Text = text.ToString(), Exists = true,
+                Visible = IsWindowVisible(handle), Enabled = IsWindowEnabled(handle), PushButton = buttonStyle == 0 || buttonStyle == 1 };
+        };
+        Exception failure = null;
+        bool enumerated = EnumWindows(delegate(IntPtr root, IntPtr unused) {
+            try {
+                uint owner;
+                GetWindowThreadProcessId(root, out owner);
+                if (owner != process || !IsWindowVisible(root) || !IsWindowEnabled(root)) return true;
+                var kind = new StringBuilder(128);
+                if (GetClassName(root, kind, kind.Capacity) == 0) throw new InvalidOperationException("Refusal root class unavailable");
+                if (kind.ToString() != "#32770") return true;
+                capture(root, root);
+                EnumChildWindows(root, delegate(IntPtr child, IntPtr data) {
+                    try {
+                        if (IsWindowVisible(child) && IsWindowEnabled(child)) capture(child, root);
+                        return true;
+                    } catch (Exception error) { failure = error; return false; }
+                }, IntPtr.Zero);
+                return failure == null;
+            } catch (Exception error) { failure = error; return false; }
+        }, IntPtr.Zero);
+        if (failure != null) throw new InvalidOperationException("Owned refusal snapshot failed", failure);
+        if (!enumerated) throw new InvalidOperationException("Refusal enumeration failed");
+        Array.Resize(ref items, count);
+        return items;
+    }
+    public static void AcknowledgeOwnedRefusal(int process, IntPtr prompt, string title, string body) {
+        var before = SelectRefusalAcknowledgement(process, title, body, ReadRefusalElements(process));
+        var after = SelectRefusalAcknowledgement(process, title, body, ReadRefusalElements(process));
+        AssertSameRefusalAction(before, after, prompt);
+        uint owner, rootOwner, bodyOwner;
+        GetWindowThreadProcessId(after.Button, out owner);
+        GetWindowThreadProcessId(after.Root, out rootOwner);
+        GetWindowThreadProcessId(after.Body, out bodyOwner);
+        if (owner != process || rootOwner != process || bodyOwner != process || !IsWindow(after.Body) ||
+            TopLevel(after.Body) != after.Root || !IsWindow(after.Root) || !IsWindow(after.Button) ||
+            !IsWindowVisible(after.Button) || !IsWindowEnabled(after.Button) || GetDlgCtrlID(after.Button) != 2 ||
+            TopLevel(after.Button) != after.Root || !IsWindowVisible(after.Root) || !IsWindowEnabled(after.Root))
+            throw new InvalidOperationException("Owned refusal action became stale");
+        Click(after.Button);
+    }
+
     public static IntPtr FindControlById(IntPtr parent, int id) {
         IntPtr result = IntPtr.Zero;
         EnumChildWindows(parent, delegate(IntPtr child, IntPtr unused) {

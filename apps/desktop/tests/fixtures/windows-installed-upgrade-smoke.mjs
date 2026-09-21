@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { assertUpgradeRunner, installedUpgradeApplication, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeFileHash, verifyUpgradeRelease } from './windows-installed-upgrade-contract.mjs'
 import { retainPrimaryFailure } from './windows-packaged-package-acceptance.mjs'
+import { baselineAbortRequested, acknowledgeBaselineAbort } from './baseline-abort.mjs'
 import { inspectInstalledDesktopIdentity, installedDesktopProcessIds, installedLauncherExited, readInstalledDesktopRuntimeDescriptor } from './windows-installed-runtime.mjs'
 
 const baseline = JSON.parse(readFileSync(new URL('./windows-upgrade-baseline.json', import.meta.url), 'utf8'))
@@ -94,6 +95,7 @@ async function main() {
     let app
     let page
     let roundFailure
+    let baselineAborted = false
     const errors = []
     const secondaryErrors = []
     try {
@@ -123,7 +125,12 @@ async function main() {
       if (round === 'baseline') {
         save(join(root, 'baseline-ready.json'), { ownerToken: owner.token, ...processIds, application })
         const deadline = Date.now() + 600_000
-        while (!existsSync(join(root, 'baseline-finish-request.json'))) {
+        while (true) {
+          if (baselineAbortRequested(root, owner, process.env.GITHUB_SHA)) {
+            baselineAborted = true
+            throw new Error('Owned baseline failure abort requested')
+          }
+          if (existsSync(join(root, 'baseline-finish-request.json'))) break
           assert.ok(Date.now() < deadline, 'Native driver did not finish its running-app refusal case')
           assert.equal(installedLauncherExited(launcher), false, 'Baseline launch transport exited during installer refusal')
           await delay(250)
@@ -148,19 +155,29 @@ async function main() {
       })
     } catch (error) {
       roundFailure = error
-      try {
-        const { collectInstalledStartupDiagnostics } = await import('./installed-startup-diagnostics.ts')
-        const startup = await collectInstalledStartupDiagnostics(app, page)
-        save(join(evidence, `${round}-startup.json`), {
-          schemaVersion: 1, round, sourceCommit: expected.manifest.source.commit,
-          candidateSourceCommit: process.env.GITHUB_SHA, ...startup,
-        })
-      } catch {
-        secondaryErrors.push('startup-diagnostic-unavailable')
+      if (!baselineAborted) {
+        try {
+          const { collectInstalledStartupDiagnostics } = await import('./installed-startup-diagnostics.ts')
+          const startup = await collectInstalledStartupDiagnostics(app, page)
+          save(join(evidence, `${round}-startup.json`), {
+            schemaVersion: 1, round, sourceCommit: expected.manifest.source.commit,
+            candidateSourceCommit: process.env.GITHUB_SHA, ...startup,
+          })
+        } catch {
+          secondaryErrors.push('startup-diagnostic-unavailable')
+        }
       }
     } finally {
+      let abortCloseFailed = false
       try { await app?.close() }
-      catch (error) { roundFailure = retainPrimaryFailure(roundFailure, error, 'round-owned-close', secondaryErrors) }
+      catch (error) {
+        abortCloseFailed = true
+        roundFailure = retainPrimaryFailure(roundFailure, error, 'round-owned-close', secondaryErrors)
+      }
+      if (baselineAborted && app !== undefined && !abortCloseFailed) {
+        try { acknowledgeBaselineAbort(root, owner, process.env.GITHUB_SHA) }
+        catch { secondaryErrors.push('baseline-abort-ack-unavailable') }
+      }
       if (roundFailure !== undefined) {
         try { save(join(evidence, `${round}-failure.json`), { error: safeError(roundFailure), pageErrors: errors, secondaryErrors }) }
         catch (error) {

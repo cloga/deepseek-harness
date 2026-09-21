@@ -64,6 +64,10 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 [cloga 发布工作流](../../../.github/workflows/desktop-fork-release.yml)仅在一次性的 GitHub 托管 Windows runner 上运行[安装器验收](windows-installer-upgrade.ps1)。选择经过评审的分支，设置 `rehearsal: true` 并填写精确的[发布计划版本](../release/cloga-windows-x64.json)；演练不能发布。驱动会拒绝已有的产品安装，并在调用真实交互式安装器前验证基线与候选版本的身份。它关闭自动启动，使用隔离数据启动已安装应用，检查自定义安装路径和重启，最后卸载。获取产物所用的凭据不会传给应用或原生辅助程序。
 
+运行中应用的拒绝提示使用专用的自有模态确认解析器，不猜测 MessageBox 返回值。它要求存活的自有安装器中只有一个可见且启用的 `#32770` 根窗口，匹配已捕获的安装器标题（仅忽略末尾标题填充空格）、精确的本地化拒绝文本，以及唯一可见且启用的普通 Button ID2，并带有明确的英语或简体中文 OK 文案。隐藏父窗口中的 Cancel／Next、其他动作、歧义或变化的句柄均被拒绝，点击前再次验证。范围限于支持的安装器及已观察模态，不适用于任意操作系统对话框或语言；600 秒提示等待、退出码 2 和安装内容不变的断言保持原样。
+
+若驱动失败时，保留的基线 monitor 仍在等待拒绝验收完成，独立的[中止协议](fixtures/baseline-abort.mjs)只授权该 owner／run／source／phase。请求以原子方式发布，不覆盖已有控制文件，并验证普通自有文件及精确字节。无效或过期控制不授予关闭权限。fixture 经既有 close／finally 路径失败退出，不写成功或拒绝验收 receipt，仅在 app.close 完成后确认。父进程原有的每句柄十秒清理预算从写请求前开始，最多给予五秒正常退出时间，仅用剩余时间执行保留句柄的停止后备步骤；第二次回收不重置预算。缺少确认时保持失败关闭，保留主要失败，正常 finish 请求和 120／30 秒门禁仍独立且不变。
+
 安装升级与同版本包操作的观察器均使用[已安装运行时读取器](fixtures/windows-installed-runtime.mjs)。CDP 求值只返回运行中应用的身份字段；描述文件通过维护中的 `readPackagedDesktopRuntimeDescriptor` 载体在 CDP 之外读取。在以 Node 模式启动打包 Electron 之前，读取器重新检查自有安装中的可执行文件哈希，并将观察到的 resources 目录绑定到该安装。描述文件校验对原始 ASAR 字节计算哈希，不使用解析或重新序列化的 JSON。此检查仅针对一次性的托管安装，绝不针对操作者的 Desktop。
 
 固定版本 [Playwright 1.61.1](https://github.com/microsoft/playwright/blob/v1.61.1/packages/playwright-core/src/server/electron/electron.ts) 在 Windows 上通过 `shell: true` 启动 Electron：`app.process()` 标识 CMD 启动载体，而非 Electron 主进程。自有主进程求值提供正安全整数 PID 和父 PID。主进程与保留的启动载体身份都必须有效；基线就绪和原生窗口归属使用主 PID，原生包辅助程序则验证直接 fixture → 主进程关系，或精确且存活的 fixture → 系统 CMD → 主进程关系，并匹配创建身份与会话。进程名称搜索或接纳枚举 PID 都不能证明归属。清理分别要求启动载体退出，以及经过验证的主进程／Host 进程族退出。

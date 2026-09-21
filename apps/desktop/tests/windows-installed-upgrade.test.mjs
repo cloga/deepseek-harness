@@ -7,6 +7,7 @@ import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { baselineAbortRequested, acknowledgeBaselineAbort } from './fixtures/baseline-abort.mjs'
 import { runInNewContext } from 'node:vm'
 import { inspectInstalledDesktopIdentity, installedDesktopProcessIds, installedLauncherExited, readInstalledDesktopRuntimeDescriptor } from './fixtures/windows-installed-runtime.mjs'
 import { assertUpgradeRunner, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeAssetPath, upgradeFileHash, verifyUpgradeRelease } from './fixtures/windows-installed-upgrade-contract.mjs'
@@ -51,6 +52,216 @@ function releaseFixture(t) {
   writeManifest()
   return { root, payload, writeManifest, expected: { commit, version, upstreamVersion: '0.1.6-alpha.2' } }
 }
+
+test('baseline abort control grants only its exact owner run source and waiting phase', t => {
+  const root = directory(t)
+  const owner = { token: 'owned-token', runId: '123', runAttempt: '1' }
+  const source = 'a'.repeat(40)
+  const request = { schemaVersion: 1, ownerToken: owner.token, runId: owner.runId, runAttempt: owner.runAttempt, sourceCommit: source, phase: 'baseline-refusal' }
+  const path = join(root, 'baseline-abort-request.json')
+  assert.equal(baselineAbortRequested(root, owner, source), false)
+  for (const [key, value] of [['ownerToken', 'foreign'], ['runId', '456'], ['runAttempt', '2'], ['sourceCommit', 'b'.repeat(40)], ['phase', 'candidate'], ['schemaVersion', 2]]) {
+    writeFileSync(path, JSON.stringify({ ...request, [key]: value }))
+    assert.equal(baselineAbortRequested(root, owner, source), false, key)
+  }
+  for (const value of ['{bad', 'null', '[]', 'x'.repeat(2049)]) {
+    writeFileSync(path, value)
+    assert.equal(baselineAbortRequested(root, owner, source), false)
+  }
+  writeFileSync(path, JSON.stringify(request))
+  assert.equal(baselineAbortRequested(root, owner, source), true)
+  acknowledgeBaselineAbort(root, owner, source)
+  const ack = JSON.parse(readFileSync(join(root, 'baseline-abort-ack.json'), 'utf8'))
+  assert.equal(ack.appCloseResolved, true)
+  assert.equal(ack.failed, true)
+  assert.equal(ack.ownerToken, owner.token)
+  assert.throws(() => acknowledgeBaselineAbort(root, owner, source), /EEXIST/u)
+})
+
+test('actual baseline wait rejects valid abort without success and ignores stale controls until normal finish', async t => {
+  const source = readFileSync(new URL('./fixtures/windows-installed-upgrade-smoke.mjs', import.meta.url), 'utf8')
+  const start = source.indexOf('        const deadline = Date.now() + 600_000')
+  const end = source.indexOf("        assert.equal(json(join(root, 'baseline-finish-request.json')).ownerToken", start)
+  assert.ok(start > 0 && end > start)
+  const loop = source.slice(start, end)
+  for (const mode of ['valid', 'wrong-token', 'stale-phase', 'malformed']) {
+    const root = directory(t)
+    const owner = { token: 'owner', runId: '123', runAttempt: '1' }
+    const commit = 'a'.repeat(40)
+    const control = { schemaVersion: 1, ownerToken: mode === 'wrong-token' ? 'other' : owner.token,
+      runId: owner.runId, runAttempt: owner.runAttempt, sourceCommit: commit, phase: mode === 'stale-phase' ? 'candidate' : 'baseline-refusal' }
+    writeFileSync(join(root, 'baseline-abort-request.json'), mode === 'malformed' ? '{' : JSON.stringify(control))
+    const events = []
+    const result = await runInNewContext(`(async () => {
+      let baselineAborted = false, primary;
+      try { ${loop}; events.push('normal-finish'); }
+      catch (error) { primary = error; }
+      finally { await app.close(); if (baselineAborted) acknowledgeBaselineAbort(root, owner, process.env.GITHUB_SHA); }
+      return { baselineAborted, failed: primary !== undefined };
+    })()`, {
+      baselineAbortRequested, acknowledgeBaselineAbort, root, owner, process: { env: { GITHUB_SHA: commit } },
+      assert, Date, existsSync: path => { try { readFileSync(path); return true } catch { return false } }, join,
+      installedLauncherExited, launcher: { exitCode: null, signalCode: null }, events,
+      app: { close: async () => { events.push('closed') } },
+      delay: async () => { events.push('waited'); writeFileSync(join(root, 'baseline-finish-request.json'), '{}') },
+    })
+    assert.equal(result.baselineAborted, mode === 'valid')
+    assert.equal(result.failed, mode === 'valid')
+    assert.deepEqual(events, mode === 'valid' ? ['closed'] : ['waited', 'normal-finish', 'closed'])
+  }
+  assert.ok(source.indexOf('acknowledgeBaselineAbort(root, owner', source.indexOf('} finally {')) > source.indexOf('try { await app?.close() }'))
+  assert.ok(source.includes('if (baselineAborted && app !== undefined && !abortCloseFailed)'))
+})
+
+test('baseline abort writer and shutdown share the original budget and require an owned close acknowledgement', { skip: process.platform !== 'win32' }, t => {
+  const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const abort = readFileSync(new URL('./fixtures/baseline-abort.ps1', import.meta.url), 'utf8')
+  const stop = driver.match(/function Stop-OwnedProcesses[^]*?\r?\n\}/u)?.[0]
+  const ownerGuard = driver.match(/function Assert-UninstallOwner[^]*?\r?\n\}/u)?.[0]
+  assert.ok(stop && ownerGuard)
+  const observed = powershellUnit(t, `
+. $env:DSH_REGISTRATION_HELPER
+${abort}
+${stop}
+${ownerGuard}
+$env:GITHUB_RUN_ID = '123'; $env:GITHUB_RUN_ATTEMPT = '1'
+$ExpectedSourceCommit = 'a' * 40; $token = 'owned-token'
+function New-BaselineAbortClock { return $script:clock }
+$script:realPathGuard = (Get-Command Assert-InstallerOwnedPath).ScriptBlock
+function Assert-InstallerOwnedPath($Root, $Path) {
+    if ($mode -eq 'published-replaced' -and -not $script:replaced -and $Path -eq (Join-Path $Root 'baseline-abort-request.json') -and (Test-Path -LiteralPath $Path)) {
+        [IO.File]::WriteAllText($Path, 'FOREIGN-replacement'); $script:replaced = $true
+    }
+    & $script:realPathGuard $Root $Path
+}
+$cases = @()
+foreach ($mode in @('grace', 'no-ack', 'wrong-ack', 'fallback', 'spent', 'write-expired', 'published-replaced', 'foreign-existing', 'wrong-object', 'changed-incarnation')) {
+    $root = Join-Path $PSScriptRoot $mode
+    New-Item -ItemType Directory -Path $root | Out-Null
+    [ordered]@{ token = $token; runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT } | ConvertTo-Json | Set-Content (Join-Path $root 'owner.json')
+    $script:clock = [pscustomobject]@{ ElapsedMilliseconds = 0L }
+    $script:replaced = $false; $script:budgetReads = 0
+    if ($mode -eq 'write-expired') {
+        $script:clock | Add-Member -Force ScriptProperty ElapsedMilliseconds {
+            $script:budgetReads++; if ($script:budgetReads -gt 1) { return 10000L }; return 0L
+        }
+    }
+    $script:waits = [Collections.Generic.List[object]]::new(); $script:kills = 0
+    $monitor = [pscustomobject]@{ Id = 30; StartTime = [datetime]'2026-09-20T01:00:00Z'; HasExited = $false; ExitCode = $null }
+    $monitor | Add-Member ScriptMethod WaitForExit {
+        param($Milliseconds)
+        $script:waits.Add([pscustomobject]@{ requested = $Milliseconds; elapsed = $script:clock.ElapsedMilliseconds })
+        if ($this.HasExited) { return $true }
+        if ($mode -in @('grace', 'no-ack', 'wrong-ack')) {
+            $script:clock.ElapsedMilliseconds += 1000
+            $this.HasExited = $true; $this.ExitCode = 1
+            if ($mode -ne 'no-ack') {
+                [ordered]@{ schemaVersion = 1; ownerToken = $token; runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT
+                    sourceCommit = $ExpectedSourceCommit; phase = $(if ($mode -eq 'wrong-ack') { 'candidate' } else { 'baseline-refusal' })
+                    appCloseResolved = $true; failed = $true } | ConvertTo-Json | Set-Content (Join-Path $root 'baseline-abort-ack.json')
+            }
+            return $true
+        }
+        $script:clock.ElapsedMilliseconds += $Milliseconds
+        return $false
+    }
+    $monitor | Add-Member ScriptMethod Kill { param($Tree); if (-not $Tree) { throw 'Expected retained tree stop' }; $script:kills++; $this.HasExited = $true; $this.ExitCode = 1 }
+    $binding = [pscustomobject]@{ Process = $monitor; Id = 30; Created = $monitor.StartTime.ToUniversalTime().Ticks }
+    if ($mode -eq 'wrong-object') { $binding.Process = [pscustomobject]@{ Id = 30 } }
+    if ($mode -eq 'changed-incarnation') { $binding.Created += 10 }
+    if ($mode -eq 'foreign-existing') { [IO.File]::WriteAllText((Join-Path $root 'baseline-abort-request.json'), 'FOREIGN-request') }
+    $secondary = [Collections.Generic.List[string]]::new(); $cleanup = [Collections.Generic.List[string]]::new()
+    try { throw 'original-primary' } catch { $failure = $_ }
+    $original = $failure
+    $budget = Request-OwnedBaselineAbort $monitor $binding @($monitor) $secondary
+    if ($mode -eq 'spent') { $budget.Clock.ElapsedMilliseconds = 10000 }
+    $stopped = Stop-OwnedProcesses @($monitor) $cleanup $budget
+    $acknowledged = Confirm-OwnedBaselineAbort $budget $cleanup
+    # A second retained-handle pass must not reset this monitor's budget.
+    [void](Stop-OwnedProcesses @($monitor) $cleanup $budget)
+    $preserved = if ($mode -eq 'foreign-existing') { (Get-Content (Join-Path $root 'baseline-abort-request.json') -Raw) -ceq 'FOREIGN-request' } else { $true }
+    $cases += [pscustomobject]@{ mode = $mode; requested = $budget.Requested; stopped = $stopped; acknowledged = $acknowledged
+        waits = @($script:waits); kills = $script:kills; preserved = $preserved; primaryRetained = [object]::ReferenceEquals($original, $failure)
+        secondary = @($secondary); cleanup = @($cleanup) }
+}
+ConvertTo-Json -InputObject $cases -Depth 6 -Compress
+`, { DSH_REGISTRATION_HELPER: fileURLToPath(new URL('./fixtures/windows-installer-registration.ps1', import.meta.url)) })
+  for (const row of observed) {
+    assert.equal(row.primaryRetained, true, row.mode)
+    assert.equal(row.preserved, true, row.mode)
+    assert.equal(row.acknowledged, row.mode === 'grace', JSON.stringify(row))
+    for (const wait of row.waits) assert.ok(wait.requested <= Math.max(0, 10000 - wait.elapsed), row.mode)
+  }
+  const cases = Object.fromEntries(observed.map(row => [row.mode, row]))
+  assert.equal(cases.grace.kills, 0)
+  assert.equal(cases.grace.waits[0].requested, 5000)
+  assert.equal(cases.fallback.kills, 1)
+  assert.equal(cases.spent.stopped, false)
+  assert.ok(cases.spent.waits.every(wait => wait.requested === 0))
+  for (const mode of ['write-expired', 'published-replaced', 'foreign-existing', 'wrong-object', 'changed-incarnation']) assert.equal(cases[mode].requested, false)
+  assert.ok(cases['write-expired'].waits.every(wait => wait.requested === 0))
+  assert.ok(driver.includes('if ($abortRequestFailed -or -not (Confirm-OwnedBaselineAbort $abortBudget $cleanupErrors))'))
+  assert.ok(driver.includes('[void](Stop-OwnedProcesses $processes $cleanupErrors $abortBudget)'))
+  assert.ok(driver.includes('Wait-NoProductProcesses'))
+})
+
+test('owned refusal selector accepts only exact visible modal acknowledgement and rejects stale or ambiguous controls', { skip: process.platform !== 'win32' }, t => {
+  const helper = fileURLToPath(new URL('./windows-installer-ui.ps1', import.meta.url))
+  const observed = powershellUnit(t, `
+. $env:DSH_INSTALLER_UI_HELPER
+function Element($handle, $root, $kind, $text, $id = 0) {
+    $e = New-Object 'InstallerCapture+RefusalElement'
+    $e.Handle = [IntPtr]$handle; $e.Root = [IntPtr]$root; $e.ProcessId = 42; $e.ControlId = $id
+    $e.ClassName = $kind; $e.Text = $text; $e.Exists = $true; $e.Visible = $true; $e.Enabled = $true; $e.PushButton = $true
+    return $e
+}
+$cases = @()
+foreach ($mode in @('valid', 'chinese-ok', 'hidden-parent', 'id-one', 'cancel', 'yes', 'retry', 'wrong-title', 'wrong-body',
+    'empty-body', 'foreign-root', 'foreign-button', 'wrong-root', 'hidden-button', 'disabled-button', 'stale-button',
+    'non-push', 'duplicate-button', 'duplicate-body', 'duplicate-modal', 'stale-action')) {
+    $title = 'DeepSeek Harness (cloga) Setup'; $body = 'Exact localized refusal'
+    $root = Element 100 100 '#32770' $title
+    $text = Element 101 100 'Static' $body
+    $button = Element 102 100 'Button' 'OK' 2
+    $items = @($root, $text, $button)
+    if ($mode -eq 'chinese-ok') { $button.Text = '确定' }
+    if ($mode -eq 'hidden-parent') { $parent = Element 200 200 '#32770' $title; $parent.Enabled = $false; $cancel = Element 202 200 'Button' 'Cancel' 2; $cancel.Visible = $false; $items += @($parent, $cancel) }
+    if ($mode -eq 'id-one') { $button.ControlId = 1 }
+    if ($mode -in @('cancel','yes','retry')) { $button.Text = $mode }
+    if ($mode -eq 'wrong-title') { $root.Text = 'Foreign title' }
+    if ($mode -eq 'wrong-body') { $text.Text += ' extra' }
+    if ($mode -eq 'empty-body') { $body = '' }
+    if ($mode -eq 'foreign-root') { $root.ProcessId = 99 }
+    if ($mode -eq 'foreign-button') { $button.ProcessId = 99 }
+    if ($mode -eq 'wrong-root') { $button.Root = [IntPtr]200 }
+    if ($mode -eq 'hidden-button') { $button.Visible = $false }
+    if ($mode -eq 'disabled-button') { $button.Enabled = $false }
+    if ($mode -eq 'stale-button') { $button.Exists = $false }
+    if ($mode -eq 'non-push') { $button.PushButton = $false }
+    if ($mode -eq 'duplicate-button') { $items += (Element 103 100 'Button' 'OK' 2) }
+    if ($mode -eq 'duplicate-body') { $items += (Element 104 100 'Static' $body) }
+    if ($mode -eq 'duplicate-modal') { $items += @((Element 200 200 '#32770' $title), (Element 201 200 'Static' $body), (Element 202 200 'Button' 'OK' 2)) }
+    $accepted = $false
+    try {
+        $action = [InstallerCapture]::SelectRefusalAcknowledgement(42, $title, $body, $items)
+        $after = [InstallerCapture]::SelectRefusalAcknowledgement(42, $title, $body, $items)
+        if ($mode -eq 'stale-action') { $after.Button = [IntPtr]999 }
+        [InstallerCapture]::AssertSameRefusalAction($action, $after, [IntPtr]101)
+        $accepted = $action.Button -eq [IntPtr]102 -and $action.Root -eq [IntPtr]100
+    } catch {}
+    $cases += [pscustomobject]@{ mode = $mode; accepted = $accepted }
+}
+ConvertTo-Json -InputObject $cases -Compress
+`, { DSH_INSTALLER_UI_HELPER: helper })
+  const positives = new Set(['valid', 'chinese-ok', 'hidden-parent'])
+  for (const row of observed) assert.equal(row.accepted, positives.has(row.mode), row.mode)
+  const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  assert.ok(driver.includes('Wait-Control $refused $copy.INSTALLER_RUNNING -Seconds 600 -Dialog'))
+  assert.ok(driver.includes('if ($refused.HasExited)'))
+  assert.ok(driver.includes('AcknowledgeOwnedRefusal($refused.Id, $prompt, $installerTitles[$refused.Id], $copy.INSTALLER_RUNNING)'))
+  assert.ok(driver.includes('Wait-Exit $refused 30 2'))
+  assert.doesNotMatch(driver, /GetDlgItem\(\[InstallerCapture\]::TopLevel\(\$prompt\), 1\)/u)
+})
 
 test('runner guard rejects workstations, self-hosted and non-Windows execution', () => {
   assert.doesNotThrow(() => assertUpgradeRunner(hosted, 'win32'))
@@ -868,7 +1079,7 @@ ConvertTo-Json -InputObject $cases -Depth 4 -Compress
     { outcome: 'timeout', waited: true, postconditionsReached: false, failed: true, errors: [] },
     { outcome: 'nonzero', waited: true, postconditionsReached: false, failed: true, errors: [] },
   ])
-  const finalReaper = source.lastIndexOf('[void](Stop-OwnedProcesses $processes $cleanupErrors)')
+  const finalReaper = source.lastIndexOf('[void](Stop-OwnedProcesses $processes $cleanupErrors $abortBudget)')
   assert.ok(finalReaper < source.indexOf('Close-UninstallStream $uninstallerCopy.Guard', finalReaper))
   assert.ok(source.includes('$processes.Add($process)'))
   assert.doesNotMatch(launch, /Start-Owned \$uninstaller\s|--updated|--delete-app-data|\/NCRC|\/D=/u)

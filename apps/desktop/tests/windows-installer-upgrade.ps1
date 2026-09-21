@@ -47,13 +47,16 @@ $packageAcceptanceSuccess = $false
 $packageAcceptanceAttempted = $false
 $registration = $null
 $baselineProcessBinding = $null
+$baselineMonitorBinding = $null
 $monitor = $null
 $installationAttempted = $false
 $uninstallerCopy = $null
 $registrationIdentities = @()
 $installerProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
+$installerTitles = @{}
 . (Join-Path $PSScriptRoot 'fixtures/windows-installer-registration.ps1')
 . (Join-Path $PSScriptRoot 'fixtures/windows-uninstall-observation.ps1')
+. (Join-Path $PSScriptRoot 'fixtures/baseline-abort.ps1')
 function Product-Registrations { Get-InstallerRegistrationEntries }
 function Product-Processes {
     @(Get-CimInstance Win32_Process | Where-Object {
@@ -98,9 +101,29 @@ function Wait-Exit([Diagnostics.Process]$Process, [int]$Seconds, [int]$Expected 
 }
 # Process handles remain retained until the final pass, including handles added by uninstall/profile cleanup.
 function Stop-OwnedProcesses {
-    param($OwnedProcesses, $Errors)
+    param($OwnedProcesses, $Errors, $AbortBudget = $null)
     $stopped = $true
     foreach ($process in $OwnedProcesses) {
+        if ($null -ne $AbortBudget -and $AbortBudget.Required -and [object]::ReferenceEquals($process, $AbortBudget.Process)) {
+            try {
+                if ($AbortBudget.Requested -and -not $process.HasExited) {
+                    $remaining = [int][Math]::Max(0, 10000 - $AbortBudget.Clock.ElapsedMilliseconds)
+                    $grace = [int][Math]::Min(5000, $remaining)
+                    if ($grace -gt 0) {
+                        try { [void]$process.WaitForExit($grace) }
+                        catch { $Errors.Add('Owned baseline graceful exit observation failed'); $stopped = $false }
+                    }
+                }
+                if (-not $process.HasExited) {
+                    try { $process.Kill($true) }
+                    catch { $Errors.Add('Could not terminate retained baseline monitor'); $stopped = $false }
+                }
+                $remaining = [int][Math]::Max(0, 10000 - $AbortBudget.Clock.ElapsedMilliseconds)
+                if ($remaining -eq 0) { $Errors.Add('Owned baseline cleanup budget expired'); $stopped = $false }
+                if (-not $process.WaitForExit($remaining)) { $Errors.Add('Owned baseline monitor exit unconfirmed'); $stopped = $false }
+            } catch { $Errors.Add('Owned baseline monitor state unavailable'); $stopped = $false }
+            continue
+        }
         try {
             if (-not $process.HasExited) {
                 try { $process.Kill($true) }
@@ -201,6 +224,7 @@ function Start-Installer($Release) {
     [InstallerCapture]::Click((Wait-Control $process $copy.INSTALLER_CHOOSE_PATH))
     [void](Wait-Control $process $installPath)
     $window = [InstallerCapture]::Find($process.Id)
+    $installerTitles[$process.Id] = [InstallerCapture]::Text($window).TrimEnd(' ')
     [void][InstallerCapture]::Save($window, (Join-Path $root ('evidence/setup-' + $process.Id + '.png')))
     [InstallerCapture]::Click((Wait-Control $process $copy.INSTALLER_INSTALL))
     return $process
@@ -494,6 +518,7 @@ try {
     $before = Installation-Inventory
     $before | Set-Content -LiteralPath (Join-Path $root 'evidence/baseline-inventory.json') -Encoding utf8NoBOM
     $monitor = Start-Fixture baseline
+    $baselineMonitorBinding = [pscustomobject]@{ Process = $monitor; Id = $monitor.Id; Created = $monitor.StartTime.ToUniversalTime().Ticks }
     $timer = [Diagnostics.Stopwatch]::StartNew()
     while (-not (Test-Path -LiteralPath (Join-Path $root 'baseline-ready.json'))) {
         if ($monitor.HasExited -or $timer.Elapsed.TotalSeconds -gt 600) { throw 'Baseline Host/client acceptance did not become ready' }
@@ -513,9 +538,8 @@ try {
     }
     $refused = Start-Installer $validated.candidate
     $prompt = Wait-Control $refused $copy.INSTALLER_RUNNING -Seconds 600 -Dialog
-    $okay = [InstallerCapture]::GetDlgItem([InstallerCapture]::TopLevel($prompt), 1)
-    if ($okay -eq [IntPtr]::Zero) { throw 'Running-application prompt has no native OK action' }
-    [InstallerCapture]::Click($okay)
+    if ($refused.HasExited) { throw 'Owned refusal installer exited before acknowledgement' }
+    [InstallerCapture]::AcknowledgeOwnedRefusal($refused.Id, $prompt, $installerTitles[$refused.Id], $copy.INSTALLER_RUNNING)
     Wait-Exit $refused 30 2
     if ($live.HasExited -or (Installation-Inventory) -ne $before -or (Read-Registration @($baselineIdentity)).Key -ne $registration.Key) { throw 'Running-application refusal changed the installation or stopped the baseline' }
     Assert-NoTransactionDirectories
@@ -543,7 +567,14 @@ try {
     $failure = $_
     Write-InstallerFailureDiagnostics $installerProcesses $secondaryErrors
 } finally {
-    $initialReaped = Stop-OwnedProcesses $processes $cleanupErrors
+    $abortBudget = $null
+    $abortRequestFailed = $false
+    if ($null -ne $failure -and $null -ne $monitor) {
+        try { $abortBudget = Request-OwnedBaselineAbort $monitor $baselineMonitorBinding $processes $secondaryErrors }
+        catch { $abortRequestFailed = $true; $secondaryErrors.Add('Baseline abort control unavailable') }
+    }
+    $initialReaped = Stop-OwnedProcesses $processes $cleanupErrors $abortBudget
+    if ($abortRequestFailed -or -not (Confirm-OwnedBaselineAbort $abortBudget $cleanupErrors)) { $initialReaped = $false }
     if ($installationAttempted) {
         $uninstallAttempted = $false
         $ownedUninstaller = $null
@@ -592,7 +623,7 @@ try {
         }
     }
     # Cleanup itself can start processes after the first pass; kill AND acknowledge every late handle before disposal.
-    [void](Stop-OwnedProcesses $processes $cleanupErrors)
+    [void](Stop-OwnedProcesses $processes $cleanupErrors $abortBudget)
     # Keep uncertain execution bytes for VM teardown; releasing a guard never establishes process exit.
     if ($null -ne $uninstallerCopy) { Close-UninstallStream $uninstallerCopy.Guard $cleanupErrors }
     foreach ($process in $processes) {
