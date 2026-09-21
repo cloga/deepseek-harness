@@ -1,6 +1,6 @@
 /** Credential-free acceptance of the actual packaged Desktop and its release-owned Copilot account. */
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import {
   closeSync,
@@ -16,6 +16,7 @@ import {
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
+import { fileURLToPath } from 'node:url'
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright'
 import { desktopSmokeEnvironment } from '../../scripts/smoke-environment.ts'
 import { parseDesktopForkReleasePlan } from '../../scripts/fork-release.ts'
@@ -30,7 +31,9 @@ import {
   verifyPackagedDesktopRuntime,
 } from '../../scripts/packaged-runtime.mjs'
 import { inspectPackagedGraphResolution, packagedGraphCheckArguments } from './packaged-graph-check.ts'
-import { inspectPackagedCopilotSettings } from './copilot-settings-smoke.ts'
+import { inspectPackagedCopilotSettings, type CopilotSettingsEvidence } from './copilot-settings-smoke.ts'
+import { inspectNativeComposerGeometry } from './native-composer-geometry.ts'
+import { observeNativeComposerErrors } from './native-composer-errors.ts'
 import {
   inspectCopilotUsageCapability,
   inspectSignedOutCopilotUsage,
@@ -57,7 +60,7 @@ export interface PackagedCopilotProfileInspection {
 export interface PackagedCopilotAcceptanceOptions {
   readonly application: string
   readonly output: string
-  /** Runs once after both Desktop processes close and restart receipts match, before owned cleanup. */
+  /** Runs once after all owned Desktop processes close and acceptance passes, before owned cleanup. */
   readonly inspectProfile?: (paths: PackagedCopilotProfileInspection) => void | Promise<void>
 }
 
@@ -69,6 +72,7 @@ export interface PackagedCopilotAcceptanceOptions {
 export async function runPackagedCopilotAcceptance(options: PackagedCopilotAcceptanceOptions): Promise<void> {
   const application = resolve(options.application)
   const output = resolve(options.output)
+  const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
   const resources = join(dirname(application), 'resources')
   const runtimeRoot = packagedDesktopRuntimeRoot(resources)
   const reviewed = parseDesktopForkReleasePlan(JSON.parse(readFileSync(
@@ -121,6 +125,7 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
   const usageCapabilities: CopilotUsageCapabilityEvidence[] = []
   const signedOutUsage: SignedOutCopilotUsageEvidence[] = []
   const positiveUsage: PositiveCopilotUsageEvidence[] = []
+  const settingsObservations: CopilotSettingsEvidence[] = []
   const started = performance.now()
   const timeline: { event: string; milliseconds: number }[] = []
   const record = (event: string): void => { timeline.push({ event, milliseconds: performance.now() - started }) }
@@ -215,8 +220,8 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
         'Read-only acceptance must not create or open a verification URL')
       await page.screenshot({ path: join(output, `${phase}-account.png`) })
       const settingsEvidence = await inspectPackagedCopilotSettings(settings)
+      settingsObservations.push(settingsEvidence)
       writeFileSync(join(output, `${phase}-settings-readonly.json`), JSON.stringify(settingsEvidence, undefined, 2) + '\n')
-      await settings.locator('[data-dsh-dual-model-card]').screenshot({ path: join(output, `${phase}-model-roles.png`) })
       await settings.locator('[data-dsh-web-search-routing]').screenshot({ path: join(output, `${phase}-search-catalog.png`) })
       record(`${phase}:settings-readonly`)
       assertDesktopProvisioningInventory(profile, plan)
@@ -295,9 +300,51 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
     assert.equal(inventories[0], inventories[1], 'Restart must reuse the verified plugin receipts')
     assert.deepEqual(usageCapabilities[0], usageCapabilities[1], 'Restart must preserve the required usage capability')
     assert.deepEqual(signedOutUsage[0], signedOutUsage[1], 'Restart must preserve the absent signed-out usage surface')
+    assert.deepEqual(settingsObservations[0], settingsObservations[1], 'Restart must preserve schema-3 settings evidence')
+    const seeder = fileURLToPath(new URL('./seed-native-composer.mjs', import.meta.url))
+    const seedOwnership = randomUUID()
+    writeFileSync(join(home, 'native-composer-owner.json'), JSON.stringify({
+      kind: 'desktop-native-composer-smoke', home, token: seedOwnership,
+    }), { flag: 'wx' })
+    const seedOutput = openSync(join(output, 'native-composer-seed.json'), 'w')
+    try {
+      execFileSync(application, [seeder, runtimeRoot, home, seedOwnership], {
+        cwd: profile, env: packagedDesktopRuntimeEnvironment(environment),
+        stdio: ['ignore', seedOutput, 'inherit'], timeout: 120_000, windowsHide: true,
+      })
+    } finally { closeSync(seedOutput) }
+    record('native-composer:seeded')
+    app = await electron.launch({ executablePath: application, args: [`--user-data-dir=${userData}`], env: environment, timeout: 120_000 })
+    page = await app.firstWindow()
+    page.setDefaultTimeout(120_000)
+    await page.waitForURL('dsh-app://app/index.html', { timeout: 300_000 })
+    await page.getByRole('button', { name: 'Settings', exact: true }).waitFor({ state: 'visible' })
+    const inspectedPage = page
+    const nativeObservation = await observeNativeComposerErrors(inspectedPage, async () => {
+      // Inspection ends with an awaited browser focus roundtrip. Seal after
+      // its final receipt check, before initiating the owned Host shutdown.
+      const inspection = await inspectNativeComposerGeometry(inspectedPage, output)
+      assert.equal(createHash('sha256').update(readFileSync(join(profile, 'desktop-plugin-receipts.json'))).digest('hex'), inventories[0])
+      return inspection
+    })
+    const { inspection: nativeInspection, rendererErrors: nativeErrors } = nativeObservation
+    const nativeComposerEvidence = {
+      schemaVersion: 1, scope: 'actual-packaged-native-composer-and-released-client', sourceCommit,
+      sessionHistory: 'synthetic-persisted-in-isolated-home', quota: 'signed-out-host-response-no-credentials',
+      runtimeSha256, pluginSource: copilot.source,
+      installedClientSha256: createHash('sha256').update(readFileSync(join(profile, 'node_modules', 'dsh-github-copilot', 'lib', 'client.js'))).digest('hex'),
+      geometry: nativeInspection.geometry, nativeDialogs: nativeInspection.nativeDialogs,
+      copilotDialog: nativeInspection.copilotDialog,
+      rendererErrors: nativeErrors, realModelRound: false, realOAuth: false,
+    }
+    writeFileSync(join(output, 'native-composer-geometry.json'), JSON.stringify(nativeComposerEvidence, undefined, 2) + '\n')
+    await app.close()
+    app = undefined
+    page = undefined
+    record('native-composer:closed')
     await options.inspectProfile?.(Object.freeze({ application, runtimeRoot, home, profile, output }))
     writeFileSync(join(output, 'acceptance.json'), JSON.stringify({
-      sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+      sourceCommit,
       desktopVersion: reviewed.version,
       versionMenus,
       runtimeVersion: runtime.release.version,
@@ -311,8 +358,8 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       ancestorSdkLoaded: false,
       accountEntryVisible: true,
       manageCompatibilityDisclosureAbsent: true,
-      modelRolesViewLoaded: true,
-      currentWorkspaceReadOnly: true,
+      settingsAcceptance: settingsObservations,
+      nativeComposer: nativeComposerEvidence,
       searchProviderCatalogLoaded: true,
       providerOnlySearchRouting: true,
       fallbackProviderLabel: true,
