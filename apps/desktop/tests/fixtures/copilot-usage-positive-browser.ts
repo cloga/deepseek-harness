@@ -1,21 +1,67 @@
 /** Acceptance-only browser code, type-stripped from source rather than serialized through tsx. */
-import type { Context, Plugin } from '@deepseek-ai/cordis'
-import type { ClientModuleLoader, ClientModuleLoaderTarget } from '@deepseek-ai/dsh-client-modules/client'
-import type { ScopedStandardSourceBinding, SlotScopeAdapter } from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { PositiveCopilotUsageEvidence } from './copilot-usage-positive-smoke.ts'
 
+// This Host-runner fixture loads browser exports at runtime. Local structural views
+// keep React/JSX and Client project declarations out of the Host compiler program.
+// They describe public calls only; all renderer, selector, and Slot code stays shipped code.
+interface FixtureModules {
+  import(id: string, parent: string, attributes: Record<string, unknown>): Promise<unknown>
+}
+interface FixtureFacade {
+  create(options: unknown): FixtureModules
+}
+interface FixtureFiber extends PromiseLike<void> {
+  dispose(): Promise<void>
+}
+interface FixtureContext {
+  plugin(plugin: FixturePlugin): FixtureFiber
+  get(name: string): unknown
+  fiber: { dispose(): Promise<void> }
+}
+interface FixturePlugin {
+  inject?: unknown
+  apply(context: FixtureContext): unknown
+}
+interface FixtureObservable {
+  getSnapshot(): unknown
+  subscribe(listener: () => void): () => void
+}
+interface FixtureBinding {
+  key: string
+  ctx: FixtureContext
+  hooks: Record<string, FixtureObservable>
+  keyedHooks: Record<string, (key: string) => FixtureObservable | undefined>
+  props: Record<string, unknown>
+}
+interface FixtureScope {
+  current: FixtureObservable
+  resolve(key: string): FixtureBinding | undefined
+  renderArea(binding: FixtureBinding, props: { children?: unknown }): unknown
+}
+interface FixtureSlots {
+  installScope(name: string, adapter: FixtureScope): unknown
+  register(
+    definition: { name: string; children: Record<string, { kind: string; scope: string }> },
+    component: (props: { renderSlot(name: string, props: object): unknown; SessionProvider: unknown }) => unknown,
+  ): unknown
+  entriesOfSlot(name: string): readonly unknown[]
+}
+interface FixtureReact {
+  createElement(type: unknown, props: object, ...children: unknown[]): unknown
+}
+
 type AcceptanceWindow = Window & {
-  __desktopUsageModules?: ClientModuleLoader
+  __desktopUsageModules?: FixtureModules
 }
 
 /** Capture one public bootstrap call and restore the original facade even when boot fails. */
 export function captureUsageModulesInBrowser(): void {
   const target = window as AcceptanceWindow
-  let facade: ClientModuleLoaderTarget | undefined
+  let facade: FixtureFacade | undefined
   Object.defineProperty(target, '__ModuleLoader__', {
     configurable: true,
     get: () => facade,
-    set(value: ClientModuleLoaderTarget) {
+    set(value: FixtureFacade) {
       const create = value.create
       value.create = function (options) {
         try {
@@ -41,10 +87,27 @@ export async function runPositiveUsageInBrowser(route: string): Promise<Positive
   const modules = (window as AcceptanceWindow).__desktopUsageModules
   if (modules === undefined) throw new Error('Packaged module loader was not captured')
   const load = (id: string) => modules.import(id, '', {})
-  const { Context, Service } = await load('@deepseek-ai/cordis') as typeof import('@deepseek-ai/cordis')
-  const React = await load('react') as typeof import('react')
-  const renderer = await load('@deepseek-ai/dsh-client-ui-renderer') as typeof import('@deepseek-ai/dsh-client-ui-renderer/client')
-  const client = await load('dsh-github-copilot') as Plugin<undefined>
+  const requireMethods = (value: unknown, names: readonly string[], label: string): void => {
+    if (typeof value !== 'object' || value === null
+      || names.some(name => typeof Reflect.get(value, name) !== 'function')) {
+      throw new Error(`Packaged ${label} public methods are unavailable`)
+    }
+  }
+  const cordis = await load('@deepseek-ai/cordis')
+  requireMethods(cordis, ['Context', 'Service'], 'Cordis')
+  const { Context, Service } = cordis as {
+    Context: new () => FixtureContext
+    Service: new (context: FixtureContext, name: string) => object
+  }
+  const react = await load('react')
+  requireMethods(react, ['createElement'], 'React')
+  const React = react as FixtureReact
+  const rendererModule = await load('@deepseek-ai/dsh-client-ui-renderer')
+  requireMethods(rendererModule, ['apply'], 'UiRenderer')
+  const renderer = rendererModule as FixturePlugin
+  const clientModule = await load('dsh-github-copilot')
+  requireMethods(clientModule, ['apply'], 'Copilot Client')
+  const client = clientModule as FixturePlugin
   const application = document.getElementById('root')
   if (application === null) throw new Error('Packaged application mount is missing')
   const context = new Context()
@@ -66,15 +129,15 @@ export async function runPositiveUsageInBrowser(route: string): Promise<Positive
   const errors: unknown[][] = []
   const originalError = console.error
   class RemoteRoot extends Service {
-    constructor(ctx: Context) { super(ctx, 'remote') }
+    constructor(ctx: FixtureContext) { super(ctx, 'remote') }
     async $mount() { return async () => {} }
     $on() { return () => {} }
   }
   class AccountNamespace extends Service {
-    constructor(ctx: Context) { super(ctx, 'remote.githubCopilot') }
+    constructor(ctx: FixtureContext) { super(ctx, 'remote.githubCopilot') }
   }
   class UsageRemote extends Service {
-    constructor(ctx: Context) { super(ctx, 'remote.githubCopilotUsage') }
+    constructor(ctx: FixtureContext) { super(ctx, 'remote.githubCopilotUsage') }
     async get() {
       quotaReads++
       return { ok: true, value: {
@@ -103,16 +166,18 @@ export async function runPositiveUsageInBrowser(route: string): Promise<Positive
     console.error = (...args: unknown[]) => { errors.push(args); originalError(...args) }
     await context.plugin({ inject: renderer.inject, apply: renderer.apply })
     await context.plugin({ apply(ctx) { new RemoteRoot(ctx); new AccountNamespace(ctx); new UsageRemote(ctx) } })
-    const slots = context.get('slots')!
-    const binding: ScopedStandardSourceBinding = {
+    const slotService = context.get('slots')
+    requireMethods(slotService, ['installScope', 'register', 'entriesOfSlot'], 'SlotRegistry')
+    const slots = slotService as FixtureSlots
+    const binding: FixtureBinding = {
       key: 'desktop-usage-fixture', ctx: context,
       hooks: { session }, keyedHooks: { projection: key => key === 'modelSelection' ? projection : undefined },
       props: { sessionId: 'desktop-usage-fixture' },
     }
     const current = source(binding)
-    const adapter: SlotScopeAdapter = {
+    const adapter: FixtureScope = {
       current, resolve: key => key === binding.key ? binding : undefined,
-      renderArea: (_binding, props) => props.children as import('react').ReactNode,
+      renderArea: (_binding, props) => props.children,
     }
     slots.installScope('session', adapter)
     const dock = 'conversation.composer.dock'
@@ -123,7 +188,9 @@ export async function runPositiveUsageInBrowser(route: string): Promise<Positive
     const fiber = context.plugin(client)
     await fiber
     disposeClient = async () => { await fiber.dispose() }
-    unmount = context.get('uiRenderer')!.mount(container)
+    const uiRenderer = context.get('uiRenderer')
+    requireMethods(uiRenderer, ['mount'], 'UiRenderer service')
+    unmount = (uiRenderer as { mount(container: HTMLElement): () => void }).mount(container)
     await waitFor(() => trigger()?.textContent?.includes('7 used') === true)
     const usageText = trigger()!.textContent!
     const sibling = container.querySelector('[data-fixture-sibling]')

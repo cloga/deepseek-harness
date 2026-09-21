@@ -44,6 +44,14 @@ describe('positive packaged usage evidence validation', () => {
       .rejects.toThrow('Packaged module loader was not captured')
   })
 
+  it('rejects missing public exports before mounting a synthetic context', async () => {
+    const load = vi.fn(async () => ({}))
+    const window = { __desktopUsageModules: { import: load } }
+    await expect(runInNewContext(`${packagedUsageBrowserSource()}\nrunPositiveUsageInBrowser('github-copilot')`, { window }))
+      .rejects.toThrow('Packaged Cordis public methods are unavailable')
+    expect(load).toHaveBeenCalledExactlyOnceWith('@deepseek-ai/cordis', '', {})
+  })
+
   it('requires positive DOM and real subscription/lifecycle observations', async () => {
     await expect(inspectPositiveCopilotUsage(page(evidence), 'github-copilot')).resolves.toEqual(evidence)
   })
