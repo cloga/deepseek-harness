@@ -2,13 +2,14 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
-import { installedUpgradeApplication } from './fixtures/windows-installed-upgrade-contract.mjs'
-import { initialPackageAcceptance, packageCleanupVerified, packageGraphSnapshot, preparedTransactionId, retainPrimaryFailure, sameProcess, validatePackageFixture } from './fixtures/windows-packaged-package-acceptance.mjs'
+import { runInNewContext } from 'node:vm'
+import { installedUpgradeApplication, ownedUpgradePath } from './fixtures/windows-installed-upgrade-contract.mjs'
+import { initialPackageAcceptance, packageCleanupVerified, packageGraphSnapshot, preparePackageHomeDesktop, preparedTransactionId, retainPrimaryFailure, sameProcess, validatePackageFixture } from './fixtures/windows-packaged-package-acceptance.mjs'
 
 const source = readFileSync(new URL('./fixtures/windows-packaged-package-acceptance.mjs', import.meta.url), 'utf8')
 const native = readFileSync(new URL('./windows-desktop-ui.ps1', import.meta.url), 'utf8')
@@ -21,6 +22,102 @@ function directory(t, base = tmpdir()) {
   root = realpathSync.native(root)
   return root
 }
+
+test('private shell Desktop creation is empty and preserves the owned home and distinct workspace', t => {
+  const root = directory(t)
+  const home = join(root, 'package-home')
+  const workspace = join(root, 'package-workspace')
+  mkdirSync(home); mkdirSync(workspace)
+  writeFileSync(join(home, '.env'), 'inert private home sentinel')
+  const desktop = preparePackageHomeDesktop(root, home)
+  assert.equal(desktop, join(home, 'Desktop'))
+  assert.ok(lstatSync(desktop).isDirectory() && !lstatSync(desktop).isSymbolicLink())
+  assert.deepEqual(readdirSync(desktop), [])
+  assert.notEqual(desktop, workspace)
+  assert.equal(readFileSync(join(home, '.env'), 'utf8'), 'inert private home sentinel')
+  assert.equal(existsSync(join(home, 'profiles')), false, 'Desktop initialization must not preseed the application profile')
+})
+
+for (const kind of ['directory', 'file', 'link', 'dangling-link']) {
+  test(`private shell Desktop refuses an existing ${kind} without adopting or changing it`, t => {
+    const root = directory(t)
+    const home = join(root, 'package-home')
+    const desktop = join(home, 'Desktop')
+    const target = join(root, 'unrelated-target')
+    mkdirSync(home)
+    if (kind === 'directory') { mkdirSync(desktop); writeFileSync(join(desktop, 'sentinel'), 'retain existing Desktop') }
+    else if (kind === 'file') writeFileSync(desktop, 'retain existing file')
+    else {
+      if (kind === 'link') { mkdirSync(target); writeFileSync(join(target, 'sentinel'), 'retain link target') }
+      symlinkSync(target, desktop, process.platform === 'win32' ? 'junction' : 'dir')
+    }
+    const before = readdirSync(home)
+    assert.throws(() => preparePackageHomeDesktop(root, home), kind.includes('link') ? /must not traverse a link/ : { code: 'EEXIST' })
+    assert.deepEqual(readdirSync(home), before)
+    if (kind === 'directory') assert.equal(readFileSync(join(desktop, 'sentinel'), 'utf8'), 'retain existing Desktop')
+    else if (kind === 'file') assert.equal(readFileSync(desktop, 'utf8'), 'retain existing file')
+    else {
+      assert.ok(lstatSync(desktop).isSymbolicLink())
+      if (kind === 'link') assert.equal(readFileSync(join(target, 'sentinel'), 'utf8'), 'retain link target')
+      else assert.equal(existsSync(target), false)
+    }
+  })
+}
+
+for (const kind of ['missing', 'file', 'link']) {
+  test(`private shell Desktop refuses a ${kind} home without creating or following it`, t => {
+    const root = directory(t)
+    const home = join(root, 'package-home')
+    const target = join(root, 'unrelated-home')
+    if (kind === 'file') writeFileSync(home, 'retain non-directory home')
+    else if (kind === 'link') {
+      mkdirSync(target)
+      writeFileSync(join(target, 'sentinel'), 'retain unrelated home')
+      symlinkSync(target, home, process.platform === 'win32' ? 'junction' : 'dir')
+    }
+    const before = readdirSync(root)
+    assert.throws(() => preparePackageHomeDesktop(root, home))
+    assert.deepEqual(readdirSync(root), before)
+    if (kind === 'file') assert.equal(readFileSync(home, 'utf8'), 'retain non-directory home')
+    if (kind === 'link') {
+      assert.equal(existsSync(join(target, 'Desktop')), false)
+      assert.equal(readFileSync(join(target, 'sentinel'), 'utf8'), 'retain unrelated home')
+    }
+  })
+}
+
+test('private shell Desktop refuses a home outside the qualification root', t => {
+  const root = directory(t)
+  const foreign = directory(t)
+  assert.throws(() => preparePackageHomeDesktop(root, foreign), /strict owned descendant/)
+  assert.deepEqual(readdirSync(root), [])
+  assert.deepEqual(readdirSync(foreign), [])
+})
+
+test('actual setup block creates the private Desktop before any environment or launch consumer (no app)', t => {
+  const root = directory(t)
+  const start = source.indexOf('  const home = ownedUpgradePath(root,')
+  const end = source.indexOf('  const report = initialPackageAcceptance', start)
+  assert.ok(start > 0 && end > start)
+  const initialization = source.indexOf('  preparePackageHomeDesktop(root, home)', start)
+  assert.ok(initialization > start && initialization < end)
+  assert.ok(initialization < source.indexOf('desktopSmokeEnvironment(home)', start))
+  assert.ok(initialization < source.indexOf('._electron.launch(', start))
+  let observed = false
+  runInNewContext(`${source.slice(start, end)}\nobserveSetup({ home, workspace, profile });`, {
+    root, assert, ownedUpgradePath, preparePackageHomeDesktop, join, existsSync, mkdirSync, writeFileSync,
+    observeSetup({ home, workspace, profile }) {
+      const desktop = join(home, 'Desktop')
+      assert.ok(lstatSync(desktop).isDirectory() && !lstatSync(desktop).isSymbolicLink())
+      assert.deepEqual(readdirSync(desktop), [])
+      assert.equal(workspace, join(root, 'package-workspace'))
+      assert.notEqual(workspace, desktop)
+      assert.equal(existsSync(profile), false)
+      observed = true
+    },
+  }, { timeout: 1000 })
+  assert.equal(observed, true, 'Only an inert setup observer runs here, not Electron or the native picker')
+})
 
 test('fixture allocation resolves an aliased temporary base before ownership checks', t => {
   const parent = directory(t)

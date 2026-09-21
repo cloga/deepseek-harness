@@ -20,6 +20,22 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const save = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + '\n', { flag: 'wx' })
 const safeError = error => String(error).replace(/(https?:\/\/[^?\s"'<>]+)\?[^\s"'<>]*/gu, '$1?[redacted]')
 
+/** Create only the private shell Desktop prerequisite; this is not the selected workspace.
+ * @param {string} root - Existing owned qualification root.
+ * @param {string} home - Newly allocated private package home below that root.
+ * @returns {string} Newly created ordinary Desktop directory; existing entries are never adopted.
+ */
+export function preparePackageHomeDesktop(root, home) {
+  const ownedHome = ownedUpgradePath(root, home)
+  const stat = lstatSync(ownedHome)
+  assert.ok(stat.isDirectory() && !stat.isSymbolicLink(), 'Package home must be an ordinary owned directory')
+  const desktop = ownedUpgradePath(root, join(ownedHome, 'Desktop'))
+  mkdirSync(desktop)
+  const created = lstatSync(ownedUpgradePath(root, desktop))
+  assert.ok(created.isDirectory() && !created.isSymbolicLink(), 'Desktop must be an ordinary owned directory')
+  return desktop
+}
+
 /** Hash files and link spellings without following package junctions. This reader never repairs a graph.
  * @param {string} root - Real profile or private candidate directory.
  * @returns {{fingerprint: string, entries: object[]}} Bounded ordered inventory and its exact digest.
@@ -166,6 +182,7 @@ export async function runPackagedPackageAcceptance(runRoot) {
     assert.equal(existsSync(directory), false, 'Package acceptance requires new isolated state')
     mkdirSync(directory)
   }
+  preparePackageHomeDesktop(root, home)
   writeFileSync(join(home, '.env'), '# Hosted package acceptance: no credentials\n', { flag: 'wx' })
   writeFileSync(join(home, 'settings.yaml'), 'ui-onboarding:\n  welcomeNoticeVersion: "2026-08-13.1"\n', { flag: 'wx' })
   const profile = join(home, 'profiles', 'desktop')
