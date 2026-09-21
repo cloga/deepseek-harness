@@ -19,6 +19,8 @@
     "packages/client/*/src/css-modules.d.ts",
     "packages/client/*/tests/**/*.ts",
     "packages/client/*/tests/**/*.tsx",
+    "apps/desktop/tests/fixtures/copilot-usage-positive-browser.ts",
+    "apps/desktop/tests/fixtures/copilot-usage-positive-smoke.ts",
     "benchmarks/**/*.client.ts",
     "benchmarks/**/*.client.tsx",
     "benchmarks/support/**/*.ts",
