@@ -70,7 +70,9 @@ export function assertNativeComposerGeometry(geometry: NativeComposerGeometry, i
  * @returns Observed counts; any retired label or epoch date rejects acceptance.
  */
 export async function observeRetiredCopilotSections(dialog: Locator): Promise<{
-  sessionCreditsCount: number; resetCount: number; epochTextCount: number
+  sessionCreditsCount: number
+  resetCount: number
+  epochTextCount: number
 }> {
   const sessionCreditsCount = await dialog.getByText(/^(?:This session|本会话|Session credits|会话额度)$/u).count()
   const resetCount = await dialog.getByText(/^(?:Resets|重置时间):/u).count()

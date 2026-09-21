@@ -2,7 +2,6 @@
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SlotTestRuntime } from '@deepseek-ai/dsh-client-test-runtime'
-import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import css from '../src/client/skeleton/InputBar.module.css'
 
@@ -14,7 +13,7 @@ const empty = `.${css.dock}:empty, .${css.dock}:has(> [data-slot="${slot}"]:only
 async function bench() {
   const runtime = await SlotTestRuntime.create()
   runtimes.push(runtime)
-  await runtime.sessions.add({ id: 'composer-dock-anchor' as SessionId }, { current: true })
+  await runtime.sessions.add({ id: 'composer-dock-anchor' }, { current: true })
   // The production renderer, not a mocked renderSlot, owns the stable outlet.
   await runtime.root.declare({ [slot]: { kind: 'list', scope: 'session' } }, ({ renderSlot, SessionProvider }) => (
     <SessionProvider>

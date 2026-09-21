@@ -7,7 +7,9 @@ import { observeRetiredCopilotSections } from './fixtures/native-composer-geomet
 
 function dialog(labels: readonly string[]): Locator {
   // Counter validation only; actual renderer DOM and boxes are exercised by packaged acceptance.
-  return { getByText: (pattern: RegExp) => ({ count: async () => labels.filter(label => pattern.test(label)).length }) } as unknown as Locator
+  return {
+    getByText: (pattern: RegExp) => ({ count: async () => labels.filter(label => pattern.test(label)).length }),
+  } as unknown as Locator
 }
 
 describe('packaged native composer browser observation', () => {
