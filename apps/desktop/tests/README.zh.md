@@ -66,7 +66,9 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 安装升级与同版本包操作的观察器均使用[已安装运行时读取器](fixtures/windows-installed-runtime.mjs)。CDP 求值只返回运行中应用的身份字段；描述文件通过维护中的 `readPackagedDesktopRuntimeDescriptor` 载体在 CDP 之外读取。在以 Node 模式启动打包 Electron 之前，读取器重新检查自有安装中的可执行文件哈希，并将观察到的 resources 目录绑定到该安装。描述文件校验对原始 ASAR 字节计算哈希，不使用解析或重新序列化的 JSON。此检查仅针对一次性的托管安装，绝不针对操作者的 Desktop。
 
-基线就绪凭据绑定由同一次运行中身份求值返回的正安全整数主进程 PID。Playwright 启动器 PID 只是独立的可空诊断，不作为选择进程的依据。驱动获取该精确主 PID，将存活的普通物理可执行文件绑定到精确且规范化的安装目录、固定文件名、普通祖先和已验证的 SHA-256，并在计算哈希前后检查存活状态。路径字面拼写仅作诊断；物理绑定允许合法的大小写／分隔符规范化，不寻找替代进程。身份失败只保留有界的相等性、可用性、退出与可读性标志，然后重新抛出原始错误；不查找同名进程，也不改变清理行为。
+固定版本 [Playwright 1.61.1](https://github.com/microsoft/playwright/blob/v1.61.1/packages/playwright-core/src/server/electron/electron.ts) 在 Windows 上通过 `shell: true` 启动 Electron：`app.process()` 标识 CMD 启动载体，而非 Electron 主进程。自有主进程求值提供正安全整数 PID 和父 PID。主进程与保留的启动载体身份都必须有效；基线就绪和原生窗口归属使用主 PID，原生包辅助程序则验证直接 fixture → 主进程关系，或精确且存活的 fixture → 系统 CMD → 主进程关系，并匹配创建身份与会话。进程名称搜索或接纳枚举 PID 都不能证明归属。清理分别要求启动载体退出，以及经过验证的主进程／Host 进程族退出。
+
+驱动将该精确主 PID 绑定到存活的普通物理可执行文件，其规范化安装目录、固定文件名、普通祖先与已验证 SHA-256 必须匹配，并在哈希计算前后检查存活状态。路径字面拼写仍仅作诊断。失败时只保留有界的相等性、可用性、退出与可读性叶字段，然后重抛原始错误；物理守卫允许合法大小写／分隔符规范化，不选择替代进程。
 
 不可变的 `0.1.6-alpha.1.cloga.2` 基线使用 sequence 12 和 Copilot alpha.24；只有验证该安装的锁定身份后，才使用其[基线设置检查器](fixtures/baseline-copilot-settings-smoke.ts)。它保留该版本原有的只读模型角色与提供方目录检查，不要求后续版本的工作区或仅提供方 UI。候选及其重启仍使用针对 Copilot alpha.32 的严格[当前设置检查器](fixtures/copilot-settings-smoke.ts)。基线检查不能作为候选检查失败时的回退；两种检查器都不发起认证、保存设置或执行模型／搜索调用。
 

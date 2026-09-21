@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { assertUpgradeRunner, installedUpgradeApplication, ownedUpgradePath, upgradeFileHash } from './windows-installed-upgrade-contract.mjs'
-import { inspectInstalledDesktopIdentity, readInstalledDesktopRuntimeDescriptor } from './windows-installed-runtime.mjs'
+import { inspectInstalledDesktopIdentity, installedDesktopProcessIds, installedLauncherExited, readInstalledDesktopRuntimeDescriptor } from './windows-installed-runtime.mjs'
 
 const repository = fileURLToPath(new URL('../../../../', import.meta.url))
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u
@@ -95,7 +95,8 @@ export function initialPackageAcceptance(sourceCommit) {
  * @returns {boolean} Whether cleanup is positively established, never vacuously true after an unclaimed launch.
  */
 export function packageCleanupVerified(launches, activeHelpers, cleanupErrors) {
-  return launches.length > 0 && launches.every(launch => launch.launchReturned === true && launch.bound === true && launch.exited === true)
+  return launches.length > 0 && launches.every(launch => launch.launchReturned === true && launch.bound === true && launch.exited === true
+    && launch.launcherExited === true && Number.isSafeInteger(launch.pid) && launch.pid > 0 && Number.isSafeInteger(launch.launcherPid) && launch.launcherPid > 0)
     && activeHelpers === 0 && cleanupErrors.length === 0
 }
 
@@ -171,6 +172,7 @@ export async function runPackagedPackageAcceptance(runRoot) {
   const report = initialPackageAcceptance(expected.source.commit)
   const checkpoints = []
   const shells = []
+  const launchers = new Map()
   const children = new Set()
   const secondaryErrors = []
   let app
@@ -186,7 +188,11 @@ export async function runPackagedPackageAcceptance(runRoot) {
   for (const key of ['GITHUB_ACTIONS', 'RUNNER_OS', 'RUNNER_ENVIRONMENT', 'RUNNER_TEMP', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_SHA']) nativeEnvironment[key] = process.env[key]
   const native = async (action, pid = boundPid) => {
     assert.equal(children.size, 0, 'A previous native helper has not acknowledged exit')
-    assert.ok(Number.isSafeInteger(pid) && pid > 0, 'Native action requires the launched shell PID')
+    assert.ok(Number.isSafeInteger(pid) && pid > 0, 'Native action requires the observed Electron main PID')
+    const records = shells.filter(shell => shell.pid === pid)
+    assert.equal(records.length, 1, 'Native action requires one retained launch binding')
+    const launcherPid = records[0].launcherPid
+    assert.ok(Number.isSafeInteger(launcherPid) && launcherPid > 0, 'Native action requires the retained launch transport PID')
     const requestId = randomUUID()
     const path = join(evidence, `package-native-${requestId}.json`)
     const executable = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
@@ -196,7 +202,7 @@ export async function runPackagedPackageAcceptance(runRoot) {
     try {
       child = spawn(executable, ['-NoProfile', '-NonInteractive', '-File', join(repository, 'apps/desktop/tests/windows-desktop-ui.ps1'),
         '-Action', action, '-RunRoot', root, '-OwnerToken', owner.token, '-RequestId', requestId,
-        '-ShellPid', String(pid), '-FixturePid', String(process.pid)], { env: nativeEnvironment, windowsHide: true, stdio: ['ignore', 'ignore', diagnostic] })
+        '-ShellPid', String(pid), '-LauncherPid', String(launcherPid), '-FixturePid', String(process.pid)], { env: nativeEnvironment, windowsHide: true, stdio: ['ignore', 'ignore', diagnostic] })
       children.add(child)
     } catch (error) { nativeStartFailure = error }
     try { closeSync(diagnostic) }
@@ -248,11 +254,20 @@ export async function runPackagedPackageAcceptance(runRoot) {
   const launch = async label => {
     assert.equal(app, undefined)
     // A launcher may spawn Electron and reject before returning its handle. Such an attempt remains unqualified.
-    const shellRecord = { launchId: randomUUID(), label, launchReturned: false, pid: null, bound: false, exited: false }
+    const shellRecord = { launchId: randomUUID(), label, launchReturned: false, launcherPid: null, launcherExited: false, pid: null, bound: false, exited: false }
     shells.push(shellRecord)
     app = await (await import('playwright'))._electron.launch({ executablePath: application, args: [`--user-data-dir=${userData}`], env: environment, timeout: 120_000 })
     shellRecord.launchReturned = true
-    boundPid = app.process().pid
+    const launcher = app.process()
+    launchers.set(shellRecord.launchId, launcher)
+    shellRecord.launcherPid = launcher.pid ?? null
+    const identity = await app.evaluate(inspectInstalledDesktopIdentity)
+    assert.equal(resolve(identity.executable).toLowerCase(), application.toLowerCase())
+    assert.equal(resolve(identity.userData).toLowerCase(), userData.toLowerCase())
+    assert.equal(identity.packaged, true)
+    assert.equal(identity.version, expected.version)
+    const processIds = installedDesktopProcessIds(launcher, identity, process.pid)
+    boundPid = processIds.pid
     shellRecord.pid = boundPid
     const bindingPath = join(root, `package-shell-${boundPid}.json`)
     const bindingAlreadyExisted = existsSync(bindingPath)
@@ -266,15 +281,11 @@ export async function runPackagedPackageAcceptance(runRoot) {
         assert.equal(recorded.ownerToken, owner.token)
         assert.equal(recorded.fixture.pid, process.pid)
         assert.equal(recorded.shell.pid, boundPid)
+        assert.equal(recorded.launcher.pid, shellRecord.launcherPid)
         shellRecord.bound = true
       }
     } catch (error) { bindFailure = retainPrimaryFailure(bindFailure, error, 'bind-evidence-read', secondaryErrors) }
     if (bindFailure !== undefined) throw bindFailure
-    const identity = await app.evaluate(inspectInstalledDesktopIdentity)
-    assert.equal(resolve(identity.executable).toLowerCase(), application.toLowerCase())
-    assert.equal(resolve(identity.userData).toLowerCase(), userData.toLowerCase())
-    assert.equal(identity.packaged, true)
-    assert.equal(identity.version, expected.version)
     const runtime = readInstalledDesktopRuntimeDescriptor(application, identity.resourcesPath, expected.installedEvidence.executableSha256)
     assert.equal(hash(runtime), expected.installedEvidence.runtimeSha256)
     errors = []
@@ -296,17 +307,19 @@ export async function runPackagedPackageAcceptance(runRoot) {
     const [, clickError] = await Promise.all([native(action), trigger.click().then(() => undefined, error => error)])
     if (clickError !== undefined) {
       if (action !== 'Exit' || !/Target.*closed|page.*closed/iu.test(String(clickError))) throw clickError
-      // Only the genuinely invoked native Exit followed by actual process exit can explain a closed click target.
-      await until('shell exited after native menu selection', () => app.process().exitCode, value => value !== null, 60_000)
+      // Transport exit explains the closed click target; VerifyExited separately checks Electron and its Host family.
+      await until('launch transport exited after native menu selection', () => installedLauncherExited(app.process()), Boolean, 60_000)
     }
   }
   const closeNormally = async () => {
     await native('Observe')
-    const child = app.process()
+    const launcher = app.process()
     await openNativeMenu('Exit')
-    await until('owned shell exit', () => child.exitCode, value => value !== null, 60_000)
+    await until('owned launch transport exit', () => installedLauncherExited(launcher), Boolean, 60_000)
     await native('VerifyExited')
-    shells.find(shell => shell.pid === boundPid).exited = true
+    const shell = shells.find(shell => shell.pid === boundPid)
+    shell.launcherExited = true
+    shell.exited = true
     app = undefined
     page = undefined
     boundPid = undefined
@@ -598,7 +611,7 @@ export async function runPackagedPackageAcceptance(runRoot) {
     catch (error) { cleanupFailure('native-helper-exit', error) }
     if (children.size === 0) {
       if (app !== undefined) {
-        if (app.process().exitCode === null && shells.some(shell => shell.pid === boundPid && shell.bound)) {
+        if (!installedLauncherExited(app.process()) && shells.some(shell => shell.pid === boundPid && shell.bound)) {
           try { await native('Observe') }
           catch (error) { cleanupFailure('final-pre-close-observation', error) }
         }
@@ -608,6 +621,10 @@ export async function runPackagedPackageAcceptance(runRoot) {
       for (const shell of shells.filter(item => item.bound && !item.exited)) {
         try {
           await native('StopOwned', shell.pid)
+          const launcher = launchers.get(shell.launchId)
+          assert.ok(launcher, 'Owned cleanup requires the retained launch transport handle')
+          await until('owned launch transport exit', () => installedLauncherExited(launcher), Boolean, 60_000)
+          shell.launcherExited = true
           await native('VerifyExited', shell.pid)
           shell.exited = true
         } catch (error) { cleanupFailure('owned-family-exit', error) }
@@ -624,6 +641,10 @@ export async function runPackagedPackageAcceptance(runRoot) {
       catch (error) { cleanupFailure('loopback-provider-close', error) }
     }
     if (errors.length !== 0) failure ??= new Error('Product page errors were observed')
+    for (const shell of shells) {
+      const launcher = launchers.get(shell.launchId)
+      if (launcher !== undefined) shell.launcherExited = installedLauncherExited(launcher)
+    }
     report.cleanupVerified = packageCleanupVerified(shells, children.size, cleanupErrors)
     if (failure === undefined && !report.cleanupVerified) failure = new Error('Package acceptance cleanup is incomplete')
     report.succeeded = failure === undefined && report.cleanupVerified

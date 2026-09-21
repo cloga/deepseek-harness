@@ -235,7 +235,7 @@ pnpm run package:desktop:win:x64:unsigned
 
 ### Fork 拥有的 Windows 发布
 
-当前已发布的不可变基线是 `0.1.6-alpha.1.cloga.12`，sequence 为 22。alpha2 候选版本是 `0.1.6-alpha.2.cloga.1`，暂定 sequence 为 26；候选版本不会预留 sequence，发布前必须重新检查通道。其 plan 不构成发布或已安装升级证据。安装器升级 fixture（测试前置数据）仍锁定 `0.1.6-alpha.1.cloga.2`，sequence 为 12，不证明从 `.cloga.12` 升级已通过验收。
+最新验证的发布元数据标识不可变的 `0.1.6-alpha.1.cloga.14`，sequence 为 24，包含 Copilot `0.4.0-alpha.32`（Release 392640510）。此次元数据、源码和校验和验证未下载安装器，不构成独立的安装器字节验证或原生安装验收。alpha2 候选版本是 `0.1.6-alpha.2.cloga.1`，暂定 sequence 为 26；候选版本不会预留 sequence，发布前必须重新检查通道。其 plan 不构成发布或已安装升级证据。安装器升级 fixture（测试前置数据）仍锁定 `0.1.6-alpha.1.cloga.2`，sequence 为 12，使用 Copilot alpha.24，不证明从 `.cloga.14` 升级已通过验收。
 
 `release/cloga-windows-x64.json` 中经过评审的 plan 同时推进语义版本与整数 sequence。每次手动触发 `Desktop fork release (Windows x64)` workflow 都必须提供 `confirm_version` 与 `expected_source_sha`。安装依赖之前，源码锁定值必须恰好为 40 个小写十六进制字符，并与检出的 `HEAD` 完全一致；确认未变的版本号不代表授权较新的 commit。Workflow 固定 Node 24.13.0 与 pnpm 11.7.0，从冻结 lockfile 安装，测试 Desktop，打包固定 cloga 身份，并验证独立 helper、capability、未签名 installer、已安装 executable、runtime descriptor 与原生/托管互斥。
 

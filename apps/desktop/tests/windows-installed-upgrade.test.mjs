@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { runInNewContext } from 'node:vm'
-import { inspectInstalledDesktopIdentity, installedProcessIds, readInstalledDesktopRuntimeDescriptor } from './fixtures/windows-installed-runtime.mjs'
+import { inspectInstalledDesktopIdentity, installedDesktopProcessIds, installedLauncherExited, readInstalledDesktopRuntimeDescriptor } from './fixtures/windows-installed-runtime.mjs'
 import { assertUpgradeRunner, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeAssetPath, upgradeFileHash, verifyUpgradeRelease } from './fixtures/windows-installed-upgrade-contract.mjs'
 
 const uninstallObservationSource = readFileSync(new URL('./fixtures/windows-uninstall-observation.ps1', import.meta.url), 'utf8')
@@ -71,27 +71,53 @@ test('direct fixture invocation refuses a workstation before loading Playwright 
 test('installed identity callback serializes without an import loader or lexical closure', () => {
   const calls = []
   const identity = runInNewContext(`(${inspectInstalledDesktopIdentity.toString()})(electron)`, {
-    process: Object.freeze({ pid: 17, execPath: 'owned application', resourcesPath: 'owned resources' }),
+    process: Object.freeze({ pid: 303, ppid: 202, execPath: 'owned application', resourcesPath: 'owned resources' }),
     electron: { app: {
       getPath(name) { calls.push(name); return 'isolated user data' },
       getVersion() { return 'synthetic version' }, isPackaged: true,
     } },
   })
   assert.deepEqual(JSON.parse(JSON.stringify(identity)), {
-    pid: 17, executable: 'owned application', resourcesPath: 'owned resources', userData: 'isolated user data', version: 'synthetic version', packaged: true,
+    pid: 303, parentPid: 202, executable: 'owned application', resourcesPath: 'owned resources', userData: 'isolated user data', version: 'synthetic version', packaged: true,
   })
   assert.deepEqual(calls, ['userData'])
+  assert.deepEqual(installedDesktopProcessIds({ pid: 202 }, identity, 101), { pid: 303, launcherPid: 202 })
+  for (const invalid of [{ pid: 0, ppid: 202 }, { pid: 1.5, ppid: 202 }, { pid: 303, ppid: 0 }, { pid: 303, ppid: 303 }]) {
+    assert.throws(() => runInNewContext(`(${inspectInstalledDesktopIdentity.toString()})({app:{}})`, { process: invalid }), /process identity is invalid/u)
+  }
+})
+
+test('installed PID routing preserves distinct launch transport and Electron main authority', () => {
+  assert.deepEqual(installedDesktopProcessIds({ pid: 202 }, { pid: 303, parentPid: 202 }, 101), { pid: 303, launcherPid: 202 })
+  assert.deepEqual(installedDesktopProcessIds({ pid: 303 }, { pid: 303, parentPid: 101 }, 101), { pid: 303, launcherPid: 303 })
+  for (const [launcher, identity, fixture] of [
+    [{ pid: 202 }, { pid: 303, parentPid: 999 }, 101],
+    [{ pid: 303 }, { pid: 303, parentPid: 202 }, 101],
+    [{ pid: 101 }, { pid: 303, parentPid: 101 }, 101],
+    [{ pid: 202 }, { pid: 101, parentPid: 202 }, 101],
+    [{ pid: 0 }, { pid: 303, parentPid: 202 }, 101],
+    [{ pid: 202 }, { pid: Number.MAX_SAFE_INTEGER + 1, parentPid: 202 }, 101],
+  ]) assert.throws(() => installedDesktopProcessIds(launcher, identity, fixture))
+  assert.equal(installedLauncherExited({ exitCode: null, signalCode: null }), false)
+  assert.equal(installedLauncherExited({ exitCode: 0, signalCode: null }), true)
+  assert.equal(installedLauncherExited({ exitCode: null, signalCode: 'SIGTERM' }), true)
+  assert.equal(installedLauncherExited({}), false)
+  const observer = readFileSync(new URL('./fixtures/windows-installed-upgrade-smoke.mjs', import.meta.url), 'utf8')
+  assert.ok(observer.includes('const processIds = installedDesktopProcessIds(launcher, identity, process.pid)'))
+  assert.ok(observer.includes("save(join(root, 'baseline-ready.json'), { ownerToken: owner.token, ...processIds, application })"))
+  assert.doesNotMatch(observer, /pid: app\.process\(\)\.pid/u)
 })
 
 test('installed main PID remains authority when Playwright launcher differs', () => {
-  assert.deepEqual(installedProcessIds(17, 99), { pid: 17, launcherPid: 99 })
-  assert.deepEqual(installedProcessIds(17, undefined), { pid: 17, launcherPid: null })
+  assert.deepEqual(installedDesktopProcessIds({ pid: 99 }, { pid: 17, parentPid: 99 }, 1), { pid: 17, launcherPid: 99 })
   for (const invalid of [undefined, null, 0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '17']) {
-    assert.throws(() => installedProcessIds(invalid, 99), /positive safe integer/u)
-    assert.deepEqual(installedProcessIds(17, invalid), { pid: 17, launcherPid: null })
+    assert.throws(() => installedDesktopProcessIds({ pid: 99 }, { pid: invalid, parentPid: 99 }, 1))
+    assert.throws(() => installedDesktopProcessIds({ pid: invalid }, { pid: 17, parentPid: 99 }, 1))
+    assert.throws(() => installedDesktopProcessIds({ pid: 99 }, { pid: 17, parentPid: invalid }, 1))
+    assert.throws(() => installedDesktopProcessIds({ pid: 99 }, { pid: 17, parentPid: 99 }, invalid))
   }
   const fixture = readFileSync(new URL('./fixtures/windows-installed-upgrade-smoke.mjs', import.meta.url), 'utf8')
-  assert.ok(fixture.includes('const processIds = installedProcessIds(identity.pid, app.process().pid)'))
+  assert.ok(fixture.includes('const processIds = installedDesktopProcessIds(launcher, identity, process.pid)'))
   assert.ok(fixture.includes("save(join(root, 'baseline-ready.json'), { ownerToken: owner.token, ...processIds, application })"))
   assert.doesNotMatch(fixture, /pid: app\.process\(\)\.pid/u)
   const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
@@ -112,10 +138,11 @@ test('installed main PID callback survives the actual tsx loader serialization',
   assert.equal(child.signal, null)
   assert.equal(child.status, 0, child.stderr)
   const identity = runInNewContext(`(${JSON.parse(child.stdout)})(electron)`, {
-    process: { pid: 17, execPath: 'owned', resourcesPath: 'resources' },
+    process: { pid: 17, ppid: 99, execPath: 'owned', resourcesPath: 'resources' },
     electron: { app: { getPath: () => 'userData', getVersion: () => 'version', isPackaged: true } },
   })
   assert.equal(identity.pid, 17)
+  assert.equal(identity.parentPid, 99)
   assert.equal(identity.executable, 'owned')
 })
 
