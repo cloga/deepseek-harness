@@ -202,7 +202,9 @@ function installInitialBottomDiagnostic({ key, callId }: { key: string; callId: 
             : active !== null && tool?.contains(active) ? 'tool' : active === null ? 'none' : 'other',
         trusted: event?.isTrusted ?? false,
       })
-      if (records.length > 128) { records.shift(); dropped += 1 }
+      // Keep the first 64 observations and the latest 64: geometry polling
+      // must not evict the entire startup/input sequence before a failure.
+      if (records.length > 128) { records.splice(64, 1); dropped += 1 }
     },
     capture(kind: string, event: Event | null): void {
       try { state.bind(); state.sample(kind, event) }
@@ -689,6 +691,30 @@ it('initial-bottom diagnostic serializes without captures, bounds records and ex
   fixture.resizeCallbacks[0]?.()
   const after: unknown = runInContext('JSON.stringify(saved.read())', fixture.context)
   expect(after).toBe(before)
+})
+
+it('initial-bottom diagnostic keeps its early observations and latest failure despite geometry-poll flooding', () => {
+  const fixture = diagnosticSandbox()
+  try {
+    fixture.listeners.get('click')?.({ type: 'click', isTrusted: true })
+    runInContext('for (let index = 0; index < 200; index++) diagnostic.observe()', fixture.context)
+    const encoded: unknown = runInContext(`JSON.stringify((() => {
+      const value = diagnostic.read()
+      return {
+        count: value.records.length, dropped: value.dropped,
+        head: value.records.slice(0, 3).map(record => record.kind),
+        first: value.records[0].milliseconds, prefixEnd: value.records[63].milliseconds,
+        tailStart: value.records[64].milliseconds, last: value.records.at(-1).milliseconds,
+        lastKind: value.records.at(-1).kind,
+      }
+    })())`, fixture.context)
+    if (typeof encoded !== 'string') throw new Error('Expected owned diagnostic retention JSON')
+    const observed: unknown = JSON.parse(encoded)
+    expect(observed).toEqual({
+      count: 128, dropped: 75, head: ['install', 'click', 'geometry-poll'],
+      first: 1, prefixEnd: 64, tailStart: 140, last: 203, lastKind: 'initial-bottom-failure',
+    })
+  } finally { runInContext('diagnostic.dispose()', fixture.context) }
 })
 
 it('initial-bottom diagnostic attempts every disposal and ignores already-queued callbacks', () => {

@@ -8,6 +8,10 @@
 
 依赖状态的用例使用 Workspace、接纳、附件和模型流屏障，区分可见中间状态与已完成操作。详情关闭等待框架过渡结束；归档验证为 seed Session 设置显式标题，并跨重载跟踪该身份。参见 [CI fixture 同步决策](../../../.agents/notes/implemented/testing/2026-09-08-ci-completion-observations.zh.md)。
 
+共享 Subagent 设置卡片分别提交限制与模型选择。测试在点击保存前安装两个精确命名空间的 mutation-response 等待器，核对 HTTP 与 RPC 成功状态、已提交的持久化值和有效值，再检查稳定后的 UI、设置文件及重新打开的内容。仅有一个命名空间出现不代表整张卡片完成；测试不改变产品保存顺序。
+
+发送后首次贴底断言的诊断保留最初 64 条与最新 64 条观察，总上限仍为 128 条。它仅通过被动监听器和显式观察调用记录标量几何及固定事件／状态类别，不增加 DOM 写入、定时器或就绪屏障。轮询不能淘汰整个早期前缀，但被省略的中间观察仍限制因果归因。诊断读取、日志或资源释放失败不能替代原始断言。惰性回调测试验证保留和清理行为，不证明浏览器行为或历史失败的原因。
+
 ## 这些是 Host 面的测试
 
 它们在根 `tsconfig.host.json` 中做类型检查，而不在 Client aggregate 中，因为它们直接读取 Host 服务：`ctx.connection`、Host 侧 `SessionStore` 与 `ctx.sessionProjectionCache`。运行时驱动浏览器并不使一个文件成为 Client 程序的一部分——两个 face 在相同的键上以不同服务合并 Cordis `Context`，因此单个程序无法同时看见两者。把这些文件挪进 Client aggregate 会让每一处 Host 服务访问都无法编译。

@@ -27,6 +27,7 @@ Core#67 集成官方基于 Web 的 Host 和共享 `runProfile` 拓扑。官方 P
 | Windows 文件系统 birthtime | 通用文件身份检查不证明能检测 Windows 上的删除再创建 | 保留 birthtime 差异，直到 Windows 替换回归证明官方等效。 |
 | 多行 Goal 编辑 | 官方 Goal 控件不证明具备多行目标编辑的等效行为 | 保留多行行为，直到换行保留与现有 Goal 操作通过等效 UI 覆盖。 |
 | 手动 compaction 模型选择 | 部分支持：精确官方 `0.1.6-alpha.2` 与合并前候选使用持久化的先前请求路由，而非维护操作获准时的当前选择器快照；证据所属文件为 `packages/compaction/compaction-basic/src/index.ts` 和 `packages/core/agent/src/model-selection.ts` | 保留 PR #92 的修复：维护操作获准时一次性捕获 owner-scoped 选择，用于策略和默认摘要目标；显式摘要覆盖仍优先，自动压力／溢出路径仍使用持久化路由。仅在官方等效选择、作用域、取消、错误、UI 和 replay 覆盖经过验证后退役。 |
+| 滚动采样待处理时自身消息的可见性 | 部分支持：官方 [ChatView](../../../../packages/client/ui-chat/src/client/chat/ChatView.tsx) 在读者采样期间推迟整个布局 effect。有序的源码回调反例表明，当本地提交在采样完成前被持久化用户与 Assistant 节点替代时，其唯一的强制跟随观察会丢失；这不证明历史浏览器失败的原因。 | 仅在已打开且没有带锚点前插的视图中保留狭窄的自身追加例外。普通流式／布局、首次位置恢复、定时器归属及后续读者操作保持不变。官方实现通过等效的有序自身发送、恢复、前插、读者输入与真实浏览器覆盖后退役。 |
 
 ### 保留的理由与部分取代
 

@@ -2359,6 +2359,176 @@ describe('ChatView', () => {
     expect(scroller.scrollTop).toBe(1600)
   })
 
+  it.each([false, true])('retains own-send following when echo settles before delayed scroll sampling (pending=%s)', (pending) => {
+    vi.useFakeTimers()
+    try {
+      const h = makeHarness({ nodes: [user(1, 'earlier question'), assistant(2, 'earlier answer')] })
+      const view = render(<h.ChatView {...h.props} />)
+      try {
+        const scroller = view.container.querySelector('[class*="scroll"]') as HTMLDivElement
+        const metrics = installScrollMetrics(scroller, 1_000, 300)
+        readerScroll(scroller, 700)
+        scroller.scrollTop = 650
+        fireEvent.scroll(scroller)
+        if (!pending) fireEvent(scroller, new Event('scrollend'))
+
+        metrics.setHeight(1_122)
+        act(() => {
+          h.setSession({
+            running: true,
+            pendingSubmissions: [{
+              requestId: 'own-send-race' as never, placement: 'transcript',
+              time: 5_000, text: 'own send while sampling', attachments: [],
+            }],
+          })
+        })
+        // The local echo has committed before the durable response; this is
+        // not a test that batches away the user-visible submission snapshot.
+        expect(view.getByText('own send while sampling').closest('[data-submission-echo]')).not.toBeNull()
+        act(() => {
+          h.setChat({ nodes: [
+            user(1, 'earlier question'), assistant(2, 'earlier answer'),
+            { ...user(3, 'own send while sampling'), source: { kind: 'user', rpcId: 'own-send-race' as never } },
+            assistant(4, 'new response', 2),
+          ] })
+          h.setSession({ pendingSubmissions: [] })
+        })
+        expect(view.container.querySelector('[data-submission-echo]')).toBeNull()
+        expect(view.getAllByText('own send while sampling')).toHaveLength(1)
+        fireEvent(scroller, new Event('scrollend'))
+        act(() => { vi.advanceTimersByTime(500) })
+
+        expect(scroller.scrollTop).toBe(822)
+        expect(view.queryByLabelText('回到底部')).toBeNull()
+        expect(h.chatScroll.read()).toBeNull()
+
+        // A later reader gesture still owns the position, and the sampler
+        // must be able to schedule again after the own-send delivery drains.
+        scroller.scrollTop = 812
+        fireEvent.scroll(scroller)
+        metrics.setHeight(1_142)
+        act(() => { h.setSession({ running: false }); vi.advanceTimersByTime(499) })
+        expect(scroller.scrollTop).toBe(812)
+        act(() => { vi.advanceTimersByTime(1) })
+        expect(scroller.scrollTop).toBe(812)
+        expect(view.getByLabelText('回到底部')).toBeTruthy()
+        expect(h.chatScroll.read()?.scrollTop).toBe(812)
+      } finally {
+        view.unmount()
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(['user', 'steering'] as const)('admits new %s words while a reader sample is pending', (kind) => {
+    vi.useFakeTimers()
+    try {
+      const initial = [user(1, 'earlier question'), assistant(2, 'earlier answer')]
+      const h = makeHarness({ nodes: initial }, { running: kind === 'steering' })
+      const view = render(<h.ChatView {...h.props} />)
+      try {
+        const scroller = view.container.querySelector('[class*="scroll"]') as HTMLDivElement
+        const metrics = installScrollMetrics(scroller, 1_000, 300)
+        readerScroll(scroller, 700)
+        scroller.scrollTop = 650
+        fireEvent.scroll(scroller)
+        metrics.setHeight(1_122)
+        act(() => {
+          if (kind === 'user') h.setChat({ nodes: [...initial, user(3, 'new own words')] })
+          else h.setSession({ testInbox: {
+            'next-turn': [],
+            'next-step': [{
+              id: 'new-steering' as never, role: 'user', source: { kind: 'user' },
+              content: [{ type: 'text', text: 'new own words' }], preview: 'new own words', text: 'new own words',
+            }],
+          } })
+        })
+        expect(view.getByText('new own words')).toBeTruthy()
+        expect(scroller.scrollTop).toBe(822)
+        fireEvent(scroller, new Event('scrollend'))
+        act(() => { vi.advanceTimersByTime(500) })
+        expect(view.queryByLabelText('回到底部')).toBeNull()
+        expect(h.chatScroll.read()).toBeNull()
+      } finally {
+        view.unmount()
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps a pending reader sample ahead of own-word signals before the first open', () => {
+    vi.useFakeTimers()
+    try {
+      const h = makeHarness({ nodes: [user(1, 'history'), assistant(2, 'history answer')] }, { openState: 'loading' })
+      h.chatScroll.save({ anchorKey: 'fixture:user:1', anchorTop: 0, scrollTop: 650 })
+      const view = render(<h.ChatView {...h.props} />)
+      try {
+        const scroller = view.container.querySelector('[class*="scroll"]') as HTMLDivElement
+        installScrollMetrics(scroller, 1_000, 300)
+        scroller.scrollTop = 610
+        fireEvent.scroll(scroller)
+        act(() => {
+          h.setSession({
+            openState: 'open',
+            pendingSubmissions: [{
+              requestId: 'first-open-echo' as never, placement: 'transcript',
+              time: 5_000, text: 'own-word signal before first open', attachments: [],
+            }],
+          })
+        })
+        expect(scroller.scrollTop).toBe(610)
+        expect(h.chatScroll.read()?.scrollTop).toBe(650)
+        fireEvent(scroller, new Event('scrollend'))
+        expect(scroller.scrollTop).toBe(610)
+        expect(h.chatScroll.read()?.scrollTop).toBe(610)
+      } finally {
+        view.unmount()
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps anchored prepend pending even when new own words arrive with it', () => {
+    vi.useFakeTimers()
+    try {
+      const initial = [user(5, 'later question'), assistant(6, 'later answer')]
+      const h = makeHarness({ nodes: initial }, { hasMore: true })
+      const view = render(<h.ChatView {...h.props} />)
+      try {
+        const scroller = view.container.querySelector('[class*="scroll"]') as HTMLDivElement
+        const metrics = installScrollMetrics(scroller, 1_000, 300)
+        const anchored = view.container.querySelector('[data-chat-flow-key="fixture:user:5"]') as HTMLElement
+        let anchoredTop = 100
+        vi.spyOn(anchored, 'getBoundingClientRect').mockImplementation(
+          () => ({ top: anchoredTop, bottom: anchoredTop + 40 } as DOMRect),
+        )
+        readerScroll(scroller, 700)
+        fireEvent.click(view.getByText('加载更早'))
+        scroller.scrollTop = 650
+        fireEvent.scroll(scroller)
+        metrics.setHeight(1_600)
+        anchoredTop = 700
+        act(() => {
+          h.setChat({ nodes: [
+            user(1, 'older question'), assistant(2, 'older answer'), ...initial, user(9, 'own input during paging'),
+          ] })
+        })
+        expect(view.getByText('own input during paging')).toBeTruthy()
+        expect(scroller.scrollTop).toBe(650)
+        fireEvent(scroller, new Event('scrollend'))
+        act(() => { vi.advanceTimersByTime(500) })
+        expect(view.getByLabelText('回到底部')).toBeTruthy()
+      } finally {
+        view.unmount()
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('back-to-bottom cancels an in-flight paging anchor', () => {
     const h = makeHarness({ nodes: [user(9, 'late')] }, { hasMore: true })
     const view = render(<h.ChatView {...h.props} />)

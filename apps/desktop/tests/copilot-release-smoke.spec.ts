@@ -398,9 +398,11 @@ describe('explicit Core source facts through the actual acceptance owner', () =>
     effects.allocated = []
     try {
       process.chdir(callerRoot)
+      const enteredCwd = process.cwd()
+      expect(realpathSync.native(enteredCwd)).toBe(realpathSync.native(callerRoot))
       const observed = await runPackagedCopilotAcceptance({ ...fixture.options, expectedCoreSource: expected })
       expect(observed).toEqual(expected)
-      expect(process.cwd()).toBe(realpathSync.native(callerRoot))
+      expect(process.cwd()).toBe(enteredCwd)
       const calls = effects.exec.mock.calls.filter(([file]) => file === 'git')
       expect(calls).toEqual([
         ['git', ['rev-parse', 'HEAD'], { cwd: resolve(import.meta.dirname, '../../..'), encoding: 'utf8' }],

@@ -465,7 +465,15 @@ export function ChatView({
   }
 
   useLayoutEffect(() => {
-    if (scrollSamplePendingRef.current) return
+    const appendedUser = lastKey !== lastKeyRef.current && lastNode?.kind === 'user'
+    const appendedSteering = lastSteeringId !== null && lastSteeringId !== lastSteeringIdRef.current
+    const appendedSubmission = lastSubmissionId !== null && lastSubmissionId !== lastSubmissionIdRef.current
+    const anchoredPrepend = anchorRef.current !== null && firstSeq !== null
+      && firstSeqRef.current !== null && firstSeq < firstSeqRef.current
+    // An already-open view must admit own words before their local echo retires.
+    // Initial restoration and anchored paging still wait for the reader sample.
+    const ownWordsOverride = openedRef.current && !anchoredPrepend && (appendedUser || appendedSteering || appendedSubmission)
+    if (scrollSamplePendingRef.current && !ownWordsOverride) return
     const local = listRef.current
     /* v8 ignore next -- ref-null guard: React attaches the ref before layout effects run. */
     if (local === null) return
@@ -522,9 +530,6 @@ export function ChatView({
     firstSeqRef.current = firstSeq
     // Own words must be visible: a new trailing user node force-scrolls
     // (send lives in the composer, so arrival is detected here, not armed there).
-    const appendedUser = lastKey !== lastKeyRef.current && lastNode?.kind === 'user'
-    const appendedSteering = lastSteeringId !== null && lastSteeringId !== lastSteeringIdRef.current
-    const appendedSubmission = lastSubmissionId !== null && lastSubmissionId !== lastSubmissionIdRef.current
     const tipMoved = followSigRef.current !== followSig
     lastKeyRef.current = lastKey
     lastSteeringIdRef.current = lastSteeringId

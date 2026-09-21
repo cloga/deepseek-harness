@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/proposed/architecture/2026-09-18-official-first-desktop-safety.md
-2026-09-18-official-first-desktop-safety.md: 5a1f10f129a6fe3646086e64e3ee829b0e3ba27a
-2026-09-18-official-first-desktop-safety.zh.md: be55b2ff71bc49cb256890c9f73f224a49ebac64
+2026-09-18-official-first-desktop-safety.md: 3658b9eb05ced0e9da83e1b130fc5e06d54850f2
+2026-09-18-official-first-desktop-safety.zh.md: 20b865fe18612b38f88a192d8388fb8507ca2736
