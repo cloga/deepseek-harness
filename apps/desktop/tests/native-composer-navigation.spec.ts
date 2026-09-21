@@ -2,7 +2,7 @@ import type { Page } from 'playwright'
 import { describe, expect, it, vi } from 'vitest'
 import { openNativeComposerFixture } from './fixtures/native-composer-geometry.ts'
 
-function fixture(sidebarExpanded: boolean, workspaceExpanded: boolean, seedReady = Promise.resolve()) {
+function fixture(sidebarExpanded: boolean, workspaceExpanded: boolean, seedReady = Promise.resolve(), title = 'synthetic-composer-workspace') {
   let sidebarOpen = sidebarExpanded
   let groupOpen = workspaceExpanded
   let selected = false
@@ -12,11 +12,13 @@ function fixture(sidebarExpanded: boolean, workspaceExpanded: boolean, seedReady
   }
   const collapse = { waitFor: vi.fn(async () => { expect(sidebarOpen).toBe(true) }) }
   const workspace = {
+    count: vi.fn(async () => 1),
     waitFor: vi.fn(async () => { expect(sidebarOpen).toBe(true) }),
     getAttribute: vi.fn(async () => String(groupOpen)),
     click: vi.fn(async () => { groupOpen = !groupOpen }),
   }
   const seeded = {
+    count: vi.fn(async () => 1),
     waitFor: vi.fn(async () => { expect(sidebarOpen && groupOpen).toBe(true); await seedReady }),
     click: vi.fn(async () => { expect(sidebarOpen && groupOpen).toBe(true); selected = true }),
   }
@@ -24,24 +26,29 @@ function fixture(sidebarExpanded: boolean, workspaceExpanded: boolean, seedReady
   // Only navigation calls are modeled here. Actual DOM and geometry remain mandatory in packaged acceptance.
   const page = {
     getByRole: vi.fn((role: string, options?: { name: string; exact: boolean }) => {
-      if (role === 'treeitem') {
-        return {
-          filter: ({ hasText }: { hasText: string }) => {
-            if (hasText === 'synthetic-composer-workspace') return { first: () => workspace }
-            expect(hasText).toBe('DESKTOP_INLINE_STATS_SYNTHETIC')
-            return seeded
-          },
-        }
-      }
       expect(role).toBe('button')
       expect(options?.exact).toBe(true)
       if (options?.name === 'Open sidebar') return reveal
       expect(options?.name).toBe('Collapse sidebar')
       return collapse
     }),
-    getByText: vi.fn((text: string) => {
-      expect(text).toBe('Synthetic settled reply; no inference occurred.')
-      return reply
+    locator: vi.fn((selector: string) => ({
+      filter: ({ has }: { has: { text: string | RegExp; exact?: boolean } }) => {
+        if (selector === '[role="treeitem"][aria-expanded]') {
+          expect(has).toEqual({ text: 'synthetic-composer-workspace', exact: true })
+          return workspace
+        }
+        expect(selector).toBe('[role="treeitem"][aria-selected]')
+        if (typeof has.text === 'string') throw new Error('Session matcher must cover cold and folded titles')
+        expect(has.text.test(title)).toBe(true)
+        expect(has.text.test('New Session')).toBe(false)
+        expect(has.text.test('synthetic-composer-workspace-other')).toBe(false)
+        return seeded
+      },
+    })),
+    getByText: vi.fn((text: string | RegExp, options?: { exact: boolean }) => {
+      if (text === 'Synthetic settled reply; no inference occurred.') return reply
+      return { text, ...options }
     }),
   } as unknown as Page
   return { page, reveal, collapse, workspace, seeded, reply }
@@ -63,6 +70,21 @@ describe('packaged native composer fixture navigation', () => {
     for (const locator of [bench.collapse, bench.workspace, bench.seeded, bench.reply]) {
       expect(locator.waitFor).toHaveBeenCalledExactlyOnceWith({ state: 'visible', timeout: 15_000 })
     }
+  })
+
+  it.each(['synthetic-composer-workspace', 'DESKTOP_INLINE_STATS_SYNTHETIC'])('accepts the exact cold or folded Session title: %s', async (title) => {
+    const bench = fixture(true, true, Promise.resolve(), title)
+    await openNativeComposerFixture(bench.page)
+    expect(bench.seeded.count).toHaveBeenCalledTimes(1)
+    expect(bench.seeded.click).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['workspace', 'seeded'] as const)('rejects ambiguous %s rows before selection', async (kind) => {
+    const bench = fixture(true, true)
+    bench[kind].count.mockResolvedValue(2)
+    await expect(openNativeComposerFixture(bench.page)).rejects.toThrow('Exactly one')
+    expect(bench.workspace.click).not.toHaveBeenCalled()
+    expect(bench.seeded.click).not.toHaveBeenCalled()
   })
 
   it('waits for the seeded row rather than closing an expanded group while its contents load', async () => {

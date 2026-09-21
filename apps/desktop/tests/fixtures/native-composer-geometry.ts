@@ -101,13 +101,21 @@ export async function openNativeComposerFixture(page: Page): Promise<void> {
   const reveal = page.getByRole('button', { name: 'Open sidebar', exact: true })
   if (await reveal.isVisible()) await reveal.click()
   await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).waitFor({ state: 'visible', timeout: 15_000 })
-  const workspace = page.getByRole('treeitem').filter({ hasText: 'synthetic-composer-workspace' }).first()
+  const workspace = page.locator('[role="treeitem"][aria-expanded]').filter({
+    has: page.getByText('synthetic-composer-workspace', { exact: true }),
+  })
   await workspace.waitFor({ state: 'visible', timeout: 15_000 })
+  assert.equal(await workspace.count(), 1, 'Exactly one test-owned workspace row must match')
   const expanded = await workspace.getAttribute('aria-expanded')
   assert(expanded === 'true' || expanded === 'false', 'The actual workspace row must expose its expansion state')
   if (expanded === 'false') await workspace.click()
-  const seeded = page.getByRole('treeitem').filter({ hasText: 'DESKTOP_INLINE_STATS_SYNTHETIC' })
+  // Cold lists do not fold missing title projections: the persisted row can
+  // legitimately show its cwd basename until opening materializes its title.
+  const seeded = page.locator('[role="treeitem"][aria-selected]').filter({
+    has: page.getByText(/^(?:DESKTOP_INLINE_STATS_SYNTHETIC|synthetic-composer-workspace)$/u),
+  })
   await seeded.waitFor({ state: 'visible', timeout: 15_000 })
+  assert.equal(await seeded.count(), 1, 'Exactly one nonblank test-owned Session row must match')
   await seeded.click()
   await page.getByText('Synthetic settled reply; no inference occurred.', { exact: true }).waitFor({ state: 'visible', timeout: 15_000 })
 }
