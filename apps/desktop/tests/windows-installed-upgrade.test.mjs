@@ -531,6 +531,103 @@ Reject-Source 'substituted-source-and-self-hash' { Get-PinnedInstallerBaselineSo
   assert.deepEqual(observed.rejected, ['internal-self-hash', 'wrong-tag', 'directory', 'substituted-source-and-self-hash'])
 })
 
+test('baseline process binding verifies provider paths and physical bytes without inspecting a real process', { skip: process.platform !== 'win32' }, t => {
+  const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const binding = source.match(/function Assert-BaselineProcessBinding[^]*?\r?\n\}/u)?.[0]
+  const receipt = source.match(/        \[ordered\]@\{\r?\n            schemaVersion = 1; sourceCommit[^]*?Set-Content[^\r\n]*installer-upgrade\.json[^\r\n]*/u)?.[0]
+  assert.ok(binding && receipt)
+  const observed = powershellUnit(t, `
+. $env:DSH_REGISTRATION_HELPER
+${binding}
+function Get-FileHash($LiteralPath, $Algorithm) {
+    $script:hashCalls++
+    if ($mode -eq 'hash-unavailable') { throw 'credential-sentinel-hash-error' }
+    $value = Microsoft.PowerShell.Utility\\Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm
+    if ($mode -eq 'exit-during-hash') { $script:observedProcess.HasExited = $true }
+    return $value
+}
+$results = @()
+foreach ($mode in @('exact', 'alternate-case', 'separator-dot', 'outside', 'prefix-sibling', 'nested-copy', 'wrong-basename', 'wrong-hash', 'directory', 'installation-junction', 'exited', 'unknown-liveness', 'getter-failure', 'null-path', 'empty-path', 'missing-file', 'hash-unavailable', 'exit-during-hash', 'invalid-digest')) {
+    $root = Join-Path $PSScriptRoot $mode
+    $installPath = Join-Path $root 'Installed App'
+    $application = Join-Path $installPath 'cloga-deepseek-harness.exe'
+    New-Item -ItemType Directory -Path $installPath, (Join-Path $root 'evidence') | Out-Null
+    [IO.File]::WriteAllText($application, 'inert baseline bytes')
+    $expected = $env:DSH_BASELINE_DIGEST
+    $observedProcess = [pscustomobject]@{ HasExited = $false; Path = $application }
+    if ($mode -eq 'alternate-case') { $observedProcess.Path = $application.ToUpperInvariant() }
+    if ($mode -eq 'separator-dot') { $observedProcess.Path = ($installPath + '\\.\\cloga-deepseek-harness.exe').Replace('\\', '/') }
+    if ($mode -in @('outside', 'prefix-sibling', 'nested-copy')) {
+        $parent = if ($mode -eq 'outside') { Join-Path $root 'foreign' } elseif ($mode -eq 'prefix-sibling') { $installPath + '-foreign' } else { Join-Path $installPath 'nested' }
+        New-Item -ItemType Directory -Path $parent | Out-Null
+        $observedProcess.Path = Join-Path $parent 'cloga-deepseek-harness.exe'
+        [IO.File]::WriteAllText($observedProcess.Path, 'inert baseline bytes')
+    }
+    if ($mode -eq 'wrong-basename') { $observedProcess.Path = Join-Path $installPath 'other.exe'; [IO.File]::WriteAllText($observedProcess.Path, 'inert baseline bytes') }
+    if ($mode -eq 'wrong-hash') { [IO.File]::WriteAllText($application, 'different inert bytes') }
+    if ($mode -eq 'directory') { Remove-Item -LiteralPath $application; New-Item -ItemType Directory -Path $application | Out-Null }
+    if ($mode -eq 'installation-junction') {
+        $physical = Join-Path $root 'physical'
+        Move-Item -LiteralPath $installPath -Destination $physical
+        New-Item -ItemType Junction -Path $installPath -Target $physical | Out-Null
+    }
+    if ($mode -eq 'exited') { $observedProcess.HasExited = $true }
+    if ($mode -eq 'unknown-liveness') { $observedProcess.HasExited = $null }
+    if ($mode -eq 'getter-failure') { $observedProcess | Add-Member ScriptProperty HasExited { throw 'credential-sentinel-getter-error' } -Force }
+    if ($mode -eq 'null-path') { $observedProcess.Path = $null }
+    if ($mode -eq 'empty-path') { $observedProcess.Path = '' }
+    if ($mode -eq 'missing-file') { Remove-Item -LiteralPath $application }
+    if ($mode -eq 'invalid-digest') { $expected = 'not-a-release-digest' }
+    $hashCalls = 0; $failure = $null
+    try { Assert-BaselineProcessBinding $observedProcess $expected } catch { $failure = $_ }
+    $ExpectedSourceCommit = 'a' * 40; $success = $false; $packageAcceptanceSuccess = $false
+    $cleanupErrors = [Collections.Generic.List[string]]::new(); $secondaryErrors = [Collections.Generic.List[string]]::new()
+${receipt}
+    $saved = Get-Content -LiteralPath (Join-Path $root 'evidence/installer-upgrade.json') -Raw | ConvertFrom-Json
+    $results += [pscustomobject]@{ mode = $mode; accepted = ($null -eq $failure); hashCalls = $hashCalls
+        facts = $saved.baselineProcessBinding; receiptSucceeded = $saved.succeeded; error = $saved.failure }
+}
+ConvertTo-Json -InputObject $results -Depth 5 -Compress
+`, { DSH_REGISTRATION_HELPER: fileURLToPath(new URL('./fixtures/windows-installer-registration.ps1', import.meta.url)), DSH_BASELINE_DIGEST: digest('inert baseline bytes') })
+  const accepted = new Set(['exact', 'alternate-case', 'separator-dot'])
+  for (const item of observed) {
+    assert.equal(item.accepted, accepted.has(item.mode), item.mode)
+    assert.equal(item.receiptSucceeded, false)
+    assert.deepEqual(Object.keys(item.facts).sort(), ['basenameMatches', 'directParentMatches', 'hashMatches', 'pathAvailable', 'providerNormalized'])
+    for (const value of Object.values(item.facts)) assert.ok(value === null || typeof value === 'boolean')
+    if (accepted.has(item.mode)) {
+      assert.equal(item.hashCalls, 1)
+      assert.ok(Object.values(item.facts).every(value => value === true))
+      assert.equal(item.error, null)
+    } else {
+      assert.equal(typeof item.error, 'string')
+      assert.equal(item.hashCalls, ['wrong-hash', 'hash-unavailable', 'exit-during-hash'].includes(item.mode) ? 1 : 0, item.mode)
+    }
+  }
+  const byMode = Object.fromEntries(observed.map(item => [item.mode, item]))
+  assert.equal(byMode['wrong-hash'].facts.hashMatches, false)
+  assert.equal(byMode['exit-during-hash'].facts.hashMatches, true)
+  assert.equal(byMode['null-path'].facts.pathAvailable, false)
+  assert.equal(byMode['missing-file'].facts.providerNormalized, false)
+  assert.equal(byMode['nested-copy'].facts.directParentMatches, false)
+  assert.equal(byMode['wrong-basename'].facts.basenameMatches, false)
+  assert.match(byMode['installation-junction'].error, /alias/u)
+  assert.doesNotMatch(JSON.stringify(observed), /credential-sentinel|Installed App|ProcessId|ExecutablePath/u)
+})
+
+test('baseline process binding keeps readiness and later refusal ownership gates in order', () => {
+  const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const ready = source.indexOf("if ($ready.ownerToken -ne $token -or $ready.application -ne $application)")
+  const lookup = source.indexOf('$live = Get-Process -Id $ready.pid -ErrorAction Stop')
+  const binding = source.indexOf('Assert-BaselineProcessBinding $live $baselineIdentity.ExecutableSha256')
+  const start = source.indexOf('$refused = Start-Installer $validated.candidate')
+  assert.ok(ready >= 0 && ready < lookup && lookup < binding && binding < start)
+  assert.ok(source.includes('$baselineProcessBinding = $null'))
+  assert.ok(source.includes('baselineProcessBinding = $baselineProcessBinding'))
+  assert.ok(source.includes("if ($live.HasExited -or (Installation-Inventory) -ne $before -or (Read-Registration @($baselineIdentity)).Key -ne $registration.Key)"))
+  assert.doesNotMatch(source, /if \(\$live\.Path -ne \$application\)/u)
+})
+
 test('cleanup rejects parent and root junctions before hashing or invoking the uninstaller', { skip: process.platform !== 'win32' }, t => {
   const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
   const readRegistration = source.match(/function Read-Registration[^]*?\r?\n\}/u)?.[0]
