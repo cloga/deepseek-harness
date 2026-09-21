@@ -208,19 +208,19 @@ function installInitialBottomDiagnostic({ key, callId }: { key: string; callId: 
       try { state.bind(); state.sample(kind, event) }
       catch (_diagnosticError) { samplingErrors += 1 }
     },
-    onEvent(this: void, event: Event): void { state.capture(events.includes(event.type) ? event.type : 'other-event', event) },
-    onResize(this: void): void { state.capture('resize', null) },
-    observe(this: void): void { state.capture('geometry-poll', null) },
-    read(this: void): unknown {
+    onEvent(event: Event): void { state.capture(events.includes(event.type) ? event.type : 'other-event', event) },
+    onResize(): void { state.capture('resize', null) },
+    observe(): void { state.capture('geometry-poll', null) },
+    read(): unknown {
       state.capture('initial-bottom-failure', null)
       return { schemaVersion: 1, dropped, samplingErrors, records: records.slice() }
     },
-    dispose(this: void): void {
+    dispose(): void {
       if (disposed) return
       disposed = true
       let failed = false
       for (const event of events) {
-        try { document.removeEventListener(event, state.onEvent, true) }
+        try { document.removeEventListener(event, onEvent, true) }
         catch (_diagnosticError) { failed = true }
       }
       try { observer.disconnect() } catch (_diagnosticError) { failed = true }
@@ -229,9 +229,10 @@ function installInitialBottomDiagnostic({ key, callId }: { key: string; callId: 
       if (failed) throw new Error('chat-scroll-diagnostic-dispose-failed')
     },
   }
-  const observer = new ResizeObserver(state.onResize)
-  scope[key] = { observe: state.observe, read: state.read, dispose: state.dispose }
-  for (const event of events) document.addEventListener(event, state.onEvent, { capture: true, passive: true })
+  const onEvent = state.onEvent.bind(state)
+  const observer = new ResizeObserver(state.onResize.bind(state))
+  scope[key] = { observe: state.observe.bind(state), read: state.read.bind(state), dispose: state.dispose.bind(state) }
+  for (const event of events) document.addEventListener(event, onEvent, { capture: true, passive: true })
   state.capture('install', null)
 }
 
@@ -640,13 +641,14 @@ function diagnosticSandbox(failRemoval = false) {
       activeElement: { matches: () => false },
       querySelector: () => host,
       addEventListener(name: string, listener: (event: ObservedEvent) => void, options: { capture: boolean; passive: boolean }) {
-        if (options.capture !== true || options.passive !== true || Object.keys(options).length !== 2) {
+        if (!options.capture || !options.passive || Object.keys(options).length !== 2) {
           throw new Error('Diagnostic listener is not passive capture')
         }
         listeners.set(name, listener)
       },
-      removeEventListener(name: string) {
+      removeEventListener(name: string, listener: (event: ObservedEvent) => void) {
         removed.push(name)
+        if (listeners.get(name) !== listener) throw new Error('Diagnostic listener identity changed')
         if (failRemoval && name === 'scroll') throw new Error('owned removal failure')
         listeners.delete(name)
       },
