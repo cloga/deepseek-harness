@@ -34,6 +34,8 @@ function fixture(): { root: HTMLElement; settings: Locator } {
   document.body.append(root)
   const locator = (elements: Element[]): Locator => ({
     locator: (selector: string) => locator(elements.flatMap(element => [...element.querySelectorAll(selector)])),
+    filter: ({ hasText }: { hasText: RegExp }) => locator(elements.filter(element => hasText.test(element.textContent ?? ''))),
+    count: async () => elements.length,
     waitFor: async () => { if (elements.length !== 1) throw new Error('Expected one ready settings control') },
     getAttribute: async (name: string) => elements[0]!.getAttribute(name),
     allTextContents: async () => elements.map(element => element.textContent ?? ''),
@@ -45,18 +47,33 @@ function fixture(): { root: HTMLElement; settings: Locator } {
   return { root, settings: locator([root]) }
 }
 
+// Only current-versus-baseline comparisons add current account readiness; baseline acceptance keeps its original DOM.
+function currentComparisonFixture(): { root: HTMLElement; settings: Locator } {
+  const result = fixture()
+  result.root.insertAdjacentHTML('afterbegin', `<section data-dsh-github-copilot-compact-account>
+    <span role="status">Signed out</span><button>Sign in with GitHub</button>
+  </section>`)
+  return result
+}
+
 afterEach(() => { document.body.replaceChildren() })
 
 describe('sequence-12 Copilot alpha.24 baseline settings acceptance', () => {
-  it('reproduces the current inspector rejecting the baseline workspace selector', async () => {
-    const { settings } = fixture()
-    await expect(inspectPackagedCopilotSettings(settings)).rejects.toThrow('The current workspace is read-only, not a workspace selector')
+  it('rejects retained baseline roles only after current account and search readiness', async () => {
+    const { root, settings } = currentComparisonFixture()
+    root.querySelector('[data-dsh-web-search-provider]')!.closest('label')!.querySelector('span')!.textContent = 'Fallback provider'
+    const before = root.innerHTML
+    await expect(inspectPackagedCopilotSettings(settings)).rejects.toThrow('Retired Model roles controls must be absent')
+    expect(root.innerHTML).toBe(before)
   })
 
   it('does not weaken the current inspector to accept the old default-provider label', async () => {
-    const { root, settings } = fixture()
-    root.querySelector('[data-dsh-dual-model-workspace]')!.outerHTML = '<p data-dsh-dual-model-workspace>No workspace selected</p>'
-    await expect(inspectPackagedCopilotSettings(settings)).rejects.toThrow()
+    const { root, settings } = currentComparisonFixture()
+    const before = root.innerHTML
+    await expect(inspectPackagedCopilotSettings(settings)).rejects.toMatchObject({
+      code: 'ERR_ASSERTION', actual: ['Search provider', 'Default search provider'], expected: ['Search provider', 'Fallback provider'],
+    })
+    expect(root.innerHTML).toBe(before)
   })
 
   it('accepts the original baseline roles and provider catalogs without mutating controls', async () => {
