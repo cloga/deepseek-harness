@@ -585,6 +585,7 @@ async function main(): Promise<void> {
                 confirm: async (detail) => {
                   const window = mainWindow
                   if (window === undefined || window.isDestroyed()) throw new Error(messages.pluginImpactUnavailable)
+                  if (prepared !== undefined) console.error('desktop plugin command phase: native-consent-invoked')
                   return (await dialog.showMessageBox(window, {
                     type: 'warning', title: messages.pluginMutationTitle, message: messages.pluginMutationPrompt,
                     detail, buttons: [messages.applyPluginChange, messages.cancel], defaultId: 1, cancelId: 1,
@@ -756,12 +757,22 @@ async function main(): Promise<void> {
         lastHostPluginCommandRequestId = event.requestId
         void executeHostPluginCommand(host, event)
         return
-      case 'plugin-command-cancel':
-        hostPluginCommands.get(event.requestId)?.cancellation.abort(new Error('desktop plugin command cancelled'))
+      case 'plugin-command-cancel': {
+        const state = hostPluginCommands.get(event.requestId)
+        if (state !== undefined) {
+          console.error(state.prepared
+            ? 'desktop plugin command phase: prepared-cancellation-received'
+            : 'desktop plugin command phase: cancellation-received')
+          state.cancellation.abort(new Error('desktop plugin command cancelled'))
+        }
         return
+      }
       case 'plugin-command-settled': {
         const state = hostPluginCommands.get(event.requestId)
-        if (state?.commandId === event.commandId) state.settled.resolve()
+        if (state?.commandId === event.commandId) {
+          console.error('desktop plugin command phase: settlement-acknowledged')
+          state.settled.resolve()
+        }
         return
       }
       default: event satisfies never

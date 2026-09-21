@@ -719,6 +719,7 @@ describe('desktop plugin interruption boundary', () => {
 
   it('settles the slash-command lifecycle before consent and preserves the app when consent is declined', async () => {
     await startApplication()
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
     const host = harness.hosts[0]!
     const before = [...harness.windows[0]!.urls]
     const staged = Promise.withResolvers<undefined>()
@@ -735,8 +736,14 @@ describe('desktop plugin interruption boundary', () => {
       expect(host.pluginCommandResponse).toHaveBeenCalledWith(1, { kind: 'prepared' })
     })
     expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(diagnostic).not.toHaveBeenCalled()
     host.emitPluginCommand({ type: 'plugin-command-settled', requestId: 1, commandId: 'command-disable' })
     await vi.waitFor(() => { expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce() })
+    expect(diagnostic.mock.calls).toEqual([
+      ['desktop plugin command phase: settlement-acknowledged'],
+      ['desktop plugin command phase: native-consent-invoked'],
+    ])
+    expect(diagnostic.mock.invocationCallOrder[1]).toBeLessThan(harness.dialog.showMessageBox.mock.invocationCallOrder[0]!)
     expect(harness.mutations).toEqual([{ type: 'plugin-toggle', name: 'example-plugin', enabled: false }])
     await vi.advanceTimersByTimeAsync(0)
     expect(host.stop).not.toHaveBeenCalled()
@@ -822,6 +829,7 @@ describe('desktop plugin interruption boundary', () => {
 
   it('cancels a Host command during staging without preparing, prompting, or stopping', async () => {
     await startApplication()
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
     const host = harness.hosts[0]!
     const staged = Promise.withResolvers<undefined>()
     harness.setBeforeMutation(() => staged.promise)
@@ -836,6 +844,39 @@ describe('desktop plugin interruption boundary', () => {
     expect(host.pluginCommandResponse).not.toHaveBeenCalled()
     expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
     expect(host.stop).not.toHaveBeenCalled()
+    expect(diagnostic.mock.calls).toEqual([['desktop plugin command phase: cancellation-received']])
+  })
+
+  it('diagnoses cancellation of a prepared command without logging request input or opening consent', async () => {
+    await startApplication()
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const host = harness.hosts[0]!
+    const before = [...harness.windows[0]!.urls]
+    host.emitPluginCommand({
+      type: 'plugin-command-request', requestId: 41, commandId: 'private-command-id',
+      operation: { type: 'disable', name: 'private-package-input' },
+    })
+    await vi.waitFor(() => { expect(host.pluginCommandResponse).toHaveBeenCalledWith(41, { kind: 'prepared' }) })
+    expect(diagnostic).not.toHaveBeenCalled()
+    host.emitPluginCommand({ type: 'plugin-command-settled', requestId: 41, commandId: 'unmatched-private-command' })
+    host.emitPluginCommand({ type: 'plugin-command-cancel', requestId: 99 })
+    expect(diagnostic).not.toHaveBeenCalled()
+    host.emitPluginCommand({ type: 'plugin-command-cancel', requestId: 41 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(diagnostic.mock.calls).toEqual([['desktop plugin command phase: prepared-cancellation-received']])
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(host.stop).not.toHaveBeenCalled()
+    expect(harness.windows[0]!.urls).toEqual(before)
+  })
+
+  it('does not emit command phase diagnostics for the normal plugin form consent path', async () => {
+    await startApplication()
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
+    await expect(Promise.resolve(invoke(DESKTOP_IPC.pluginsDisableAll, shell))).rejects.toThrow('Cancelled')
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
+    expect(diagnostic).not.toHaveBeenCalled()
+    expect(harness.hosts[0]!.stop).not.toHaveBeenCalled()
   })
 
   it('fails closed without replacing the app when command settlement does not arrive before the bound', async () => {
@@ -859,7 +900,7 @@ describe('desktop plugin interruption boundary', () => {
     await startApplication()
     const host = harness.hosts[0]!
     const before = [...harness.windows[0]!.urls]
-    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
     if (source === 'host') harness.setHostImpacts([new Error('impact unavailable')])
     else harness.setRendererImpacts([null])
     host.emitPluginCommand({
@@ -869,6 +910,8 @@ describe('desktop plugin interruption boundary', () => {
     await vi.advanceTimersByTimeAsync(0)
     host.emitPluginCommand({ type: 'plugin-command-settled', requestId: 1, commandId: 'command-impact' })
     await vi.advanceTimersByTimeAsync(0)
+    expect(diagnostic).toHaveBeenCalledWith('desktop plugin command phase: settlement-acknowledged')
+    expect(diagnostic).not.toHaveBeenCalledWith('desktop plugin command phase: native-consent-invoked')
     expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
     expect(host.stop).not.toHaveBeenCalled()
     expect(harness.windows[0]!.urls).toEqual(before)

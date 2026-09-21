@@ -225,6 +225,7 @@ if ($request.action -eq 'close') {
 
 $mainProcess = Open-Verified $ownership.main
 $hostProcess = $null
+$diagnosticStream = $null
 try {
     $hostProcess = Open-Verified $ownership.host
     $hostCim = Get-CimInstance Win32_Process -Filter "ProcessId = $($ownership.host.pid)"
@@ -245,7 +246,46 @@ try {
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
     $mainHwnd = [IntPtr]([long]$ownership.mainHwnd)
+    # Private fixture evidence only; flushed records survive helper failure or timeout.
+    # No unrelated window text or controls are recorded, and evidence never selects a target.
+    try {
+        $diagnosticStream = [IO.File]::Open($RequestFile + '.observations.jsonl', [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    } catch { [Console]::Error.WriteLine('Native observation file unavailable') }
+    $diagnosticClock = [Diagnostics.Stopwatch]::StartNew()
+    $script:nextDiagnosticMs = 0
+    $script:diagnosticWriteFailed = $false
+    function Write-Observation($value) {
+        if ($null -eq $diagnosticStream -or $script:diagnosticWriteFailed) { return }
+        try {
+            $bytes = [Text.Encoding]::UTF8.GetBytes(($value | ConvertTo-Json -Depth 6 -Compress) + "`n")
+            if ($bytes.Length -gt 32768 -or $diagnosticStream.Position + $bytes.Length -gt 262144) { return }
+            $diagnosticStream.Write($bytes, 0, $bytes.Length)
+            $diagnosticStream.Flush()
+        } catch {
+            $script:diagnosticWriteFailed = $true
+            [Console]::Error.WriteLine('Native observation write failed')
+        }
+    }
+    function Bounded-Name([string]$value) {
+        if ($value.Length -gt 128) { return $value.Substring(0, 128) }
+        return $value
+    }
     function Read-OwnedConfirmation([int]$ProcessId, [IntPtr]$MainHwnd) {
+        $trace = $diagnosticClock.ElapsedMilliseconds -ge $script:nextDiagnosticMs
+        if ($trace) {
+            $script:nextDiagnosticMs = $diagnosticClock.ElapsedMilliseconds + 10000
+            try {
+                $nativeWindows = Read-OwnedWindows $mainProcess
+                $observed = @($nativeWindows | Select-Object -First 32 | ForEach-Object {
+                    @{ hwnd = $_.hwnd; pid = $_.pid; owner = $_.owner; rootOwner = $_.rootOwner;
+                        title = (Bounded-Name $_.title); width = $_.width; height = $_.height;
+                        visible = $_.visible; minimized = $_.minimized }
+                })
+                Write-Observation @{ stage = 'native-windows'; elapsedMs = $diagnosticClock.ElapsedMilliseconds;
+                    total = $nativeWindows.Count; windows = $observed }
+            } catch { Write-Observation @{ stage = 'native-observation-unavailable' } }
+        }
         [uint32]$windowPid = 0
         $matches = @()
         # Some native TaskDialog providers do not expose the target ProcessId through UIA.
@@ -253,6 +293,7 @@ try {
         $windows = [Windows.Automation.AutomationElement]::RootElement.FindAll(
             [Windows.Automation.TreeScope]::Children, [Windows.Automation.Condition]::TrueCondition)
         if ($windows.Count -gt 8192) { throw 'Desktop confirmation window enumeration exceeded bound' }
+        if ($trace) { Write-Observation @{ stage = 'uia-root'; total = $windows.Count } }
         $ownedCount = 0
         foreach ($candidate in $windows) {
             $candidateHwnd = [IntPtr]$candidate.Current.NativeWindowHandle
@@ -261,6 +302,12 @@ try {
             $null = [OwnedDialogWin32]::GetWindowThreadProcessId($candidateHwnd, [ref]$windowPid)
             if ($windowPid -ne $ProcessId) { continue }
             if (++$ownedCount -gt 256) { throw 'Owned confirmation window enumeration exceeded bound' }
+            if ($trace -and $ownedCount -le 32) {
+                try {
+                    Write-Observation @{ stage = 'uia-owned-window'; hwnd = $candidateHwnd.ToInt64().ToString();
+                        rootOwner = [OwnedDialogWin32]::GetAncestor($candidateHwnd, 3).ToInt64().ToString() }
+                } catch { Write-Observation @{ stage = 'uia-window-observation-unavailable' } }
+            }
             $null = [OwnedDialogWin32]::GetWindowThreadProcessId($candidateHwnd, [ref]$windowPid)
             if ($windowPid -ne $ProcessId -or [OwnedDialogWin32]::GetAncestor($candidateHwnd, 3) -ne $MainHwnd) { continue }
             # Bind UIA controls to the natively verified HWND; never trust descendants from the enumerating provider object.
@@ -277,6 +324,21 @@ try {
                 $_.Current.ControlType -eq [Windows.Automation.ControlType]::Button -and $_.Current.Name -ceq 'Apply and Restart Host'
             })
             $message = @($elements | Where-Object { $_.Current.Name -ceq 'Restart the Desktop Host to apply this change?' })
+            if ($trace -and $ownedCount -le 32) {
+                try {
+                    $null = [OwnedDialogWin32]::GetWindowThreadProcessId($candidateHwnd, [ref]$windowPid)
+                    if ([OwnedDialogWin32]::IsWindow($candidateHwnd) -and $windowPid -eq $ProcessId -and
+                        [OwnedDialogWin32]::GetAncestor($candidateHwnd, 3) -eq $MainHwnd) {
+                        $controls = @($elements | Select-Object -First 32 | ForEach-Object {
+                            @{ name = (Bounded-Name $_.Current.Name); type = $_.Current.ControlType.ProgrammaticName;
+                                pid = $_.Current.ProcessId; enabled = $_.Current.IsEnabled; offscreen = $_.Current.IsOffscreen }
+                        })
+                        Write-Observation @{ stage = 'owned-controls'; hwnd = $candidateHwnd.ToInt64().ToString();
+                            total = $elements.Count; cancelCount = $cancel.Count; applyCount = $apply.Count;
+                            messageCount = $message.Count; controls = $controls }
+                    }
+                } catch { Write-Observation @{ stage = 'control-observation-unavailable' } }
+            }
             if ($cancel.Count -eq 1 -and $apply.Count -eq 1 -and $message.Count -ge 1) {
                 # Descendant traversal can race destruction or handle reuse; native identity must still match afterward.
                 if (![OwnedDialogWin32]::IsWindow($candidateHwnd) -or
@@ -333,6 +395,8 @@ try {
         messageVerified = $true; exactButtonsVerified = $true; cancelHadKeyboardFocus = $focused;
         defaultFocusAsserted = $false; closed = $true } | ConvertTo-Json -Depth 5 -Compress
 } finally {
-    if ($null -ne $hostProcess) { $hostProcess.Dispose() }
-    $mainProcess.Dispose()
+    try {
+        if ($null -ne $diagnosticStream) { $diagnosticStream.Dispose() }
+    } catch { [Console]::Error.WriteLine('Native observation close failed') }
+    try { if ($null -ne $hostProcess) { $hostProcess.Dispose() } } finally { $mainProcess.Dispose() }
 }

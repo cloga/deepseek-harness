@@ -1,11 +1,15 @@
 /** Non-GUI guards for the independent packaged command acceptance fixture. */
-import { closeSync, fstatSync, mkdtempSync, mkdirSync, readFileSync, readSync, writeFileSync } from 'node:fs'
+import { closeSync, fstatSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { CommandExecution } from '@deepseek-ai/dsh-commands/types'
 import { removeOwnedDirectory } from '../src/owned-directory.ts'
 
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return { ...actual, lstatSync: vi.fn(actual.lstatSync), readFileSync: vi.fn(actual.readFileSync) }
+})
 vi.mock('playwright', () => { throw new Error('Import safety: Playwright must not load on fixture import') })
 vi.mock('@deepseek-ai/dsh-win32-process/src/index.ts', () => { throw new Error('Import safety: Win32/Koffi loader must remain lazy') })
 vi.mock('@deepseek-ai/dsh-win32-process/src/process.ts', () => { throw new Error('Import safety: native process module must remain lazy') })
@@ -15,6 +19,7 @@ vi.mock('node:child_process', () => ({ spawn: () => { throw new Error('Import sa
 import {
   canRemoveDesktopPluginHome,
   openDesktopPluginInput,
+  readDesktopPluginNativeObservations,
   runPackagedDesktopPluginCommandAcceptance,
   snapshotDesktopPluginProfile,
   validateDesktopPluginTranscript,
@@ -121,6 +126,40 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
       { ...capture(), initialCandidates: [replacement] },
       { ...capture(), readyCandidates: [rootWindow, replacement] }]) {
       expect(() => { validateCapture(value) }).toThrow()
+    }
+  })
+
+  it('reads bounded native scan diagnostics without treating them as acceptance', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desktop-native-observations-'))
+    const file = join(home, 'scan.jsonl')
+    try {
+      expect(readDesktopPluginNativeObservations(file)).toBe('Native observation file absent')
+      expect(readDesktopPluginNativeObservations(home)).toContain('rejected')
+      writeFileSync(file, '{"stage":"owned-controls","cancelCount":0}\n')
+      expect(readDesktopPluginNativeObservations(file)).toBe('{"stage":"owned-controls","cancelCount":0}\n')
+      writeFileSync(file, 'token=private-value https://example.test/owned?secret=private-value')
+      expect(readDesktopPluginNativeObservations(file)).not.toContain('private-value')
+      writeFileSync(file, 'x'.repeat(262_144))
+      expect(readDesktopPluginNativeObservations(file)).toHaveLength(262_144)
+      writeFileSync(file, 'x'.repeat(262_145))
+      expect(readDesktopPluginNativeObservations(file)).toContain('rejected')
+    } finally { removeOwnedDirectory(home) }
+  })
+
+  it('contains observation stat and read errors without exposing them or replacing helper outcomes', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desktop-native-observations-errors-'))
+    const file = join(home, 'scan.jsonl')
+    try {
+      writeFileSync(file, '{}\n')
+      vi.mocked(lstatSync).mockImplementationOnce(() => { throw new Error('private stat error') })
+      expect(readDesktopPluginNativeObservations(file)).toBe('Native observation file unreadable')
+      vi.mocked(readFileSync).mockImplementationOnce(() => { throw new Error('private read error') })
+      expect(readDesktopPluginNativeObservations(file)).toBe('Native observation file unreadable')
+      expect(readDesktopPluginNativeObservations(file)).toBe('{}\n')
+    } finally {
+      vi.mocked(lstatSync).mockReset()
+      vi.mocked(readFileSync).mockReset()
+      removeOwnedDirectory(home)
     }
   })
 

@@ -47,7 +47,7 @@ interface Ownership {
   readonly profile: string
 }
 interface ExpectedCommand { readonly line: string; readonly execution: CommandExecution }
-interface HelperLifecycle { helperTreeUncertain: boolean }
+interface HelperLifecycle { helperTreeUncertain: boolean; nativeObservations: string[] }
 
 /**
  * Provide EOF stdin without depending on Windows device-name normalization.
@@ -150,6 +150,23 @@ function safeDiagnostic(value: unknown): string {
     .replace(/((?:authorization|token|password|secret|api[_-]?key)\s*[:=]\s*)(?:bearer\s+|token\s+)?[^\s,"'<>]+/giu, '$1[redacted]')
 }
 
+/**
+ * Read bounded fixture-only native scan evidence after the helper closes, including abnormal exits.
+ * @param path - Observation file beside the exclusively created helper request.
+ * @returns Sanitized JSONL text or a fixed read diagnostic, never success evidence or a replacement failure.
+ */
+export function readDesktopPluginNativeObservations(path: string): string {
+  try {
+    const stat = lstatSync(path, { throwIfNoEntry: false })
+    if (stat === undefined) return 'Native observation file absent'
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 262_144) return 'Native observation file rejected: not bounded regular file'
+    return safeDiagnostic(readFileSync(path, 'utf8'))
+  } catch (_error: unknown) {
+    // Best-effort evidence cannot replace the helper's independently observed exit/timeout.
+    return 'Native observation file unreadable'
+  }
+}
+
 /** Each helper owns one bounded child; output uses exclusive files, not ambient pipes or credentials. */
 async function nativeHelper<T>(
   home: string, environment: Record<string, string>, request: object, lifecycle: HelperLifecycle,
@@ -181,6 +198,8 @@ async function nativeHelper<T>(
     const timer = setTimeout(() => { timedOut = true; child.kill() }, timeout)
     let outcome: Awaited<typeof closed>
     try { outcome = await closed } finally { clearTimeout(timer) }
+    const observations = `${input}.observations.jsonl`
+    if (existsSync(observations)) lifecycle.nativeObservations.push(readDesktopPluginNativeObservations(observations))
     if (timedOut || spawnError !== undefined || outcome.signal !== null || outcome.code !== 0) {
       throw new Error(`Native helper failed after awaiting close: ${JSON.stringify({ timedOut,
         exitCode: outcome.code, signal: outcome.signal, spawnError: spawnError === undefined ? undefined : safeDiagnostic(spawnError),
@@ -285,7 +304,7 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
   let browser: Browser | undefined
   let owned: SpawnedJobProcess | undefined
   let spawnAttempted = false
-  const helperLifecycle: HelperLifecycle = { helperTreeUncertain: false }
+  const helperLifecycle: HelperLifecycle = { helperTreeUncertain: false, nativeObservations: [] }
   let ownership: Ownership | undefined
   let failure: unknown
   const descriptors: number[] = []
@@ -299,7 +318,8 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
   const userData = join(home, 'electron-user-data')
   const evidence: Record<string, unknown> = { desktopVersion: reviewed.version, sequence: reviewed.sequence,
     executableSha256, provisioningPlanSha256,
-    isolatedHome: true, modelPromptSubmitted: false, realOAuth: false, networkFreeClaimed: false }
+    isolatedHome: true, modelPromptSubmitted: false, realOAuth: false, networkFreeClaimed: false,
+    nativeObservations: helperLifecycle.nativeObservations }
   const save = (name: string, value: unknown): void => {
     writeFileSync(join(output, name), `${JSON.stringify(value, undefined, 2)}\n`, { flag: 'wx', mode: 0o600 })
   }
@@ -492,7 +512,7 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     }
     if (errors.length > 0) {
       save('cleanup-failure.json', { errors: errors.map(safeDiagnostic), home, quiescent: false,
-        spawnAttempted, helperTreeUncertain: helperLifecycle.helperTreeUncertain })
+        appJobQuiescent: quiescent, spawnAttempted, helperTreeUncertain: helperLifecycle.helperTreeUncertain })
       throw new AggregateError([...(failure === undefined ? [] : [failure]), ...errors], 'Packaged command acceptance cleanup failed')
     }
   }
