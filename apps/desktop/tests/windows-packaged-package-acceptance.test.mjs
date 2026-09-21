@@ -115,16 +115,57 @@ test('close and real evidence-write failures retain the original failure object'
   assert.ok(installed.includes('if (roundFailure !== undefined) throw roundFailure'))
 })
 
+function unitChildEvidence(result, elapsedMs, budgetMs) {
+  const stderr = result.stderr ?? ''
+  return {
+    elapsedMs: Math.round(elapsedMs), budgetMs, pid: result.pid ?? null,
+    errorCode: result.error?.code ?? null, errorMessage: result.error?.message?.slice(0, 512) ?? null,
+    signal: result.signal, status: result.status,
+    lastPhase: [...stderr.matchAll(/^\[fixture-phase:([a-z-]+)\]\r?$/gmu)].at(-1)?.[1] ?? 'no-script-marker-observed',
+    stdoutTail: (result.stdout ?? '').slice(-2048), stderrTail: stderr.slice(-2048),
+  }
+}
+
+function assertUnitChild(result, evidence) {
+  const diagnostic = JSON.stringify(evidence)
+  assert.equal(result.error, undefined, diagnostic)
+  assert.equal(result.signal, null, diagnostic)
+  assert.equal(result.status, 0, diagnostic)
+}
+
+test('unit child diagnostics cannot accept a timeout with zero status or hide assertion-phase failures', () => {
+  const result = { error: { code: 'ETIMEDOUT', message: 'deadline' }, signal: null, status: 0, stderr: '[fixture-phase:mock-setup-complete]\n' + 'x'.repeat(10_000) }
+  const evidence = unitChildEvidence(result, 30_001, 30_000)
+  assert.equal(evidence.lastPhase, 'mock-setup-complete')
+  assert.equal(evidence.errorCode, 'ETIMEDOUT')
+  assert.equal(evidence.status, 0)
+  assert.equal(evidence.stderrTail.length, 2048)
+  assert.throws(() => assertUnitChild(result, evidence), /ETIMEDOUT/u)
+  const failed = { signal: null, status: 1, stderr: '[fixture-phase:assertions-start]\nassertion failed' }
+  assert.throws(() => assertUnitChild(failed, unitChildEvidence(failed, 1, 10)), /assertions-start/u)
+  const signalled = { signal: 'SIGTERM', status: null }
+  assert.throws(() => assertUnitChild(signalled, unitChildEvidence(signalled, 1, 10)), /SIGTERM/u)
+  assert.equal(unitChildEvidence(signalled, 1, 10).lastPhase, 'no-script-marker-observed')
+  assert.equal(unitChildEvidence({ stderr: 'parser echo: [fixture-phase:assertions-start]' }, 1, 10).lastPhase, 'no-script-marker-observed')
+})
+
 /** Run only extracted pure error/reaper code with fake process handles; never load the native driver or application. */
-function powershellUnit(t, body, shell = 'pwsh') {
+function powershellUnit(t, body, shell = 'pwsh', { timeout = 15_000, phases = false } = {}) {
   const root = directory(t)
   const script = join(root, 'pure-unit.ps1')
-  writeFileSync(script, "$ErrorActionPreference = 'Stop'\n" + body)
+  writeFileSync(script, "$ErrorActionPreference = 'Stop'\n"
+    + (phases ? "[Console]::Error.WriteLine('[fixture-phase:script-start]')\n" : '') + body
+    + (phases ? "\n[Console]::Error.WriteLine('[fixture-phase:script-complete]')\n" : ''))
   const names = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'PSMODULEPATH', 'PROGRAMFILES'])
   const env = { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => names.has(name.toUpperCase()))), POWERSHELL_TELEMETRY_OPTOUT: '1', POWERSHELL_UPDATECHECK: 'Off' }
-  const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-File', script], { encoding: 'utf8', env, timeout: 15_000 })
-  assert.equal(result.error, undefined)
-  assert.equal(result.status, 0, result.stderr)
+  const started = performance.now()
+  const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-File', script], { encoding: 'utf8', env, timeout })
+  const evidence = unitChildEvidence(result, performance.now() - started, timeout)
+  assertUnitChild(result, evidence)
+  if (phases) {
+    assert.equal(evidence.lastPhase, 'script-complete', JSON.stringify(evidence))
+    t.diagnostic(`Pure unit subprocess: ${JSON.stringify(evidence)}`)
+  }
   return JSON.parse(result.stdout.trim())
 }
 
@@ -229,6 +270,8 @@ test('native exit verification requires both transport and actual main exit with
   const body = native.split("if ($Action -eq 'VerifyExited') {")[1].split("    } elseif ($Action -eq 'StopOwned')")[0]
   assert.ok(same && body)
   // Match the native driver's Windows PowerShell edition: Core auto-converts ISO JSON strings to DateTime.
+  // This one hosted 15s total-process guard expired before phase evidence existed. Allow 30s for
+  // fresh PowerShell/mock setup; this is not an installed-process exit or UI performance deadline.
   const observed = powershellUnit(t, `
 ${same}
 function Verify-Exit {
@@ -252,6 +295,8 @@ $command = 'C:/Windows/System32/cmd.exe'
 $binding = [pscustomobject]@{ launcher = [pscustomobject]@{ pid = 202; parentPid = 101; executable = $command; created = $time.ToUniversalTime().ToString('o') } }
 $familyPath = Join-Path $PSScriptRoot 'family.json'
 @{ ownerToken = $OwnerToken; completeObservation = $true; processes = @(@{ pid = 303; parentPid = 202; executable = $application; created = $time.AddSeconds(1).ToUniversalTime().ToString('o') }) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $familyPath
+[Console]::Error.WriteLine('[fixture-phase:mock-setup-complete]')
+[Console]::Error.WriteLine('[fixture-phase:assertions-start]')
 $rejected = @()
 foreach ($case in @('transport-live', 'main-live')) {
     $processes = if ($case -eq 'transport-live') { @{ 202 = [pscustomobject]@{ ProcessId = 202; ParentProcessId = 101; ExecutablePath = $command; Started = $time } } }
@@ -266,7 +311,7 @@ $gone = Verify-Exit
 $processes = @{ 202 = [pscustomobject]@{ ProcessId = 202; ParentProcessId = 101; ExecutablePath = $command; Started = $time.AddSeconds(10); CreationDate = $time.AddSeconds(10) } }
 $reused = Verify-Exit
 [pscustomobject]@{ rejected = $rejected; gone = $gone.ownedFamilyExited; reused = $reused.ownedFamilyExited } | ConvertTo-Json -Compress
-`, join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
+`, join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), { timeout: 30_000, phases: true })
   assert.deepEqual(observed, { rejected: ['transport-live', 'main-live'], gone: true, reused: true })
 })
 

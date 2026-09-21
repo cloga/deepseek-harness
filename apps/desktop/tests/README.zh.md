@@ -76,7 +76,11 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 [打包 skill canary](fixtures/packaged-skills-smoke.mjs) 从指定产物挂载最小 Cordis 服务，并读取其中真实的 ASAR preset 与 skill。其子进程仅接收明确的操作系统环境白名单，用户状态目录全部私有；它自己的清理保留主要失败，只有清理失败时也会判定失败。这些保证仅适用于该 canary，不适用于其他 runtime-smoke 子进程。它通过四次真实 skill 工具调用检查随附 skill 与合成用户 skill，不代表生产 Host 或 profile 验证。[纯 helper 回归](packaged-skills-smoke.test.mjs) 在产物构建前执行，不证明打包行为已通过。
 
-[打包 Copilot 验收](fixtures/copilot-release-smoke.ts)在同一个已配置插件的 profile 中组合完整的初次启动／重启 Copilot alpha.32 断言与可选的清理观察器 canary。只有这些断言通过后，观察器才针对真实 profile 运行一次。刻意抛出的标记按错误对象的精确身份识别并被局部处理；其他失败不能算作该预期 canary。正常的 `acceptance.json` receipt 与独立的 `observer-cleanup.json` 证据共同记录组合成功，以及自有 home 和祖先 canary 已删除。工作流使用这一组合运行，不再从 GitHub 为第二个全新 profile 重复配置插件。这些证据不证明非预期失败时成功 receipt 被抑制，也不证明实时额度访问、OAuth、模型调用或搜索。
+[打包 Copilot 验收](fixtures/copilot-release-smoke.ts)在同一个已配置插件的 profile 中完成初次启动／重启两轮 Copilot alpha.32 断言后，才写入临时的 `functional-results.json` 观察记录。随后观察器针对真实 profile 运行一次，其异常经过实际验收所有者的非预期错误路径；所有者不会局部处理所谓预期标记。它先将清理与诊断结果写入最终的 `failure.json`，再传播原始错误。普通模式仅在清理和 receipt 操作成功后写入 `acceptance.json`；组合观察器 canary 模式必须让该文件保持不存在。初始化、诊断、清理或 receipt 失败均不能生成成功的套件证据。
+
+[观察器包装器](fixtures/copilot-observer-smoke.ts)要求精确的私有错误对象传播出来，最终失败证据中不存在诊断或清理错误，且自有 home、profile 和祖先 canary 均已删除。随后它写入 `observer-cleanup.json`，最后以原子且独占的方式发布 `packaged-suite.json`，作为套件提交标记。最后这个文件通过哈希及共享的源码／tree／运行／尝试／plan／产物身份绑定原始功能、失败和观察器 receipt，并明确不宣称普通验收完成。仅有临时功能观察不代表套件成功。合成所有者／包装器测试不证明真实托管运行、实时额度访问、OAuth、模型调用或搜索。
+
+必需的只读[验收验证器](../scripts/verify-fork-qualification.ts)在真实安装升级之后、发布资产校验和封存及已验收产物上传之前运行。它将 receipt 关系与精确身份对照已定稿发布元数据、升级归属及已验证输入、候选／重启记录、独立同版本包验收和清理证据进行检查。仅用于 CI 的摘要不进入保持不变的六个公开资产。仅 rehearsal 使用的 `desktop-unqualified-candidate-*` artifact 在验收前保留内部诊断字节；它不是 publisher 输入、release 或验收证据。这些内部记录不扩大公开资产清单，也不将同版本插件选择提升为跨版本升级证明。
 
 独立的[包操作场景](fixtures/windows-packaged-package-acceptance.mjs)使用另一个私有 home，以及真实的 Plugin Manager 控件、标题栏菜单、shell 确认和替代 Host。它将现有的私有测试组合包原样归档。安装首先提升一个仍禁用该组合包的图；必须经过官方 Enable 开关和另一次正常重启，才能报告行状态为 Running。通过真实设置配置的自定义提供方使用回环测试端点；场景断言不发出模型请求。组合输入、仅附件和仅草稿输入都必须阻止激活，同时保留实时输入。Copilot 的禁用与移除选择在同版本重启后检查；确认移除后不存在时，还必须看到已正确加载的保留 fixture。
 

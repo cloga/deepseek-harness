@@ -205,6 +205,17 @@ jobs:
           --artifacts apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts
           --out ${{ env.RELEASE_ASSETS }}
 
+      # Internal diagnostic bytes only: never consumed by the protected publisher.
+      # Retaining them avoids rebuilding an identical candidate merely to investigate fixture/native UI failures.
+      - name: Retain unqualified rehearsal candidate for targeted diagnosis
+        if: ${{ inputs.rehearsal }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-unqualified-candidate-${{ steps.plan.outputs.version }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ env.RELEASE_ASSETS }}/*
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Acquire the verified installer-upgrade baseline
         id: upgrade_baseline
         shell: pwsh
@@ -286,6 +297,31 @@ jobs:
           path: |
             ${{ runner.temp }}/cloga-installer-upgrade-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*
             ${{ runner.temp }}/desktop-upgrade-baseline-${{ github.run_id }}-${{ github.run_attempt }}/acquisition.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Verify complete release qualification
+        id: qualification
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm exec tsx apps/desktop/scripts/verify-fork-qualification.ts `
+            --plan $env:RELEASE_PLAN `
+            --release-assets $env:RELEASE_ASSETS `
+            --packaged-evidence dist/desktop-copilot-acceptance `
+            --upgrade-root (Join-Path $env:RUNNER_TEMP "cloga-installer-upgrade-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT") `
+            --baseline-directory (Join-Path $env:RUNNER_TEMP "desktop-upgrade-baseline-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT") `
+            --expected-source $env:GITHUB_SHA `
+            --run-id $env:GITHUB_RUN_ID `
+            --run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --output dist/desktop-fork-qualification/qualification.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Retain verified internal qualification summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-fork-qualification-${{ steps.plan.outputs.version }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: dist/desktop-fork-qualification/qualification.json
           if-no-files-found: error
           retention-days: 7
 

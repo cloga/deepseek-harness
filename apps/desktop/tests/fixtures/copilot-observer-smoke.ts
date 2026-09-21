@@ -1,46 +1,117 @@
-/** Contain an exact post-acceptance observer canary within one packaged run, then verify its owned cleanup. */
+/** Verify unexpected observer propagation and owned cleanup after one full packaged run. */
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync, type Stats } from 'node:fs'
 import { join, resolve } from 'node:path'
-import type { PackagedCopilotAcceptanceOptions, PackagedCopilotProfileInspection } from './copilot-release-smoke.ts'
+import type { PackagedCopilotAcceptanceOptions } from './copilot-release-smoke.ts'
 
-/** An expected observer exception was contained; directory removal is checked separately after the run returns. */
-export interface PackagedCopilotObserverEvidence {
-  readonly observerInvokedOnce: true
-  readonly canaryContained: true
+/** Identity shared by internal functional, failure and suite evidence. */
+export interface PackagedProofIdentity {
+  readonly evidenceId: string
+  readonly sourceCommit: string
+  readonly sourceTree: string
+  readonly runId: string | null
+  readonly runAttempt: string | null
+  readonly planSha256: string
+  readonly runtimeSha256: string
+  readonly executableSha256: string
+  readonly provisioningSha256: string
+  readonly capabilitySha256: string
 }
 
 /**
- * Await the optional observer, containing only its explicitly expected exception by identity.
- * @param options - Acceptance observer and optional expected canary object.
- * @param paths - Frozen live profile paths owned by the acceptance run.
- * @returns Canary evidence only after that exact object was thrown; ordinary observer failures propagate.
+ * Publish complete bytes atomically, refusing existing evidence except owned diagnostic finalization.
+ * @param output - Existing evidence directory.
+ * @param file - Fixture-owned filename.
+ * @param value - Owned JSON evidence, never runtime objects.
+ * @param replace - Only the owner's already-created failure receipt may be replaced.
  */
-export async function inspectPackagedCopilotProfile(
-  options: PackagedCopilotAcceptanceOptions,
-  paths: PackagedCopilotProfileInspection,
-): Promise<PackagedCopilotObserverEvidence | undefined> {
-  if (options.expectedObserverFailure === undefined) {
-    await options.inspectProfile?.(paths)
-    return undefined
-  }
-  assert(options.inspectProfile, 'An expected observer failure requires an observer')
-  let observed = false
+export function writePackagedProof(output: string, file: string, value: unknown, replace = false): void {
+  assert(['functional-results.json', 'acceptance.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json'].includes(file),
+    'Unknown packaged proof filename')
+  assert(!replace || file === 'failure.json', 'Only owned failure diagnostics can be finalized')
+  const target = join(output, file)
+  const temporary = join(output, `.${file}.${randomUUID()}.tmp`)
+  let descriptor: number | undefined
+  let staged: Stats | undefined
+  let reserved: Stats | undefined
+  const sameFile = (current: Stats, expected: Stats): boolean => current.isFile() && !current.isSymbolicLink()
+    && current.dev === expected.dev && current.ino === expected.ino
+  // A fresh private evidence directory has one writer. These observations reject accidental replacement;
+  // portable rename cannot compare-and-swap against a malicious concurrent same-user filesystem writer.
+  const previous = replace ? lstatSync(target) : undefined
+  if (previous !== undefined) assert(previous.isFile() && !previous.isSymbolicLink(), 'Owned diagnostic must remain a regular file')
   try {
-    await options.inspectProfile(paths)
+    descriptor = openSync(temporary, 'wx', 0o600)
+    staged = fstatSync(descriptor)
+    writeFileSync(descriptor, JSON.stringify(value, undefined, 2) + '\n')
+    fsyncSync(descriptor)
+    closeSync(descriptor)
+    descriptor = undefined
+    if (!replace) {
+      descriptor = openSync(target, 'wx', 0o600)
+      reserved = fstatSync(descriptor)
+      closeSync(descriptor)
+      descriptor = undefined
+    }
+    const expected = previous ?? reserved
+    assert(expected !== undefined)
+    const current = lstatSync(target)
+    assert(sameFile(current, expected) && (replace || current.size === 0), 'Receipt reservation changed before publication')
+    // Final filesystem operation: failure before this point leaves no newly committed valid receipt.
+    renameSync(temporary, target)
   } catch (error) {
-    if (error !== options.expectedObserverFailure) throw error
-    observed = true
+    const secondary: unknown[] = []
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor) } catch (closeError) { secondary.push(closeError) }
+    }
+    if (reserved !== undefined) {
+      try {
+        if (existsSync(target)) {
+          const current = lstatSync(target)
+          if (sameFile(current, reserved) && current.size === 0) unlinkSync(target)
+        }
+      } catch (removeError) { secondary.push(removeError) }
+    }
+    if (staged !== undefined) {
+      try { if (existsSync(temporary) && sameFile(lstatSync(temporary), staged)) unlinkSync(temporary) }
+      catch (removeError) { secondary.push(removeError) }
+    }
+    if (secondary.length > 0) throw new AggregateError([error, ...secondary], 'Packaged receipt publication and cleanup failed')
+    throw error
   }
-  assert(observed, 'The observer must throw its exact expected canary')
-  return { observerInvokedOnce: true, canaryContained: true }
+}
+
+function readProof(output: string, file: string): { value: Record<string, unknown>; sha256: string } {
+  const path = join(output, file)
+  const stat = lstatSync(path)
+  assert(stat.isFile() && !stat.isSymbolicLink() && stat.size > 0 && stat.size <= 2 * 1024 * 1024,
+    'Packaged proof must be a bounded regular file')
+  const bytes = readFileSync(path)
+  assert.equal(bytes.length, stat.size, 'Packaged proof changed while reading')
+  const value: unknown = JSON.parse(bytes.toString('utf8'))
+  assert(typeof value === 'object' && value !== null && !Array.isArray(value), 'Packaged proof must be an object')
+  return { value: value as Record<string, unknown>, sha256: createHash('sha256').update(bytes).digest('hex') }
+}
+
+function identityOf(value: Record<string, unknown>): PackagedProofIdentity {
+  const fields = ['evidenceId', 'sourceCommit', 'sourceTree', 'runId', 'runAttempt', 'planSha256',
+    'runtimeSha256', 'executableSha256', 'provisioningSha256', 'capabilitySha256'] as const
+  assert(typeof value.evidenceId === 'string' && /^[a-f0-9-]{36}$/u.test(value.evidenceId))
+  for (const field of ['sourceCommit', 'sourceTree'] as const) {
+    assert(typeof value[field] === 'string' && /^[a-f0-9]{40}$/u.test(value[field]))
+  }
+  for (const field of fields.slice(5)) assert(typeof value[field] === 'string' && /^[a-f0-9]{64}$/u.test(value[field]))
+  for (const field of ['runId', 'runAttempt'] as const) assert(value[field] === null || (typeof value[field] === 'string' && /^\d+$/u.test(value[field])))
+  // All identity leaves were validated above; no unselected receipt fields cross this projection.
+  return Object.fromEntries(fields.map(field => [field, value[field]])) as unknown as PackagedProofIdentity
 }
 
 /**
- * Run full packaged acceptance once with a post-restart canary and verify cleanup after its awaited return.
- * @param options - Packaged application and a fresh evidence destination.
- * @param runAcceptance - The real acceptance entrypoint; unit tests supply an isolated runner, not an application.
- * @returns Resolves after successful acceptance and observed removal of the owned profile, home, and ancestor SDK.
+ * Exercise an ordinary failing observer through the actual owner, then commit separately scoped suite evidence.
+ * @param options - Packaged application and fresh evidence destination.
+ * @param runAcceptance - Fixed to the actual owner by the CLI; isolated wrapper tests may supply a controlled runner.
+ * @returns Resolves only after full functional evidence, exact error propagation and observed owned removal.
  */
 export async function runPackagedCopilotObserverCanary(
   options: Pick<PackagedCopilotAcceptanceOptions, 'application' | 'output'>,
@@ -49,15 +120,15 @@ export async function runPackagedCopilotObserverCanary(
   const application = resolve(options.application)
   const output = resolve(options.output)
   mkdirSync(output, { recursive: true })
-  for (const file of ['acceptance.json', 'failure.json', 'observer-cleanup.json']) {
+  for (const file of ['functional-results.json', 'acceptance.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json']) {
     assert(!existsSync(join(output, file)), `Combined acceptance requires fresh ${file} evidence`)
   }
-  const marker = new Error('packaged observer cleanup canary')
+  const marker = new Error(`packaged observer cleanup canary ${randomUUID()}`)
   const captures: Array<{ home: string; profile: string; legacySdk: string }> = []
-  await runAcceptance({
+  let propagated = false
+  try { await runAcceptance({
     application,
     output,
-    expectedObserverFailure: marker,
     inspectProfile(paths) {
       assert.equal(captures.length, 0, 'Observer must run once')
       assert(Object.isFrozen(paths), 'Observer paths must be immutable')
@@ -65,6 +136,7 @@ export async function runPackagedCopilotObserverCanary(
       assert.equal(paths.application, application)
       assert.equal(paths.output, output)
       assert(existsSync(paths.profile), 'Real provisioned profile must exist during inspection')
+      assert(!existsSync(join(output, 'acceptance.json')), 'Ordinary acceptance must be withheld before cleanup')
       captures.push({
         home: paths.home,
         profile: paths.profile,
@@ -72,31 +144,48 @@ export async function runPackagedCopilotObserverCanary(
       })
       throw marker
     },
-  })
+  }) } catch (error) {
+    if (error !== marker) throw error
+    propagated = true
+  }
+  assert(propagated, 'Real acceptance must reject the exact unexpected observer marker')
   assert.equal(captures.length, 1, 'Real acceptance must reach the observer exactly once')
   const captured = captures[0]!
   assert(!existsSync(captured.home), 'Acceptance must remove its owned home')
   assert(!existsSync(captured.profile), 'Acceptance must remove its owned profile')
   assert(!existsSync(captured.legacySdk), 'Acceptance must remove its owned ancestor canary')
-  assert(!existsSync(join(output, 'failure.json')), 'Expected canary must not be reported as an acceptance failure')
-  const acceptance: unknown = JSON.parse(readFileSync(join(output, 'acceptance.json'), 'utf8'))
-  assert(typeof acceptance === 'object' && acceptance !== null && 'observerCleanupCanary' in acceptance,
-    'Successful acceptance must record the contained observer canary')
-  assert.deepEqual(acceptance.observerCleanupCanary, { observerInvokedOnce: true, canaryContained: true })
-  writeFileSync(join(output, 'observer-cleanup.json'), JSON.stringify({
-    schemaVersion: 2,
-    observerInvokedOnce: true,
-    canaryContained: true,
-    acceptanceCompleted: true,
-    successWithCanary: true,
-    ownedHomeRemoved: true,
-    ownedProfileRemoved: true,
-    ownedLegacySdkRemoved: true,
-    realOAuth: false,
-    realModelRound: false,
-    realSearch: false,
-    liveAccountQuota: false,
-    verificationNavigationExercised: false,
-    manualVerificationAddressObserved: false,
-  }, undefined, 2) + '\n', { flag: 'wx' })
+  assert(!existsSync(join(output, 'acceptance.json')), 'Unexpected observer failure must withhold ordinary acceptance')
+  const functional = readProof(output, 'functional-results.json')
+  const failure = readProof(output, 'failure.json')
+  assert.equal(functional.value.schemaVersion, 1)
+  assert.equal(functional.value.scope, 'packaged-functional-observations')
+  assert.equal(functional.value.functionalAssertionsCompleted, true)
+  assert.equal(functional.value.normalAcceptanceCompleted, false)
+  assert.equal(functional.value.cleanupVerified, false)
+  const identity = identityOf(functional.value)
+  assert.deepEqual(identityOf(failure.value), identity, 'Failure and functional evidence must identify the same run')
+  assert.equal(failure.value.schemaVersion, 2)
+  assert.equal(failure.value.scope, 'packaged-acceptance-failure')
+  assert.equal(failure.value.error, String(marker), 'Failure receipt must retain the exact observer marker')
+  assert.equal(failure.value.cleanupCompleted, true)
+  assert.equal(failure.value.cleanupVerified, true)
+  assert.deepEqual(failure.value.cleanupErrors, [])
+  assert.deepEqual(failure.value.diagnosticErrors, [])
+  writePackagedProof(output, 'observer-cleanup.json', {
+    schemaVersion: 3, scope: 'unexpected-observer-failure-cleanup', ...identity,
+    observerInvokedOnce: true, errorPropagationVerified: true, ordinaryAcceptanceWithheld: true,
+    cleanupVerified: true, ownedHomeRemoved: true, ownedProfileRemoved: true, ownedLegacySdkRemoved: true,
+    normalAcceptanceCompleted: false, functionalSha256: functional.sha256, failureSha256: failure.sha256,
+  })
+  const observer = readProof(output, 'observer-cleanup.json')
+  writePackagedProof(output, 'packaged-suite.json', {
+    schemaVersion: 1, scope: 'packaged-functional-with-unexpected-observer-failure', ...identity,
+    functionalAssertionsCompleted: true, errorPropagationVerified: true, cleanupVerified: true,
+    normalAcceptanceCompleted: false,
+    receipts: {
+      functional: { file: 'functional-results.json', sha256: functional.sha256 },
+      failure: { file: 'failure.json', sha256: failure.sha256 },
+      observer: { file: 'observer-cleanup.json', sha256: observer.sha256 },
+    },
+  })
 }
