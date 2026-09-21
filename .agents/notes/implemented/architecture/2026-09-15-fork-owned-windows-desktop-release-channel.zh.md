@@ -30,13 +30,15 @@ Manifest schema 3 对规范 JSON 进行 self-hash，并记录源码 repository�
 
 经过评审的 release plan schema 2 携带通用精确状态 Desktop 插件 plan；schema 1 会规范化为空 plan，使现有且版本中立的 release 定义仍然可读。Build receipt 独立 self-hash，并记录相同的 source、build inputs、identity、artifact evidence、helper 与 capability hashes、已发布 provisioning plan 的文件 hash 与规范 hash、native-updater exclusion、network policy、installation policy 与通用插件 schema 兼容性。`SHA256SUMS` 与 `SHA512SUMS` 覆盖 installer、provisioning plan、manifest 与 receipt。
 
-仅构建使用的元数据发现可以通过 [release fetch adapter](../../../../apps/desktop/scripts/desktop-release-github-fetch.ts) 显式接收 `DSH_DESKTOP_RELEASE_GITHUB_TOKEN`。CI 向 preparation 与 remote verification 提供该适配器的只读 Actions token，不传给 packaging 或应用；独立的基线获取凭据在“发布”一节说明。仅固定 GitHub API repository 的规范 release-list 与 tag-resolution GET 请求携带认证。带认证的重定向会失败关闭；下载及其他 origin 保持匿名，并移除调用方的 authorization/cookie。传输和响应错误不输出任意远端文本，只保留安全的取消分类或数字 HTTP 状态。未提供 token 时仍匿名发现；不会读取凭据存储或环境中的 `GH_TOKEN`，receipt 也绝不包含 token。已发布应用的行为保持不变。
+仅构建使用的元数据发现可以通过 [release fetch adapter](../../../../apps/desktop/scripts/desktop-release-github-fetch.ts) 显式接收 `DSH_DESKTOP_RELEASE_GITHUB_TOKEN`。CI 向 preparation 与 remote verification 提供该适配器的只读 Actions token，不传给 packaging 或应用；独立的基线获取凭据在“发布”一节说明。仅固定 GitHub API repository 的规范 release-list 与 tag-resolution GET 请求携带认证。带认证的重定向会失败关闭；下载及其他 origin 保持匿名，并移除调用方的 authorization/cookie。传输和响应错误不输出任意远端文本，只保留安全的取消分类或数字 HTTP 状态。未提供 token 时仍匿名发现；不会读取凭据存储或环境中的 `GH_TOKEN`，receipt 也绝不包含 token。打包应用不接收构建 token。
 
 ## 发现与安装
 
 Capability schema 3 包含固定的 `cloga/deepseek-harness` owner、`dsh-desktop-v` tag prefix、`release.json` asset name、包内 sequence、minimum sequence、精确插件 provisioning capability 与规范 plan hash，以及一个精确 migration record。它不接受用户选择的 repository 或 URL。
 
-Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须已经发布、不可变、锁定 commit，并携带恰好一个具有 GitHub SHA-256 digest 的已上传 manifest asset。Desktop 把 tag 解析到同一 commit，验证 raw asset digest，解析 self-hashed manifest，并选择最高且不冲突的 sequence。包内 sequence 防止企业部署后的 self-selection；durable completion receipt 防止回滚。
+Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须已经发布、不可变、锁定 commit，并携带恰好一个具有 GitHub SHA-256 digest 的已上传 manifest asset。对每个匹配记录，先验证其元数据及原始 manifest，再判断该记录的选择资格：即使记录不符合选择范围，raw digest、完整 schema／self-hash、最低 sequence 及 source／tag／target 一致性仍为必需。私有用途在更新发现时接纳 sequence 大于或等于有效安装下限的记录，在显式已安装恢复时仅接纳恰好等于包内当前 sequence 的记录。每个符合范围的 tag，包括不会最终胜出的候选，都必须通过未修改的有界链解析到同一 commit，之后才能构造已验证选择。最高 sequence 冲突、已安装精确版本检查及防回滚保持不变。
+
+此改变有意停止审计无关的 tag 指针：较旧且不符合选择范围的 tag 损坏不再阻止当前下限的选择，精确恢复也不审计其他 sequence 的 tag。这不是完整历史 tag 验证。匹配元数据／manifest 格式错误或不可取得时仍失败关闭；仅构建使用的下限零发现继续验证所有匹配 tag。不使用缓存、凭据注入、CI 绕过、profile 预置、重试或超时更改。[请求预算回归](../../../../apps/desktop/tests/managed-update-discovery.spec.ts)绑定已记录的四次启动／两个 profile 工作量：十九个较旧 release 加既有 alpha33 五次请求获取流程，使安装阶段之前的正常 REST 需求从90降至14，同时仍验证全部 manifest。这是源码约定的算术，不是实际流量测量，也不归因其他用户的额度消耗；两次完整验收仍然必需。
 
 所选 handoff 同时锁定 manifest 的规范 self-hash 与 raw release-asset SHA-256。独立 helper 在下载 receipt 与 installer 前重新验证二者。下次启动时，Desktop 会在 Host 启动前协调打包的插件 plan。Completion 在记录新 sequence 前验证运行中的 executable、runtime descriptor、预期 GitHub release 与 asset identifiers，并根据 capability schema 3 验证打包 plan。
 
@@ -52,7 +54,7 @@ Helper 下载仍最多尝试三次，退避为 500/1000 毫秒。每次元数据
 
 加载后的配置区分打包的 discovery 下限与持久完成的 sequence。Discovery 与 handoff 使用打包和已完成 sequence 中的较大值；completion 只使用持久 receipt 的 sequence，缺失时为零。若 completion 使用打包下限，就会跳过新安装 release 自身的待完成结果及清单检查。重复 completion 是幂等的，清单验证失败会保留先前 receipt，较高的已完成 sequence 绝不降低。
 
-不可变 `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest 仅在源码 repository 没有匹配 release 时作为精确 sequence-zero migration 保留。Migration record 固定 manifest 与 installer hash，并固定 build receipt 的 `dsh-v0.1.5-rc.2` source tag；由 manifest 固定的 receipt 仍保留 source commit 与 tree。任何格式错误、可变、冲突或不可达的 source release 都会 fail closed，不会 fallback。一旦 source release 存在，Windows Ops 不能充当第二通道。
+不可变 `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest 仅在源码 repository 没有匹配 release 时作为精确 sequence-zero migration 保留。Migration record 固定 manifest 与 installer hash，并固定 build receipt 的 `dsh-v0.1.5-rc.2` source tag；由 manifest 固定的 receipt 仍保留 source commit 与 tree。任何 source 元数据／manifest 失败，或符合选择范围的 tag／冲突失败，都会 fail closed，不会 fallback。一旦 source release 存在，Windows Ops 不能充当第二通道。
 
 ## 保留历史与手动安装恢复
 

@@ -260,7 +260,7 @@ describe('build/release-only GitHub metadata fetch', () => {
       const selected = await discoverDesktopReleaseForBuild(capability, TOKEN, transport)
       expect(selected).toMatchObject({ manifest: { source: { commit: MANAGED_COMMIT } } })
       expect(transport.mock.calls.map(([input]) => requestUrl(input))).toEqual(annotated
-        ? [LIST, REF, TAG, MANIFEST, cdn] : [LIST, REF, MANIFEST, cdn])
+        ? [LIST, MANIFEST, cdn, REF, TAG] : [LIST, MANIFEST, cdn, REF])
       expect(JSON.stringify(capability)).toBe(before)
       expect(JSON.stringify(selected)).not.toContain(TOKEN)
     }

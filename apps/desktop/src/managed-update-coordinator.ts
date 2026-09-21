@@ -106,7 +106,7 @@ export async function discoverDesktopManagedSourceRelease(
   installedSequence: number,
   operations: ManagedUpdateOperations = defaultOperations,
 ): Promise<DesktopManagedUpdateSelection | undefined> {
-  const selections = await discoverSourceReleases(capability, operations)
+  const selections = await discoverSourceReleases(capability, operations, { kind: 'minimum', sequence: installedSequence })
   return selectSourceRelease(selections.filter(selection => selection.manifest.sequence >= installedSequence))
 }
 
@@ -122,7 +122,7 @@ export async function discoverDesktopManagedInstalledRelease(
   version: string,
   operations: ManagedUpdateOperations = defaultOperations,
 ): Promise<DesktopManagedUpdateSelection> {
-  const selections = await discoverSourceReleases(capability, operations)
+  const selections = await discoverSourceReleases(capability, operations, { kind: 'exact', sequence: capability.currentSequence })
   const selected = selectSourceRelease(selections.filter(selection => selection.manifest.sequence === capability.currentSequence))
   if (selected === undefined || selected.manifest.owner !== DESKTOP_MANAGED_UPDATE_SOURCE_REPOSITORY
     || selected.manifest.version !== version) {
@@ -131,9 +131,14 @@ export async function discoverDesktopManagedInstalledRelease(
   return selected
 }
 
+type SourceReleaseScope =
+  | { readonly kind: 'minimum'; readonly sequence: number }
+  | { readonly kind: 'exact'; readonly sequence: number }
+
 async function discoverSourceReleases(
   capability: DesktopManagedUpdateCapability,
   operations: ManagedUpdateOperations,
+  scope: SourceReleaseScope,
 ): Promise<DesktopManagedUpdateSelection[]> {
   const response = await withDesktopUpdateNetworkError('release-list', () => requestDesktopGithubRelease(
     new URL(RELEASES_API),
@@ -155,16 +160,6 @@ async function discoverSourceReleases(
     if (release.draft !== false || release.immutable !== true || typeof release.target_commitish !== 'string'
       || !COMMIT.test(release.target_commitish)) {
       throw new Error('desktop managed update: channel release is not immutable or commit-pinned')
-    }
-    const tagCommit = await withDesktopUpdateNetworkError('release-tag', () => resolveDesktopGithubTagCommit(
-      SOURCE_OWNER,
-      SOURCE_REPOSITORY,
-      tag,
-      (url, init) => operations.fetch(url, init),
-      'desktop managed update',
-    ))
-    if (tagCommit !== release.target_commitish) {
-      throw new Error('desktop managed update: release tag does not resolve to its target commit')
     }
     if (!Array.isArray(release.assets)) throw new Error('desktop managed update: channel release has no asset list')
     const manifests = release.assets.filter((asset): asset is Record<string, unknown> => (
@@ -188,6 +183,20 @@ async function discoverSourceReleases(
       || manifest.source.commit !== release.target_commitish
       || manifest.source.tag !== release.tag_name) {
       throw new Error('desktop managed update: release metadata does not match its manifest')
+    }
+    // Every matching record and original manifest is validated, even outside this caller's selection scope.
+    // Only eligible records may become verified selections; floor zero retains full-catalog tag verification.
+    const eligible = scope.kind === 'minimum' ? manifest.sequence >= scope.sequence : manifest.sequence === scope.sequence
+    if (!eligible) continue
+    const tagCommit = await withDesktopUpdateNetworkError('release-tag', () => resolveDesktopGithubTagCommit(
+      SOURCE_OWNER,
+      SOURCE_REPOSITORY,
+      tag,
+      (url, init) => operations.fetch(url, init),
+      'desktop managed update',
+    ))
+    if (tagCommit !== release.target_commitish) {
+      throw new Error('desktop managed update: release tag does not resolve to its target commit')
     }
     selections.push({
       kind: 'source',

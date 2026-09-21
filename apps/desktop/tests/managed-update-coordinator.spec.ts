@@ -255,8 +255,8 @@ describe('DesktopManagedUpdateCoordinator', () => {
 
   it.each([
     ['/releases?', '读取发布列表', 'read the release list', 1],
-    ['/git/ref/tags/', '校验发布标签', 'verify the release tag', 2],
-    ['/releases/download/', '下载更新清单', 'download the update manifest', 3],
+    ['/git/ref/tags/', '校验发布标签', 'verify the release tag', 3],
+    ['/releases/download/', '下载更新清单', 'download the update manifest', 2],
   ] as const)('localizes only network details at %s without changing requests or retrying', async (failedPath, stage, englishStage, calls) => {
     const normal = sourceFetch()
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, _init) => {
@@ -278,8 +278,8 @@ describe('DesktopManagedUpdateCoordinator', () => {
     const urls = fetch.mock.calls.map(([input]) => input instanceof URL ? input.href : typeof input === 'string' ? input : input.url)
     expect(urls).toEqual([
       'https://api.github.com/repos/cloga/deepseek-harness/releases?per_page=100',
-      `https://api.github.com/repos/cloga/deepseek-harness/git/ref/tags/${MANAGED_TAG}`,
       `https://github.com/cloga/deepseek-harness/releases/download/${MANAGED_TAG}/release.json`,
+      `https://api.github.com/repos/cloga/deepseek-harness/git/ref/tags/${MANAGED_TAG}`,
     ].slice(0, calls))
     for (const [, init] of fetch.mock.calls) {
       expect(init?.credentials).toBe('omit')
@@ -333,7 +333,7 @@ describe('DesktopManagedUpdateCoordinator', () => {
       message: 'Could not download the update manifest: the connection was reset (ECONNRESET).\nCheck your network connection and try again.',
       technicalDetails: '下载更新清单时连接被重置（ECONNRESET）。\n请检查网络连接后重试。',
     })
-    expect(fetch).toHaveBeenCalledTimes(3)
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 
   it('retains the integrity error instead of reporting a network problem', async () => {
@@ -346,7 +346,7 @@ describe('DesktopManagedUpdateCoordinator', () => {
     const state = await coordinator.check()
     expect(state).toEqual({ phase: 'error', mode: 'github-release-managed', failedOperation: 'check',
       message: 'desktop managed update: manifest asset digest does not match GitHub' })
-    expect(fetch).toHaveBeenCalledTimes(3)
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 
   it('discovers the immutable source release and shares repeated install clicks', async () => {
@@ -427,17 +427,14 @@ describe('DesktopManagedUpdateCoordinator', () => {
   })
 
   it('rejects a source release whose tag commit differs from its target', async () => {
-    const fetch = sourceFetch()
-    fetch.mockImplementationOnce(async () => new Response(JSON.stringify([{
-      tag_name: MANAGED_TAG,
-      target_commitish: MANAGED_COMMIT,
-      draft: false,
-      immutable: true,
-      assets: [{ name: 'release.json', state: 'uploaded', digest: `sha256:${'1'.repeat(64)}` }],
-    }])))
-    fetch.mockImplementationOnce(async () => new Response(JSON.stringify({
-      object: { type: 'commit', sha: 'f'.repeat(40) },
-    })))
+    const normal = sourceFetch()
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      const url = input instanceof URL ? input.href : typeof input === 'string' ? input : input.url
+      // The manifest and raw digest remain valid; this negative reaches actual eligible tag verification.
+      return url.includes('/git/ref/tags/')
+        ? new Response(JSON.stringify({ object: { type: 'commit', sha: 'f'.repeat(40) } }))
+        : normal(input)
+    })
     const coordinator = new DesktopManagedUpdateCoordinator(
       managedCapability(),
       () => 1,
