@@ -94,6 +94,25 @@ async function observeNativeDialog(page: Page, trigger: Locator, title: string, 
 }
 
 /**
+ * Reveal the actual sidebar before selecting the test-owned persisted Session.
+ * @param page - Actual packaged page, including a restored collapsed navigation rail.
+ */
+export async function openNativeComposerFixture(page: Page): Promise<void> {
+  const reveal = page.getByRole('button', { name: 'Open sidebar', exact: true })
+  if (await reveal.isVisible()) await reveal.click()
+  await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).waitFor({ state: 'visible', timeout: 15_000 })
+  const workspace = page.getByRole('treeitem').filter({ hasText: 'synthetic-composer-workspace' }).first()
+  await workspace.waitFor({ state: 'visible', timeout: 15_000 })
+  const expanded = await workspace.getAttribute('aria-expanded')
+  assert(expanded === 'true' || expanded === 'false', 'The actual workspace row must expose its expansion state')
+  if (expanded === 'false') await workspace.click()
+  const seeded = page.getByRole('treeitem').filter({ hasText: 'DESKTOP_INLINE_STATS_SYNTHETIC' })
+  await seeded.waitFor({ state: 'visible', timeout: 15_000 })
+  await seeded.click()
+  await page.getByText('Synthetic settled reply; no inference occurred.', { exact: true }).waitFor({ state: 'visible', timeout: 15_000 })
+}
+
+/**
  * Open only the test-owned seeded Session and measure the shipped composer without submitting input.
  * The real signed-out Host supplies quota state; synthetic history supplies native token counts.
  * @param page - Actual packaged application page in the isolated acceptance home.
@@ -101,12 +120,7 @@ async function observeNativeDialog(page: Page, trigger: Locator, title: string, 
  * @returns Measured rectangles, native typography, and signed-out dialog observations.
  */
 export async function inspectNativeComposerGeometry(page: Page, output: string): Promise<NativeComposerInspection> {
-  const workspace = page.getByRole('treeitem').filter({ hasText: 'synthetic-composer-workspace' }).first()
-  const seeded = page.getByRole('treeitem').filter({ hasText: 'DESKTOP_INLINE_STATS_SYNTHETIC' })
-  await workspace.waitFor({ state: 'visible' })
-  if (!await seeded.isVisible()) await workspace.click()
-  await seeded.click()
-  await page.getByText('Synthetic settled reply; no inference occurred.', { exact: true }).waitFor({ state: 'visible' })
+  await openNativeComposerFixture(page)
   const stats = page.locator('[data-composer-stats]')
   const time = stats.getByRole('button', { name: '1 turns 1 steps', exact: true })
   const usage = stats.getByRole('button', { name: '105 tok · Cache hit 90%', exact: true })
