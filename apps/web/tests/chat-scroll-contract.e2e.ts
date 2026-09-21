@@ -641,7 +641,7 @@ function diagnosticSandbox(failRemoval = false) {
     document: {
       activeElement: { matches: () => false },
       querySelector: () => host,
-      addEventListener(name: string, listener: (event: ObservedEvent) => void, options: { capture: boolean; passive: boolean }) {
+      addEventListener(name: string, listener: (event: ObservedEvent) => void, options: { capture: unknown; passive: unknown }) {
         if (options.capture !== true || options.passive !== true || Object.keys(options).length !== 2) {
           throw new Error('Diagnostic listener is not passive capture')
         }

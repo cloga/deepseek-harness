@@ -676,9 +676,9 @@ describe('Desktop fork release plan', () => {
         [steps[acceptance], steps[observerCleanup]])
     }
     assertAcceptancePair(steps)
-    expect(() => assertAcceptancePair([...steps, steps[acceptance]!])).toThrow()
-    expect(() => assertAcceptancePair(steps.filter((_, index) => index !== acceptance))).toThrow()
-    expect(() => assertAcceptancePair(steps.filter((_, index) => index !== observerCleanup))).toThrow()
+    expect(() => { assertAcceptancePair([...steps, steps[acceptance]!]) }).toThrow()
+    expect(() => { assertAcceptancePair(steps.filter((_, index) => index !== acceptance)) }).toThrow()
+    expect(() => { assertAcceptancePair(steps.filter((_, index) => index !== observerCleanup)) }).toThrow()
     expect(steps[observerCleanup]?.run).toBe([
       'pnpm exec tsx apps/desktop/tests/fixtures/copilot-release-smoke.ts --observer-cleanup-canary',
       '--application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe',
