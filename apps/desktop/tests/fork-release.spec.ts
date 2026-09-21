@@ -36,6 +36,7 @@ type ReleaseWorkflow = {
       if?: string
       run?: string
       shell?: string
+      'continue-on-error'?: boolean
       env?: Record<string, string>
       with?: Record<string, unknown>
     }>
@@ -149,7 +150,93 @@ function assertProjectFixtureSelection(workflow: ReleaseWorkflow): void {
   expect(prepare).toBeGreaterThan(transactions)
 }
 
+function assertQualificationGate(workflow: ReleaseWorkflow): void {
+  const steps = workflow.jobs.build!.steps
+  const index = steps.findIndex(step => step.name === 'Verify complete release qualification')
+  expect(steps.filter(step => step.name === 'Verify complete release qualification')).toHaveLength(1)
+  const upgrade = steps.findIndex(step => step.name === 'Verify real installed Desktop upgrade')
+  const checksums = steps.findIndex(step => step.name === 'Verify release asset checksums')
+  expect(upgrade).toBeGreaterThanOrEqual(0)
+  expect(index).toBeGreaterThan(upgrade)
+  expect(checksums).toBeGreaterThan(index)
+  const step = steps[index]!
+  expect(step.id).toBe('qualification')
+  expect(step.shell).toBe('pwsh')
+  expect(step).not.toHaveProperty('if')
+  expect(step).not.toHaveProperty('continue-on-error')
+  expect(step.env).toBeUndefined()
+  expect(step.run?.trim()).toBe([
+    "$ErrorActionPreference = 'Stop'",
+    'pnpm exec tsx apps/desktop/scripts/verify-fork-qualification.ts `',
+    '  --plan $env:RELEASE_PLAN `',
+    '  --release-assets $env:RELEASE_ASSETS `',
+    '  --ordinary-evidence dist/desktop-copilot-acceptance `',
+    '  --packaged-evidence dist/desktop-copilot-observer-canary `',
+    '  --upgrade-root (Join-Path $env:RUNNER_TEMP "cloga-installer-upgrade-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT") `',
+    '  --baseline-directory (Join-Path $env:RUNNER_TEMP "desktop-upgrade-baseline-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT") `',
+    '  --expected-source $env:GITHUB_SHA `',
+    '  --run-id $env:GITHUB_RUN_ID `',
+    '  --run-attempt $env:GITHUB_RUN_ATTEMPT `',
+    '  --output dist/desktop-fork-qualification/qualification.json',
+    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+  ].join('\n'))
+  const summary = steps.findIndex(item => item.name === 'Retain verified internal qualification summary')
+  expect(summary).toBeGreaterThan(index)
+  expect(checksums).toBeGreaterThan(summary)
+  expect(steps[summary]).toMatchObject({
+    uses: 'actions/upload-artifact@v4',
+    with: {
+      name: 'desktop-fork-qualification-${{ steps.plan.outputs.version }}-${{ github.sha }}-${{ github.run_attempt }}',
+      path: 'dist/desktop-fork-qualification/qualification.json', 'if-no-files-found': 'error', 'retention-days': 7,
+    },
+  })
+  expect(steps[summary]).not.toHaveProperty('if')
+  expect(steps[summary]).not.toHaveProperty('continue-on-error')
+  const diagnostic = steps.findIndex(item => item.name === 'Retain unqualified rehearsal candidate for targeted diagnosis')
+  expect(diagnostic).toBeGreaterThan(steps.findIndex(item => item.name === 'Finalize release manifest and receipts'))
+  expect(upgrade).toBeGreaterThan(diagnostic)
+  expect(steps[diagnostic]).toMatchObject({
+    if: '${{ inputs.rehearsal }}', uses: 'actions/upload-artifact@v4',
+    with: {
+      name: 'desktop-unqualified-candidate-${{ steps.plan.outputs.version }}-${{ github.sha }}-${{ github.run_attempt }}',
+      path: '${{ env.RELEASE_ASSETS }}/*', 'if-no-files-found': 'error', 'retention-days': 7,
+    },
+  })
+  const released = steps.findIndex(item => item.with?.name === 'desktop-fork-release-${{ steps.plan.outputs.version }}')
+  expect(released).toBeGreaterThan(checksums)
+  expect(workflow.jobs.release!.needs).toBe('build')
+  const download = workflow.jobs.release!.steps.find(item => item.uses === 'actions/download-artifact@v4')
+  expect(download?.with?.name).toBe('desktop-fork-release-${{ needs.build.outputs.version }}')
+}
+
 describe('Desktop fork release plan', () => {
+  it('requires complete source-bound qualification before sealing and never publishes diagnostic artifacts', () => {
+    assertQualificationGate(readReleaseWorkflow())
+  })
+
+  it.each([
+    'missing', 'duplicate', 'before-upgrade', 'after-seal', 'conditional', 'continue-on-error',
+    'wrong-source', 'public-summary-path', 'swallowed-exit', 'diagnostic-for-release', 'unguarded-diagnostic',
+  ])('rejects a %s qualification path', (damage) => {
+    const workflow = readReleaseWorkflow()
+    const steps = workflow.jobs.build!.steps
+    const index = steps.findIndex(step => step.name === 'Verify complete release qualification')
+    const step = steps[index]!
+    if (damage === 'missing') steps.splice(index, 1)
+    else if (damage === 'duplicate') steps.push({ ...step })
+    else if (damage === 'before-upgrade') steps.unshift(...steps.splice(index, 1))
+    else if (damage === 'after-seal') steps.push(...steps.splice(index, 1))
+    else if (damage === 'conditional') step.if = 'always()'
+    else if (damage === 'continue-on-error') step['continue-on-error'] = true
+    else if (damage === 'wrong-source') step.run = step.run!.replace('--expected-source $env:GITHUB_SHA', '--expected-source unreviewed')
+    else if (damage === 'public-summary-path') step.run = step.run!.replace('dist/desktop-fork-qualification/', 'dist/desktop-fork-release/')
+    else if (damage === 'swallowed-exit') step.run = step.run!.replace('exit $LASTEXITCODE', 'Write-Output $LASTEXITCODE')
+    else if (damage === 'diagnostic-for-release') {
+      workflow.jobs.release!.steps.find(item => item.uses === 'actions/download-artifact@v4')!.with!.name = 'desktop-unqualified-candidate'
+    } else delete steps.find(item => item.name === 'Retain unqualified rehearsal candidate for targeted diagnosis')!.if
+    expect(() => { assertQualificationGate(workflow) }).toThrow()
+  })
+
   it('isolates read-only rehearsals by branch while keeping publication globally serialized', () => {
     assertRehearsalConcurrency(readReleaseWorkflow())
   })
@@ -585,10 +672,15 @@ describe('Desktop fork release plan', () => {
     const observerCleanup = steps.findIndex(step => step.name === 'Verify real acceptance observer failure cleanup')
     expect(observerCleanup).toBeGreaterThan(acceptance)
     expect(finalize).toBeGreaterThan(observerCleanup)
-    expect(steps[observerCleanup]?.run).toContain('fixtures/copilot-observer-smoke.ts')
+    expect(steps[observerCleanup]?.run).toBe([
+      'pnpm exec tsx apps/desktop/tests/fixtures/copilot-release-smoke.ts --observer-cleanup-canary',
+      '--application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe',
+      '--output dist/desktop-copilot-observer-canary',
+    ].join(' '))
     expect(steps[observerCleanup]).not.toHaveProperty('continue-on-error')
     expect(steps[observerCleanup]).not.toHaveProperty('if')
-    expect(steps.some(step => step.run?.includes('--observer-cleanup-canary'))).toBe(false)
+    expect(steps.filter(step => step.run?.includes('--observer-cleanup-canary'))).toHaveLength(1)
+    expect(steps.some(step => step.run?.includes('fixtures/copilot-observer-smoke.ts'))).toBe(false)
     const observerEvidence = steps.findIndex(step => step.with?.name === 'desktop-copilot-observer-canary-${{ steps.plan.outputs.version }}')
     expect(observerEvidence).toBeGreaterThan(observerCleanup)
     expect(finalize).toBeGreaterThan(observerEvidence)

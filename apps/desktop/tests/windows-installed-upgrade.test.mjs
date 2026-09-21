@@ -466,6 +466,43 @@ test('installed baseline selects only its version-owned settings observer after 
   assert.ok(source.includes('await inspectSettings(settings)'))
 })
 
+function compileChildEvidence(result, elapsedMs, budgetMs) {
+  const stderr = result.stderr ?? ''
+  return {
+    elapsedMs: Math.round(elapsedMs), budgetMs, pid: result.pid ?? null,
+    errorCode: result.error?.code ?? null, errorMessage: result.error?.message?.slice(0, 512) ?? null,
+    signal: result.signal, status: result.status,
+    lastPhase: [...stderr.matchAll(/^\[fixture-phase:([a-z-]+)\]\r?$/gmu)].at(-1)?.[1] ?? 'no-script-marker-observed',
+    stdoutTail: (result.stdout ?? '').slice(-2048), stderrTail: stderr.slice(-2048),
+  }
+}
+
+function assertCompileChild(result, evidence) {
+  const diagnostic = JSON.stringify(evidence)
+  assert.equal(result.error, undefined, diagnostic)
+  assert.equal(result.signal, null, diagnostic)
+  assert.equal(result.status, 0, diagnostic)
+}
+
+test('compile child diagnostics retain timeout, signal, status and bounded phase evidence independently', () => {
+  const timeout = { code: 'ETIMEDOUT', message: 'owned child exceeded its budget' }
+  const result = { error: timeout, pid: 12, signal: null, status: 0, stdout: 'x'.repeat(10_000), stderr: '[fixture-phase:compile-start]\n' + 'y'.repeat(10_000) }
+  const evidence = compileChildEvidence(result, 30_005, 30_000)
+  assert.equal(evidence.lastPhase, 'compile-start')
+  assert.equal(evidence.errorCode, 'ETIMEDOUT')
+  assert.equal(evidence.status, 0)
+  assert.equal(evidence.signal, null)
+  assert.equal(evidence.stdoutTail.length, 2048)
+  assert.equal(evidence.stderrTail.length, 2048)
+  assert.throws(() => assertCompileChild(result, evidence), /ETIMEDOUT/u)
+  const signalled = { signal: 'SIGTERM', status: null, stdout: '', stderr: '' }
+  assert.equal(compileChildEvidence(signalled, 1, 10).lastPhase, 'no-script-marker-observed')
+  assert.equal(compileChildEvidence({ stderr: 'parser echo: [fixture-phase:compile-start]' }, 1, 10).lastPhase, 'no-script-marker-observed')
+  assert.throws(() => assertCompileChild(signalled, compileChildEvidence(signalled, 1, 10)), /SIGTERM/u)
+  const assertionFailure = { signal: null, status: 1, stderr: '[fixture-phase:assertions-start]\nassertion failed' }
+  assert.throws(() => assertCompileChild(assertionFailure, compileChildEvidence(assertionFailure, 1, 10)), /assertions-start/u)
+})
+
 for (const [edition, shell] of [
   ['Core', 'pwsh'],
   ['Desktop', join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')],
@@ -474,7 +511,11 @@ for (const [edition, shell] of [
     const helper = fileURLToPath(new URL('./windows-installer-ui.ps1', import.meta.url))
     const script = `
 $ErrorActionPreference = 'Stop'
+[Console]::Error.WriteLine('[fixture-phase:script-start]')
+[Console]::Error.WriteLine('[fixture-phase:compile-start]')
 . $env:DSH_INSTALLER_UI_HELPER
+[Console]::Error.WriteLine('[fixture-phase:compile-complete]')
+[Console]::Error.WriteLine('[fixture-phase:assertions-start]')
 $helperType = 'InstallerCapture' -as [type]
 if ($null -eq $helperType) { throw 'InstallerCapture was not compiled' }
 if ($null -ne $helperType.TypeInitializer) { throw 'InstallerCapture must not run a static initializer' }
@@ -482,15 +523,21 @@ $members = @($helperType.GetMethods([System.Reflection.BindingFlags]'Public,Stat
 . $env:DSH_INSTALLER_UI_HELPER
 if (('InstallerCapture' -as [type]) -ne $helperType) { throw 'Repeated loading replaced the helper type' }
 [pscustomobject]@{ edition = $PSVersionTable.PSEdition; version = $PSVersionTable.PSVersion.ToString(); members = $members } | ConvertTo-Json -Compress
+[Console]::Error.WriteLine('[fixture-phase:script-complete]')
 `
     const names = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'PSMODULEPATH', 'PROGRAMFILES'])
     const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => names.has(name.toUpperCase())))
+    // Total fresh-process/Core Add-Type safeguard, not a native UI or performance deadline.
+    // Preserve the original bound; phase diagnostics do not justify widening it.
+    const budgetMs = 10_000
+    const started = performance.now()
     const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {
-      encoding: 'utf8', timeout: 10_000, env: { ...environment, DSH_INSTALLER_UI_HELPER: helper },
+      encoding: 'utf8', timeout: budgetMs, env: { ...environment, DSH_INSTALLER_UI_HELPER: helper },
     })
-    assert.equal(result.error, undefined)
-    assert.equal(result.signal, null)
-    assert.equal(result.status, 0, result.stderr)
+    const evidence = compileChildEvidence(result, performance.now() - started, budgetMs)
+    assertCompileChild(result, evidence)
+    assert.equal(evidence.lastPhase, 'script-complete', JSON.stringify(evidence))
+    t.diagnostic(`Compile subprocess: ${JSON.stringify(evidence)}`)
     const observed = JSON.parse(result.stdout.trim())
     assert.equal(observed.edition, edition)
     for (const member of ['Initialize', 'Find', 'FindText', 'FindButton', 'Progress', 'Save', 'SaveStock', 'StockRun', 'DiagnosticText', 'SaveWithShadow', 'SendMessage']) {
