@@ -131,7 +131,7 @@ describe('WorkspaceBrowser', () => {
       useSessions: hook(sessionState([
         summary('blank', 20, { blank: true, displayTitle: name }),
         summary('persisted', 10, { displayTitle: title }),
-      ], { current: sid('blank') })),
+      ], { main: sid('blank') })),
       useWorkspaces: hook(workspaceState([workspace(name, ['blank', 'persisted'], name)])),
     })
     const group = b.view.container.querySelector<HTMLElement>('[role="treeitem"][aria-expanded]')!

@@ -13,10 +13,12 @@ const empty = `.${css.dock}:empty, .${css.dock}:has(> [data-slot="${slot}"]:only
 async function bench() {
   const runtime = await SlotTestRuntime.create()
   runtimes.push(runtime)
-  await runtime.sessions.add({ id: 'composer-dock-anchor' }, { current: true })
+  const sessionId = await runtime.sessions.add({ id: 'composer-dock-anchor' })
+  const reference = runtime.sessions.retainFor(runtime.ctx, sessionId)
+  await reference.ready
   // The production renderer, not a mocked renderSlot, owns the stable outlet.
   await runtime.root.declare({ [slot]: { kind: 'list', scope: 'session' } }, ({ renderSlot, SessionProvider }) => (
-    <SessionProvider>
+    <SessionProvider session={reference}>
       <div className={css.dock} data-testid="dock-owner">{renderSlot(slot, {})}</div>
     </SessionProvider>
   ))
