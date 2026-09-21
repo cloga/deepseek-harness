@@ -4,6 +4,7 @@ import type {
   AttachmentIdType, ImageAttachmentLimits, ImageAttachmentRef, ImageMediaType,
 } from '@deepseek-ai/dsh-attachment'
 import type { Branded } from '@deepseek-ai/dsh-brand'
+import type { ModelSelectionIntent } from '@deepseek-ai/dsh-agent/types'
 import type { LlmAttemptId, MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionId, SessionSeqCursor } from '@deepseek-ai/dsh-session/types'
@@ -28,16 +29,6 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     imageLimits: ImageAttachmentLimits
     /** Durable model selection already used and selected for the next request. */
     modelSelection: ModelSelectionProjection
-  }
-}
-
-declare module '@deepseek-ai/dsh-session/types' {
-  interface SessionEventMap {
-    /**
-     * Complete validated model selection requested for subsequent prompt
-     * assembly. Log-only: it never enters derived model history.
-     */
-    'model/selection': ModelSelection
   }
 }
 
@@ -83,11 +74,7 @@ export type PromptContentPart =
   | { readonly type: 'file'; readonly receiptId: Branded<'file-upload-receipt-id'> }
 
 /** Complete model selection for one Session. */
-export interface ModelSelection {
-  readonly provider: string
-  readonly model: string
-  readonly reasoningEffort?: string
-}
+export type ModelSelection = ModelSelectionIntent
 
 /** Host fold state for durable model selection. */
 export interface ModelSelectionProjectionState {

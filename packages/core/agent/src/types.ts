@@ -26,6 +26,20 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   }
 }
 
+/** Durable explicit provider, model, and optional effort chosen for subsequent requests. */
+export interface ModelSelectionIntent {
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+}
+
+declare module '@deepseek-ai/dsh-session/types' {
+  interface SessionEventMap {
+    /** Complete validated manual selection; log-only and absent from model history. */
+    'model/selection': ModelSelectionIntent
+  }
+}
+
 /** One of the two ordered pending-message lists owned by an agent. */
 export type InboxTarget = 'next-turn' | 'next-step'
 

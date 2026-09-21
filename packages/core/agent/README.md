@@ -62,7 +62,11 @@ await handle.agent.whenIdle()
 
 `Agent.ctx` is the agent's scoped context: registrations made through it (tools, prompt sections, variables, event listeners, restrictions) apply to that agent alone and unwind on disposal. The same mechanism is what agent presets use to give one session a different capability set without affecting its neighbors.
 
-Entry points that install `installModelSelection()` also provide a synchronous `model-selection/query` listener. Use `readModelSelection(agent.ctx, agent)` to read a detached snapshot for non-turn maintenance without assembling a prompt or consuming the pending choice. The helper uses the exact owner object as its scope key; its payload promises only that identity, not a full Agent. An absent selection returns `undefined`; a query does not change the selection already captured for an in-flight step.
+Entry points that install `installModelSelection()` also provide a synchronous `model-selection/query` listener. Use `readModelSelection(agent.ctx, agent)` to read a detached configured-selection snapshot for non-turn maintenance without assembling a prompt, running asynchronous resolution, or consuming the pending choice. The helper uses the exact owner object as its scope key; its payload promises only that identity, not a full Agent. An absent selection returns `undefined`; an unresolved policy exposes only its configured fallback, not a prediction of the next resolved route. A query does not change the selection already captured for an in-flight step.
+
+For an assembly context carrying an Agent, the helper dispatches the Agent-scoped asynchronous `model-selection/resolve` waterfall before downstream assembly listeners. The payload carries that Agent, a detached configured selection captured before any await, and the optional assembly cancellation signal. Delegating with `next()` yields the captured selection unless another resolver replaces it. Diagnostic assemblies without an Agent skip resolution even when a scope is present.
+
+Only successful, non-cancelled downstream assembly publishes the resolved selection for prompt variables, request routing, and switch notices. Resolver failure, downstream assembly failure, or cancellation retains the prior assembled value. Resolution never overwrites the mutable configured selection: a concurrent manual change applies at the next assembly rather than splitting the current step's prompt and route. This extension point does not itself implement an Auto routing policy.
 
 ### Intercept or observe work in flight
 
@@ -154,7 +158,7 @@ Accepted history and steering are append-only; a blocked submission sends no req
 
 #### What the model sees
 
-Registrations through `agent.ctx` can shadow prompt sections or tools and can install agent-only interceptors during unpublished setup, so one agent sees a different prompt and tool set than its neighbors. Model selection captures one provider/model/effort value before prompt assembly and applies it to the same step's request; a later concurrent change waits for another step.
+Registrations through `agent.ctx` can shadow prompt sections or tools and can install agent-only interceptors during unpublished setup, so one agent sees a different prompt and tool set than its neighbors. Model selection detaches the configured provider/model/effort before asynchronous resolution, then uses the successfully assembled resolved route for that step's prompt variables and request. A concurrent configured-selection change waits for the next assembly; diagnostic assemblies without an Agent do not run the resolver.
 
 #### Token effect
 

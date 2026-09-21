@@ -11,7 +11,7 @@ import {
   type ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import { scopeTarget, type Scoped } from '@deepseek-ai/dsh-scope'
-import type { PreStepDecision } from './runtime-types.ts'
+import type { Agent, PreStepDecision } from './runtime-types.ts'
 
 /** Complete provider, model, and optional reasoning effort selected for one live Agent. */
 export interface ModelSelection {
@@ -27,7 +27,7 @@ export interface ModelSelection {
 export interface ModelSelectionRef {
   /** Model selected for the next step that enters prompt assembly. */
   current: ModelSelection | undefined
-  /** Selection captured when the current step entered prompt assembly. */
+  /** Resolved selection published by the latest successful prompt assembly. */
   assembled: ModelSelection | undefined
 }
 
@@ -35,6 +35,16 @@ export interface ModelSelectionRef {
 export interface ModelSelectionQuery {
   /** The exact object used as the selection owner's scope key. */
   readonly owner: object
+}
+
+/** One Agent assembly's detached selection before asynchronous routing policy. */
+export interface ModelSelectionResolution {
+  /** Agent whose route is being resolved. */
+  readonly agent: Agent
+  /** Configured selection captured before resolution starts. */
+  readonly selection: ModelSelection | undefined
+  /** Cancellation of this assembly only; absent for callers without a turn signal. */
+  readonly signal?: AbortSignal
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -48,11 +58,27 @@ declare module '@deepseek-ai/cordis' {
      * @mode waterfall
      */
     'model-selection/query'(this: Scoped<ModelSelectionQuery>, payload: ModelSelectionQuery, next: () => ModelSelection | undefined): ModelSelection | undefined
+    /**
+     * Resolve the route for one scoped prompt assembly before its downstream
+     * assembly listeners run. The result supplies prompt variables, request
+     * routing, and switch notices without changing the configured selection.
+     * Scope-filtered dispatch uses payload.agent as the routing key. Diagnostic
+     * assemblies without an Agent do not dispatch this event.
+     * @param payload.agent - Agent supplied by the assembly context.
+     * @param payload.selection - detached configured selection captured before any await.
+     * @param payload.signal - cancellation for this assembly, when supplied.
+     * @param next - delegate to the captured selection or another resolver.
+     * @returns the selection for this assembly, or undefined to retain request defaults.
+     * @mode waterfall
+     */
+    'model-selection/resolve'(this: Scoped<Agent>, payload: ModelSelectionResolution, next: () => Promise<ModelSelection | undefined>): Promise<ModelSelection | undefined>
   }
 }
 
 /**
- * Read the selection installed for one scope identity without entering a model turn.
+ * Read the configured selection for one scope identity without entering a model
+ * turn or running asynchronous resolution. An unresolved policy therefore exposes
+ * only its configured fallback here, not a prediction of the next resolved route.
  * @param ctx - context through which to dispatch the scoped query.
  * @param owner - exact object used as the selection owner's scope key.
  * @returns a detached current selection, or undefined when no selection is installed.
@@ -89,11 +115,14 @@ function modelSwitchNotice(previous: ModelSelection, selected: ModelSelection) {
 
 /**
  * Couple one mutable selection to Agent-scoped prompt assembly and request routing.
- * Prompt assembly snapshots the selected model before delegating, then applies
- * its provider/model pair and effort to request config so a
- * concurrent switch takes effect on a later step instead of splitting the two
- * surfaces. An absent selected effort clears any inherited effort, restoring
- * the selected model's provider/default behavior.
+ * Prompt assembly detaches the configured selection before asynchronous
+ * `model-selection/resolve` policy runs, then delegates assembly. Only successful,
+ * non-cancelled assembly publishes the resolved selection to prompt variables and
+ * request routing. Resolution never changes `current`: a concurrent switch takes
+ * effect on a later step instead of splitting the two surfaces. Diagnostic
+ * assemblies without an Agent retain the configured route without resolution.
+ * An absent selected effort clears any inherited effort, restoring the selected
+ * model's provider/default behavior.
  *
  * A provider/model change appends a durable user-role notice to the next
  * admitted request. It compares the assembled selection with the latest
@@ -115,9 +144,26 @@ export function installModelSelection(agentCtx: Context, selection: ModelSelecti
       ...selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort },
     }
   })
-  const disposeAssembly = agentCtx.on('system-prompt/assemble', async (_assembly, _context, next) => {
-    const selected = selection.current
+  const disposeAssembly = agentCtx.on('system-prompt/assemble', async (_assembly, context, next) => {
+    const current = selection.current
+    const captured = current === undefined ? undefined : { ...current }
+    context.signal?.throwIfAborted()
+    const resolved = context.agent === undefined
+      ? captured
+      : await agentCtx.waterfall(
+        scopeTarget(context.agent, context.agent),
+        'model-selection/resolve',
+        {
+          agent: context.agent,
+          selection: captured,
+          ...context.signal === undefined ? {} : { signal: context.signal },
+        },
+        () => Promise.resolve(captured),
+      )
+    context.signal?.throwIfAborted()
+    const selected = resolved === undefined ? undefined : { ...resolved }
     const assembled = await next()
+    context.signal?.throwIfAborted()
     selection.assembled = selected
     if (selected === undefined) return assembled
     return {
