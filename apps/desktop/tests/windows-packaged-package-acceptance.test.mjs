@@ -79,11 +79,15 @@ test('fresh evidence cannot claim any real acceptance path passed', () => {
 
 test('rejected or unbound launch attempts cannot vacuously qualify cleanup', () => {
   const unclaimed = { launchReturned: false, pid: null, bound: false, exited: false }
-  const qualified = { launchReturned: true, pid: 41, bound: true, exited: true }
+  const qualified = { launchReturned: true, launcherPid: 40, launcherExited: true, pid: 41, bound: true, exited: true }
   assert.equal(packageCleanupVerified([], 0, []), false)
   assert.equal(packageCleanupVerified([unclaimed], 0, []), false)
   assert.equal(packageCleanupVerified([qualified, unclaimed], 0, []), false)
   assert.equal(packageCleanupVerified([{ ...qualified, bound: false }], 0, []), false)
+  assert.equal(packageCleanupVerified([{ ...qualified, exited: false }], 0, []), false, 'CMD exit cannot certify Electron/Host exit')
+  assert.equal(packageCleanupVerified([{ ...qualified, launcherExited: false }], 0, []), false, 'Native family exit cannot certify launch transport exit')
+  assert.equal(packageCleanupVerified([{ ...qualified, launcherPid: null }], 0, []), false)
+  assert.equal(packageCleanupVerified([{ ...qualified, pid: 0 }], 0, []), false)
   assert.equal(packageCleanupVerified([qualified], 1, []), false)
   assert.equal(packageCleanupVerified([qualified], 0, ['exit unconfirmed']), false)
   assert.equal(packageCleanupVerified([qualified], 0, []), true)
@@ -112,17 +116,159 @@ test('close and real evidence-write failures retain the original failure object'
 })
 
 /** Run only extracted pure error/reaper code with fake process handles; never load the native driver or application. */
-function powershellUnit(t, body) {
+function powershellUnit(t, body, shell = 'pwsh') {
   const root = directory(t)
   const script = join(root, 'pure-unit.ps1')
   writeFileSync(script, "$ErrorActionPreference = 'Stop'\n" + body)
   const names = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'PSMODULEPATH', 'PROGRAMFILES'])
   const env = { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => names.has(name.toUpperCase()))), POWERSHELL_TELEMETRY_OPTOUT: '1', POWERSHELL_UPDATECHECK: 'Off' }
-  const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', script], { encoding: 'utf8', env, timeout: 15_000 })
+  const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-File', script], { encoding: 'utf8', env, timeout: 15_000 })
   assert.equal(result.error, undefined)
   assert.equal(result.status, 0, result.stderr)
   return JSON.parse(result.stdout.trim())
 }
+
+test('package observer binds the observed Electron PID before native actions and retains transport ownership separately', () => {
+  const launch = source.slice(source.indexOf('  const launch = async label => {'), source.indexOf('  const openNativeMenu'))
+  assert.ok(launch.indexOf('app.evaluate(inspectInstalledDesktopIdentity)') < launch.indexOf("await native('Bind')"))
+  assert.ok(launch.indexOf('assert.equal(identity.version, expected.version)') < launch.indexOf("await native('Bind')"))
+  assert.ok(launch.includes('const processIds = installedDesktopProcessIds(launcher, identity, process.pid)'))
+  assert.ok(launch.includes('boundPid = processIds.pid'))
+  assert.doesNotMatch(source, /boundPid = app\.process\(\)\.pid/u)
+  assert.ok(source.includes("'-LauncherPid', String(launcherPid)"))
+  assert.ok(source.includes('const records = shells.filter(shell => shell.pid === pid)'))
+  assert.ok(source.includes('launchers.set(shellRecord.launchId, launcher)'))
+  assert.ok(source.includes('assert.equal(recorded.launcher.pid, shellRecord.launcherPid)'))
+  assert.ok(source.includes("await native('StopOwned', shell.pid)"))
+  assert.ok(source.includes("await native('VerifyExited', shell.pid)"))
+  assert.ok(source.includes('const launcher = launchers.get(shell.launchId)'))
+  assert.ok(source.includes('shell.launcherExited = installedLauncherExited(launcher)'))
+  assert.ok(native.includes('Assert-DesktopLaunchLineage $fixture $launcher $shell $application'))
+  assert.ok(native.includes("(Join-Path ([Environment]::SystemDirectory) 'cmd.exe')"))
+  assert.ok(native.includes('launcher = (Identity $launcher)'))
+  assert.ok(native.includes('$binding.launcher.pid -ne $LauncherPid'))
+  assert.ok(native.includes('Same-Identity $launcher $binding.launcher'))
+  assert.ok(native.includes('Same-Identity (Read-Process $LauncherPid) $binding.launcher'))
+  assert.ok(native.includes("throw 'Owned launch transport remains live; exit is not verified'"))
+})
+
+test('native launch lineage admits only the retained CMD chain or exact direct-child launch', { skip: process.platform !== 'win32' }, t => {
+  const helper = native.match(/function Assert-DesktopLaunchLineage[^]*?\r?\n\}/u)?.[0]
+  assert.ok(helper)
+  const observed = powershellUnit(t, `
+${helper}
+function Changed($Record, $Field, $Value) { $copy = $Record.PSObject.Copy(); $copy.$Field = $Value; return $copy }
+$application = 'C:/owned/cloga-deepseek-harness.exe'
+$command = 'C:/Windows/System32/cmd.exe'
+$time = [datetime]'2026-01-01T00:00:00Z'
+$fixture = [pscustomobject]@{ ProcessId = 101; ParentProcessId = 1; CreationDate = $time; SessionId = 7; ExecutablePath = 'C:/node.exe' }
+$launcher = [pscustomobject]@{ ProcessId = 202; ParentProcessId = 101; CreationDate = $time.AddSeconds(1); SessionId = 7; ExecutablePath = $command }
+$shell = [pscustomobject]@{ ProcessId = 303; ParentProcessId = 202; CreationDate = $time.AddSeconds(2); SessionId = 7; ExecutablePath = $application }
+$direct = Changed $shell 'ParentProcessId' 101
+Assert-DesktopLaunchLineage $fixture $launcher $shell $application $command
+Assert-DesktopLaunchLineage $fixture $direct $direct $application $command
+$cases = @(
+    @{ label = 'missing-launcher'; launcher = $null; shell = $shell },
+    @{ label = 'fixture-as-launcher'; launcher = $fixture; shell = $shell },
+    @{ label = 'wrong-launcher-parent'; launcher = (Changed $launcher 'ParentProcessId' 999); shell = $shell },
+    @{ label = 'wrong-main-parent'; launcher = $launcher; shell = (Changed $shell 'ParentProcessId' 999) },
+    @{ label = 'foreign-command-interpreter'; launcher = (Changed $launcher 'ExecutablePath' 'C:/foreign/cmd.exe'); shell = $shell },
+    @{ label = 'foreign-main-executable'; launcher = $launcher; shell = (Changed $shell 'ExecutablePath' ($application + '.other')) },
+    @{ label = 'launcher-predates-fixture'; launcher = (Changed $launcher 'CreationDate' $time.AddSeconds(-1)); shell = $shell },
+    @{ label = 'main-predates-launcher'; launcher = $launcher; shell = (Changed $shell 'CreationDate' $time) },
+    @{ label = 'launcher-foreign-session'; launcher = (Changed $launcher 'SessionId' 9); shell = $shell },
+    @{ label = 'main-foreign-session'; launcher = $launcher; shell = (Changed $shell 'SessionId' 9) },
+    @{ label = 'direct-incarnation-mismatch'; launcher = $direct; shell = (Changed $direct 'CreationDate' $time.AddSeconds(3)) },
+    @{ label = 'direct-parent-mismatch'; launcher = $direct; shell = $shell }
+)
+$rejected = @()
+foreach ($case in $cases) {
+    $failure = $null
+    try { Assert-DesktopLaunchLineage $fixture $case.launcher $case.shell $application $command } catch { $failure = $_ }
+    if ($null -eq $failure) { throw ('Accepted foreign lineage: ' + $case.label) }
+    $rejected += $case.label
+}
+[pscustomobject]@{ accepted = @('cmd-chain', 'direct-child'); rejected = $rejected } | ConvertTo-Json -Compress
+`)
+  assert.deepEqual(observed.accepted, ['cmd-chain', 'direct-child'])
+  assert.deepEqual(observed.rejected, [
+    'missing-launcher', 'fixture-as-launcher', 'wrong-launcher-parent', 'wrong-main-parent', 'foreign-command-interpreter',
+    'foreign-main-executable', 'launcher-predates-fixture', 'main-predates-launcher', 'launcher-foreign-session',
+    'main-foreign-session', 'direct-incarnation-mismatch', 'direct-parent-mismatch',
+  ])
+})
+
+test('native incarnation comparison rejects a reused launcher PID without touching any real process', { skip: process.platform !== 'win32' }, t => {
+  const helper = native.match(/function Same-Identity[^]*?\r?\n\}/u)?.[0]
+  assert.ok(helper)
+  const observed = powershellUnit(t, `
+${helper}
+$started = [datetime]'2026-01-01T00:00:01Z'
+$image = 'C:/Windows/System32/cmd.exe'
+$disposed = 0
+function Get-Process {
+    $handle = [pscustomobject]@{ Handle = 1; StartTime = $script:started; Path = $script:image }
+    $handle | Add-Member ScriptMethod Dispose { $script:disposed++ }
+    return $handle
+}
+$actual = [pscustomobject]@{ ProcessId = 202; ParentProcessId = 101; ExecutablePath = $image }
+$expected = [pscustomobject]@{ pid = 202; parentPid = 101; executable = $image; created = $started.ToUniversalTime().ToString('o') }
+$matched = Same-Identity $actual $expected
+$started = $started.AddSeconds(2)
+$reused = Same-Identity $actual $expected
+$started = [datetime]$expected.created
+$image = 'C:/foreign/cmd.exe'
+$foreign = Same-Identity $actual $expected
+[pscustomobject]@{ matched = $matched; reused = $reused; foreign = $foreign; disposed = $disposed } | ConvertTo-Json -Compress
+`)
+  assert.deepEqual(observed, { matched: true, reused: false, foreign: false, disposed: 3 })
+})
+
+test('native exit verification requires both transport and actual main exit without adopting reused PIDs', { skip: process.platform !== 'win32' }, t => {
+  const same = native.match(/function Same-Identity[^]*?\r?\n\}/u)?.[0]
+  const body = native.split("if ($Action -eq 'VerifyExited') {")[1].split("    } elseif ($Action -eq 'StopOwned')")[0]
+  assert.ok(same && body)
+  // Match the native driver's Windows PowerShell edition: Core auto-converts ISO JSON strings to DateTime.
+  const observed = powershellUnit(t, `
+${same}
+function Verify-Exit {
+${body}
+    return $result
+}
+function Read-Process($ProcessId) { return $script:processes[[int]$ProcessId] }
+function Get-CimInstance { return @($script:processes.Values) }
+function Get-Process($Id) {
+    $value = Read-Process $Id
+    if ($null -eq $value) { return $null }
+    $handle = [pscustomobject]@{ Handle = 1; StartTime = $value.Started; Path = $value.ExecutablePath }
+    $handle | Add-Member ScriptMethod Dispose {}
+    return $handle
+}
+$OwnerToken = 'unit-owner'
+$LauncherPid = 202
+$application = Join-Path $PSScriptRoot 'app.exe'
+$time = [datetime]'2026-01-01T00:00:01Z'
+$command = 'C:/Windows/System32/cmd.exe'
+$binding = [pscustomobject]@{ launcher = [pscustomobject]@{ pid = 202; parentPid = 101; executable = $command; created = $time.ToUniversalTime().ToString('o') } }
+$familyPath = Join-Path $PSScriptRoot 'family.json'
+@{ ownerToken = $OwnerToken; completeObservation = $true; processes = @(@{ pid = 303; parentPid = 202; executable = $application; created = $time.AddSeconds(1).ToUniversalTime().ToString('o') }) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $familyPath
+$rejected = @()
+foreach ($case in @('transport-live', 'main-live')) {
+    $processes = if ($case -eq 'transport-live') { @{ 202 = [pscustomobject]@{ ProcessId = 202; ParentProcessId = 101; ExecutablePath = $command; Started = $time } } }
+        else { @{ 303 = [pscustomobject]@{ ProcessId = 303; ParentProcessId = 202; ExecutablePath = $application; Started = $time.AddSeconds(1) } } }
+    $failure = $null
+    try { [void](Verify-Exit) } catch { $failure = $_ }
+    if ($null -eq $failure -or $failure.Exception.Message -notmatch 'remains live') { throw ('Exit incorrectly admitted: ' + $case + ': ' + $failure) }
+    $rejected += $case
+}
+$processes = @{}
+$gone = Verify-Exit
+$processes = @{ 202 = [pscustomobject]@{ ProcessId = 202; ParentProcessId = 101; ExecutablePath = $command; Started = $time.AddSeconds(10); CreationDate = $time.AddSeconds(10) } }
+$reused = Verify-Exit
+[pscustomobject]@{ rejected = $rejected; gone = $gone.ownedFamilyExited; reused = $reused.ownedFamilyExited } | ConvertTo-Json -Compress
+`, join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
+  assert.deepEqual(observed, { rejected: ['transport-live', 'main-live'], gone: true, reused: true })
+})
 
 test('Windows pure reaper covers late cleanup handles and rejects WaitForExit false', { skip: process.platform !== 'win32' }, t => {
   const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')

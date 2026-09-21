@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory)][string]$OwnerToken,
     [Parameter(Mandatory)][ValidatePattern('^[a-f0-9-]{36}$')][string]$RequestId,
     [Parameter(Mandatory)][int]$ShellPid,
+    [Parameter(Mandatory)][int]$LauncherPid,
     [Parameter(Mandatory)][int]$FixturePid
 )
 $ErrorActionPreference = 'Stop'
@@ -63,22 +64,42 @@ function Same-Identity($Actual, $Expected) {
     try { [void]$handle.Handle; return $handle.StartTime.ToUniversalTime().ToString('o') -ceq $Expected.created -and $handle.Path -ieq $Expected.executable }
     finally { $handle.Dispose() }
 }
+# Playwright's Windows shell:true transport is an explicit fixture-owned CMD parent, not a UI owner.
+# https://github.com/microsoft/playwright/blob/v1.61.1/packages/playwright-core/src/server/electron/electron.ts
+function Assert-DesktopLaunchLineage($Fixture, $Launcher, $Shell, [string]$Application, [string]$CommandInterpreter) {
+    foreach ($item in @($Fixture, $Launcher, $Shell)) {
+        if ($null -eq $item -or $item.ProcessId -le 0 -or $item.CreationDate -isnot [datetime] -or $null -eq $item.SessionId) { throw 'Missing live launch lineage' }
+    }
+    if ($Launcher.ProcessId -eq $Fixture.ProcessId -or $Shell.ProcessId -eq $Fixture.ProcessId -or
+        $Shell.ExecutablePath -ine $Application -or $Launcher.ParentProcessId -ne $Fixture.ProcessId -or
+        $Launcher.CreationDate -lt $Fixture.CreationDate -or $Shell.CreationDate -lt $Launcher.CreationDate -or
+        $Launcher.SessionId -ne $Fixture.SessionId -or $Shell.SessionId -ne $Fixture.SessionId) { throw 'Foreign installed launch lineage' }
+    if ($Launcher.ProcessId -eq $Shell.ProcessId) {
+        if ($Shell.ParentProcessId -ne $Fixture.ProcessId -or $Launcher.ExecutablePath -ine $Application -or
+            $Launcher.CreationDate -ne $Shell.CreationDate) { throw 'Direct launch identity differs' }
+    } elseif ($Launcher.ExecutablePath -ine $CommandInterpreter -or $Shell.ParentProcessId -ne $Launcher.ProcessId) {
+        throw 'Electron is not the child of its retained OS command interpreter'
+    }
+}
 function Read-Process([int]$ProcessId) { Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" }
 $fixture = Read-Process $FixturePid
 $helper = Read-Process $PID
-if ($null -eq $fixture -or $null -eq $helper -or $helper.ParentProcessId -ne $FixturePid -or $ShellPid -le 0 -or $ShellPid -eq $FixturePid) { throw 'Missing fixture parent' }
+if ($null -eq $fixture -or $null -eq $helper -or $helper.ParentProcessId -ne $FixturePid -or $ShellPid -le 0 -or $ShellPid -eq $FixturePid -or $LauncherPid -le 0 -or $LauncherPid -eq $FixturePid) { throw 'Missing fixture parent' }
 $shell = Read-Process $ShellPid
+$launcher = Read-Process $LauncherPid
 if ($Action -eq 'Bind') {
-    if ($null -eq $shell -or $shell.ParentProcessId -ne $FixturePid -or $shell.ExecutablePath -ine $application -or $shell.CreationDate -lt $fixture.CreationDate -or $shell.SessionId -ne $fixture.SessionId) { throw 'Shell is not the fixture-owned installed executable' }
+    Assert-DesktopLaunchLineage $fixture $launcher $shell $application (Join-Path ([Environment]::SystemDirectory) 'cmd.exe')
     if ((Get-FileHash -LiteralPath $application -Algorithm SHA256).Hash.ToLowerInvariant() -cne $validated.candidate.manifest.installedEvidence.executableSha256) { throw 'Installed executable changed' }
     if (Test-Path -LiteralPath $bindingPath) { throw 'Shell PID binding already exists; retain its previous incarnation evidence' }
-    $binding = [ordered]@{ ownerToken = $OwnerToken; fixture = (Identity $fixture); shell = (Identity $shell) }
+    $binding = [ordered]@{ ownerToken = $OwnerToken; fixture = (Identity $fixture); launcher = (Identity $launcher); shell = (Identity $shell) }
     $binding | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $bindingPath -Encoding UTF8
     @{ ownerToken = $OwnerToken; completeObservation = $false; processes = @($binding.shell) } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $familyPath -Encoding UTF8
 } else {
     $binding = Get-Content -LiteralPath $bindingPath -Raw | ConvertFrom-Json
-    if ($binding.ownerToken -cne $OwnerToken -or -not (Same-Identity $fixture $binding.fixture)) { throw 'Native request has another fixture owner' }
-    if ($Action -notin @('StopOwned','VerifyExited') -and -not (Same-Identity $shell $binding.shell)) { throw 'Shell process incarnation changed or exited' }
+    if ($binding.ownerToken -cne $OwnerToken -or -not (Same-Identity $fixture $binding.fixture) -or
+        $binding.shell.pid -ne $ShellPid -or $binding.launcher.pid -ne $LauncherPid) { throw 'Native request has another fixture owner' }
+    if ($Action -notin @('StopOwned','VerifyExited') -and
+        (-not (Same-Identity $shell $binding.shell) -or -not (Same-Identity $launcher $binding.launcher))) { throw 'Shell or launch transport incarnation changed or exited' }
 }
 
 # A family observation records creation times. Cleanup reopens handles and verifies those times before termination.
@@ -183,6 +204,7 @@ function Wait-Control([string]$Name, [switch]$FolderDialog) {
 }
 try {
     if ($Action -eq 'VerifyExited') {
+        if (Same-Identity (Read-Process $LauncherPid) $binding.launcher) { throw 'Owned launch transport remains live; exit is not verified' }
         $known = Get-Content -LiteralPath $familyPath -Raw | ConvertFrom-Json
         if ($known.ownerToken -cne $OwnerToken -or $known.completeObservation -ne $true) { throw 'Exit verification requires a complete owned-family observation, not a partial Bind seed' }
         $reusedPids = @()

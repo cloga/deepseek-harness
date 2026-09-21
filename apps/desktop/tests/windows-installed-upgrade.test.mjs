@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { runInNewContext } from 'node:vm'
-import { inspectInstalledDesktopIdentity, readInstalledDesktopRuntimeDescriptor } from './fixtures/windows-installed-runtime.mjs'
+import { inspectInstalledDesktopIdentity, installedDesktopProcessIds, installedLauncherExited, readInstalledDesktopRuntimeDescriptor } from './fixtures/windows-installed-runtime.mjs'
 import { inspectInstalledPageDiagnostic } from './fixtures/windows-installed-upgrade-smoke.mjs'
 import { assertUpgradeRunner, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeAssetPath, upgradeFileHash, verifyUpgradeRelease } from './fixtures/windows-installed-upgrade-contract.mjs'
 import { retainPrimaryFailure } from './fixtures/windows-packaged-package-acceptance.mjs'
@@ -72,16 +72,41 @@ test('direct fixture invocation refuses a workstation before loading Playwright 
 test('installed identity callback serializes without an import loader or lexical closure', () => {
   const calls = []
   const identity = runInNewContext(`(${inspectInstalledDesktopIdentity.toString()})(electron)`, {
-    process: Object.freeze({ execPath: 'owned application', resourcesPath: 'owned resources' }),
+    process: Object.freeze({ pid: 303, ppid: 202, execPath: 'owned application', resourcesPath: 'owned resources' }),
     electron: { app: {
       getPath(name) { calls.push(name); return 'isolated user data' },
       getVersion() { return 'synthetic version' }, isPackaged: true,
     } },
   })
   assert.deepEqual(JSON.parse(JSON.stringify(identity)), {
-    executable: 'owned application', resourcesPath: 'owned resources', userData: 'isolated user data', version: 'synthetic version', packaged: true,
+    pid: 303, parentPid: 202, executable: 'owned application', resourcesPath: 'owned resources', userData: 'isolated user data', version: 'synthetic version', packaged: true,
   })
   assert.deepEqual(calls, ['userData'])
+  assert.deepEqual(installedDesktopProcessIds({ pid: 202 }, identity, 101), { pid: 303, launcherPid: 202 })
+  for (const invalid of [{ pid: 0, ppid: 202 }, { pid: 1.5, ppid: 202 }, { pid: 303, ppid: 0 }, { pid: 303, ppid: 303 }]) {
+    assert.throws(() => runInNewContext(`(${inspectInstalledDesktopIdentity.toString()})({app:{}})`, { process: invalid }), /process identity is invalid/u)
+  }
+})
+
+test('installed PID routing preserves distinct launch transport and Electron main authority', () => {
+  assert.deepEqual(installedDesktopProcessIds({ pid: 202 }, { pid: 303, parentPid: 202 }, 101), { pid: 303, launcherPid: 202 })
+  assert.deepEqual(installedDesktopProcessIds({ pid: 303 }, { pid: 303, parentPid: 101 }, 101), { pid: 303, launcherPid: 303 })
+  for (const [launcher, identity, fixture] of [
+    [{ pid: 202 }, { pid: 303, parentPid: 999 }, 101],
+    [{ pid: 303 }, { pid: 303, parentPid: 202 }, 101],
+    [{ pid: 101 }, { pid: 303, parentPid: 101 }, 101],
+    [{ pid: 202 }, { pid: 101, parentPid: 202 }, 101],
+    [{ pid: 0 }, { pid: 303, parentPid: 202 }, 101],
+    [{ pid: 202 }, { pid: Number.MAX_SAFE_INTEGER + 1, parentPid: 202 }, 101],
+  ]) assert.throws(() => installedDesktopProcessIds(launcher, identity, fixture))
+  assert.equal(installedLauncherExited({ exitCode: null, signalCode: null }), false)
+  assert.equal(installedLauncherExited({ exitCode: 0, signalCode: null }), true)
+  assert.equal(installedLauncherExited({ exitCode: null, signalCode: 'SIGTERM' }), true)
+  assert.equal(installedLauncherExited({}), false)
+  const observer = readFileSync(new URL('./fixtures/windows-installed-upgrade-smoke.mjs', import.meta.url), 'utf8')
+  assert.ok(observer.includes('const processIds = installedDesktopProcessIds(launcher, identity, process.pid)'))
+  assert.ok(observer.includes("save(join(root, 'baseline-ready.json'), { ownerToken: owner.token, ...processIds, application })"))
+  assert.doesNotMatch(observer, /pid: app\.process\(\)\.pid/u)
 })
 
 function observeInstalledPage(options = {}) {

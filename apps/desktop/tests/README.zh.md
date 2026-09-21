@@ -64,6 +64,8 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 安装升级与同版本包操作的观察器均使用[已安装运行时读取器](fixtures/windows-installed-runtime.mjs)。CDP 求值只返回运行中应用的身份字段；描述文件通过维护中的 `readPackagedDesktopRuntimeDescriptor` 载体在 CDP 之外读取。在以 Node 模式启动打包 Electron 之前，读取器重新检查自有安装中的可执行文件哈希，并将观察到的 resources 目录绑定到该安装。描述文件校验对原始 ASAR 字节计算哈希，不使用解析或重新序列化的 JSON。此检查仅针对一次性的托管安装，绝不针对操作者的 Desktop。
 
+固定版本 [Playwright 1.61.1](https://github.com/microsoft/playwright/blob/v1.61.1/packages/playwright-core/src/server/electron/electron.ts) 在 Windows 上通过 `shell: true` 启动 Electron：`app.process()` 标识 CMD 启动载体，而非 Electron 主进程。自有 Electron 主进程内的求值提供实际 PID 和父 PID；基线就绪、原生窗口归属与 Host 进程族检查将该主进程绑定到精确可执行文件及其哈希。启动载体分别保留 PID、创建身份和存活证据，并要求精确且存活的 fixture → CMD → Electron 主进程链。宽松父进程匹配、进程名称匹配或接纳枚举得到的 PID 都不能证明归属。仅启动载体退出不证明 Electron 主进程或 Host 进程族已清理。
+
 不可变的 `0.1.6-alpha.1.cloga.2` 基线使用 sequence 12 和 Copilot alpha.24；只有验证该安装的锁定身份后，才使用其[基线设置检查器](fixtures/baseline-copilot-settings-smoke.ts)。它保留该版本原有的只读模型角色与提供方目录检查，不要求后续版本的工作区或仅提供方 UI。候选及其重启仍使用针对 Copilot alpha.32 的严格[当前设置检查器](fixtures/copilot-settings-smoke.ts)。基线检查不能作为候选检查失败时的回退；两种检查器都不发起认证、保存设置或执行模型／搜索调用。
 
 注册验证和清理绑定自有目录中的确切 `Uninstall cloga-deepseek-harness.exe`：原版 NSIS 根据已验证的 `executableName` 派生这个文件名，而不是使用显示名称或安装目录名称。注册表命令必须是带引号的自有路径，随后为 `/currentuser`；`QuietUninstallString` 只能再追加确切的 ` /S`。其他可执行文件名、模式或尾随参数仍被拒绝；一致的 HKCU 注册表视图别名不会放宽源码、版本、可执行文件哈希或文件系统祖先检查。

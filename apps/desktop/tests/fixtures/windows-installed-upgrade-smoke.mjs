@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { assertUpgradeRunner, installedUpgradeApplication, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeFileHash, verifyUpgradeRelease } from './windows-installed-upgrade-contract.mjs'
 import { retainPrimaryFailure } from './windows-packaged-package-acceptance.mjs'
-import { inspectInstalledDesktopIdentity, readInstalledDesktopRuntimeDescriptor } from './windows-installed-runtime.mjs'
+import { inspectInstalledDesktopIdentity, installedDesktopProcessIds, installedLauncherExited, readInstalledDesktopRuntimeDescriptor } from './windows-installed-runtime.mjs'
 
 const baseline = JSON.parse(readFileSync(new URL('./windows-upgrade-baseline.json', import.meta.url), 'utf8'))
 const json = path => JSON.parse(readFileSync(path, 'utf8'))
@@ -171,11 +171,13 @@ async function main() {
     const secondaryErrors = []
     try {
       app = await _electron.launch({ executablePath: application, args: [`--user-data-dir=${userData}`], env, timeout: 120_000 })
+      const launcher = app.process()
       const identity = await app.evaluate(inspectInstalledDesktopIdentity)
       assert.equal(resolve(identity.executable).toLowerCase(), application.toLowerCase())
       assert.equal(resolve(identity.userData).toLowerCase(), userData.toLowerCase())
       assert.equal(identity.version, expected.manifest.version)
       assert.equal(identity.packaged, true)
+      const processIds = installedDesktopProcessIds(launcher, identity, process.pid)
       const runtimeBytes = readInstalledDesktopRuntimeDescriptor(application, identity.resourcesPath, expected.manifest.installedEvidence.executableSha256)
       assert.equal(hash(runtimeBytes), expected.manifest.installedEvidence.runtimeSha256)
       const expectedUrl = values.phase === 'baseline' ? baseline.applicationUrl : 'dsh-app://app/'
@@ -192,15 +194,15 @@ async function main() {
       const settingsEvidence = await inspectSettings(settings)
       await page.screenshot({ path: join(evidence, `${round}-models.png`) })
       if (round === 'baseline') {
-        save(join(root, 'baseline-ready.json'), { ownerToken: owner.token, pid: app.process().pid, application })
+        save(join(root, 'baseline-ready.json'), { ownerToken: owner.token, ...processIds, application })
         const deadline = Date.now() + 600_000
         while (!existsSync(join(root, 'baseline-finish-request.json'))) {
           assert.ok(Date.now() < deadline, 'Native driver did not finish its running-app refusal case')
-          assert.equal(app.process().exitCode, null, 'Baseline exited during installer refusal')
+          assert.equal(installedLauncherExited(launcher), false, 'Baseline launch transport exited during installer refusal')
           await delay(250)
         }
         assert.equal(json(join(root, 'baseline-finish-request.json')).ownerToken, owner.token)
-        assert.equal(app.process().exitCode, null)
+        assert.equal(installedLauncherExited(launcher), false, 'Baseline launch transport exited')
         assert.equal(page.url(), expectedUrl)
         await account.getByRole('button', { name: 'Sign in with GitHub', exact: true }).waitFor({ state: 'visible' })
         await page.screenshot({ path: join(evidence, 'baseline-after-refusal.png') })
