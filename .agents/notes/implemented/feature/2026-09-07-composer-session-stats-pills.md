@@ -17,6 +17,16 @@ The session stats strip under the composer (`StatsLine`, ui-chat, mounted on `co
 - **Render discipline.** The row folds settled nodes only (`chat.legacy.nodes` identity), so streaming chunk frames cause zero rerenders — pinned by a render-count unit test. A session with no closed step and no billed tokens renders nothing.
 - **The composer owns dock spacing.** `InputBar` places slot contributions and `ContextMeter` in one centered flex row, supplies 4px above the dock and 4px below it even when the slot has no visible contribution. The hero keeps no bottom padding and hides its empty dock. `StatsPills` supplies shrinkable time and billing content; it does not claim the full row width or add outer padding.
 
+## Shared dock layout
+
+The composer owns one centered, wrapping dock row; StatsPills supplies an intrinsic-width group rather than a full-width row. Later public dock entries can follow the native cache-hit pill without importing Chat components or manipulating another plugin's DOM. Both the outer row and native group can wrap at narrow widths; each native anchor and dialog remains independent. Empty dock content contributes no padding, and `data-composer-stats` still controls the existing bottom clearance.
+
+Official Core `0.1.6-alpha.2` already provides the shared flex dock, intrinsic statistics group and below-card ContextMeter. The alpha.2 candidate preserves those owners and adds wrapping plus empty-outlet handling without importing the alpha.1 composer's toolbar placement or changing Session projections or token accounting. Retire the remaining layout adaptation when the official target passes equivalent wide/narrow native geometry and empty-outlet/ContextMeter-only checks.
+
+A new statistics-item Slot is unnecessary because the existing ordered public dock supports this placement. Making the native StatsPills group `display: contents` is also unnecessary: retaining its box preserves its geometry and avoids changing accessibility grouping. Packaged geometry acceptance opens a test-owned persisted Session through the shipped application and measures real InputBar, StatsPills, and released plugin controls; synthetic history and signed-out account state do not imply model inference or live quota access.
+
+The renderer's stable public `[data-slot="conversation.composer.dock"]` outlet itself uses `display: contents`, including empty, null-rendering, and unloaded states. The shell hides a sole empty outlet without confusing text-only content or a crash marker with emptiness. Geometry acceptance measures the bounded physical flex owner and its actual controls together, not the outlet's nonexistent box. Only absent or temporarily unlaid controls reset sampling within the existing deadline; wrong anchors, wrong owners, and ambiguity fail directly.
+
 ## Alternatives considered
 
 - **The single-line variant (StatsLine, the A/B loser).** All figures resident in one text row, with a hover tooltip restating the full line when it truncated. Lost on crowding and reach: exact token counts appeared nowhere (the line and its tooltip both carried compact totals only), and one row gave time and billing figures no visual grouping.

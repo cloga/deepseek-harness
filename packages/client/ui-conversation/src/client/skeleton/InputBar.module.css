@@ -12,14 +12,17 @@
 
 .dock {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: center;
   gap: 12px;
+  min-width: 0;
   max-width: 100%;
   padding-top: 4px;
 }
 
-.hero .dock:empty {
+.dock:empty,
+.dock:has(> [data-slot="conversation.composer.dock"]:only-child:empty) {
   display: none;
 }
 

@@ -9,6 +9,7 @@
 // the shell (jsdom's beforeinput lacks the ranges Lexical needs).
 
 import type { InboxState } from '@deepseek-ai/dsh-agent/types'
+import type { ContextPressureProjection } from '@deepseek-ai/dsh-token-meter/client'
 import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
@@ -93,6 +94,7 @@ interface BenchOptions {
   leftItems?: React.ReactNode
   rightItems?: React.ReactNode
   footer?: React.ReactNode
+  contextPressure?: ContextPressureProjection
   attachments?: readonly ComposerAttachment[]
   /** Upload states served for file-kind drafts (absent = every file is ready). */
   fileUploads?: DraftFileUploads
@@ -184,7 +186,8 @@ function bench(over?: BenchOptions) {
       (selector ?? (v => v))(key === 'plan'
         ? over?.plan
         : key === 'goal' ? over?.goal
-          : key === 'imageLimits' ? over?.imageLimits : undefined)),
+          : key === 'imageLimits' ? over?.imageLimits
+            : key === 'contextPressure' ? over?.contextPressure : undefined)),
     useInput: bindSnapshotSelector(shell.state),
     inputActions: shell.actions,
     keyboard: shell,
@@ -1595,7 +1598,48 @@ describe('strips and variants', () => {
     expect(view.getByTestId('ov')).toBeTruthy()
     expect(view.getByTestId('li')).toBeTruthy()
     expect(view.getByTestId('ri')).toBeTruthy()
+    const footer = view.getByTestId('foot')
+    expect(footer.parentElement?.className).toContain('dock')
+    expect(view.container.querySelector('[data-composer-card]')?.contains(footer)).toBe(false)
+  })
+
+  it('keeps the physical dock empty when neither the public slot nor context meter has content', () => {
+    const { view, props, slotCalls } = bench()
+    const dock = view.container.querySelector('[class*="dock"]')
+    expect(dock).not.toBeNull()
+    expect(dock?.childNodes).toHaveLength(0)
+    slotCalls.length = 0
+    view.rerender(<InputBar {...props} variant="hero" />)
+    expect(view.container.querySelector('[class*="dock"]')).toBe(dock)
+    expect(dock?.childNodes).toHaveLength(0)
+    expect(slotCalls.some(call => call.key === 'conversation.composer.dock')).toBe(false)
+    slotCalls.length = 0
+    view.rerender(<InputBar {...props} sessionId={undefined} />)
+    expect(view.container.querySelector('[class*="dock"]')).toBe(dock)
+    expect(dock?.childNodes).toHaveLength(0)
+    expect(slotCalls.some(call => call.key === 'conversation.composer.dock')).toBe(false)
+  })
+
+  it('retains the context meter outside the card when the public dock is ineligible', () => {
+    const { view, props, slotCalls } = bench({
+      footer: <i data-testid="foot" />,
+      contextPressure: { pressureTokens: 25, contextWindow: 100 },
+    })
+    const meter = view.getByRole('button', { name: /25%/u })
+    const dock = view.container.querySelector('[class*="dock"]')
+    expect(dock?.contains(meter)).toBe(true)
+    expect(view.container.querySelector('[data-composer-card]')?.contains(meter)).toBe(false)
     expect(view.getByTestId('foot')).toBeTruthy()
+    for (const variant of ['hero', 'no-session'] as const) {
+      slotCalls.length = 0
+      view.rerender(variant === 'hero'
+        ? <InputBar {...props} variant="hero" />
+        : <InputBar {...props} sessionId={undefined} />)
+      expect(view.queryByTestId('foot')).toBeNull()
+      expect(view.getByRole('button', { name: /25%/u })).toBe(meter)
+      expect(dock?.contains(meter)).toBe(true)
+      expect(slotCalls.some(call => call.key === 'conversation.composer.dock')).toBe(false)
+    }
   })
 })
 

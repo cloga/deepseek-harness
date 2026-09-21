@@ -47,7 +47,7 @@ function isolatedRunner(damage?: Damage) {
     catch (error) { marker = error }
     if (damage === 'repeat-observer') await actual.inspectProfile?.(Object.freeze(paths))
     const functional = {
-      ...identity, schemaVersion: damage === 'legacy-functional-schema' ? 1 : 2,
+      ...identity, schemaVersion: damage === 'legacy-functional-schema' ? 2 : 3,
       scope: damage === 'foreign-functional-scope' ? 'other' : 'packaged-functional-observations',
       functionalAssertionsCompleted: damage !== 'functional-not-complete',
       normalAcceptanceCompleted: damage === 'functional-success', cleanupVerified: damage === 'functional-cleanup',
@@ -137,7 +137,8 @@ describe('separately scoped observer suite evidence', () => {
     expect(existsSync(join(fixture.options.output, 'packaged-suite.json'))).toBe(false)
   })
 
-  it.each(['positive-usage.json', 'functional-results.json', 'acceptance.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json'])('rejects stale %s before invoking acceptance', async (file) => {
+  it.each(['positive-usage.json', 'native-composer-seed.json', 'native-composer-geometry.json',
+    'functional-results.json', 'acceptance.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json'])('rejects stale %s before invoking acceptance', async (file) => {
     const fixture = isolatedRunner()
     mkdirSync(fixture.options.output)
     writeFileSync(join(fixture.options.output, file), '{}')

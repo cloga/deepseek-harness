@@ -12,14 +12,15 @@ import { desktopPluginProvisioningPlanSha256, parseDesktopPluginProvisioningPlan
 import { parseDesktopPluginProvisionReceipt } from '../src/plugin-source.ts'
 import { verifyUpgradeRelease } from '../tests/fixtures/windows-installed-upgrade-contract.mjs'
 import { assertPositiveCopilotUsageEvidence } from '../tests/fixtures/copilot-usage-positive-smoke.ts'
+import { assertNativeComposerGeometry, type NativeComposerGeometry } from '../tests/fixtures/native-composer-geometry.ts'
 
 const repository = resolve(import.meta.dirname, '../../..')
 const pinPath = join(repository, 'apps/desktop/tests/fixtures/windows-upgrade-baseline.json')
 const identityKeys = ['evidenceId', 'sourceCommit', 'sourceTree', 'runId', 'runAttempt', 'planSha256', 'runtimeSha256', 'executableSha256', 'provisioningSha256', 'capabilitySha256']
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u
-const packagedTrue = ['isolatedHome', 'onboardingNoticeDismissed', 'actualGraphVerified', 'ancestorSdkJunction', 'accountEntryVisible', 'manageCompatibilityDisclosureAbsent', 'modelRolesViewLoaded', 'currentWorkspaceReadOnly', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
+const packagedTrue = ['isolatedHome', 'onboardingNoticeDismissed', 'actualGraphVerified', 'ancestorSdkJunction', 'accountEntryVisible', 'manageCompatibilityDisclosureAbsent', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
 const packagedFalse = ['ancestorSdkLoaded', 'liveAccountQuota', 'realOAuth', 'verificationNavigationExercised', 'manualVerificationAddressObserved', 'realModelRound', 'realSearch', 'installerUpgradeVerified']
-const settingsTrue = ['modelRolesViewLoaded', 'currentWorkspaceReadOnly', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
+const settingsTrue = ['accountViewLoaded', 'retiredModelRolesAbsent', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
 const upgradeTrue = ['succeeded', 'installerUpgradeVerified', 'runningApplicationRefusalVerified', 'sameCustomPathVerified', 'actualInstalledHostAndClientVerified', 'candidateRestartVerified', 'retainedHomeFileVerified', 'separateSameVersionPackagedPluginAcceptanceVerified']
 const upgradeFalse = ['pluginUserChoicesVerified', 'draftAttachmentRefusalVerified', 'promotionFailureRollbackVerified', 'managedHandoffVerified', 'postSuccessDowngradeVerified']
 const packageTrue = ['succeeded', 'preparedGraphVerified', 'declinePreservedGraphVerified', 'discardPreservedGraphVerified', 'liveDraftAttachmentVetoVerified', 'attachmentOnlyVetoVerified', 'draftOnlyVetoVerified', 'consentGraphPromotionVerified', 'newHostGenerationVerified', 'installedDisabledAfterConsentVerified', 'enabledFixtureRunningAfterSeparateRestartVerified', 'copilotDisabledChoiceAcrossRestartVerified', 'copilotRemovalChoiceAcrossRestartVerified', 'zeroModelRequestsVerified', 'cleanupVerified']
@@ -87,12 +88,47 @@ function absent(path: string): void { physical(path); assert.equal(lstatSync(pat
 function settings(value: unknown, baseline = false): void {
   const record = object(value)
   const required = baseline ? ['modelRolesViewLoaded', 'searchProviderCatalogLoaded'] : settingsTrue
-  keys(record, [...required, 'registeredSearchProviders', 'realSearch'])
+  keys(record, [...(baseline ? [] : ['schemaVersion']), ...required, 'registeredSearchProviders', 'realSearch'])
+  if (!baseline) assert.equal(record.schemaVersion, 3)
   flags(record, required, ['realSearch'])
   const providers = array(record.registeredSearchProviders)
   assert(providers.every(item => typeof item === 'string' && item.length > 0))
   assert.equal(new Set(providers).size, providers.length)
   assert(providers.includes('github-copilot-hosted'))
+}
+
+// Validate lossless JSON shape before sharing the producer's geometric semantics.
+function nativeGeometry(value: unknown, viewportWidth: number): NativeComposerGeometry {
+  const record = object(value)
+  keys(record, ['viewportWidth', 'dock', 'time', 'usage', 'copilot', 'nativeStyle', 'copilotStyle'])
+  assert.equal(record.viewportWidth, viewportWidth)
+  const box = (value: unknown) => {
+    const fields = object(value)
+    keys(fields, ['x', 'y', 'width', 'height'])
+    const number = (key: string): number => {
+      const result = fields[key]
+      assert(typeof result === 'number' && Number.isFinite(result), 'Geometry must contain finite numbers')
+      return result
+    }
+    const result = { x: number('x'), y: number('y'), width: number('width'), height: number('height') }
+    assert(result.width > 0 && result.height > 0, 'Geometry boxes must have positive dimensions')
+    return result
+  }
+  const style = (value: unknown) => {
+    const fields = object(value)
+    keys(fields, ['fontSize', 'lineHeight', 'color'])
+    const result = { fontSize: text(fields.fontSize), lineHeight: text(fields.lineHeight), color: text(fields.color) }
+    for (const field of ['fontSize', 'lineHeight'] as const) {
+      assert.match(result[field], /^(?:\d+(?:\.\d+)?|\.\d+)px$/u)
+      assert(Number.parseFloat(result[field]) > 0 && Number.isFinite(Number.parseFloat(result[field])))
+    }
+    assert(result.color.trim().length > 0 && result.color.length <= 256)
+    return result
+  }
+  const geometry = { viewportWidth, dock: box(record.dock), time: box(record.time), usage: box(record.usage), copilot: box(record.copilot),
+    nativeStyle: style(record.nativeStyle), copilotStyle: style(record.copilotStyle) }
+  assertNativeComposerGeometry(geometry, viewportWidth === 1280)
+  return geometry
 }
 
 /** Paths and exact workflow identity supplied by the caller; all inputs remain read-only. */
@@ -224,8 +260,8 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
   const f = functional.value
   keys(f, ['schemaVersion', 'scope', ...identityKeys, 'functionalAssertionsCompleted', 'normalAcceptanceCompleted', 'cleanupVerified',
     ...packagedTrue, ...packagedFalse, 'desktopVersion', 'runtimeVersion', 'versionMenus', 'plugin', 'transport', 'restartReceiptSha256', 'copilotUsageCapability', 'signedOutCopilotUsage', 'hostQuotaNoNetworkEvidence', 'timeline',
-    'positiveCopilotUsage', 'positiveUsageHostTransport'])
-  assert.equal(f.schemaVersion, 2)
+    'positiveCopilotUsage', 'positiveUsageHostTransport', 'settingsAcceptance', 'nativeComposer'])
+  assert.equal(f.schemaVersion, 3)
   assert.equal(f.scope, 'packaged-functional-observations')
   flags(f, [...packagedTrue, 'functionalAssertionsCompleted'], [...packagedFalse, 'normalAcceptanceCompleted', 'cleanupVerified'])
   assert.equal(f.desktopVersion, plan.version)
@@ -247,6 +283,37 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
   for (const [index, provider] of ['github-copilot', 'github-copilot-preview'].entries()) {
     assertPositiveCopilotUsageEvidence(positiveCases[index], provider)
   }
+  const native = input(options.packagedEvidence, 'native-composer-geometry.json', 'packaged.nativeComposer').value
+  keys(native, ['schemaVersion', 'scope', ...identityKeys, 'sessionHistory', 'quota', 'pluginSource', 'installedClientSha256',
+    'geometry', 'nativeDialogs', 'copilotDialog', 'rendererErrors', 'realModelRound', 'realOAuth'])
+  assert.equal(native.schemaVersion, 1)
+  assert.equal(native.scope, 'actual-packaged-native-composer-and-released-client')
+  for (const field of identityKeys) assert.deepEqual(native[field], object(identity)[field], `Native composer identity differs: ${field}`)
+  assert.equal(native.sessionHistory, 'synthetic-persisted-in-isolated-home')
+  assert.equal(native.quota, 'signed-out-host-response-no-credentials')
+  assert.deepEqual(native.pluginSource, copilot.source)
+  assertReviewedCopilotUsageClient(copilot.source, text(native.installedClientSha256))
+  assert.deepEqual(native.rendererErrors, [])
+  flags(native, [], ['realModelRound', 'realOAuth'])
+  const geometries = array(native.geometry)
+  assert.equal(geometries.length, 2)
+  for (const [index, width] of [1280, 400].entries()) nativeGeometry(geometries[index], width)
+  const dialogs = object(native.nativeDialogs)
+  keys(dialogs, ['time', 'usage'])
+  for (const name of ['time', 'usage']) {
+    const dialog = object(dialogs[name])
+    keys(dialog, ['opened', 'closedOnEscape', 'focusReturned'])
+    flags(dialog, ['opened', 'closedOnEscape', 'focusReturned'])
+  }
+  const copilotDialog = object(native.copilotDialog)
+  keys(copilotDialog, ['signedOutObserved', 'sessionCreditsCount', 'resetCount', 'epochTextCount', 'focusReturned'])
+  flags(copilotDialog, ['signedOutObserved', 'focusReturned'])
+  for (const field of ['sessionCreditsCount', 'resetCount', 'epochTextCount']) assert.equal(copilotDialog[field], 0)
+  assert.deepEqual(f.nativeComposer, native, 'Functional native composer observations differ from original sidecar')
+  const settingsAcceptance = array(f.settingsAcceptance)
+  assert.equal(settingsAcceptance.length, 2)
+  for (const value of settingsAcceptance) settings(value)
+  assert.deepEqual(settingsAcceptance[0], settingsAcceptance[1], 'Restart must preserve settings observations')
   assert.equal(f.transport, 'official Web-backed Desktop Host with packaged Electron dsh-app origin bridge')
   assert.equal(f.hostQuotaNoNetworkEvidence, 'immutable-plugin-ci-regression-only')
   const usageCapability = { id: 'account-quota-composer-usage', required: true, evidenceScope: 'synthetic-quota-and-public-remote-ui-contracts-not-live-account-access', signedOutNetworkRegressionDeclared: true, lifecycleRegressionDeclared: true }
@@ -273,6 +340,10 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
       if (phase === 'restart' && event === 'packaged-graph') expectedTimeline.push('restart:positive-usage')
     }
   }
+  for (const event of ['seeded', 'launch', 'application', 'observed', 'closed']) {
+    expectedTimeline.push(`native-composer:${event}`)
+    if (event === 'application' && timeline.includes('native-composer:provider-deferred')) expectedTimeline.push('native-composer:provider-deferred')
+  }
   assert.deepEqual(timeline, expectedTimeline)
   let previousGraph: RecordValue | undefined
   for (const [index, phase] of phases.entries()) {
@@ -288,7 +359,9 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
     flags(menu, [], ['nativePopupOpened', 'nativeModalOpened'])
     const usage = input(options.packagedEvidence, `${phase}-usage-readonly.json`, `packaged.${phase}.usage`).value
     assert.deepEqual(usage, { capability: usageCapability, signedOut })
-    settings(input(options.packagedEvidence, `${phase}-settings-readonly.json`, `packaged.${phase}.settings`).value)
+    const settingsRecord = input(options.packagedEvidence, `${phase}-settings-readonly.json`, `packaged.${phase}.settings`).value
+    settings(settingsRecord)
+    assert.deepEqual(settingsRecord, settingsAcceptance[index])
     const graph = input(options.packagedEvidence, `${phase}-packaged-graph.json`, `packaged.${phase}.graph`).value
     keys(graph, ['valid', 'runtimeSha256', 'executable', 'nodeVersion', 'electronVersion', 'runAsNode', 'nodePath', 'nodeOptionsPresent', 'electronNoAsarPresent', 'cwd', 'profile', 'runtimeRoot', 'resolutionMode'])
     flags(graph, ['valid'], ['nodeOptionsPresent', 'electronNoAsarPresent'])

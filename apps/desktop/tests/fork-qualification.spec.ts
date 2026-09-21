@@ -65,14 +65,14 @@ const json = (path: string): Json => object(JSON.parse(readFileSync(path, 'utf8'
 const save = (path: string, value: unknown): void => { writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`) }
 const rawHash = (path: string) => sha(readFileSync(path))
 const truths = (names: string[], value = true): Record<string, boolean> => Object.fromEntries(names.map(name => [name, value] as const))
-const packagedTrue = ['isolatedHome', 'onboardingNoticeDismissed', 'actualGraphVerified', 'ancestorSdkJunction', 'accountEntryVisible', 'manageCompatibilityDisclosureAbsent', 'modelRolesViewLoaded', 'currentWorkspaceReadOnly', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
+const packagedTrue = ['isolatedHome', 'onboardingNoticeDismissed', 'actualGraphVerified', 'ancestorSdkJunction', 'accountEntryVisible', 'manageCompatibilityDisclosureAbsent', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
 const packagedFalse = ['ancestorSdkLoaded', 'liveAccountQuota', 'realOAuth', 'verificationNavigationExercised', 'manualVerificationAddressObserved', 'realModelRound', 'realSearch', 'installerUpgradeVerified']
-const settingsTrue = ['modelRolesViewLoaded', 'currentWorkspaceReadOnly', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
+const settingsTrue = ['accountViewLoaded', 'retiredModelRolesAbsent', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
 const upgradeTrue = ['succeeded', 'installerUpgradeVerified', 'runningApplicationRefusalVerified', 'sameCustomPathVerified', 'actualInstalledHostAndClientVerified', 'candidateRestartVerified', 'retainedHomeFileVerified', 'separateSameVersionPackagedPluginAcceptanceVerified']
 const upgradeFalse = ['pluginUserChoicesVerified', 'draftAttachmentRefusalVerified', 'promotionFailureRollbackVerified', 'managedHandoffVerified', 'postSuccessDowngradeVerified']
 const packageTrue = ['succeeded', 'preparedGraphVerified', 'declinePreservedGraphVerified', 'discardPreservedGraphVerified', 'liveDraftAttachmentVetoVerified', 'attachmentOnlyVetoVerified', 'draftOnlyVetoVerified', 'consentGraphPromotionVerified', 'newHostGenerationVerified', 'installedDisabledAfterConsentVerified', 'enabledFixtureRunningAfterSeparateRestartVerified', 'copilotDisabledChoiceAcrossRestartVerified', 'copilotRemovalChoiceAcrossRestartVerified', 'zeroModelRequestsVerified', 'cleanupVerified']
 const packageFalse = ['newlyInstalledTargetHealthyAtFirstConsent', 'verifiedGithubReleaseReceiptForFixture', 'choicesAcrossInstallerUpgradeVerified', 'draftPersistedAcrossQuitVerified', 'promotionFailureRollbackVerified', 'managedHandoffVerified']
-const settings = { ...truths(settingsTrue), registeredSearchProviders: ['github-copilot-hosted'], realSearch: false }
+const settings = { schemaVersion: 3, ...truths(settingsTrue), registeredSearchProviders: ['github-copilot-hosted'], realSearch: false }
 const usageCapability = { id: 'account-quota-composer-usage', required: true, evidenceScope: 'synthetic-quota-and-public-remote-ui-contracts-not-live-account-access', signedOutNetworkRegressionDeclared: true, lifecycleRegressionDeclared: true }
 const signedOut = { usageTriggerCount: 0, accountUsageTextCount: 0, usageSurfaceAbsent: true, hostQuotaRequestInstrumentation: 'not-available-in-packaged-smoke' }
 
@@ -198,12 +198,33 @@ function fixture(temporaryRoot = tmpdir()) {
     ['launch', 'version-menu', 'application', 'account', 'usage-readonly', 'settings-readonly', 'packaged-graph', 'closed']
       .map(event => `${phase}:${event}`))]
   timelineEvents.splice(timelineEvents.indexOf('restart:closed'), 0, 'restart:positive-usage')
-  save(join(packagedEvidence, 'functional-results.json'), { schemaVersion: 2, scope: 'packaged-functional-observations', ...identity, functionalAssertionsCompleted: true, normalAcceptanceCompleted: false, cleanupVerified: false,
+  timelineEvents.push(...['seeded', 'launch', 'application', 'observed', 'closed'].map(event => `native-composer:${event}`))
+  const nativeComposer = {
+    schemaVersion: 1, scope: 'actual-packaged-native-composer-and-released-client', ...identity,
+    sessionHistory: 'synthetic-persisted-in-isolated-home', quota: 'signed-out-host-response-no-credentials',
+    pluginSource: copilot, installedClientSha256: rawHash(clientPath),
+    geometry: [1280, 400].map(viewportWidth => ({
+      viewportWidth, dock: { x: 10, y: 10, width: viewportWidth - 20, height: 30 },
+      time: { x: 10, y: 10, width: 60, height: 22 }, usage: { x: 80, y: 10, width: 100, height: 22 },
+      copilot: { x: 192, y: 10, width: 130, height: 22 },
+      nativeStyle: { fontSize: '13px', lineHeight: '20px', color: 'rgb(100, 100, 100)' },
+      copilotStyle: { fontSize: '13px', lineHeight: '20px', color: 'rgb(100, 100, 100)' },
+    })),
+    nativeDialogs: {
+      time: { opened: true, closedOnEscape: true, focusReturned: true },
+      usage: { opened: true, closedOnEscape: true, focusReturned: true },
+    },
+    copilotDialog: { signedOutObserved: true, sessionCreditsCount: 0, resetCount: 0, epochTextCount: 0, focusReturned: true },
+    rendererErrors: [], realModelRound: false, realOAuth: false,
+  }
+  save(join(packagedEvidence, 'native-composer-geometry.json'), nativeComposer)
+  save(join(packagedEvidence, 'functional-results.json'), { schemaVersion: 3, scope: 'packaged-functional-observations', ...identity, functionalAssertionsCompleted: true, normalAcceptanceCompleted: false, cleanupVerified: false,
     ...truths(packagedTrue), ...truths(packagedFalse, false), desktopVersion: plan.version,
     runtimeVersion: plan.upstreamVersion, versionMenus: menus, plugin: copilot,
     transport: 'official Web-backed Desktop Host with packaged Electron dsh-app origin bridge', restartReceiptSha256: rawHash(join(packagedEvidence, 'initial-desktop-plugin-receipts.json')),
     copilotUsageCapability: usageCapability, signedOutCopilotUsage: [signedOut, signedOut], hostQuotaNoNetworkEvidence: 'immutable-plugin-ci-regression-only',
     positiveCopilotUsage: positiveCases, positiveUsageHostTransport: 'not-provided-to-isolated-fixture',
+    settingsAcceptance: [settings, settings], nativeComposer,
     timeline: timelineEvents.map((event, milliseconds) => ({ event, milliseconds })) })
   save(join(packagedEvidence, 'failure.json'), { schemaVersion: 2, scope: 'packaged-acceptance-failure', ...identity, error: `Error: packaged observer cleanup canary ${token}`, cleanupCompleted: true, cleanupVerified: true, cleanupErrors: [], diagnosticErrors: [] })
   save(join(packagedEvidence, 'observer-cleanup.json'), { schemaVersion: 3, scope: 'unexpected-observer-failure-cleanup', ...identity,
@@ -246,6 +267,13 @@ function mutatePositive(callback: (value: Json) => void): void {
   current.seal()
 }
 
+// Only synthetic mutation fixtures may reseal: original producer integration tests never do so.
+function mutateNative(callback: (value: Json) => void): void {
+  current.edit(packaged('native-composer-geometry.json'), callback)
+  current.edit(packaged('functional-results.json'), (value) => { value.nativeComposer = json(packaged('native-composer-geometry.json')) })
+  current.seal()
+}
+
 function inventory(directory: string): Record<string, string> {
   const result: Record<string, string> = {}
   for (const name of readdirSync(directory)) {
@@ -279,10 +307,10 @@ describe('CI-only fork qualification from retained evidence', () => {
     expect(boundary.gitCalls).toEqual([])
   })
 
-  it('requires functional schema2 rather than accepting a legacy functional receipt', () => {
-    mutate(packaged('functional-results.json'), (value) => { value.schemaVersion = 1 }); expect(verify).toThrow()
+  it.each([1, 2])('requires functional schema3 rather than accepting legacy schema%s', (schemaVersion) => {
+    mutate(packaged('functional-results.json'), (value) => { value.schemaVersion = schemaVersion }); expect(verify).toThrow()
   })
-  it.each(['positiveCopilotUsage', 'positiveUsageHostTransport'])('requires functional v2 field %s', (field) => {
+  it.each(['positiveCopilotUsage', 'positiveUsageHostTransport', 'settingsAcceptance', 'nativeComposer'])('requires functional v3 field %s', (field) => {
     mutate(packaged('functional-results.json'), (value) => { Reflect.deleteProperty(value, field) }); expect(verify).toThrow()
   })
   it('binds original positive usage bytes in the CI-only input inventory', () => {
@@ -359,6 +387,115 @@ describe('CI-only fork qualification from retained evidence', () => {
       else object(event).event = 'restart:unknown-usage'
       timeline.forEach((item, milliseconds) => { object(item).milliseconds = milliseconds })
     }); expect(verify).toThrow()
+  })
+
+  it('requires the raw native sidecar and binds its original bytes, not reconstructed JSON', () => {
+    const path = packaged('native-composer-geometry.json')
+    const before = verify().inputs['packaged.nativeComposer']
+    expect(before).toBe(rawHash(path))
+    writeFileSync(path, readFileSync(path, 'utf8') + ' ')
+    expect(verify().inputs['packaged.nativeComposer']).toBe(rawHash(path))
+    expect(verify().inputs['packaged.nativeComposer']).not.toBe(before)
+    rmSync(path)
+    expect(verify).toThrow()
+  })
+  it.each(['schemaVersion', 'scope', 'sessionHistory', 'quota', 'pluginSource', 'installedClientSha256', 'geometry', 'nativeDialogs', 'copilotDialog', 'rendererErrors', 'realModelRound', 'realOAuth'])('rejects missing native %s even with matching resealed functional data', (field) => {
+    mutateNative((value) => { Reflect.deleteProperty(value, field) }); expect(verify).toThrow()
+  })
+  it.each(['evidenceId', 'sourceCommit', 'sourceTree', 'runId', 'runAttempt', 'planSha256', 'runtimeSha256', 'executableSha256', 'provisioningSha256', 'capabilitySha256'])('rejects replayed native identity %s after resealing', (field) => {
+    mutateNative((value) => { value[field] = 'foreign' }); expect(verify).toThrow()
+  })
+  it.each(['schemaVersion', 'scope', 'sessionHistory', 'quota', 'pluginSource', 'installedClientSha256'])('rejects changed native %s', (field) => {
+    mutateNative((value) => { value[field] = field.endsWith('Sha256') ? '0'.repeat(64) : 'foreign' }); expect(verify).toThrow()
+  })
+  it.each(['realModelRound', 'realOAuth', 'liveQuotaVerified'])('rejects expanded native scope %s', (field) => {
+    mutateNative((value) => { value[field] = true }); expect(verify).toThrow()
+  })
+  it('rejects native renderer errors', () => {
+    mutateNative((value) => { value.rendererErrors = ['observed error'] }); expect(verify).toThrow()
+  })
+  it('rejects native bytes disagreeing with functional observations', () => {
+    current.edit(packaged('native-composer-geometry.json'), (value) => { value.quota = 'foreign' }); expect(verify).toThrow()
+  })
+  it.each(['missing', 'duplicate', 'reversed', 'wrong-width'])('rejects %s native viewport observations', (damage) => {
+    mutateNative((value) => {
+      const geometry = array(value.geometry)
+      if (damage === 'missing') geometry.pop()
+      else if (damage === 'duplicate') geometry[1] = geometry[0]
+      else if (damage === 'reversed') geometry.reverse()
+      else object(geometry[0]).viewportWidth = 1200
+    }); expect(verify).toThrow()
+  })
+  it.each([0, 1].flatMap(index => ['dock', 'time', 'usage', 'copilot'].flatMap(box => ['missing', 'extra', 'zero', 'negative', 'nonfinite', 'string'].map(damage => ({ index, box, damage })))))('rejects native viewport $index $box $damage geometry', ({ index, box, damage }) => {
+    mutateNative((value) => {
+      const geometry = object(array(value.geometry)[index])
+      if (damage === 'missing') Reflect.deleteProperty(geometry, box)
+      else {
+        const rectangle = object(geometry[box])
+        if (damage === 'extra') rectangle.hidden = false
+        else rectangle.width = damage === 'zero' ? 0 : damage === 'negative' ? -1 : damage === 'nonfinite' ? null : '20'
+      }
+    }); expect(verify).toThrow()
+  })
+  it.each(['overlap', 'dock-overflow', 'viewport-overflow', 'wide-stacked', 'wide-wrong-order', 'style-mismatch', 'style-extra', 'style-empty', 'style-unit', 'geometry-extra'])('rejects semantically invalid native layout %s after resealing', (damage) => {
+    mutateNative((value) => {
+      const geometry = object(array(value.geometry)[0])
+      const copilot = object(geometry.copilot)
+      if (damage === 'overlap') copilot.x = object(geometry.usage).x
+      else if (damage === 'dock-overflow') object(geometry.dock).width = 100
+      else if (damage === 'viewport-overflow') { copilot.x = 1300; object(geometry.dock).width = 1500 }
+      else if (damage === 'wide-stacked') copilot.y = 60
+      else if (damage === 'wide-wrong-order') { object(geometry.time).x = 300; object(geometry.usage).x = 160; copilot.x = 10 }
+      else if (damage === 'style-mismatch') object(geometry.copilotStyle).fontSize = '14px'
+      else if (damage === 'style-extra') object(geometry.nativeStyle).weight = '400'
+      else if (damage === 'style-empty') { object(geometry.nativeStyle).color = ''; object(geometry.copilotStyle).color = '' }
+      else if (damage === 'style-unit') { object(geometry.nativeStyle).lineHeight = 'normal'; object(geometry.copilotStyle).lineHeight = 'normal' }
+      else geometry.extra = true
+    }); expect(verify).toThrow()
+  })
+  it.each(['time', 'usage'].flatMap(dialog => ['opened', 'closedOnEscape', 'focusReturned', 'extra'].map(field => ({ dialog, field }))))('rejects native dialog $dialog $field', ({ dialog, field }) => {
+    mutateNative((value) => { objectAt(value, 'nativeDialogs', dialog)[field] = false }); expect(verify).toThrow()
+  })
+  it.each(['signedOutObserved', 'focusReturned', 'sessionCreditsCount', 'resetCount', 'epochTextCount', 'extra'])('rejects Copilot native dialog %s', (field) => {
+    mutateNative((value) => { object(value.copilotDialog)[field] = field.endsWith('Count') ? 1 : false }); expect(verify).toThrow()
+  })
+  it.each(['initial', 'restart', 'native-composer'])('admits exactly positioned %s provider-deferred event', (phase) => {
+    mutate(packaged('functional-results.json'), (value) => {
+      const timeline = array(value.timeline)
+      const index = timeline.findIndex(item => object(item).event === `${phase}:application`)
+      timeline.splice(index + 1, 0, { event: `${phase}:provider-deferred`, milliseconds: 0 })
+      timeline.forEach((item, milliseconds) => { object(item).milliseconds = milliseconds })
+    })
+    expect(verify().packagedFunctionalVerified).toBe(true)
+  })
+  it.each(['missing', 'duplicate', 'reordered', 'early', 'deferred-before', 'deferred-duplicate'])('rejects %s native phase timeline', (damage) => {
+    mutate(packaged('functional-results.json'), (value) => {
+      const timeline = array(value.timeline)
+      const index = timeline.findIndex(item => object(item).event === 'native-composer:application')
+      if (damage === 'missing') timeline.splice(index, 1)
+      else if (damage === 'duplicate') timeline.splice(index, 0, timeline[index])
+      else if (damage === 'reordered') [timeline[index], timeline[index + 1]] = [timeline[index + 1], timeline[index]]
+      else if (damage === 'early') { const [event] = timeline.splice(index, 1); timeline.splice(1, 0, event) }
+      else if (damage === 'deferred-before') timeline.splice(index, 0, { event: 'native-composer:provider-deferred' })
+      else timeline.splice(index + 1, 0, { event: 'native-composer:provider-deferred' }, { event: 'native-composer:provider-deferred' })
+      timeline.forEach((item, milliseconds) => { object(item).milliseconds = milliseconds })
+    }); expect(verify).toThrow()
+  })
+  it.each(['legacy-fields', 'legacy-schema', 'missing', 'extra', 'false-retirement', 'short', 'sidecar-mismatch'])('rejects %s settings acceptance', (damage) => {
+    mutate(packaged('functional-results.json'), (value) => {
+      const observations = array(value.settingsAcceptance)
+      const record = object(observations[0])
+      if (damage === 'legacy-fields') { Reflect.deleteProperty(record, 'accountViewLoaded'); record.modelRolesViewLoaded = true }
+      else if (damage === 'legacy-schema') record.schemaVersion = 2
+      else if (damage === 'missing') Reflect.deleteProperty(record, 'retiredModelRolesAbsent')
+      else if (damage === 'extra') record.currentWorkspaceReadOnly = true
+      else if (damage === 'false-retirement') record.retiredModelRolesAbsent = false
+      else if (damage === 'short') observations.pop()
+      else record.registeredSearchProviders = ['github-copilot-hosted', 'foreign']
+    }); expect(verify).toThrow()
+  })
+  it.each(['candidate', 'candidate-restart'])('requires schema3 installed %s settings without changing baseline', (round) => {
+    mutate(installed(`${round}.json`), (value) => { object(value.actualHostSettingsViews).schemaVersion = 2 }); expect(verify).toThrow()
   })
 
   it('binds helper bootstrap/ACK/cancel to finalized helper bytes without claiming live handoff', () => {
@@ -451,7 +588,7 @@ describe('CI-only fork qualification from retained evidence', () => {
     mutate(packaged('functional-results.json'), (value) => { value.provisioningSha256 = sha(JSON.stringify(plan.desktopProvisioning)) }); expect(verify).toThrow()
   })
   it.each(['initial', 'restart'])('crosschecks original %s observations', (phase) => {
-    mutate(packaged(`${phase}-settings-readonly.json`), (value) => { value.currentWorkspaceReadOnly = false }); expect(verify).toThrow()
+    mutate(packaged(`${phase}-settings-readonly.json`), (value) => { value.retiredModelRolesAbsent = false }); expect(verify).toThrow()
   })
   it.each(['initial-version-menu.json', 'restart-version-menu.json'])('rejects native popup claims in %s', (file) => {
     mutate(packaged(file), (value) => { value.nativePopupOpened = true }); expect(verify).toThrow()

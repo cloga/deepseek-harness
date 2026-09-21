@@ -18,6 +18,7 @@ import {
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
+import { fileURLToPath } from 'node:url'
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright'
 import { desktopSmokeEnvironment } from '../../scripts/smoke-environment.ts'
 import { parseDesktopForkReleasePlan } from '../../scripts/fork-release.ts'
@@ -33,8 +34,10 @@ import {
   verifyPackagedDesktopRuntime,
 } from '../../scripts/packaged-runtime.mjs'
 import { inspectPackagedGraphResolution, packagedGraphCheckArguments } from './packaged-graph-check.ts'
-import { inspectPackagedCopilotSettings } from './copilot-settings-smoke.ts'
+import { inspectPackagedCopilotSettings, type CopilotSettingsEvidence } from './copilot-settings-smoke.ts'
 import { runPackagedCopilotObserverCanary, writePackagedProof, type PackagedProofIdentity } from './copilot-observer-smoke.ts'
+import { inspectNativeComposerGeometry, type NativeComposerInspection } from './native-composer-geometry.ts'
+import { observeNativeComposerErrors } from './native-composer-errors.ts'
 import {
   inspectCopilotUsageCapability,
   inspectSignedOutCopilotUsage,
@@ -96,7 +99,7 @@ function snapshotExpectedCoreSource(value: unknown): ExpectedCoreSource {
 export interface PackagedCopilotAcceptanceOptions {
   readonly application: string
   readonly output: string
-  /** Runs once after both Desktop processes close and restart receipts match, before owned cleanup. */
+  /** Runs once after all owned Desktop processes close and acceptance passes, before owned cleanup. */
   readonly inspectProfile?: (paths: PackagedCopilotProfileInspection) => void | Promise<void>
 }
 
@@ -162,7 +165,8 @@ export async function runPackagedCopilotAcceptance(
   const application = resolve(options.application)
   const output = resolve(options.output)
   mkdirSync(output, { recursive: true })
-  for (const file of ['positive-usage.json', 'functional-results.json', 'acceptance.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json']) {
+  for (const file of ['positive-usage.json', 'native-composer-seed.json', 'native-composer-geometry.json',
+    'functional-results.json', 'acceptance.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json']) {
     assert(!existsSync(join(output, file)), `Packaged acceptance requires fresh ${file} evidence`)
   }
   const ownedDirectories: string[] = []
@@ -176,6 +180,7 @@ export async function runPackagedCopilotAcceptance(
   const usageCapabilities: CopilotUsageCapabilityEvidence[] = []
   const signedOutUsage: SignedOutCopilotUsageEvidence[] = []
   const positiveUsage: PositiveCopilotUsageEvidence[] = []
+  const settingsObservations: CopilotSettingsEvidence[] = []
   const started = performance.now()
   const timeline: { event: string; milliseconds: number }[] = []
   const record = (event: string): void => { timeline.push({ event, milliseconds: performance.now() - started }) }
@@ -291,6 +296,8 @@ export async function runPackagedCopilotAcceptance(
     )
     writeFileSync(join(output, 'executable.json'), metadata.trim() + '\n')
     record('package-identity')
+    let reviewedClientReader: (() => string) | undefined
+    let positiveClientSha256: string | undefined
     for (const phase of ['initial', 'restart'] as const) {
       record(`${phase}:launch`)
       app = await electron.launch({
@@ -361,8 +368,8 @@ export async function runPackagedCopilotAcceptance(
         'Read-only acceptance must not create or open a verification URL')
       await page.screenshot({ path: join(output, `${phase}-account.png`) })
       const settingsEvidence = await inspectPackagedCopilotSettings(settings)
+      settingsObservations.push(settingsEvidence)
       writeFileSync(join(output, `${phase}-settings-readonly.json`), JSON.stringify(settingsEvidence, undefined, 2) + '\n')
-      await settings.locator('[data-dsh-dual-model-card]').screenshot({ path: join(output, `${phase}-model-roles.png`) })
       await settings.locator('[data-dsh-web-search-routing]').screenshot({ path: join(output, `${phase}-search-catalog.png`) })
       record(`${phase}:settings-readonly`)
       assertDesktopProvisioningInventory(profile, plan)
@@ -439,6 +446,8 @@ export async function runPackagedCopilotAcceptance(
           return sha256
         }
         const installedClientSha256 = readReviewedClient()
+        reviewedClientReader = readReviewedClient
+        positiveClientSha256 = installedClientSha256
         let restoreCapture: (() => Promise<void>) | undefined
         try {
           restoreCapture = await capturePackagedUsageModules(page)
@@ -476,8 +485,89 @@ export async function runPackagedCopilotAcceptance(
     assert.equal(inventories[0], inventories[1], 'Restart must reuse the verified plugin receipts')
     assert.deepEqual(usageCapabilities[0], usageCapabilities[1], 'Restart must preserve the required usage capability')
     assert.deepEqual(signedOutUsage[0], signedOutUsage[1], 'Restart must preserve the absent signed-out usage surface')
+    assert.deepEqual(settingsObservations[0], settingsObservations[1], 'Restart must preserve schema-3 settings evidence')
+    const seeder = fileURLToPath(new URL('./seed-native-composer.mjs', import.meta.url))
+    const seedOwnership = randomUUID()
+    writeFileSync(join(home, 'native-composer-owner.json'), JSON.stringify({
+      kind: 'desktop-native-composer-smoke', home, token: seedOwnership,
+    }), { flag: 'wx' })
+    assert(reviewedClientReader !== undefined && positiveClientSha256 !== undefined)
+    const readNativeClient = reviewedClientReader
+    assert.equal(readNativeClient(), positiveClientSha256, 'Native composer must use the positive round Client bytes')
+    assert.equal(digest(readFileSync(application)), observedCoreSource.executableSha256, 'Packaged executable changed before seeding')
+    const seedPath = join(output, 'native-composer-seed.json')
+    const seedOutput = openSync(seedPath, 'wx')
+    try {
+      execFileSync(application, [seeder, runtimeRoot, home, seedOwnership], {
+        cwd: profile, env: packagedDesktopRuntimeEnvironment(environment),
+        stdio: ['ignore', seedOutput, 'inherit'], timeout: 120_000, windowsHide: true,
+      })
+    } catch (error) { retain(error); throw error }
+    finally {
+      try { closeSync(seedOutput) } catch (error) { cleanupErrors.push(describeError(error)); retain(error) }
+    }
+    if (failed) throw failure
+    const seeded = lstatSync(seedPath)
+    assert(seeded.isFile() && !seeded.isSymbolicLink() && seeded.size > 0 && seeded.size <= 8192)
+    assert.deepEqual(JSON.parse(readFileSync(seedPath, 'utf8')), {
+      sessionId: 'desktop-inline-composer-synthetic', scope: 'test-owned-persisted-session-with-synthetic-history-and-token-counts',
+      workspaceRegistered: true, provider: 'github-copilot', seederModelCalls: 0, liveAccountQuota: false,
+    })
+    assert(!existsSync(legacySdkLoaded), 'Native seeding must not load the ancestor SDK')
+    record('native-composer:seeded')
+    record('native-composer:launch')
+    app = await electron.launch({ executablePath: application, args: [`--user-data-dir=${userData}`], env: environment, timeout: 120_000 })
+    assert.equal(resolve(await app.evaluate(({ app }) => app.getPath('userData'))), userData)
+    page = await app.firstWindow()
+    page.setDefaultTimeout(120_000)
+    await page.waitForFunction(packagedCopilotStartupReady, undefined, { timeout: 300_000 })
+    if (page.url() !== 'dsh-app://app/') {
+      throw new Error(`Native composer startup failed: ${safeDiagnostic(await page.locator('#error').innerText())}`)
+    }
+    record('native-composer:application')
+    const inspectedPage = page
+    const providerDialog = inspectedPage.getByRole('dialog', { name: 'Add an API key to get started', exact: true })
+    let nativeObservation: { inspection: NativeComposerInspection; rendererErrors: readonly string[] } | undefined
+    let providerDeferred = false
+    try {
+      await inspectedPage.addLocatorHandler(providerDialog, async () => {
+        assert.equal(providerDeferred, false, 'Native composer provider choice must occur at most once')
+        providerDeferred = true
+        await providerDialog.getByRole('button', { name: 'Configure later', exact: true }).click()
+        await providerDialog.waitFor({ state: 'detached' })
+        record('native-composer:provider-deferred')
+      }, { times: 1 })
+      nativeObservation = await observeNativeComposerErrors(inspectedPage, async () => {
+        const inspection = await inspectNativeComposerGeometry(inspectedPage, output)
+        assert.equal(digest(readFileSync(join(profile, 'desktop-plugin-receipts.json'))), inventories[0])
+        assert.equal(readNativeClient(), positiveClientSha256, 'Native inspection changed released Client bytes')
+        assert(!existsSync(legacySdkLoaded), 'Native Host must not load the ancestor SDK')
+        return inspection
+      }, (error) => { cleanupErrors.push(describeError(error)) })
+    } catch (error) { retain(error); throw error }
+    finally {
+      try { await inspectedPage.removeLocatorHandler(providerDialog) }
+      catch (error) { cleanupErrors.push(describeError(error)); retain(error) }
+    }
+    if (failed) throw failure
+    assert(nativeObservation !== undefined)
+    const { inspection: nativeInspection, rendererErrors: nativeErrors } = nativeObservation
+    const nativeComposerEvidence = {
+      ...identity, schemaVersion: 1, scope: 'actual-packaged-native-composer-and-released-client',
+      sessionHistory: 'synthetic-persisted-in-isolated-home', quota: 'signed-out-host-response-no-credentials',
+      pluginSource: copilot.source, installedClientSha256: positiveClientSha256,
+      geometry: nativeInspection.geometry, nativeDialogs: nativeInspection.nativeDialogs,
+      copilotDialog: nativeInspection.copilotDialog,
+      rendererErrors: nativeErrors, realModelRound: false, realOAuth: false,
+    }
+    writePackagedProof(output, 'native-composer-geometry.json', nativeComposerEvidence)
+    record('native-composer:observed')
+    await app.close()
+    app = undefined
+    page = undefined
+    record('native-composer:closed')
     functional = {
-      ...identity, schemaVersion: 2, scope: 'packaged-functional-observations',
+      ...identity, schemaVersion: 3, scope: 'packaged-functional-observations',
       functionalAssertionsCompleted: true, normalAcceptanceCompleted: false, cleanupVerified: false,
       desktopVersion: reviewed.version,
       versionMenus,
@@ -492,8 +582,8 @@ export async function runPackagedCopilotAcceptance(
       ancestorSdkLoaded: false,
       accountEntryVisible: true,
       manageCompatibilityDisclosureAbsent: true,
-      modelRolesViewLoaded: true,
-      currentWorkspaceReadOnly: true,
+      settingsAcceptance: settingsObservations,
+      nativeComposer: nativeComposerEvidence,
       searchProviderCatalogLoaded: true,
       providerOnlySearchRouting: true,
       fallbackProviderLabel: true,

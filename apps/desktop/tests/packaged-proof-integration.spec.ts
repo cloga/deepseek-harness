@@ -1,5 +1,6 @@
 /** Actual packaged receipt producers feed the real verifier; native/UI and installed evidence remain inert unit boundaries. */
 import { createHash } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
@@ -17,7 +18,7 @@ import type { PositiveCopilotUsageEvidence } from './fixtures/copilot-usage-posi
 const boundary = vi.hoisted(() => ({
   pin: '', temporaryBase: '', launch: vi.fn(), exec: vi.fn(), runtimeRoot: vi.fn(), runtimeBytes: vi.fn(), environment: vi.fn(),
   menu: vi.fn(), settings: vi.fn(), usage: vi.fn(), capability: vi.fn(), allocated: [] as string[],
-  reviewedPlugin: undefined as unknown, installedClientSha256: '',
+  reviewedPlugin: undefined as unknown, installedClientSha256: '', native: vi.fn(),
 }))
 vi.mock('node:fs', async (original) => {
   const fs = await original<typeof import('node:fs')>()
@@ -56,6 +57,11 @@ vi.mock('../scripts/smoke-environment.ts', () => ({ desktopSmokeEnvironment: bou
 vi.mock('../src/plugin-receipts.ts', () => ({ assertDesktopProvisioningInventory: vi.fn() }))
 vi.mock('./fixtures/desktop-version-menu-smoke.ts', () => ({ inspectDesktopVersionMenu: boundary.menu }))
 vi.mock('./fixtures/copilot-settings-smoke.ts', () => ({ inspectPackagedCopilotSettings: boundary.settings }))
+vi.mock('./fixtures/native-composer-geometry.ts', async original => ({
+  ...await original<typeof import('./fixtures/native-composer-geometry.ts')>(),
+  // Only browser observations are synthetic; the consumer's shared geometry assertion remains real.
+  inspectNativeComposerGeometry: boundary.native,
+}))
 vi.mock('./fixtures/copilot-usage-smoke.ts', () => ({ inspectCopilotUsageCapability: boundary.capability, inspectSignedOutCopilotUsage: boundary.usage }))
 
 const source = 'a'.repeat(40)
@@ -72,7 +78,7 @@ function readRecord(path: string): Record<string, unknown> {
 }
 const flags = (names: readonly string[], value: boolean): Record<string, boolean> => Object.fromEntries(names.map(name => [name, value]))
 const settings = {
-  modelRolesViewLoaded: true, currentWorkspaceReadOnly: true, searchProviderCatalogLoaded: true,
+  schemaVersion: 3, accountViewLoaded: true, retiredModelRolesAbsent: true, searchProviderCatalogLoaded: true,
   providerOnlySearchRouting: true, fallbackProviderLabel: true, registeredSearchProviders: ['github-copilot-hosted'], realSearch: false,
 }
 const capabilityEvidence = {
@@ -165,6 +171,20 @@ function integrationFixture(alteredClientBytes?: string) {
   boundary.settings.mockResolvedValue(settings)
   boundary.capability.mockReturnValue(capabilityEvidence)
   boundary.usage.mockResolvedValue(signedOut)
+  boundary.native.mockResolvedValue({
+    geometry: [1280, 400].map(viewportWidth => ({
+      viewportWidth, dock: { x: 10, y: 10, width: viewportWidth - 20, height: 30 },
+      time: { x: 10, y: 10, width: 60, height: 22 }, usage: { x: 80, y: 10, width: 100, height: 22 },
+      copilot: { x: 192, y: 10, width: 130, height: 22 },
+      nativeStyle: { fontSize: '13px', lineHeight: '20px', color: 'rgb(100, 100, 100)' },
+      copilotStyle: { fontSize: '13px', lineHeight: '20px', color: 'rgb(100, 100, 100)' },
+    })),
+    nativeDialogs: {
+      time: { opened: true, closedOnEscape: true, focusReturned: true },
+      usage: { opened: true, closedOnEscape: true, focusReturned: true },
+    },
+    copilotDialog: { signedOutObserved: true, sessionCreditsCount: 0, resetCount: 0, epochTextCount: 0, focusReturned: true },
+  })
   type Locator = {
     waitFor(): Promise<void>
     click(): Promise<void>
@@ -182,8 +202,11 @@ function integrationFixture(alteredClientBytes?: string) {
   const positiveRoutes: string[] = []
   let captureDisposed = false
   let captureRestored = false
+  const events = new EventEmitter()
   const page = {
-    ...locator, setDefaultTimeout() {}, waitForFunction: async () => {}, url: () => 'dsh-app://app/', isClosed: () => false,
+    ...locator, on: events.on.bind(events), off: events.off.bind(events),
+    addLocatorHandler: async () => {}, removeLocatorHandler: async () => {},
+    setDefaultTimeout() {}, waitForFunction: async () => {}, url: () => 'dsh-app://app/', isClosed: () => false,
     addInitScript: async (script: string) => {
       expect(script.endsWith('\ncaptureUsageModulesInBrowser()')).toBe(true)
       return { dispose: async () => { captureDisposed = true } }
@@ -213,7 +236,7 @@ function integrationFixture(alteredClientBytes?: string) {
     save(join(profile, 'package.json'), { dependencies: { [plugin.packageName]: `file:.desktop-plugin-artifacts/${plugin.sha256}.tgz` }, dsh: { profile: { bundles: [plugin.packageName] } } })
     return {
       process: () => ({ stderr: { on() {} } }), firstWindow: async () => page, close: async () => {},
-      evaluate: async () => evaluations++ % 2 === 0 ? join(home, 'electron-user-data') : { node: '24.18.1', electron: '44.0.0' },
+      evaluate: async () => rounds === 3 || evaluations++ % 2 === 0 ? join(home, 'electron-user-data') : { node: '24.18.1', electron: '44.0.0' },
     }
   })
   boundary.exec.mockImplementation((file: string, args: string[], options?: { stdio?: (string | number | undefined)[] }) => {
@@ -223,6 +246,16 @@ function integrationFixture(alteredClientBytes?: string) {
     }
     if (file.endsWith('powershell.exe')) return JSON.stringify(metadata)
     expect(file).toBe(application)
+    if (args[0]?.endsWith('seed-native-composer.mjs')) {
+      expect(args.slice(1, 3)).toEqual([runtimeRoot, home])
+      const descriptor = options?.stdio?.[1]
+      expect(typeof descriptor).toBe('number')
+      writeFileSync(descriptor as number, JSON.stringify({
+        sessionId: 'desktop-inline-composer-synthetic', scope: 'test-owned-persisted-session-with-synthetic-history-and-token-counts',
+        workspaceRegistered: true, provider: 'github-copilot', seederModelCalls: 0, liveAccountQuota: false,
+      }))
+      return
+    }
     // The actual graph-argument producer supplies the profile/runtime; no Electron child is executed.
     expect(args.slice(0, 2)).toEqual(['--input-type=module', '--eval'])
     expect(args[3]).toBe(profile); expect(args[4]).toBe(runtimeRoot)
@@ -337,7 +370,7 @@ describe('actual owner/wrapper receipt producer to real qualification consumer',
   it('verifies original emitted receipts and before-cleanup diagnostics without rewriting any packaged evidence', async () => {
     const fixture = integrationFixture()
     await runPackagedCopilotObserverCanary(fixture.ownerOptions, runPackagedCopilotAcceptance)
-    expect(fixture.rounds).toBe(2)
+    expect(fixture.rounds).toBe(3)
     expect(fixture.positiveRoutes).toEqual(['github-copilot', 'github-copilot-preview'])
     expect(fixture.captureDisposed).toBe(true)
     expect(fixture.captureRestored).toBe(true)
@@ -346,7 +379,9 @@ describe('actual owner/wrapper receipt producer to real qualification consumer',
     const summary = verifyForkQualification(fixture.options)
     const functional = readRecord(join(fixture.options.packagedEvidence, 'functional-results.json'))
     const positive = readRecord(join(fixture.options.packagedEvidence, 'positive-usage.json'))
-    expect(functional.schemaVersion).toBe(2)
+    expect(functional.schemaVersion).toBe(3)
+    expect(functional.settingsAcceptance).toEqual([settings, settings])
+    expect(functional.nativeComposer).toEqual(readRecord(join(fixture.options.packagedEvidence, 'native-composer-geometry.json')))
     expect(functional.positiveCopilotUsage).toEqual(positive.cases)
     expect(positive.installedClientSha256).toBe(boundary.installedClientSha256)
     expect(summary).toMatchObject({
@@ -354,7 +389,7 @@ describe('actual owner/wrapper receipt producer to real qualification consumer',
     })
     for (const [name, file] of [
       ['functional', 'functional-results.json'], ['failure', 'failure.json'], ['observer', 'observer-cleanup.json'],
-      ['suite', 'packaged-suite.json'], ['positiveUsage', 'positive-usage.json'],
+      ['suite', 'packaged-suite.json'], ['positiveUsage', 'positive-usage.json'], ['nativeComposer', 'native-composer-geometry.json'],
     ] as const) {
       expect(summary.inputs[`packaged.${name}`]).toBe(original[file])
     }
@@ -369,6 +404,49 @@ describe('actual owner/wrapper receipt producer to real qualification consumer',
     const positive = readRecord(path)
     positive.hostTransport = 'unexpected-live-transport'
     save(path, positive)
+    expect(() => verifyForkQualification(fixture.options)).toThrow()
+  })
+
+  it.each(['missing', 'foreign-run', 'dialog', 'geometry', 'errors', 'client'])('rejects %s native sidecar damage without reconstructing producer receipts', async (damage) => {
+    const fixture = integrationFixture()
+    await runPackagedCopilotObserverCanary(fixture.ownerOptions, runPackagedCopilotAcceptance)
+    expect(verifyForkQualification(fixture.options).packagedFunctionalVerified).toBe(true)
+    const path = join(fixture.options.packagedEvidence, 'native-composer-geometry.json')
+    const value = readRecord(path)
+    if (damage === 'missing') {
+      const { unlinkSync } = await vi.importActual<typeof import('node:fs')>('node:fs')
+      unlinkSync(path)
+    } else {
+      if (damage === 'foreign-run') value.runId = '456'
+      else if (damage === 'dialog') value.nativeDialogs = {}
+      else if (damage === 'geometry') value.geometry = []
+      else if (damage === 'errors') value.rendererErrors = ['retained error']
+      else value.installedClientSha256 = '0'.repeat(64)
+      save(path, value)
+    }
+    expect(() => verifyForkQualification(fixture.options)).toThrow()
+  })
+
+  it('hashes original native bytes including whitespace instead of synthesizing them from functional data', async () => {
+    const fixture = integrationFixture()
+    await runPackagedCopilotObserverCanary(fixture.ownerOptions, runPackagedCopilotAcceptance)
+    const before = verifyForkQualification(fixture.options).inputs['packaged.nativeComposer']
+    const path = join(fixture.options.packagedEvidence, 'native-composer-geometry.json')
+    writeFileSync(path, readFileSync(path, 'utf8') + ' ')
+    const after = verifyForkQualification(fixture.options).inputs['packaged.nativeComposer']
+    expect(after).toBe(rawHash(path))
+    expect(after).not.toBe(before)
+  })
+
+  it('preserves the actual native inspection failure and withholds functional and suite success', async () => {
+    const fixture = integrationFixture()
+    const primary = new Error('inert native inspection failure')
+    boundary.native.mockRejectedValueOnce(primary)
+    await expect(runPackagedCopilotObserverCanary(fixture.ownerOptions, runPackagedCopilotAcceptance)).rejects.toBe(primary)
+    expect(fixture.rounds).toBe(3)
+    for (const name of ['native-composer-geometry.json', 'functional-results.json', 'packaged-suite.json', 'acceptance.json']) {
+      expect(existsSync(join(fixture.options.packagedEvidence, name))).toBe(false)
+    }
     expect(() => verifyForkQualification(fixture.options)).toThrow()
   })
 
