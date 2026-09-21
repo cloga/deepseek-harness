@@ -51,6 +51,7 @@ import { MANAGED_UPDATE_RECOVERY_ARGUMENT, managedUpdateRecoveryCommand } from '
 import { DesktopUpdateSchedule, resolveDesktopUpdateScheduleConfig } from './update-schedule.ts'
 import { desktopUpdateErrorSummary, presentDesktopUpdate } from './update-presentation.ts'
 import { desktopErrorState } from './startup-error.ts'
+import { installDesktopWindowNavigation } from './window-navigation.ts'
 import { DesktopMandatoryUpdatePolicy, resolveDesktopPolicyConfig, type DesktopPolicyState } from './mandatory-update-policy.ts'
 import { DesktopMandatoryUpdateWindow } from './mandatory-update-window.ts'
 import { DesktopPolicyTestAuth } from './policy-test-auth.ts'
@@ -160,9 +161,13 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
       webSecurity: true,
     },
   })
-  window.webContents.setWindowOpenHandler(({ url }) => {
-    if (['http:', 'https:'].includes(new URL(url).protocol)) void shell.openExternal(url)
-    return { action: 'deny' }
+  installDesktopWindowNavigation(window.webContents, {
+    openExternal: url => shell.openExternal(url),
+    openFailed: () => {
+      if (window.isDestroyed()) return
+      const messages = currentDesktopLocale().messages
+      dialog.showErrorBox(messages.externalLinkFailedTitle, messages.externalLinkFailedAdvice)
+    },
   })
   window.webContents.on('context-menu', (_event, { isEditable, selectionText, editFlags }) => {
     const items: MenuItemConstructorOptions[] = []
@@ -189,15 +194,6 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
           ? { label: messages[item.role as keyof typeof messages] } : {}),
         accelerator: '',
       }))).popup({ window })
-    }
-  })
-  window.webContents.on('will-navigate', (event, url) => {
-    const destination = new URL(url)
-    const current = new URL(window.webContents.getURL())
-    if (destination.protocol !== `${SCHEME}:`
-      && !(destination.protocol === 'http:' && destination.origin === current.origin)) {
-      event.preventDefault()
-      if (['http:', 'https:'].includes(destination.protocol)) void shell.openExternal(url)
     }
   })
   return window

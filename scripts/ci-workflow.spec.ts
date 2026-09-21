@@ -13,7 +13,45 @@ const root = resolve(import.meta.dirname, '..')
 const runnerPrivatePnpmDestination = /^\$\{\{ runner\.temp \}\}\/setup-pnpm-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}$/
 const nativeWindowsPnpmDestination = '${{ runner.temp }}/setup-pnpm-js-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}'
 
+function assertDevelopmentElectronPreparation(job: Record<string, unknown>, testCommand: string): void {
+  if (!Array.isArray(job.steps)) throw new TypeError('Windows test job must define steps')
+  const steps = job.steps.filter(isRecord)
+  const install = steps.findIndex(step => typeof step.run === 'string' && step.run.includes('pnpm install --frozen-lockfile'))
+  const prepare = steps.findIndex(step => step.run === 'node apps/desktop/node_modules/electron/install.js')
+  const test = steps.findIndex(step => step.run === testCommand)
+  expect(install).toBeGreaterThanOrEqual(0)
+  expect(prepare).toBeGreaterThan(install)
+  expect(test).toBeGreaterThan(prepare)
+  expect(steps[prepare]).toMatchObject({ shell: 'pwsh' })
+  expect(steps[prepare]).not.toHaveProperty('if')
+  expect(steps[prepare]).not.toHaveProperty('continue-on-error', true)
+}
+
 describe('CI workflow', () => {
+  it.each([
+    ['ci.yml', 'windows-coverage', 'pnpm run check:ci:coverage'],
+    ['ci-master.yml', 'serial-windows', 'pnpm run check:ci:windows-complete'],
+    ['desktop-fork-release.yml', 'build', 'pnpm exec vitest run apps/desktop apps/desktop-host --config=vitest.desktop-release.config.ts --maxWorkers=1'],
+  ])('prepares development Electron before the Windows tests in %s / %s', (file, name, command) => {
+    assertDevelopmentElectronPreparation(workflowJob(loadWorkflow('.github/workflows/' + file), name), command)
+  })
+
+  it.each(['omitted', 'late', 'ignored'])('rejects %s development Electron preparation', (damage) => {
+    const job = workflowJob(loadWorkflow('.github/workflows/ci.yml'), 'windows-coverage')
+    if (!Array.isArray(job.steps)) throw new TypeError('Windows coverage job must define steps')
+    const steps = job.steps.filter(isRecord)
+    const index = steps.findIndex(step => step.run === 'node apps/desktop/node_modules/electron/install.js')
+    expect(index).toBeGreaterThanOrEqual(0)
+    const preparation = steps[index]!
+    if (damage === 'ignored') preparation['continue-on-error'] = true
+    else {
+      steps.splice(index, 1)
+      if (damage === 'late') steps.push(preparation)
+      job.steps = steps
+    }
+    expect(() => { assertDevelopmentElectronPreparation(job, 'pnpm run check:ci:coverage') }).toThrow()
+  })
+
   it('prepares confinement before Node compatibility smokes', () => {
     const job = workflowJob(loadWorkflow('.github/workflows/ci.yml'), 'node-compat')
     if (!Array.isArray(job.steps)) throw new TypeError('Node compatibility job must define steps')

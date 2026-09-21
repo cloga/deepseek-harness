@@ -106,6 +106,10 @@ jobs:
       - name: Install from frozen lockfile
         run: pnpm install --frozen-lockfile
 
+      - name: Prepare development Electron for navigation tests
+        shell: pwsh
+        run: node apps/desktop/node_modules/electron/install.js
+
       # These guards consume source fixtures, not built application artifacts.
       - name: Verify installer-upgrade guard tests
         shell: pwsh

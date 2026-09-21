@@ -267,6 +267,10 @@ jobs:
             pnpm install --frozen-lockfile
           }
 
+      - name: Prepare development Electron for navigation tests
+        shell: pwsh
+        run: node apps/desktop/node_modules/electron/install.js
+
       - name: Run complete unsharded Windows gate inventory serially
         shell: pwsh
         env:
