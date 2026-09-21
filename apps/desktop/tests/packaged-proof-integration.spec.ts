@@ -305,8 +305,9 @@ function integrationFixture(alteredClientBytes?: string) {
   return {
     ownerOptions: { application, output: packagedEvidence }, get rounds() { return rounds },
     positiveRoutes, get captureDisposed() { return captureDisposed }, get captureRestored() { return captureRestored }, options: {
-    planPath, releaseAssets, packagedEvidence, upgradeRoot, baselineDirectory, expectedSource: source, runId: '123', runAttempt: '2',
-  } }
+      planPath, releaseAssets, packagedEvidence, upgradeRoot, baselineDirectory, expectedSource: source, runId: '123', runAttempt: '2',
+    },
+  }
 }
 
 function packagedHashes(directory: string): Record<string, string> {
