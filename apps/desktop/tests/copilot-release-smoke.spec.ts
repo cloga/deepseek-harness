@@ -10,8 +10,9 @@ import type { PositiveCopilotUsageEvidence } from './fixtures/copilot-usage-posi
 
 const effects = vi.hoisted(() => ({
   parseArgs: vi.fn(() => { throw new Error('Import must not parse CLI arguments') }),
-  launch: vi.fn(), runtimeRoot: vi.fn(), runtimeBytes: vi.fn(), verifyRuntime: vi.fn(),
-  exec: vi.fn(), menu: vi.fn(), settings: vi.fn(), usage: vi.fn(), capability: vi.fn(),
+  launch: vi.fn<() => Promise<unknown>>(), runtimeRoot: vi.fn(), runtimeBytes: vi.fn(), verifyRuntime: vi.fn(),
+  exec: vi.fn<(file: string, args: string[], options: { stdio?: (string | number | undefined)[] }) => unknown>(),
+  menu: vi.fn(), settings: vi.fn(), usage: vi.fn(), capability: vi.fn(),
   environment: vi.fn(), graph: vi.fn(), inventory: vi.fn(),
   captureUsage: vi.fn(), restoreUsage: vi.fn(), positiveUsage: vi.fn(), clientPolicy: vi.fn(), nativeGeometry: vi.fn(),
   fault: undefined as ((operation: string, path: unknown) => void) | undefined,
