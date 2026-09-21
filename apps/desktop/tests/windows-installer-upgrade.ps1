@@ -482,8 +482,7 @@ try {
     Assert-BaselineProcessBinding $live $baselineIdentity.ExecutableSha256
     $refused = Start-Installer $validated.candidate
     $prompt = Wait-Control $refused $copy.INSTALLER_RUNNING -Seconds 600 -Dialog
-    $okay = [InstallerCapture]::GetDlgItem([InstallerCapture]::TopLevel($prompt), 1)
-    if ($okay -eq [IntPtr]::Zero) { throw 'Running-application prompt has no native OK action' }
+    $okay = [InstallerCapture]::RequireAcknowledgment($refused.Id, $prompt, $copy.INSTALLER_RUNNING)
     [InstallerCapture]::Click($okay)
     Wait-Exit $refused 30 2
     if ($live.HasExited -or (Installation-Inventory) -ne $before -or (Read-Registration @($baselineIdentity)).Key -ne $registration.Key) { throw 'Running-application refusal changed the installation or stopped the baseline' }

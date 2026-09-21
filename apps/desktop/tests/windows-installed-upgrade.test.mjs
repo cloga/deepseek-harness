@@ -53,6 +53,26 @@ function releaseFixture(t) {
   return { root, payload, writeManifest, expected: { commit, version, upstreamVersion: '0.1.6-alpha.2' } }
 }
 
+test('running-app refusal uses validated acknowledgment before its unchanged exit and preservation checks', () => {
+  const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const refusal = source.slice(source.indexOf('    $refused = Start-Installer'), source.indexOf("    @{ ownerToken = $token } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'baseline-finish-request.json')"))
+  const steps = [
+    '$prompt = Wait-Control $refused $copy.INSTALLER_RUNNING -Seconds 600 -Dialog',
+    '$okay = [InstallerCapture]::RequireAcknowledgment($refused.Id, $prompt, $copy.INSTALLER_RUNNING)',
+    '[InstallerCapture]::Click($okay)',
+    'Wait-Exit $refused 30 2',
+    'if ($live.HasExited -or (Installation-Inventory) -ne $before -or (Read-Registration @($baselineIdentity)).Key -ne $registration.Key)',
+    'Assert-NoTransactionDirectories',
+  ]
+  let previous = -1
+  for (const step of steps) {
+    const index = refusal.indexOf(step)
+    assert.ok(index > previous, `Missing or reordered refusal step: ${step}`)
+    previous = index
+  }
+  assert.doesNotMatch(refusal, /GetDlgItem/u)
+})
+
 test('runner guard rejects workstations, self-hosted and non-Windows execution', () => {
   assert.doesNotThrow(() => assertUpgradeRunner(hosted, 'win32'))
   for (const [key, value] of [['GITHUB_ACTIONS', 'false'], ['RUNNER_ENVIRONMENT', 'self-hosted'], ['RUNNER_OS', 'Linux'], ['GITHUB_RUN_ID', ''], ['GITHUB_RUN_ATTEMPT', ''], ['RUNNER_TEMP', '']]) {
@@ -339,7 +359,7 @@ if (('InstallerCapture' -as [type]) -ne $helperType) { throw 'Repeated loading r
     t.diagnostic(`Compile subprocess: ${JSON.stringify(evidence)}`)
     const observed = JSON.parse(result.stdout.trim())
     assert.equal(observed.edition, edition)
-    for (const member of ['Initialize', 'Find', 'FindText', 'FindButton', 'Progress', 'Save', 'SaveStock', 'StockRun', 'DiagnosticText', 'SaveWithShadow', 'SendMessage']) {
+    for (const member of ['Initialize', 'Find', 'FindText', 'FindButton', 'Progress', 'Save', 'SaveStock', 'StockRun', 'RequireAcknowledgment', 'DiagnosticText', 'SaveWithShadow', 'SendMessage']) {
       assert.ok(observed.members.includes(member), `Actual helper is missing ${member}`)
     }
     t.diagnostic(`Compilation only: PowerShell ${observed.edition} ${observed.version}`)
@@ -514,7 +534,118 @@ try {
         { if ([InstallerCapture]::IsWindow($other)) { throw 'Wrong-class window survived cleanup' } }
     )
 }
-[pscustomobject]@{ dimensions = $dimensions; finishId = $finishId; diagnostic = $diagnostic; foreignDiagnostic = $foreignDiagnostic; limitedDiagnostic = $limitedDiagnostic; rejected = @($rejected); cleanupVerified = $true; cleanupFailures = $cleanupFailures } | ConvertTo-Json -Depth 4 -Compress
+# Exercise the actual selector on owned native controls, never an installer or application.
+$ackWindows = [Collections.Generic.List[IntPtr]]::new()
+$ackRoots = [Collections.Generic.List[IntPtr]]::new()
+$ackRejected = [Collections.Generic.List[string]]::new()
+function New-AckControl([string]$Kind, [string]$Text, [IntPtr]$Parent, [int]$Id) {
+    $handle = [StockCaptureFixture]::Create($Kind, $Text, $Parent, $Id)
+    $ackWindows.Add($handle)
+    if ($Parent -eq [IntPtr]::Zero) { $ackRoots.Add($handle) }
+    return $handle
+}
+function Reject-Ack([string]$Label, [scriptblock]$Action) {
+    $failure = $null
+    try { & $Action } catch { $failure = $_ }
+    if ($null -eq $failure -or $failure.Exception.ToString() -notmatch 'Acknowledgment') { throw "Missing acknowledgment rejection: $Label" }
+    $ackRejected.Add($Label)
+}
+$primaryFailure = $null
+$ackTitle = [InstallerCapture]::ProductName + ' Setup'
+$ackBody = 'Exact running-application refusal.'
+try {
+    $outer = New-AckControl '#32770' $ackTitle ([IntPtr]::Zero) 0
+    foreach ($id in @(1, 2)) {
+        $decoy = New-AckControl 'Button' 'Outer wizard action' $outer $id
+        [void][StockCaptureFixture]::ShowWindow($decoy, 0)
+        [void][StockCaptureFixture]::EnableWindow($decoy, $false)
+    }
+    [void][StockCaptureFixture]::EnableWindow($outer, $false)
+    $modal = New-AckControl '#32770' $ackTitle ([IntPtr]::Zero) 0
+    $body = New-AckControl 'Static' $ackBody $modal 65535
+    $ack = New-AckControl 'Button' 'Localized acknowledgment, not English OK' $modal 2
+    [StockCaptureFixture]::ButtonStyle($ack, 1)
+    $oldIdOneMissing = [InstallerCapture]::GetDlgItem([InstallerCapture]::TopLevel($body), 1) -eq [IntPtr]::Zero
+    if (-not $oldIdOneMissing) { throw 'Observed ID2 fixture no longer rejects the old ID1 lookup' }
+    if ([InstallerCapture]::RequireAcknowledgment($PID, $body, $ackBody) -ne $ack) { throw 'Observed ID2 acknowledgment differs' }
+    Reject-Ack 'foreign-pid' { [InstallerCapture]::RequireAcknowledgment(($PID + 1), $body, $ackBody) }
+    Reject-Ack 'invalid-pid' { [InstallerCapture]::RequireAcknowledgment(0, $body, $ackBody) }
+    Reject-Ack 'zero-prompt' { [InstallerCapture]::RequireAcknowledgment($PID, [IntPtr]::Zero, $ackBody) }
+    Reject-Ack 'invalid-prompt' { [InstallerCapture]::RequireAcknowledgment($PID, [IntPtr](-1), $ackBody) }
+    Reject-Ack 'root-as-prompt' { [InstallerCapture]::RequireAcknowledgment($PID, $modal, $ackBody) }
+    Reject-Ack 'wrong-body' { [InstallerCapture]::RequireAcknowledgment($PID, $body, 'Different body') }
+    Reject-Ack 'substring-body' { [InstallerCapture]::RequireAcknowledgment($PID, $body, 'running-application') }
+    Reject-Ack 'empty-body' { [InstallerCapture]::RequireAcknowledgment($PID, $body, '') }
+    foreach ($target in @(@('modal', $modal), @('body', $body), @('button', $ack))) {
+        [void][StockCaptureFixture]::EnableWindow($target[1], $false)
+        Reject-Ack ('disabled-' + $target[0]) { [InstallerCapture]::RequireAcknowledgment($PID, $body, $ackBody) }
+        [void][StockCaptureFixture]::EnableWindow($target[1], $true)
+        [void][StockCaptureFixture]::ShowWindow($target[1], 0)
+        Reject-Ack ('hidden-' + $target[0]) { [InstallerCapture]::RequireAcknowledgment($PID, $body, $ackBody) }
+        [void][StockCaptureFixture]::ShowWindow($target[1], 8)
+    }
+    [void][InstallerCapture]::SetWindowText($modal, 'Foreign product Setup')
+    Reject-Ack 'wrong-title' { [InstallerCapture]::RequireAcknowledgment($PID, $body, $ackBody) }
+    [void][InstallerCapture]::SetWindowText($modal, $ackTitle)
+    foreach ($style in @(3, 9, 11)) {
+        [StockCaptureFixture]::ButtonStyle($ack, $style)
+        Reject-Ack ('non-push-style-' + $style) { [InstallerCapture]::RequireAcknowledgment($PID, $body, $ackBody) }
+    }
+    [StockCaptureFixture]::ButtonStyle($ack, 1)
+    $extra = New-AckControl 'Button' 'Alternative' $modal 7
+    Reject-Ack 'extra-button' { [InstallerCapture]::RequireAcknowledgment($PID, $body, $ackBody) }
+    [void][StockCaptureFixture]::EnableWindow($extra, $false)
+    Reject-Ack 'disabled-alternative' { [InstallerCapture]::RequireAcknowledgment($PID, $body, $ackBody) }
+    [void][StockCaptureFixture]::ShowWindow($extra, 0)
+    Reject-Ack 'hidden-alternative' { [InstallerCapture]::RequireAcknowledgment($PID, $body, $ackBody) }
+    if (-not [StockCaptureFixture]::DestroyWindow($extra)) { throw 'Cannot destroy alternative' }
+    $duplicate = New-AckControl 'Static' $ackBody $modal 100
+    Reject-Ack 'duplicate-body' { [InstallerCapture]::RequireAcknowledgment($PID, $body, $ackBody) }
+    if (-not [StockCaptureFixture]::DestroyWindow($duplicate)) { throw 'Cannot destroy duplicate body' }
+    $otherModal = New-AckControl '#32770' $ackTitle ([IntPtr]::Zero) 0
+    $otherBody = New-AckControl 'Static' $ackBody $otherModal 65535
+    Reject-Ack 'duplicate-dialog' { [InstallerCapture]::RequireAcknowledgment($PID, $body, $ackBody) }
+    if (-not [StockCaptureFixture]::DestroyWindow($otherModal)) { throw 'Cannot destroy duplicate dialog' }
+    $page = New-AckControl '#32770' '' $modal 1018
+    $nestedBody = New-AckControl 'Static' $ackBody $page 100
+    Reject-Ack 'nested-body' { [InstallerCapture]::RequireAcknowledgment($PID, $nestedBody, $ackBody) }
+    if (-not [StockCaptureFixture]::DestroyWindow($nestedBody)) { throw 'Cannot destroy nested body' }
+    $wrongBody = New-AckControl 'Edit' 'Wrong body class' $modal 100
+    Reject-Ack 'wrong-body-class' { [InstallerCapture]::RequireAcknowledgment($PID, $wrongBody, 'Wrong body class') }
+    if (-not [StockCaptureFixture]::DestroyWindow($ack)) { throw 'Cannot destroy ID2 action' }
+    Reject-Ack 'missing-button' { [InstallerCapture]::RequireAcknowledgment($PID, $body, $ackBody) }
+    $nested = New-AckControl 'Button' 'Nested action' $page 2
+    Reject-Ack 'nested-button' { [InstallerCapture]::RequireAcknowledgment($PID, $body, $ackBody) }
+    if (-not [StockCaptureFixture]::DestroyWindow($nested)) { throw 'Cannot destroy nested action' }
+    $wrongButton = New-AckControl 'Static' 'OK' $modal 2
+    Reject-Ack 'wrong-button-class' { [InstallerCapture]::RequireAcknowledgment($PID, $body, $ackBody) }
+    if (-not [StockCaptureFixture]::DestroyWindow($wrongButton)) { throw 'Cannot destroy wrong-class action' }
+    $ack = New-AckControl 'Button' 'Acknowledgment with conventional ID' $modal 1
+    [StockCaptureFixture]::ButtonStyle($ack, 0)
+    $localizedBody = 'DeepSeek Harness 正在运行。请先关闭应用，再重新运行安装程序。'
+    [void][InstallerCapture]::SetWindowText($body, $localizedBody)
+    [void][InstallerCapture]::SetWindowText($modal, ([InstallerCapture]::ProductName + ' 安装'))
+    if ([InstallerCapture]::RequireAcknowledgment($PID, $body, $localizedBody) -ne $ack) { throw 'Localized ID1 acknowledgment differs' }
+    if (-not [StockCaptureFixture]::DestroyWindow($body)) { throw 'Cannot destroy message body' }
+    Reject-Ack 'stale-body' { [InstallerCapture]::RequireAcknowledgment($PID, $body, $localizedBody) }
+    $wrongRoot = New-AckControl 'Static' $ackTitle ([IntPtr]::Zero) 0
+    $wrongRootBody = New-AckControl 'Static' $ackBody $wrongRoot 65535
+    Reject-Ack 'wrong-root-class' { [InstallerCapture]::RequireAcknowledgment($PID, $wrongRootBody, $ackBody) }
+} catch { $primaryFailure = $_ } finally {
+    Complete-Fixture $primaryFailure @(
+        {
+            $destroyFailures = [Collections.Generic.List[string]]::new()
+            foreach ($handle in $ackRoots) {
+                if ([InstallerCapture]::IsWindow($handle) -and -not [StockCaptureFixture]::DestroyWindow($handle)) { $destroyFailures.Add([string]$handle) }
+            }
+            if ($destroyFailures.Count) { throw ('Acknowledgment roots survived destruction: ' + ($destroyFailures -join ', ')) }
+        },
+        {
+            if (@($ackWindows | Where-Object { [InstallerCapture]::IsWindow($_) }).Count) { throw 'Acknowledgment controls survived cleanup' }
+        }
+    )
+}
+[pscustomobject]@{ dimensions = $dimensions; finishId = $finishId; diagnostic = $diagnostic; foreignDiagnostic = $foreignDiagnostic; limitedDiagnostic = $limitedDiagnostic; rejected = @($rejected); cleanupVerified = $true; cleanupFailures = $cleanupFailures; acknowledgment = @{ oldIdOneMissing = $oldIdOneMissing; acceptedIds = @(2, 1); rejected = @($ackRejected); cleanupVerified = $true } } | ConvertTo-Json -Depth 4 -Compress
 `
     const names = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'PSMODULEPATH', 'PROGRAMFILES'])
     const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => names.has(name.toUpperCase())))
@@ -529,6 +660,16 @@ try {
     assert.equal(observed.dimensions, '320x180')
     assert.equal(observed.cleanupVerified, true)
     assert.equal(observed.finishId, 1203)
+    assert.deepEqual(observed.acknowledgment, {
+      oldIdOneMissing: true, acceptedIds: [2, 1], cleanupVerified: true,
+      rejected: [
+        'foreign-pid', 'invalid-pid', 'zero-prompt', 'invalid-prompt', 'root-as-prompt', 'wrong-body', 'substring-body', 'empty-body',
+        'disabled-modal', 'hidden-modal', 'disabled-body', 'hidden-body', 'disabled-button', 'hidden-button', 'wrong-title',
+        'non-push-style-3', 'non-push-style-9', 'non-push-style-11', 'extra-button', 'disabled-alternative', 'hidden-alternative',
+        'duplicate-body', 'duplicate-dialog', 'nested-body', 'wrong-body-class', 'missing-button', 'nested-button', 'wrong-button-class',
+        'stale-body', 'wrong-root-class',
+      ],
+    })
     assert.match(observed.diagnostic, /CLASS=Button ID=1203 VISIBLE=True ENABLED=True STYLE=\d+ CHECK=1 TEXT=&Run Synthetic stock capture/u)
     assert.doesNotMatch(observed.foreignDiagnostic, /Synthetic stock capture/u)
     assert.match(observed.limitedDiagnostic, /LIMIT_REACHED=True/u)

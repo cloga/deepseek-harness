@@ -62,6 +62,8 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 [cloga 发布工作流](../../../.github/workflows/desktop-fork-release.yml)仅在一次性的 GitHub 托管 Windows runner 上运行[安装器验收](windows-installer-upgrade.ps1)。选择经过评审的分支，设置 `rehearsal: true` 并填写精确的[发布计划版本](../release/cloga-windows-x64.json)；演练不能发布。驱动会拒绝已有的产品安装，并在调用真实交互式安装器前验证基线与候选版本的身份。它关闭自动启动，使用隔离数据启动已安装应用，检查自定义安装路径和重启，最后卸载。获取产物所用的凭据不会传给应用或原生辅助程序。
 
+应用正在运行时的拒绝提示采用安装器的 `MB_OK` 确认操作，不依赖数字按钮 ID 或英文标题。点击前，原生辅助程序验证自有且存活的模态窗口、精确的本地化消息，以及唯一、直接隶属该窗口、可见且启用的普通或默认按压按钮；额外、嵌套、隐藏或禁用的按钮选项都会导致失败。驱动仍要求退出码为 2、基线文件与注册信息不变、基线应用保持存活，并且不存在事务目录。屏幕外的自有 Win32 回归检查选择与拒绝行为，不启动安装器；只有托管安装验收才能验证正常拒绝和清理。
+
 安装升级与同版本包操作的观察器均使用[已安装运行时读取器](fixtures/windows-installed-runtime.mjs)。CDP 求值只返回运行中应用的身份字段；描述文件通过维护中的 `readPackagedDesktopRuntimeDescriptor` 载体在 CDP 之外读取。在以 Node 模式启动打包 Electron 之前，读取器重新检查自有安装中的可执行文件哈希，并将观察到的 resources 目录绑定到该安装。描述文件校验对原始 ASAR 字节计算哈希，不使用解析或重新序列化的 JSON。此检查仅针对一次性的托管安装，绝不针对操作者的 Desktop。
 
 固定版本 [Playwright 1.61.1](https://github.com/microsoft/playwright/blob/v1.61.1/packages/playwright-core/src/server/electron/electron.ts) 在 Windows 上通过 `shell: true` 启动 Electron：`app.process()` 标识 CMD 启动载体，而非 Electron 主进程。自有 Electron 主进程内的求值提供实际 PID 和父 PID；基线就绪、原生窗口归属与 Host 进程族检查将该主进程绑定到精确可执行文件及其哈希。启动载体分别保留 PID、创建身份和存活证据，并要求精确且存活的 fixture → CMD → Electron 主进程链。宽松父进程匹配、进程名称匹配或接纳枚举得到的 PID 都不能证明归属。仅启动载体退出不证明 Electron 主进程或 Host 进程族已清理。

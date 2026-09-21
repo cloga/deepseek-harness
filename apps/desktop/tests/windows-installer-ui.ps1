@@ -48,6 +48,7 @@ public static class InstallerCapture {
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr window, int id);
     [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr window);
+    [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr window);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder text, int count);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wparam, string text);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr wparam, StringBuilder text, uint flags, uint timeout, out IntPtr result);
@@ -191,6 +192,59 @@ public static class InstallerCapture {
             return result == IntPtr.Zero;
         }, IntPtr.Zero);
         return result;
+    }
+
+    static string WindowClass(IntPtr window) {
+        var kind = new StringBuilder(128);
+        GetClassName(window, kind, kind.Capacity);
+        return kind.ToString();
+    }
+
+    static bool LiveOwnedControl(int process, IntPtr control) {
+        uint owner;
+        GetWindowThreadProcessId(control, out owner);
+        return process > 0 && owner == process && IsWindow(control)
+            && IsWindowVisible(control) && IsWindowEnabled(control);
+    }
+
+    // installer.nsh requests MB_OK, then exits with code 2 regardless of its return value.
+    // The observed sole acknowledgment has ID2; neither that ID nor an English caption is its identity.
+    public static IntPtr RequireAcknowledgment(int process, IntPtr prompt, string expectedBody) {
+        IntPtr dialog = TopLevel(prompt);
+        if (String.IsNullOrEmpty(expectedBody) || String.IsNullOrEmpty(ProductName)
+            || !LiveOwnedControl(process, prompt) || !LiveOwnedControl(process, dialog)
+            || dialog == prompt || TopLevel(dialog) != dialog || GetParent(prompt) != dialog
+            || WindowClass(dialog) != "#32770" || WindowClass(prompt) != "Static"
+            || !Text(dialog).StartsWith(ProductName + " ", StringComparison.Ordinal)
+            || Text(prompt) != expectedBody)
+            throw new InvalidOperationException("Acknowledgment requires the exact owned message dialog and body");
+
+        int matchingBodies = 0;
+        EnumWindows(delegate(IntPtr window, IntPtr unused) {
+            uint owner;
+            GetWindowThreadProcessId(window, out owner);
+            if (owner != process || !IsWindowVisible(window)) return true;
+            EnumChildWindows(window, delegate(IntPtr child, IntPtr data) {
+                if (IsWindowVisible(child) && Text(child) == expectedBody) matchingBodies++;
+                return true;
+            }, IntPtr.Zero);
+            return true;
+        }, IntPtr.Zero);
+        if (matchingBodies != 1)
+            throw new InvalidOperationException("Acknowledgment message body is ambiguous");
+
+        IntPtr action = IntPtr.Zero;
+        int buttons = 0;
+        // EnumChildWindows is recursive. Count every Button, including hidden/disabled alternatives,
+        // then require the sole action to be a direct child rather than a nested page control.
+        EnumChildWindows(dialog, delegate(IntPtr child, IntPtr unused) {
+            if (WindowClass(child) == "Button") { buttons++; action = child; }
+            return true;
+        }, IntPtr.Zero);
+        if (buttons != 1 || !LiveOwnedControl(process, action) || GetParent(action) != dialog
+            || TopLevel(action) != dialog || (GetWindowLong(action, -16) & 0xf) > 1)
+            throw new InvalidOperationException("Acknowledgment requires one direct enabled native pushbutton and no alternatives");
+        return action;
     }
 
     public static string VisibleText(int process) {
