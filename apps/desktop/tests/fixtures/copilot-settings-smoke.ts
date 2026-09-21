@@ -59,7 +59,7 @@ export async function inspectPackagedCopilotSettings(settings: Locator): Promise
   assert.equal(roleControls, 0, 'Retired Model roles controls must be absent, including hidden controls')
   assert.equal(await settings.locator('button, [role="tab"], h1, h2, h3')
     .filter({ hasText: /^(?:Copilot\s*·\s*)?(?:Model roles|模型分工)$/i }).count(), 0,
-    'Retired Model roles settings entries must be absent')
+  'Retired Model roles settings entries must be absent')
   return {
     schemaVersion: 3, accountViewLoaded: true, retiredModelRolesAbsent: true, searchProviderCatalogLoaded: true,
     providerOnlySearchRouting: true, fallbackProviderLabel: true,

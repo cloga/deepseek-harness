@@ -92,8 +92,8 @@ describe('read-only packaged Copilot settings acceptance', () => {
     const selector = surface === 'account' ? '[role="status"]' : '[data-dsh-web-search-mode]:enabled'
     let release!: () => void
     let reached!: () => void
-    const ready = new Promise<void>(resolve => { release = resolve })
-    const waiting = new Promise<void>(resolve => { reached = resolve })
+    const ready = new Promise<void>((resolve) => { release = resolve })
+    const waiting = new Promise<void>((resolve) => { reached = resolve })
     const { root, settings } = fixture(async (current) => {
       if (current === selector) { reached(); await ready }
     })

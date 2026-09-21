@@ -71,6 +71,7 @@ export interface PackagedCopilotAcceptanceOptions {
 export async function runPackagedCopilotAcceptance(options: PackagedCopilotAcceptanceOptions): Promise<void> {
   const application = resolve(options.application)
   const output = resolve(options.output)
+  const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
   const resources = join(dirname(application), 'resources')
   const runtimeRoot = packagedDesktopRuntimeRoot(resources)
   const reviewed = parseDesktopForkReleasePlan(JSON.parse(readFileSync(
@@ -324,11 +325,12 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
     assert.deepEqual(nativeErrors, [], 'Native composer acceptance must not produce renderer errors')
     assert.equal(createHash('sha256').update(readFileSync(join(profile, 'desktop-plugin-receipts.json'))).digest('hex'), inventories[0])
     const nativeComposerEvidence = {
-      schemaVersion: 1, scope: 'actual-packaged-native-composer-and-released-client',
+      schemaVersion: 1, scope: 'actual-packaged-native-composer-and-released-client', sourceCommit,
       sessionHistory: 'synthetic-persisted-in-isolated-home', quota: 'signed-out-host-response-no-credentials',
       runtimeSha256, pluginSource: copilot.source,
       installedClientSha256: createHash('sha256').update(readFileSync(join(profile, 'node_modules', 'dsh-github-copilot', 'lib', 'client.js'))).digest('hex'),
-      geometry: nativeInspection.geometry, copilotDialog: nativeInspection.copilotDialog,
+      geometry: nativeInspection.geometry, nativeDialogs: nativeInspection.nativeDialogs,
+      copilotDialog: nativeInspection.copilotDialog,
       rendererErrors: nativeErrors, realModelRound: false, realOAuth: false,
     }
     writeFileSync(join(output, 'native-composer-geometry.json'), JSON.stringify(nativeComposerEvidence, undefined, 2) + '\n')
@@ -338,7 +340,7 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
     record('native-composer:closed')
     await options.inspectProfile?.(Object.freeze({ application, runtimeRoot, home, profile, output }))
     writeFileSync(join(output, 'acceptance.json'), JSON.stringify({
-      sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+      sourceCommit,
       desktopVersion: reviewed.version,
       versionMenus,
       runtimeVersion: runtime.release.version,

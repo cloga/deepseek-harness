@@ -8,7 +8,7 @@
 
 托管 Windows Desktop 需要升级其 release-owned Copilot 包，但不能悄然提升 Core 基线，也不能在官方 Core 已提供完整等价能力后继续无条件保留 companion 行为。插件发布、Core 兼容性、打包 Desktop 行为和已安装机器激活是彼此独立的证据。
 
-经过评审的维护目标是 Desktop `0.1.6-alpha.1.cloga.18` / sequence 30 与 Copilot alpha.35 配对，保留 Core `0.1.6-alpha.1`。插件制品由精确来源计划决定，而不是由这个目标版本标签决定。不可变的 [Copilot `0.4.0-alpha.33`](https://github.com/cloga/dsh-github-copilot/releases/tag/v0.4.0-alpha.33)提供历史 selector 修复证据；其 alpha.1/alpha.2 兼容性不能验收后续插件版本，也不能验收由其他负责人维护的 Core alpha.2 Desktop 适配。
+经过评审的 Desktop `0.1.6-alpha.1.cloga.18` / sequence 30 计划固定不可变的 [Copilot `0.4.0-alpha.35`](https://github.com/cloga/dsh-github-copilot/releases/tag/v0.4.0-alpha.35)，保留 Core `0.1.6-alpha.1`。完整的精确来源 lock 决定插件制品。插件发布与 alpha.1/alpha.2 兼容性不能代替 Desktop 验收，也不能验收由其他负责人维护的 Core alpha.2 适配。
 
 ## 决策
 
@@ -26,11 +26,11 @@ Alpha.34 已退役 Model roles 卡片、旧版 Settings 入口、角色选择器
 
 ## 官方优先比较
 
-精确官方评审目标是 [Core `0.1.6-alpha.2`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.6-alpha.2)。插件 alpha.33 的 [alpha.2 比较](https://github.com/cloga/dsh-github-copilot/blob/v0.4.0-alpha.33/docs/official-first-016-alpha2.md)、[compaction 决策](https://github.com/cloga/dsh-github-copilot/blob/v0.4.0-alpha.33/docs/copilot-compaction.md)与[账户用量约定](https://github.com/cloga/dsh-github-copilot/blob/v0.4.0-alpha.33/docs/copilot-usage.md)保留历史源码级证据，而非 alpha.35 制品验证。
+精确官方评审目标是 [Core `0.1.6-alpha.2`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.6-alpha.2)。插件 alpha.35 的 [alpha.2 比较](https://github.com/cloga/dsh-github-copilot/blob/v0.4.0-alpha.35/docs/official-first-016-alpha2.md)、[compaction 决策](https://github.com/cloga/dsh-github-copilot/blob/v0.4.0-alpha.35/docs/copilot-compaction.md)与[账户用量约定](https://github.com/cloga/dsh-github-copilot/blob/v0.4.0-alpha.35/docs/copilot-usage.md)提供源码级策略证据；制品验证仍是独立检查。
 
 | 领域 | 官方 alpha.2 支持 | 决策与迁移条件 |
 |---|---|---|
-| OAuth、常规 Copilot transport、严格 Remote factory、service tracing、串行初始化、原生 subagent descriptor | Alpha.33 已使用完整原语 | 继续使用官方原语。只有在受支持 Core 下限提升且打包 alpha.2 验收通过后，才移除 alpha.1 compatibility bridge。 |
+| OAuth、常规 Copilot transport、严格 Remote factory、service tracing、串行初始化、原生 subagent descriptor | Alpha.35 已使用完整原语 | 继续使用官方原语。只有在受支持 Core 下限提升且打包 alpha.2 验收通过后，才移除 alpha.1 compatibility bridge。 |
 | Managed HTTP 401 recovery | 原生 `Models.getAuth()` 与 canonical credentials 拥有 renewal 和 persistence；Core 不拥有 Copilot route proof、同 token 拒绝、cooldown 或 generation race | 仅保留有界 managed-route rejection policy。官方 provider transport 提供等价 provider-scoped rejected-token renewal 并通过 Desktop 验收后移除。 |
 | 账户额度与 composer 用量 | Public Remote codec 与原生 Context meter 是官方原语；Core 不暴露完整 Copilot provider quota、credits 或 Session attribution | 保留规范化账户快照与可选 Copilot Session UI。官方 API 提供等价账户语义和受支持 Session-scoped composer seam 后移除。 |
 | Composer dock 位置 | 官方 shared flex dock 与固有宽度统计组支持相邻的公开 dock 条目 | 仅将支持换行的 Client 布局回移至 alpha.1，保留 ContextMeter 位置和 token 语义。独立验收的 alpha.2 升级通过相同原生几何检查后移除此适配。 |
@@ -43,6 +43,8 @@ Alpha.34 已退役 Model roles 卡片、旧版 Settings 入口、角色选择器
 Alpha.34 的 Model roles 退役是产品决定，不代表官方已提供等价功能。不会仅因官方原语名称相似而移除其他 companion 功能。由其他负责人维护的 alpha.2 draft 继续独立；明确获准的 Client 布局回移不合并、rebase 或吸收其中的其他变更。
 
 ## 发布证据边界
+
+Copilot alpha.35 的[合并后运行 35603503257](https://github.com/cloga/dsh-github-copilot/actions/runs/35603503257)通过源码、兼容性、构建及不可变 GitHub 发布检查；其历史失败项是即时 npm 完整性回读。独立[只读验证运行 35605111730](https://github.com/cloga/dsh-github-copilot/actions/runs/35605111730)通过 npm/GitHub 字节一致性与 alpha tag 检查。精确发布资产及 SHA-512 integrity 已独立核对，没有重新发布。这只验收插件字节，不验收仍独立的 Desktop installer 或本地激活。
 
 历史 Copilot alpha.33 合并后的 [run 35559690050](https://github.com/cloga/dsh-github-copilot/actions/runs/35559690050) 中 compatibility、精确 alpha.1/alpha.2 Windows/Ubuntu、verification、packaging 与 GitHub publication 全部成功；即时 npm 可见性验证失败。独立只读 verifier [run 35560198211，第 2 次尝试](https://github.com/cloga/dsh-github-copilot/actions/runs/35560198211/attempts/2)通过 npm/GitHub 字节一致性及 alpha tag 验证。这些运行只验收 alpha.33，不验收 alpha.35 或 Desktop `.cloga.18`。每个维护版本都需要自己的不可变插件 lock 与 Desktop 验收；Desktop 使用已发布字节，不重新发布或改写插件 Release。
 

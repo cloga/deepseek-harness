@@ -5,6 +5,7 @@ import type { Locator, Page } from 'playwright'
 
 interface Box { x: number; y: number; width: number; height: number }
 interface PillStyle { fontSize: string; lineHeight: string; color: string }
+interface DialogObservation { opened: boolean; closedOnEscape: boolean; focusReturned: boolean }
 
 /** One measured viewport of the actual native composer. */
 export interface NativeComposerGeometry {
@@ -20,10 +21,12 @@ export interface NativeComposerGeometry {
 /** Native geometry plus observed signed-out Copilot dialog behavior. */
 export interface NativeComposerInspection {
   readonly geometry: readonly NativeComposerGeometry[]
+  readonly nativeDialogs: { readonly time: DialogObservation; readonly usage: DialogObservation }
   readonly copilotDialog: {
-    readonly signedOutObserved: true
+    readonly signedOutObserved: boolean
     readonly sessionCreditsCount: number
     readonly resetCount: number
+    readonly epochTextCount: number
     readonly focusReturned: boolean
   }
 }
@@ -73,6 +76,23 @@ async function pillStyle(locator: Locator): Promise<PillStyle> {
   })
 }
 
+async function observeNativeDialog(page: Page, trigger: Locator, title: string, screenshot: string): Promise<DialogObservation> {
+  await trigger.click()
+  const dialog = page.getByRole('dialog', { name: title, exact: true })
+  await dialog.waitFor({ state: 'visible' })
+  const opened = await dialog.isVisible()
+  if (title === 'Token usage') await dialog.getByText('Cache hit', { exact: true }).waitFor({ state: 'visible' })
+  assert.equal(opened, true, 'Native statistics dialog must open')
+  await page.screenshot({ path: screenshot })
+  await page.keyboard.press('Escape')
+  await dialog.waitFor({ state: 'hidden' })
+  const closedOnEscape = await dialog.isHidden()
+  const focusReturned = await trigger.evaluate(element => document.activeElement === element)
+  assert.equal(closedOnEscape, true, 'Escape must close the native statistics dialog')
+  assert.equal(focusReturned, true, 'Closing native statistics must retain its actual trigger focus')
+  return { opened, closedOnEscape, focusReturned }
+}
+
 /**
  * Open only the test-owned seeded Session and measure the shipped composer without submitting input.
  * The real signed-out Host supplies quota state; synthetic history supplies native token counts.
@@ -118,33 +138,29 @@ export async function inspectNativeComposerGeometry(page: Page, output: string):
     result.push(geometry)
     await page.screenshot({ path: join(output, `native-composer-${String(viewportWidth)}.png`) })
   }
-  await time.click()
-  const timeDialog = page.getByRole('dialog', { name: 'Session statistics', exact: true })
-  await timeDialog.waitFor({ state: 'visible' })
-  await page.screenshot({ path: join(output, 'native-composer-time-dialog.png') })
-  await page.keyboard.press('Escape')
-  await timeDialog.waitFor({ state: 'hidden' })
-  await usage.click()
-  const dialog = page.getByRole('dialog', { name: 'Token usage', exact: true })
-  await dialog.waitFor({ state: 'visible' })
-  await dialog.getByText('Cache hit', { exact: true }).waitFor({ state: 'visible' })
-  await page.screenshot({ path: join(output, 'native-composer-token-dialog.png') })
-  await page.keyboard.press('Escape')
-  await dialog.waitFor({ state: 'hidden' })
+  const nativeDialogs = {
+    time: await observeNativeDialog(page, time, 'Session statistics', join(output, 'native-composer-time-dialog.png')),
+    usage: await observeNativeDialog(page, usage, 'Token usage', join(output, 'native-composer-token-dialog.png')),
+  }
   await copilot.click()
   const copilotDialog = page.getByRole('dialog').filter({
     has: page.getByRole('button', { name: 'Close usage details', exact: true }),
   })
-  await copilotDialog.getByText('Sign in to Copilot in Models to view account usage.', { exact: true }).waitFor({ state: 'visible' })
+  const signedOut = copilotDialog.getByText('Sign in to Copilot in Models to view account usage.', { exact: true })
+  await signedOut.waitFor({ state: 'visible' })
+  const signedOutObserved = await signedOut.isVisible()
+  assert.equal(signedOutObserved, true, 'Copilot dialog must report actual signed-out state')
   const sessionCreditsCount = await copilotDialog.getByText(/Session credits|会话额度/u).count()
   const resetCount = await copilotDialog.getByText(/^(?:Resets|重置时间):/u).count()
   assert.equal(sessionCreditsCount, 0, 'Unavailable Session credits section must remain retired')
   assert.equal(resetCount, 0, 'Signed-out usage must not invent a reset date')
-  assert.doesNotMatch(await copilotDialog.innerText(), /\b1970\b/u)
+  const epochTextCount = await copilotDialog.getByText(/\b1970\b/u).count()
+  assert.equal(epochTextCount, 0, 'Copilot usage must not display an epoch reset date')
   await page.screenshot({ path: join(output, 'native-composer-copilot-dialog.png') })
   await page.keyboard.press('Escape')
   await copilotDialog.waitFor({ state: 'hidden' })
   const focusReturned = await copilot.evaluate(element => document.activeElement === element)
   assert.equal(focusReturned, true, 'Closing Copilot usage must return focus to its actual trigger')
-  return { geometry: result, copilotDialog: { signedOutObserved: true, sessionCreditsCount, resetCount, focusReturned } }
+  return { geometry: result, nativeDialogs,
+    copilotDialog: { signedOutObserved, sessionCreditsCount, resetCount, epochTextCount, focusReturned } }
 }
