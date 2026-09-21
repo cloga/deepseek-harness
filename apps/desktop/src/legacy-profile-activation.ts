@@ -6,8 +6,21 @@ import type { DesktopPaths } from './paths.ts'
 /** Fixed launcher-owned locations, resolved from the same Harness home; never journal-supplied paths. */
 export type DesktopProfileSafetyPaths = Pick<DesktopPaths, 'profile' | 'legacyStateRoot'>
 
+/** Stable fatal admission result, including an unsafe or incomplete legacy inspection. */
+export class DesktopLegacyActivationRefusal extends Error {
+  constructor(reason: string, options?: ErrorOptions) {
+    super(`desktop legacy activation: ${reason}; retain all profile and recovery bytes for manual inspection before retrying`, options)
+    this.name = 'DesktopLegacyActivationRefusal'
+  }
+}
+
+/** Identify only this boundary's refusal, never a message-matching network or runtime error. */
+export function isDesktopLegacyActivationRefusal(error: unknown): error is DesktopLegacyActivationRefusal {
+  return error instanceof DesktopLegacyActivationRefusal
+}
+
 function refuse(reason: string): never {
-  throw new Error(`desktop legacy activation: ${reason}; retain all profile and recovery bytes for manual inspection before retrying`)
+  throw new DesktopLegacyActivationRefusal(reason)
 }
 
 /** Walk from the filesystem root so an intermediate link is rejected before inspecting its children. */
@@ -32,6 +45,14 @@ function ordinaryDirectory(path: string): boolean {
  * @param paths - Explicit Desktop profile and legacy state root from the owning launcher.
  */
 export function assertNoLegacyDesktopActivation(paths: DesktopProfileSafetyPaths): void {
+  try { inspectLegacyDesktopActivation(paths) } catch (error) {
+    if (isDesktopLegacyActivationRefusal(error)) throw error
+    // Only failures inside this read-only inspection become fatal legacy refusals.
+    throw new DesktopLegacyActivationRefusal('legacy evidence could not be safely inspected', { cause: error })
+  }
+}
+
+function inspectLegacyDesktopActivation(paths: DesktopProfileSafetyPaths): void {
   if (!isAbsolute(paths.profile) || !isAbsolute(paths.legacyStateRoot)) refuse('launcher paths must be absolute')
   const profile = resolve(paths.profile)
   const legacyRoot = resolve(paths.legacyStateRoot)
@@ -46,6 +67,8 @@ export function assertNoLegacyDesktopActivation(paths: DesktopProfileSafetyPaths
   const directory = opendirSync(parent)
   let entries = 0
   let transactions = 0
+  let failed = false
+  let failure: unknown
   try {
     for (let entry = directory.readSync(); entry !== null; entry = directory.readSync()) {
       if (++entries > 1024) refuse('profile parent exceeds the bounded inspection limit')
@@ -58,7 +81,13 @@ export function assertNoLegacyDesktopActivation(paths: DesktopProfileSafetyPaths
         refuse('an orphan alpha1 rollback requires explicit recovery')
       }
     }
+  } catch (error) {
+    failed = true
+    failure = error
   } finally {
-    directory.closeSync()
+    try { directory.closeSync() } catch (error) {
+      if (!failed) { failed = true; failure = error }
+    }
   }
+  if (failed) throw failure
 }

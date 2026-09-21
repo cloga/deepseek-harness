@@ -21,7 +21,9 @@ import type { ProfilePackageHealth } from '@deepseek-ai/dsh-app-boot'
 
 const manifestRead = vi.hoisted(() => ({ read: undefined as (() => Promise<string>) | undefined }))
 const legacySafety = vi.hoisted(() => ({ check: vi.fn() }))
-vi.mock('../src/legacy-profile-activation.ts', () => ({ assertNoLegacyDesktopActivation: legacySafety.check }))
+vi.mock('../src/legacy-profile-activation.ts', async original => ({
+  ...await original<typeof import('../src/legacy-profile-activation.ts')>(), assertNoLegacyDesktopActivation: legacySafety.check,
+}))
 
 const baseline = vi.hoisted(() => ({
   assess: vi.fn<() => Promise<DesktopProvisioningAssessment>>(),
@@ -1378,6 +1380,64 @@ describe('desktop main startup', () => {
     expect(baseline.stage).toHaveBeenCalledOnce()
     expect(harness.hosts).toHaveLength(0)
     expect(baseline.commit).not.toHaveBeenCalled()
+  })
+
+  it('preserves a one-shot legacy preparation refusal even after later inspection would clear', async () => {
+    managedFixture()
+    const { DesktopLegacyActivationRefusal } = await import('../src/legacy-profile-activation.ts')
+    const primary = new DesktopLegacyActivationRefusal('one-shot retained journal')
+    baseline.assess.mockResolvedValue({ status: 'provisionable', reason: 'fresh-profile', packageName: 'fixture-provider',
+      planSha256: 'a'.repeat(64), planResourceSha256: 'b'.repeat(64) })
+    baseline.stage.mockImplementation(async () => {
+      legacySafety.check.mockImplementationOnce(() => { throw primary })
+      legacySafety.check()
+      throw new Error('one-shot refusal did not run')
+    })
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    const rejected = expect(invoke(DESKTOP_IPC.boot)).rejects.toBe(primary)
+    harness.prepared.resolve()
+    await rejected
+    expect(() => { legacySafety.check() }).not.toThrow()
+    expect(harness.hosts).toHaveLength(0)
+    expect(baseline.stage).toHaveBeenCalledOnce()
+    expect(baseline.assess).toHaveBeenCalledTimes(1)
+    expect(baseline.commit).not.toHaveBeenCalled()
+    expect(vi.mocked(console.error).mock.calls.some(call => call[0] === primary)).toBe(true)
+  })
+
+  it('preserves a one-shot legacy commit refusal without reassessment or replacement Host fallback', async () => {
+    managedFixture()
+    const { DesktopLegacyActivationRefusal } = await import('../src/legacy-profile-activation.ts')
+    const cause = new Error('legacy journal could not be inspected')
+    const primary = new DesktopLegacyActivationRefusal('one-shot unsafe inspection', { cause })
+    baseline.assess.mockResolvedValue({ status: 'exact-satisfied', packageOwner: 'user', qualification: 'pending',
+      packageName: 'fixture-provider', planSha256: 'a'.repeat(64), planResourceSha256: 'b'.repeat(64),
+      owner: { profile: 'desktop-test-profile', runtimeDir: 'runtime', installAnchor: 'runtime', runtimeFingerprint: 'c'.repeat(64),
+        dependencyRegistry: 'https://registry.example.test/', configPaths: [] },
+      baseFingerprint: 'd'.repeat(64), baseGraphFingerprint: 'e'.repeat(64), assessmentFingerprint: 'f'.repeat(64) })
+    baseline.commit.mockImplementationOnce(async () => {
+      legacySafety.check.mockImplementationOnce(() => { throw primary })
+      legacySafety.check()
+      throw new Error('one-shot refusal did not run')
+    })
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.packages = [{ name: 'fixture-provider', version: '1.0.0', enabled: true, healthy: true }]
+    const rejected = expect(invoke(DESKTOP_IPC.boot)).rejects.toBe(primary)
+    host.ready.resolve()
+    await rejected
+    expect(() => { legacySafety.check() }).not.toThrow()
+    expect(primary.cause).toBe(cause)
+    expect(baseline.commit).toHaveBeenCalledOnce()
+    expect(baseline.assess).toHaveBeenCalledTimes(2)
+    expect(baseline.stage).not.toHaveBeenCalled()
+    expect(harness.hosts).toEqual([host])
+    expect(vi.mocked(console.error).mock.calls.some(call => call[0] === primary)).toBe(true)
+    expect(baseline.completion).not.toHaveBeenCalled()
   })
 
   it.each(['ready', 'failed'] as const)('checks managed completion only after final Host readiness: %s', async (outcome) => {
