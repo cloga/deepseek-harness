@@ -10,6 +10,10 @@ import type { PackagedCopilotAcceptanceOptions } from './fixtures/copilot-releas
 const directories: string[] = []
 afterEach(() => { for (const directory of directories.splice(0)) removeOwnedDirectory(directory) })
 const digest = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex')
+function record(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected an owned evidence object')
+  return value as Record<string, unknown>
+}
 type Damage = 'skip-observer' | 'repeat-observer' | 'mutable-paths' | 'retain-home' | 'retain-ancestor'
   | 'missing-functional' | 'missing-failure' | 'acceptance-present' | 'wrong-error' | 'return-after-error'
   | 'wrong-marker-text' | 'diagnostic-errors' | 'cleanup-errors' | 'cleanup-unfinalized' | 'cleanup-unverified'
@@ -80,7 +84,10 @@ describe('separately scoped observer suite evidence', () => {
     expect(fixture.run).toHaveBeenCalledTimes(1)
     expect(fixture.run.mock.calls[0]?.[0]).not.toHaveProperty('expectedObserverFailure')
     for (const path of [fixture.home, fixture.profile, fixture.legacySdk]) expect(existsSync(path)).toBe(false)
-    const read = (file: string) => JSON.parse(readFileSync(join(fixture.options.output, file), 'utf8'))
+    const read = (file: string): Record<string, unknown> => {
+      const value: unknown = JSON.parse(readFileSync(join(fixture.options.output, file), 'utf8'))
+      return record(value)
+    }
     const observer = read('observer-cleanup.json')
     expect(observer).toMatchObject({
       ...fixture.identity, schemaVersion: 3, scope: 'unexpected-observer-failure-cleanup',
@@ -93,12 +100,15 @@ describe('separately scoped observer suite evidence', () => {
       ...fixture.identity, schemaVersion: 1, scope: 'packaged-functional-with-unexpected-observer-failure',
       functionalAssertionsCompleted: true, errorPropagationVerified: true, cleanupVerified: true, normalAcceptanceCompleted: false,
     })
-    expect(Object.keys(suite.receipts).sort()).toEqual(['failure', 'functional', 'observer'])
-    for (const [name, file] of [['functional', 'functional-results.json'], ['failure', 'failure.json'], ['observer', 'observer-cleanup.json']]) {
-      expect(suite.receipts[name!]).toEqual({ file, sha256: digest(readFileSync(join(fixture.options.output, file!))) })
+    const receipts = record(suite.receipts)
+    expect(Object.keys(receipts).sort()).toEqual(['failure', 'functional', 'observer'])
+    for (const [name, file] of [
+      ['functional', 'functional-results.json'], ['failure', 'failure.json'], ['observer', 'observer-cleanup.json'],
+    ] as const) {
+      expect(receipts[name]).toEqual({ file, sha256: digest(readFileSync(join(fixture.options.output, file))) })
     }
-    expect(observer.functionalSha256).toBe(suite.receipts.functional.sha256)
-    expect(observer.failureSha256).toBe(suite.receipts.failure.sha256)
+    expect(observer.functionalSha256).toBe(record(receipts.functional).sha256)
+    expect(observer.failureSha256).toBe(record(receipts.failure).sha256)
     expect(existsSync(join(fixture.options.output, 'acceptance.json'))).toBe(false)
     expect(readdirSync(fixture.options.output).some(name => name.endsWith('.tmp'))).toBe(false)
   })
@@ -109,7 +119,7 @@ describe('separately scoped observer suite evidence', () => {
     'wrong-marker-text', 'diagnostic-errors', 'cleanup-errors', 'cleanup-unfinalized', 'cleanup-unverified',
     'foreign-identity', 'foreign-functional-scope', 'functional-not-complete', 'functional-success',
     'functional-cleanup', 'wrong-failure-schema', 'invalid-identity', 'linked-functional', 'oversized-functional',
-  ] as const)('rejects %s without committing suite evidence', async damage => {
+  ] as const)('rejects %s without committing suite evidence', async (damage) => {
     const fixture = isolatedRunner(damage)
     await expect(runPackagedCopilotObserverCanary(fixture.options, fixture.run)).rejects.toThrow()
     expect(fixture.run).toHaveBeenCalledTimes(1)
@@ -126,7 +136,7 @@ describe('separately scoped observer suite evidence', () => {
     expect(existsSync(join(fixture.options.output, 'packaged-suite.json'))).toBe(false)
   })
 
-  it.each(['functional-results.json', 'acceptance.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json'])('rejects stale %s before invoking acceptance', async file => {
+  it.each(['functional-results.json', 'acceptance.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json'])('rejects stale %s before invoking acceptance', async (file) => {
     const fixture = isolatedRunner()
     mkdirSync(fixture.options.output)
     writeFileSync(join(fixture.options.output, file), '{}')
@@ -139,9 +149,9 @@ describe('separately scoped observer suite evidence', () => {
     const fixture = isolatedRunner()
     mkdirSync(fixture.options.output)
     writeFileSync(join(fixture.options.output, 'packaged-suite.json'), 'foreign bytes')
-    expect(() => writePackagedProof(fixture.options.output, 'packaged-suite.json', {})).toThrow()
+    expect(() => { writePackagedProof(fixture.options.output, 'packaged-suite.json', {}) }).toThrow()
     expect(readFileSync(join(fixture.options.output, 'packaged-suite.json'), 'utf8')).toBe('foreign bytes')
     expect(readdirSync(fixture.options.output)).toEqual(['packaged-suite.json'])
-    expect(() => writePackagedProof(fixture.options.output, 'packaged-suite.json', {}, true)).toThrow('Only owned failure')
+    expect(() => { writePackagedProof(fixture.options.output, 'packaged-suite.json', {}, true) }).toThrow('Only owned failure')
   })
 })

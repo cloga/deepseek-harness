@@ -15,17 +15,17 @@ const effects = vi.hoisted(() => ({
 }))
 vi.mock('node:util', async original => ({ ...await original<typeof import('node:util')>(), parseArgs: effects.parseArgs }))
 vi.mock('node:child_process', () => ({ execFileSync: effects.exec }))
-vi.mock('node:fs', async original => {
+vi.mock('node:fs', async (original) => {
   const fs = await original<typeof import('node:fs')>()
   return {
     ...fs,
     mkdtempSync: (...args: Parameters<typeof fs.mkdtempSync>) => {
       effects.fault?.('allocate', args[0])
       const path = fs.mkdtempSync(...args)
-      effects.allocated.push(String(path))
+      effects.allocated.push(path)
       return path
     },
-    writeFileSync: (...args: Parameters<typeof fs.writeFileSync>) => { effects.fault?.('write', args[0]); return fs.writeFileSync(...args) },
+    writeFileSync: (...args: Parameters<typeof fs.writeFileSync>) => { effects.fault?.('write', args[0]); fs.writeFileSync(...args) },
     openSync: (...args: Parameters<typeof fs.openSync>) => {
       effects.fault?.('open', args[0])
       const descriptor = fs.openSync(...args)
@@ -42,9 +42,9 @@ vi.mock('node:fs', async original => {
     renameSync: (...args: Parameters<typeof fs.renameSync>) => {
       const existing = fs.existsSync(args[1]) ? fs.lstatSync(args[1]) : undefined
       effects.fault?.(existing?.size === 0 ? 'publish' : 'finalize', args[1])
-      return fs.renameSync(...args)
+      fs.renameSync(...args)
     },
-    unlinkSync: (...args: Parameters<typeof fs.unlinkSync>) => { effects.fault?.('unlink', args[0]); return fs.unlinkSync(...args) },
+    unlinkSync: (...args: Parameters<typeof fs.unlinkSync>) => { effects.fault?.('unlink', args[0]); fs.unlinkSync(...args) },
   }
 })
 vi.mock('playwright', () => ({ _electron: { launch: effects.launch } }))
@@ -55,14 +55,14 @@ vi.mock('../scripts/packaged-runtime.mjs', () => ({
   verifyPackagedDesktopRuntime: effects.verifyRuntime,
 }))
 vi.mock('../scripts/fork-release.ts', () => ({ parseDesktopForkReleasePlan: (value: unknown) => value }))
-vi.mock('../src/plugin-provisioning.ts', () => ({ readDesktopPluginProvisioningPlan: (path: string) => JSON.parse(readFileSync(path, 'utf8')) }))
+vi.mock('../src/plugin-provisioning.ts', () => ({ readDesktopPluginProvisioningPlan: (path: string) => readObject(path) }))
 vi.mock('../src/plugin-receipts.ts', () => ({ assertDesktopProvisioningInventory: effects.inventory }))
 vi.mock('../scripts/smoke-environment.ts', () => ({ desktopSmokeEnvironment: effects.environment }))
 vi.mock('./fixtures/desktop-version-menu-smoke.ts', () => ({ inspectDesktopVersionMenu: effects.menu }))
 vi.mock('./fixtures/copilot-settings-smoke.ts', () => ({ inspectPackagedCopilotSettings: effects.settings }))
 vi.mock('./fixtures/copilot-usage-smoke.ts', () => ({ inspectCopilotUsageCapability: effects.capability, inspectSignedOutCopilotUsage: effects.usage }))
 vi.mock('./fixtures/packaged-graph-check.ts', () => ({ inspectPackagedGraphResolution: () => ({}), packagedGraphCheckArguments: effects.graph }))
-vi.mock('../src/owned-directory.ts', async original => {
+vi.mock('../src/owned-directory.ts', async (original) => {
   const actual = await original<typeof import('../src/owned-directory.ts')>()
   return { removeOwnedDirectory(path: string) {
     effects.removed.push(path)
@@ -73,7 +73,12 @@ vi.mock('../src/owned-directory.ts', async original => {
 
 const directories: string[] = []
 const hash = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex')
-const receipt = (output: string, name: string): Record<string, unknown> => JSON.parse(readFileSync(join(output, name), 'utf8'))
+function readObject(path: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(readFileSync(path, 'utf8'))
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected an owned JSON object')
+  return value as Record<string, unknown>
+}
+const receipt = (output: string, name: string): Record<string, unknown> => readObject(join(output, name))
 beforeEach(() => {
   vi.clearAllMocks()
   effects.fault = undefined
@@ -100,7 +105,7 @@ function ownerFixture() {
   writeFileSync(application, 'inert unit fixture bytes')
   const output = join(root, 'evidence')
   const resources = join(root, 'resources')
-  const reviewed = JSON.parse(readFileSync(resolve('apps/desktop/release/cloga-windows-x64.json'), 'utf8'))
+  const reviewed = readObject(resolve('apps/desktop/release/cloga-windows-x64.json'))
   mkdirSync(join(resources, 'desktop-provisioning'), { recursive: true })
   mkdirSync(join(resources, 'managed-update'))
   writeFileSync(join(resources, 'desktop-provisioning', 'plan.json'), JSON.stringify(reviewed.desktopProvisioning))
@@ -243,7 +248,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     expect(metadataCall?.[2]).toMatchObject({ timeout: 120_000 })
   })
 
-  it.each(['sync', 'async', 'undefined'] as const)('preserves the %s observer failure through real catch and cleanup', async mode => {
+  it.each(['sync', 'async', 'undefined'] as const)('preserves the %s observer failure through real catch and cleanup', async (mode) => {
     const fixture = ownerFixture()
     const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
     const primary = mode === 'undefined' ? undefined : new Error('unexpected observer')
@@ -269,7 +274,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     expect(existsSync(join(fixture.options.output, 'acceptance.json'))).toBe(false)
   })
 
-  it.each(['first-allocation', 'second-allocation', 'prepare'] as const)('cleans every acquired directory after %s failure', async stage => {
+  it.each(['first-allocation', 'second-allocation', 'prepare'] as const)('cleans every acquired directory after %s failure', async (stage) => {
     const fixture = ownerFixture()
     const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
     const primary = new Error(stage)
@@ -284,7 +289,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     expect(receipt(fixture.options.output, 'failure.json')).toMatchObject({ error: String(primary), cleanupCompleted: true })
   })
 
-  it.each(['home', 'ancestor', 'close'] as const)('cleanup-only %s failure cannot publish ordinary acceptance', async stage => {
+  it.each(['home', 'ancestor', 'close'] as const)('cleanup-only %s failure cannot publish ordinary acceptance', async (stage) => {
     const fixture = ownerFixture()
     const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
     const primary = new Error('cleanup failed')
@@ -297,7 +302,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     expect(receipt(fixture.options.output, 'failure.json').cleanupErrors).not.toEqual([])
   })
 
-  it.each(['initial-diagnostic', 'final-diagnostic', 'cleanup'] as const)('combined owner rejects %s damage without suite success', async stage => {
+  it.each(['initial-diagnostic', 'final-diagnostic', 'cleanup'] as const)('combined owner rejects %s damage without suite success', async (stage) => {
     const fixture = ownerFixture()
     const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
     const { runPackagedCopilotObserverCanary } = await import('./fixtures/copilot-observer-smoke.ts')
@@ -345,7 +350,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     expect(existsSync(join(fixture.options.output, 'acceptance.json'))).toBe(false)
   })
 
-  it.each(['functional-results.json', 'acceptance.json'] as const)('failed atomic %s publication never reports acceptance', async file => {
+  it.each(['functional-results.json', 'acceptance.json'] as const)('failed atomic %s publication never reports acceptance', async (file) => {
     const fixture = ownerFixture()
     const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
     effects.fault = (operation, path) => { if (operation === 'publish' && basename(String(path)) === file) throw new Error('atomic publication failed') }
@@ -355,7 +360,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     expect(readdirSync(fixture.options.output).some(name => name.endsWith('.tmp'))).toBe(false)
   })
 
-  it.each(['ordinary', 'suite'] as const)('leaves no valid %s commit marker when rename and reservation cleanup both fail', async mode => {
+  it.each(['ordinary', 'suite'] as const)('leaves no valid %s commit marker when rename and reservation cleanup both fail', async (mode) => {
     const fixture = ownerFixture()
     const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
     const { runPackagedCopilotObserverCanary } = await import('./fixtures/copilot-observer-smoke.ts')
@@ -387,7 +392,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     expect(receipt(fixture.options.output, 'failure.json')).toMatchObject({ cleanupCompleted: true })
   })
 
-  it.each(['contents', 'inode'] as const)('preserves a reservation whose %s changed before publication', async damage => {
+  it.each(['contents', 'inode'] as const)('preserves a reservation whose %s changed before publication', async (damage) => {
     const fixture = ownerFixture()
     const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
     const fs = await vi.importActual<typeof import('node:fs')>('node:fs')
@@ -430,7 +435,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     expect(existsSync(join(fixture.options.output, 'functional-results.json'))).toBe(false)
   })
 
-  it.each(['functional-results.json', 'failure.json', 'acceptance.json', 'observer-cleanup.json', 'packaged-suite.json'])('refuses stale %s before acquiring resources', async file => {
+  it.each(['functional-results.json', 'failure.json', 'acceptance.json', 'observer-cleanup.json', 'packaged-suite.json'])('refuses stale %s before acquiring resources', async (file) => {
     const fixture = ownerFixture()
     const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
     mkdirSync(fixture.options.output)

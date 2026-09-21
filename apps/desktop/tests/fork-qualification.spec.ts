@@ -1,7 +1,7 @@
 /** Synthetic, inert evidence only: no installer, browser, package manager or network is executed. */
 import { createHash } from 'node:crypto'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, readdirSync, lstatSync, symlinkSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, readdirSync, lstatSync, symlinkSync, realpathSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createDesktopForkReleaseCapability, parseDesktopForkReleasePlan } from '../scripts/fork-release.ts'
@@ -11,7 +11,7 @@ import { buildDesktopProvisioningState } from '../src/plugin-provisioning.ts'
 import { assertPackagedQualificationPaths, verifyForkQualification, runForkQualificationCli } from '../scripts/verify-fork-qualification.ts'
 
 const boundary = vi.hoisted(() => ({ syntheticPin: '', source: 'a'.repeat(40), tree: 'b'.repeat(40), gitCalls: [] as string[] }))
-vi.mock('node:fs', async importOriginal => {
+vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
   return { ...actual, openSync: (...args: Parameters<typeof actual.openSync>) => {
     // Only the immutable baseline-pin read is substituted. Production has no injected pin or success override.
@@ -19,7 +19,7 @@ vi.mock('node:fs', async importOriginal => {
     return actual.openSync(...args)
   } }
 })
-vi.mock('node:child_process', async importOriginal => {
+vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
   return { ...actual, execFileSync: (file: string, args: string[]) => {
     expect(file).toBe('git')
@@ -30,18 +30,30 @@ vi.mock('node:child_process', async importOriginal => {
   } }
 })
 
-// Mutation fixtures deliberately cover invalid and heterogeneous on-disk schemas, not typed product objects.
-type Json = Record<string, any>
+// Narrow containers only; mutated leaves deliberately remain unknown, including invalid schema values.
+type Json = Record<string, unknown>
+function object(value: unknown): Json {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected fixture object')
+  return value as Json
+}
+function objectAt(value: Json, ...path: string[]): Json {
+  for (const key of path) value = object(value[key])
+  return value
+}
+function array(value: unknown): unknown[] {
+  if (!Array.isArray(value)) throw new Error('Expected fixture array')
+  return value
+}
 const root = resolve(import.meta.dirname, '../../..')
 const token = '11111111-2222-4333-8444-555555555555'
 const source = 'a'.repeat(40)
 const tree = 'b'.repeat(40)
 const previousSource = 'c'.repeat(40)
 const sha = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex')
-const json = (path: string): Json => JSON.parse(readFileSync(path, 'utf8')) as Json
-const save = (path: string, value: unknown) => writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
+const json = (path: string): Json => object(JSON.parse(readFileSync(path, 'utf8')) as unknown)
+const save = (path: string, value: unknown): void => { writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`) }
 const rawHash = (path: string) => sha(readFileSync(path))
-const truths = (names: string[], value = true) => Object.fromEntries(names.map(name => [name, value]))
+const truths = (names: string[], value = true): Record<string, boolean> => Object.fromEntries(names.map(name => [name, value] as const))
 const packagedTrue = ['isolatedHome', 'onboardingNoticeDismissed', 'actualGraphVerified', 'ancestorSdkJunction', 'accountEntryVisible', 'manageCompatibilityDisclosureAbsent', 'modelRolesViewLoaded', 'currentWorkspaceReadOnly', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
 const packagedFalse = ['ancestorSdkLoaded', 'liveAccountQuota', 'realOAuth', 'verificationNavigationExercised', 'manualVerificationAddressObserved', 'realModelRound', 'realSearch', 'installerUpgradeVerified']
 const settingsTrue = ['modelRolesViewLoaded', 'currentWorkspaceReadOnly', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
@@ -53,8 +65,12 @@ const settings = { ...truths(settingsTrue), registeredSearchProviders: ['github-
 const usageCapability = { id: 'account-quota-composer-usage', required: true, evidenceScope: 'synthetic-quota-and-public-remote-ui-contracts-not-live-account-access', signedOutNetworkRegressionDeclared: true, lifecycleRegressionDeclared: true }
 const signedOut = { usageTriggerCount: 0, accountUsageTextCount: 0, usageSurfaceAbsent: true, hostQuotaRequestInstrumentation: 'not-available-in-packaged-smoke' }
 
-function fixture() {
-  const directory = mkdtempSync(join(tmpdir(), 'dsh-synthetic-qualification-'))
+const ownedRoots: string[] = []
+function fixture(temporaryRoot = tmpdir()) {
+  const allocated = mkdtempSync(join(temporaryRoot, 'dsh-synthetic-qualification-'))
+  ownedRoots.push(allocated)
+  // Cleanup already owns the raw allocation if expanding a Windows 8.3 ancestor fails.
+  const directory = realpathSync.native(allocated)
   const releaseAssets = join(directory, 'assets')
   const packagedEvidence = join(directory, 'packaged')
   const baselineDirectory = join(directory, 'baseline')
@@ -82,18 +98,21 @@ function fixture() {
     const build = { workflow: DESKTOP_MANAGED_UPDATE_WORKFLOW, nodeVersion: 'v24.13.0', pnpmVersion: '11.7.0', packageRegistry: 'https://packagefeedproxy.microsoft.io/npm/', lockfileSha256: sha('synthetic lock'), planSha256: rawHash(planPath) }
     const network = { manifestOrigin: 'https://github.com', apiOrigin: 'https://api.github.com', allowedRedirectHosts: ['github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'] }
     const installation = { interaction: 'required', installerArguments: [], uac: 'installer-controlled', completion: 'post-restart-installed-evidence' }
-    const receipt: Json = { schemaVersion: 1, action: 'desktop-fork-release', status: 'complete', createdUtc: '2026-01-01T00:00:00.000Z',
+    const receiptPayload = { schemaVersion: 1, action: 'desktop-fork-release', status: 'complete', createdUtc: '2026-01-01T00:00:00.000Z',
       source: { repository: 'cloga/deepseek-harness', tag: `dsh-desktop-v${version}`, version, commit, tree }, buildInputs: build,
       identity: { ...plan.identity, upstreamVersion, sequence }, artifacts: { installer, executableSha256, runtimeSha256, helperSha256: sha('synthetic helper'), capabilitySha256: rawHash(join(packagedEvidence, 'capability.json')),
-        provisioning: { file: 'desktop-provisioning.json', sha256: rawHash(join(packagedEvidence, 'provisioning-plan.json')), planSha256: capability.provisioning!.planSha256 } },
-      validation: { helperStandalone: true, nativeUpdaterEnabled: false, appUpdateYmlPresent: false, managedCapabilityMatches: true, provisioningPlanMatches: true, installerStarted: false, installedDesktopTouched: false }, network, installation }
-    receipt.receiptSha256 = managedUpdateJsonSha256(receipt)
+        provisioning: { file: 'desktop-provisioning.json', sha256: rawHash(join(packagedEvidence, 'provisioning-plan.json')), planSha256: capability.provisioning.planSha256 } },
+      validation: {
+        helperStandalone: true, nativeUpdaterEnabled: false, appUpdateYmlPresent: false,
+        managedCapabilityMatches: true, provisioningPlanMatches: true, installerStarted: false, installedDesktopTouched: false,
+      }, network, installation }
+    const receipt = { ...receiptPayload, receiptSha256: managedUpdateJsonSha256(receiptPayload) }
     save(join(destination, 'build-receipt.json'), receipt)
-    const manifest: Json = { schemaVersion: 3, owner: 'cloga/deepseek-harness', mode: 'interactive-windows-installer', channel: 'cloga-windows-x64', version, upstreamVersion, sequence,
+    const manifestPayload = { schemaVersion: 3, owner: 'cloga/deepseek-harness', mode: 'interactive-windows-installer', channel: 'cloga-windows-x64', version, upstreamVersion, sequence,
       source: { repository: 'cloga/deepseek-harness', commit, tree, tag: `dsh-desktop-v${version}` }, build, identity: plan.identity, installer,
       buildReceipt: { file: 'build-receipt.json', sha256: rawHash(join(destination, 'build-receipt.json')), receiptSha256: receipt.receiptSha256 }, installedEvidence: { executableSha256, runtimeSha256 },
       pluginCompatibility: { capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, automaticProvisioning: false }, network, installation }
-    manifest.manifestSha256 = managedUpdateJsonSha256(manifest)
+    const manifest = { ...manifestPayload, manifestSha256: managedUpdateJsonSha256(manifestPayload) }
     save(join(destination, 'release.json'), manifest)
     return { manifest, installer: join(destination, installerFile), manifestPath: join(destination, 'release.json'), manifestFileSha256: rawHash(join(destination, 'release.json')) }
   }
@@ -114,7 +133,8 @@ function fixture() {
     const expected = round === 'baseline' ? previous : candidate
     save(join(evidence, `${round}.json`), { sourceCommit: expected.manifest.source.commit, version: expected.manifest.version, executableSha256, runtimeSha256,
       actualInstalledApplication: true, actualHostSettingsViews: round === 'baseline' ? { modelRolesViewLoaded: true, searchProviderCatalogLoaded: true, registeredSearchProviders: ['github-copilot-hosted'], realSearch: false } : settings,
-      sameRetainedHome: true, retainedEnvSha256, isolatedUserData: true, pluginUserChoicesVerified: false, draftAttachmentRefusalVerified: false, realOAuth: false, realModelRound: false, managedHandoffVerified: false })
+      sameRetainedHome: true, retainedEnvSha256, isolatedUserData: true, pluginUserChoicesVerified: false,
+      draftAttachmentRefusalVerified: false, realOAuth: false, realModelRound: false, managedHandoffVerified: false })
   }
   save(join(evidence, 'profile-cleanup.json'), truths(['ownedHomeRemoved', 'ownedElectronDataRemoved', 'isolatedPackageAcceptanceDataRemoved']))
   save(join(evidence, 'package-acceptance.json'), { schemaVersion: 1, sourceCommit: source, scope: 'candidate-installed-desktop-same-version-isolated-home', ...truths(packageTrue), ...truths(packageFalse, false),
@@ -138,7 +158,8 @@ function fixture() {
   const identity = { evidenceId: token, sourceCommit: source, sourceTree: tree, runId: '123', runAttempt: '2', planSha256: rawHash(planPath), runtimeSha256, executableSha256,
     provisioningSha256: rawHash(join(packagedEvidence, 'provisioning-plan.json')), capabilitySha256: rawHash(join(packagedEvidence, 'capability.json')) }
   save(join(packagedEvidence, 'functional-results.json'), { schemaVersion: 1, scope: 'packaged-functional-observations', ...identity, functionalAssertionsCompleted: true, normalAcceptanceCompleted: false, cleanupVerified: false,
-    ...truths(packagedTrue), ...truths(packagedFalse, false), desktopVersion: plan.version, runtimeVersion: plan.upstreamVersion, versionMenus: menus, plugin: copilot,
+    ...truths(packagedTrue), ...truths(packagedFalse, false), desktopVersion: plan.version,
+    runtimeVersion: plan.upstreamVersion, versionMenus: menus, plugin: copilot,
     transport: 'official Web-backed Desktop Host with packaged Electron dsh-app origin bridge', restartReceiptSha256: rawHash(join(packagedEvidence, 'initial-desktop-plugin-receipts.json')),
     copilotUsageCapability: usageCapability, signedOutCopilotUsage: [signedOut, signedOut], hostQuotaNoNetworkEvidence: 'immutable-plugin-ci-regression-only',
     timeline: ['package-identity', ...['initial', 'restart'].flatMap(phase => ['launch', 'version-menu', 'application', 'account', 'usage-readonly', 'settings-readonly', 'packaged-graph', 'closed'].map(event => `${phase}:${event}`))].map((event, milliseconds) => ({ event, milliseconds })) })
@@ -149,15 +170,29 @@ function fixture() {
   const options = { planPath, releaseAssets, packagedEvidence, upgradeRoot, baselineDirectory, expectedSource: source, runId: '123', runAttempt: '2' }
   const edit = (path: string, mutate: (value: Json) => void) => { const value = json(path); mutate(value); save(path, value) }
   const seal = () => {
-    edit(join(packagedEvidence, 'observer-cleanup.json'), value => { value.functionalSha256 = rawHash(join(packagedEvidence, 'functional-results.json')); value.failureSha256 = rawHash(join(packagedEvidence, 'failure.json')) })
-    edit(join(packagedEvidence, 'packaged-suite.json'), value => { value.receipts = Object.fromEntries([['functional', 'functional-results.json'], ['failure', 'failure.json'], ['observer', 'observer-cleanup.json']].map(([key, file]) => [key, { file, sha256: rawHash(join(packagedEvidence, file!)) }])) })
+    edit(join(packagedEvidence, 'observer-cleanup.json'), (value) => { value.functionalSha256 = rawHash(join(packagedEvidence, 'functional-results.json')); value.failureSha256 = rawHash(join(packagedEvidence, 'failure.json')) })
+    edit(join(packagedEvidence, 'packaged-suite.json'), (value) => {
+      const files = [
+        ['functional', 'functional-results.json'], ['failure', 'failure.json'], ['observer', 'observer-cleanup.json'],
+      ] as const
+      value.receipts = Object.fromEntries<{ file: string; sha256: string }>(
+        files.map(([key, file]) => [key, { file, sha256: rawHash(join(packagedEvidence, file)) }]),
+      )
+    })
   }
   seal()
   return { directory, options, edit, seal, evidence, candidate, previous }
 }
 let current: ReturnType<typeof fixture>
 beforeEach(() => { current = fixture(); boundary.gitCalls = [] })
-afterEach(() => { rmSync(current.directory, { recursive: true, force: true }); boundary.syntheticPin = ''; vi.unstubAllEnvs(); vi.restoreAllMocks() })
+afterEach(() => {
+  // Remove nested allocations first while their owned alias-parent still exists; rm does not follow child links.
+  for (const directory of ownedRoots.toReversed()) rmSync(directory, { recursive: true, force: true })
+  ownedRoots.length = 0
+  boundary.syntheticPin = ''
+  vi.unstubAllEnvs()
+  vi.restoreAllMocks()
+})
 const verify = () => verifyForkQualification(current.options)
 const packaged = (file: string) => join(current.options.packagedEvidence, file)
 const installed = (file: string) => join(current.evidence, file)
@@ -174,11 +209,23 @@ function inventory(directory: string): Record<string, string> {
 }
 
 describe('CI-only fork qualification from retained evidence', () => {
+  it('canonicalizes newly owned allocations before constructing evidence paths through a temporary-root alias', () => {
+    const parent = join(current.directory, 'allocation-parent')
+    const alias = join(current.directory, 'allocation-alias')
+    mkdirSync(parent)
+    symlinkSync(parent, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    const allocated = fixture(alias)
+    expect(dirname(allocated.directory)).toBe(realpathSync.native(parent))
+    expect(allocated.directory).toBe(realpathSync.native(allocated.directory))
+    expect(verifyForkQualification(allocated.options).packagedFunctionalVerified).toBe(true)
+  })
   it('accepts the complete synthetic graph, preserves all input bytes, and retains narrow scope', () => {
     const before = inventory(current.directory)
     const summary = verify()
     expect(summary).toMatchObject({ sourceCommit: source, sourceTree: tree, runId: '123', runAttempt: '2', packagedFunctionalVerified: true, actualInstalledUpgradeVerified: true, normalPackagedAcceptanceCompleted: false,
-      limits: { realOAuth: false, realModelRound: false, realSearch: false, liveAccountQuota: false, choicesAcrossInstallerUpgradeVerified: false } })
+      limits: {
+        realOAuth: false, realModelRound: false, realSearch: false, liveAccountQuota: false, choicesAcrossInstallerUpgradeVerified: false,
+      } })
     expect(summary.inputs['packaged.suite']).toBe(rawHash(packaged('packaged-suite.json')))
     expect(inventory(current.directory)).toEqual(before)
     expect(boundary.gitCalls).toEqual([])
@@ -192,125 +239,128 @@ describe('CI-only fork qualification from retained evidence', () => {
   it('requires original helper acceptance, not only helperStandalone build validation', () => {
     rmSync(packaged('helper-acceptance.json')); expect(verify).toThrow()
   })
-  it.each(['helperSha256', 'isolatedBootstrap', 'validSyntheticHandoffAcknowledged', 'cancellationCompleted', 'nodePath', 'nodeOptions', 'manifestTransport', 'liveHandoff', 'installerStarted'])('rejects changed helper %s', field => {
-    mutate(packaged('helper-acceptance.json'), value => { value[field] = typeof value[field] === 'boolean' ? !value[field] : 'foreign' }); expect(verify).toThrow()
+  it.each(['helperSha256', 'isolatedBootstrap', 'validSyntheticHandoffAcknowledged', 'cancellationCompleted', 'nodePath', 'nodeOptions', 'manifestTransport', 'liveHandoff', 'installerStarted'])('rejects changed helper %s', (field) => {
+    mutate(packaged('helper-acceptance.json'), (value) => { value[field] = typeof value[field] === 'boolean' ? !value[field] : 'foreign' }); expect(verify).toThrow()
   })
   it('rejects additional helper authority fields', () => {
-    mutate(packaged('helper-acceptance.json'), value => { value.liveUpgradeVerified = true }); expect(verify).toThrow()
+    mutate(packaged('helper-acceptance.json'), (value) => { value.liveUpgradeVerified = true }); expect(verify).toThrow()
   })
   it('accepts optional before-cleanup diagnostics without relabeling them as surviving files', () => {
     mutate(packaged('failure.json'), value => Object.assign(value, { stderrTail: '', stderrTruncated: false, profileFilesPresentBeforeCleanup: { 'package.json': true, 'desktop-plugin-receipts.json': true, 'desktop-plugin-provisioning-state.json': true },
-      realOAuth: false, realModelRound: false, realSearch: false, verificationNavigationExercised: false, manualVerificationAddressObserved: false }))
+      realOAuth: false, realModelRound: false, realSearch: false,
+      verificationNavigationExercised: false, manualVerificationAddressObserved: false }))
     expect(verify().unexpectedObserverFailureCleanupVerified).toBe(true)
   })
-  it.each(['schemaVersion', 'scope'])('rejects unknown failure %s', field => { mutate(packaged('failure.json'), value => { value[field] = 'foreign' }); expect(verify).toThrow() })
-  it('rejects unknown failure fields even with a resealed graph', () => { mutate(packaged('failure.json'), value => { value.unrecognizedSuccess = true }); expect(verify).toThrow() })
-  it.each(['missing', 'reordered', 'duplicate', 'nonmonotonic'])('rejects %s functional observations', damage => {
-    mutate(packaged('functional-results.json'), value => {
-      if (damage === 'missing') value.timeline.pop()
-      else if (damage === 'reordered') value.timeline.reverse()
-      else if (damage === 'duplicate') value.timeline.push(value.timeline.at(-1))
-      else value.timeline[2].milliseconds = -1
+  it.each(['schemaVersion', 'scope'])('rejects unknown failure %s', (field) => { mutate(packaged('failure.json'), (value) => { value[field] = 'foreign' }); expect(verify).toThrow() })
+  it('rejects unknown failure fields even with a resealed graph', () => { mutate(packaged('failure.json'), (value) => { value.unrecognizedSuccess = true }); expect(verify).toThrow() })
+  it.each(['missing', 'reordered', 'duplicate', 'nonmonotonic'])('rejects %s functional observations', (damage) => {
+    mutate(packaged('functional-results.json'), (value) => {
+      const timeline = array(value.timeline)
+      if (damage === 'missing') timeline.pop()
+      else if (damage === 'reordered') timeline.reverse()
+      else if (damage === 'duplicate') timeline.push(timeline.at(-1))
+      else object(timeline[2]).milliseconds = -1
     }); expect(verify).toThrow()
   })
-  it.each(['owner.json', 'validated.json', 'retained.json'])('requires root evidence %s', file => { rmSync(join(current.options.upgradeRoot, file)); expect(verify).toThrow() })
-  it.each(['installer-upgrade.json', 'baseline.json', 'candidate.json', 'candidate-restart.json', 'profile-cleanup.json', 'package-acceptance.json'])('requires installed evidence %s', file => { rmSync(installed(file)); expect(verify).toThrow() })
-  it.each(['functional-results.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json'])('rejects missing %s', file => {
+  it.each(['owner.json', 'validated.json', 'retained.json'])('requires root evidence %s', (file) => { rmSync(join(current.options.upgradeRoot, file)); expect(verify).toThrow() })
+  it.each(['installer-upgrade.json', 'baseline.json', 'candidate.json', 'candidate-restart.json', 'profile-cleanup.json', 'package-acceptance.json'])('requires installed evidence %s', (file) => { rmSync(installed(file)); expect(verify).toThrow() })
+  it.each(['functional-results.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json'])('rejects missing %s', (file) => {
     rmSync(packaged(file)); expect(verify).toThrow()
   })
-  it.each(['functional-results.json', 'failure.json', 'observer-cleanup.json'])('rejects modified original %s bytes without resealing', file => {
+  it.each(['functional-results.json', 'failure.json', 'observer-cleanup.json'])('rejects modified original %s bytes without resealing', (file) => {
     writeFileSync(packaged(file), readFileSync(packaged(file), 'utf8') + ' '); expect(verify).toThrow()
   })
   it.each(['sourceCommit', 'sourceTree', 'runId', 'runAttempt', 'planSha256', 'runtimeSha256', 'executableSha256', 'provisioningSha256', 'capabilitySha256', 'evidenceId'].flatMap(field => ['functional-results.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json'].map(file => ({ field, file }))))('rejects foreign $file $field even with updated graph hashes', ({ file, field }) => {
-    mutate(packaged(file), value => { value[field] = 'foreign' }); expect(verify).toThrow()
+    mutate(packaged(file), (value) => { value[field] = 'foreign' }); expect(verify).toThrow()
   })
-  it.each(['functional-results.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json'])('rejects missing identity in %s', file => {
-    mutate(packaged(file), value => { delete value.runAttempt }); expect(verify).toThrow()
+  it.each(['functional-results.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json'])('rejects missing identity in %s', (file) => {
+    mutate(packaged(file), (value) => { delete value.runAttempt }); expect(verify).toThrow()
   })
-  it.each(packagedTrue)('requires functional observation %s, not only suite success', field => {
-    mutate(packaged('functional-results.json'), value => { value[field] = false }); expect(verify).toThrow()
+  it.each(packagedTrue)('requires functional observation %s, not only suite success', (field) => {
+    mutate(packaged('functional-results.json'), (value) => { value[field] = false }); expect(verify).toThrow()
   })
-  it.each(packagedFalse)('rejects expanded packaged scope %s', field => {
-    mutate(packaged('functional-results.json'), value => { value[field] = true }); expect(verify).toThrow()
+  it.each(packagedFalse)('rejects expanded packaged scope %s', (field) => {
+    mutate(packaged('functional-results.json'), (value) => { value[field] = true }); expect(verify).toThrow()
   })
-  it.each(['cleanupErrors', 'diagnosticErrors'])('rejects exact observer marker with %s', field => {
-    mutate(packaged('failure.json'), value => { value[field] = ['synthetic secondary failure'] }); expect(verify).toThrow()
+  it.each(['cleanupErrors', 'diagnosticErrors'])('rejects exact observer marker with %s', (field) => {
+    mutate(packaged('failure.json'), (value) => { value[field] = ['synthetic secondary failure'] }); expect(verify).toThrow()
   })
-  it.each(['cleanupCompleted', 'cleanupVerified'])('requires finalized failure %s', field => {
-    mutate(packaged('failure.json'), value => { value[field] = false }); expect(verify).toThrow()
+  it.each(['cleanupCompleted', 'cleanupVerified'])('requires finalized failure %s', (field) => {
+    mutate(packaged('failure.json'), (value) => { value[field] = false }); expect(verify).toThrow()
   })
-  it.each(['observerInvokedOnce', 'errorPropagationVerified', 'ordinaryAcceptanceWithheld', 'cleanupVerified', 'ownedHomeRemoved', 'ownedProfileRemoved', 'ownedLegacySdkRemoved'])('requires observer %s', field => {
-    mutate(packaged('observer-cleanup.json'), value => { value[field] = false }); expect(verify).toThrow()
+  it.each(['observerInvokedOnce', 'errorPropagationVerified', 'ordinaryAcceptanceWithheld', 'cleanupVerified', 'ownedHomeRemoved', 'ownedProfileRemoved', 'ownedLegacySdkRemoved'])('requires observer %s', (field) => {
+    mutate(packaged('observer-cleanup.json'), (value) => { value[field] = false }); expect(verify).toThrow()
   })
-  it.each(['functionalAssertionsCompleted', 'errorPropagationVerified', 'cleanupVerified'])('requires suite %s', field => {
-    mutate(packaged('packaged-suite.json'), value => { value[field] = false }); expect(verify).toThrow()
+  it.each(['functionalAssertionsCompleted', 'errorPropagationVerified', 'cleanupVerified'])('requires suite %s', (field) => {
+    mutate(packaged('packaged-suite.json'), (value) => { value[field] = false }); expect(verify).toThrow()
   })
-  it.each(['../functional-results.json', 'C:\\foreign.json', 'acceptance.json'])('rejects suite receipt path %s', file => {
-    mutate(packaged('packaged-suite.json'), value => { value.receipts.functional.file = file }, false); expect(verify).toThrow()
+  it.each(['../functional-results.json', 'C:\\foreign.json', 'acceptance.json'])('rejects suite receipt path %s', (file) => {
+    mutate(packaged('packaged-suite.json'), (value) => { objectAt(value, 'receipts', 'functional').file = file }, false); expect(verify).toThrow()
   })
-  it.each(['extra', 'missing', 'wrong-hash'])('rejects %s suite receipt edge', damage => {
-    mutate(packaged('packaged-suite.json'), value => {
-      if (damage === 'extra') value.receipts.extra = value.receipts.functional
-      else if (damage === 'missing') delete value.receipts.failure
-      else value.receipts.observer.sha256 = '0'.repeat(64)
+  it.each(['extra', 'missing', 'wrong-hash'])('rejects %s suite receipt edge', (damage) => {
+    mutate(packaged('packaged-suite.json'), (value) => {
+      const receipts = object(value.receipts)
+      if (damage === 'extra') receipts.extra = receipts.functional
+      else if (damage === 'missing') delete receipts.failure
+      else object(receipts.observer).sha256 = '0'.repeat(64)
     }, false); expect(verify).toThrow()
   })
   it('rejects ordinary acceptance alongside the combined canary', () => { save(packaged('acceptance.json'), {}); expect(verify).toThrow() })
-  it.each(['functional-results.json', 'observer-cleanup.json', 'packaged-suite.json'])('rejects normal acceptance claim in %s', file => {
-    mutate(packaged(file), value => { value.normalAcceptanceCompleted = true }); expect(verify).toThrow()
+  it.each(['functional-results.json', 'observer-cleanup.json', 'packaged-suite.json'])('rejects normal acceptance claim in %s', (file) => {
+    mutate(packaged(file), (value) => { value.normalAcceptanceCompleted = true }); expect(verify).toThrow()
   })
-  it('does not mistake provisional cleanup for final cleanup', () => { mutate(packaged('functional-results.json'), value => { value.cleanupVerified = true }); expect(verify).toThrow() })
-  it('rejects unknown success scope', () => { mutate(packaged('functional-results.json'), value => { value.nativePopupVerified = true }); expect(verify).toThrow() })
-  it('rejects a diagnostic capture error even after final cleanup', () => { mutate(packaged('failure.json'), value => { value.captureError = 'failed' }); expect(verify).toThrow() })
-  it('rejects a different primary failure', () => { mutate(packaged('failure.json'), value => { value.error = 'Error: unrelated' }); expect(verify).toThrow() })
-  it.each(['desktop-runtime.json', 'capability.json', 'provisioning-plan.json'])('binds raw %s bytes rather than reserialized JSON', file => {
+  it('does not mistake provisional cleanup for final cleanup', () => { mutate(packaged('functional-results.json'), (value) => { value.cleanupVerified = true }); expect(verify).toThrow() })
+  it('rejects unknown success scope', () => { mutate(packaged('functional-results.json'), (value) => { value.nativePopupVerified = true }); expect(verify).toThrow() })
+  it('rejects a diagnostic capture error even after final cleanup', () => { mutate(packaged('failure.json'), (value) => { value.captureError = 'failed' }); expect(verify).toThrow() })
+  it('rejects a different primary failure', () => { mutate(packaged('failure.json'), (value) => { value.error = 'Error: unrelated' }); expect(verify).toThrow() })
+  it.each(['desktop-runtime.json', 'capability.json', 'provisioning-plan.json'])('binds raw %s bytes rather than reserialized JSON', (file) => {
     writeFileSync(packaged(file), readFileSync(packaged(file), 'utf8') + ' '); expect(verify).toThrow()
   })
   it('distinguishes normalized provisioning identity from raw resource SHA', () => {
     const plan = json(current.options.planPath)
-    mutate(packaged('functional-results.json'), value => { value.provisioningSha256 = sha(JSON.stringify(plan.desktopProvisioning)) }); expect(verify).toThrow()
+    mutate(packaged('functional-results.json'), (value) => { value.provisioningSha256 = sha(JSON.stringify(plan.desktopProvisioning)) }); expect(verify).toThrow()
   })
-  it.each(['initial', 'restart'])('crosschecks original %s observations', phase => {
-    mutate(packaged(`${phase}-settings-readonly.json`), value => { value.currentWorkspaceReadOnly = false }); expect(verify).toThrow()
+  it.each(['initial', 'restart'])('crosschecks original %s observations', (phase) => {
+    mutate(packaged(`${phase}-settings-readonly.json`), (value) => { value.currentWorkspaceReadOnly = false }); expect(verify).toThrow()
   })
-  it.each(['initial-version-menu.json', 'restart-version-menu.json'])('rejects native popup claims in %s', file => {
-    mutate(packaged(file), value => { value.nativePopupOpened = true }); expect(verify).toThrow()
+  it.each(['initial-version-menu.json', 'restart-version-menu.json'])('rejects native popup claims in %s', (file) => {
+    mutate(packaged(file), (value) => { value.nativePopupOpened = true }); expect(verify).toThrow()
   })
-  it.each(['runtimeSha256', 'nodeOptionsPresent', 'resolutionMode', 'profile', 'runtimeRoot'])('crosschecks original graph %s', field => {
-    mutate(packaged('initial-packaged-graph.json'), value => { value[field] = 'foreign' }); expect(verify).toThrow()
+  it.each(['runtimeSha256', 'nodeOptionsPresent', 'resolutionMode', 'profile', 'runtimeRoot'])('crosschecks original graph %s', (field) => {
+    mutate(packaged('initial-packaged-graph.json'), (value) => { value[field] = 'foreign' }); expect(verify).toThrow()
   })
-  it('requires actual signed-out counts, not merely an absent surface flag', () => { mutate(packaged('initial-usage-readonly.json'), value => { value.signedOut.usageTriggerCount = 1 }); expect(verify).toThrow() })
-  it('crosschecks original profile dependency', () => { mutate(packaged('restart-package.json'), value => { value.dependencies['dsh-github-copilot'] = '*' }); expect(verify).toThrow() })
-  it('crosschecks original provisioning state', () => { mutate(packaged('initial-desktop-plugin-provisioning-state.json'), value => { value.planSha256 = '0'.repeat(64) }); expect(verify).toThrow() })
-  it('crosschecks original receipt bytes', () => { mutate(packaged('initial-desktop-plugin-receipts.json'), value => { value.owners['dsh-github-copilot'] = 'user' }); expect(verify).toThrow() })
+  it('requires actual signed-out counts, not merely an absent surface flag', () => { mutate(packaged('initial-usage-readonly.json'), (value) => { object(value.signedOut).usageTriggerCount = 1 }); expect(verify).toThrow() })
+  it('crosschecks original profile dependency', () => { mutate(packaged('restart-package.json'), (value) => { object(value.dependencies)['dsh-github-copilot'] = '*' }); expect(verify).toThrow() })
+  it('crosschecks original provisioning state', () => { mutate(packaged('initial-desktop-plugin-provisioning-state.json'), (value) => { value.planSha256 = '0'.repeat(64) }); expect(verify).toThrow() })
+  it('crosschecks original receipt bytes', () => { mutate(packaged('initial-desktop-plugin-receipts.json'), (value) => { object(value.owners)['dsh-github-copilot'] = 'user' }); expect(verify).toThrow() })
 
-  it.each(upgradeTrue)('requires actual installed upgrade %s', field => { mutate(installed('installer-upgrade.json'), value => { value[field] = false }); expect(verify).toThrow() })
-  it.each(upgradeFalse)('retains unqualified installed scope %s', field => { mutate(installed('installer-upgrade.json'), value => { value[field] = true }); expect(verify).toThrow() })
-  it.each(['cleanupErrors', 'secondaryErrors', 'failure'])('rejects succeeded:true with installer %s', field => { mutate(installed('installer-upgrade.json'), value => { value[field] = field === 'failure' ? 'synthetic failure' : ['synthetic failure'] }); expect(verify).toThrow() })
-  it.each(packageTrue)('requires same-version package %s', field => { mutate(installed('package-acceptance.json'), value => { value[field] = false }); expect(verify).toThrow() })
-  it.each(packageFalse)('retains package scope limit %s', field => { mutate(installed('package-acceptance.json'), value => { value[field] = true }); expect(verify).toThrow() })
-  it.each(['pageErrors', 'cleanupErrors', 'secondaryErrors'])('rejects package %s despite success', field => { mutate(installed('package-acceptance.json'), value => { value[field] = ['synthetic failure'] }); expect(verify).toThrow() })
-  it.each(['sourceCommit', 'scope'])('rejects foreign package %s', field => { mutate(installed('package-acceptance.json'), value => { value[field] = 'foreign' }); expect(verify).toThrow() })
-  it('rejects package error alongside success', () => { mutate(installed('package-acceptance.json'), value => { value.error = 'failed' }); expect(verify).toThrow() })
-  it.each(['ownedHomeRemoved', 'ownedElectronDataRemoved', 'isolatedPackageAcceptanceDataRemoved'])('requires profile cleanup %s', field => { mutate(installed('profile-cleanup.json'), value => { value[field] = false }); expect(verify).toThrow() })
-  it.each(['token', 'runId', 'runAttempt'])('rejects foreign root owner %s', field => { mutate(join(current.options.upgradeRoot, 'owner.json'), value => { value[field] = 'foreign' }); expect(verify).toThrow() })
-  it('rejects foreign validated owner', () => { mutate(join(current.options.upgradeRoot, 'validated.json'), value => { value.ownerToken = 'foreign' }); expect(verify).toThrow() })
-  it.each(['manifestFileSha256', 'manifestPath', 'installer'])('rejects foreign validated candidate %s', field => { mutate(join(current.options.upgradeRoot, 'validated.json'), value => { value.candidate[field] = 'foreign' }); expect(verify).toThrow() })
-  it('rejects source-only validated manifest replay', () => { mutate(join(current.options.upgradeRoot, 'validated.json'), value => { value.candidate.manifest.source.commit = previousSource }); expect(verify).toThrow() })
+  it.each(upgradeTrue)('requires actual installed upgrade %s', (field) => { mutate(installed('installer-upgrade.json'), (value) => { value[field] = false }); expect(verify).toThrow() })
+  it.each(upgradeFalse)('retains unqualified installed scope %s', (field) => { mutate(installed('installer-upgrade.json'), (value) => { value[field] = true }); expect(verify).toThrow() })
+  it.each(['cleanupErrors', 'secondaryErrors', 'failure'])('rejects succeeded:true with installer %s', (field) => { mutate(installed('installer-upgrade.json'), (value) => { value[field] = field === 'failure' ? 'synthetic failure' : ['synthetic failure'] }); expect(verify).toThrow() })
+  it.each(packageTrue)('requires same-version package %s', (field) => { mutate(installed('package-acceptance.json'), (value) => { value[field] = false }); expect(verify).toThrow() })
+  it.each(packageFalse)('retains package scope limit %s', (field) => { mutate(installed('package-acceptance.json'), (value) => { value[field] = true }); expect(verify).toThrow() })
+  it.each(['pageErrors', 'cleanupErrors', 'secondaryErrors'])('rejects package %s despite success', (field) => { mutate(installed('package-acceptance.json'), (value) => { value[field] = ['synthetic failure'] }); expect(verify).toThrow() })
+  it.each(['sourceCommit', 'scope'])('rejects foreign package %s', (field) => { mutate(installed('package-acceptance.json'), (value) => { value[field] = 'foreign' }); expect(verify).toThrow() })
+  it('rejects package error alongside success', () => { mutate(installed('package-acceptance.json'), (value) => { value.error = 'failed' }); expect(verify).toThrow() })
+  it.each(['ownedHomeRemoved', 'ownedElectronDataRemoved', 'isolatedPackageAcceptanceDataRemoved'])('requires profile cleanup %s', (field) => { mutate(installed('profile-cleanup.json'), (value) => { value[field] = false }); expect(verify).toThrow() })
+  it.each(['token', 'runId', 'runAttempt'])('rejects foreign root owner %s', (field) => { mutate(join(current.options.upgradeRoot, 'owner.json'), (value) => { value[field] = 'foreign' }); expect(verify).toThrow() })
+  it('rejects foreign validated owner', () => { mutate(join(current.options.upgradeRoot, 'validated.json'), (value) => { value.ownerToken = 'foreign' }); expect(verify).toThrow() })
+  it.each(['manifestFileSha256', 'manifestPath', 'installer'])('rejects foreign validated candidate %s', (field) => { mutate(join(current.options.upgradeRoot, 'validated.json'), (value) => { object(value.candidate)[field] = 'foreign' }); expect(verify).toThrow() })
+  it('rejects source-only validated manifest replay', () => { mutate(join(current.options.upgradeRoot, 'validated.json'), (value) => { objectAt(value, 'candidate', 'manifest', 'source').commit = previousSource }); expect(verify).toThrow() })
   it.each(['baseline', 'candidate', 'candidate-restart'].flatMap(round => ['sourceCommit', 'version', 'runtimeSha256', 'executableSha256', 'retainedEnvSha256', 'sameRetainedHome', 'actualInstalledApplication', 'isolatedUserData'].map(field => ({ round, field }))))('rejects changed $round $field', ({ round, field }) => {
-    mutate(installed(`${round}.json`), value => { value[field] = 'foreign' }); expect(verify).toThrow()
+    mutate(installed(`${round}.json`), (value) => { value[field] = 'foreign' }); expect(verify).toThrow()
   })
-  it.each(['immutable', 'manifestSha256', 'installerSha256', 'receiptSha256', 'sourceCommit', 'releaseId', 'installerExecuted'])('rejects baseline acquisition %s mismatch', field => { mutate(join(current.options.baselineDirectory, 'acquisition.json'), value => { value[field] = 'foreign' }); expect(verify).toThrow() })
+  it.each(['immutable', 'manifestSha256', 'installerSha256', 'receiptSha256', 'sourceCommit', 'releaseId', 'installerExecuted'])('rejects baseline acquisition %s mismatch', (field) => { mutate(join(current.options.baselineDirectory, 'acquisition.json'), (value) => { value[field] = 'foreign' }); expect(verify).toThrow() })
   it('requires independently pinned original baseline bytes', () => { writeFileSync(current.previous.manifestPath, readFileSync(current.previous.manifestPath, 'utf8') + ' '); expect(verify).toThrow() })
-  it('rejects retained-home identity not derived from this owner', () => { mutate(join(current.options.upgradeRoot, 'retained.json'), value => { value.envSha256 = '0'.repeat(64) }); expect(verify).toThrow() })
+  it('rejects retained-home identity not derived from this owner', () => { mutate(join(current.options.upgradeRoot, 'retained.json'), (value) => { value.envSha256 = '0'.repeat(64) }); expect(verify).toThrow() })
   it('rejects leftover home despite a successful cleanup receipt', () => { mkdirSync(join(current.options.upgradeRoot, 'home')); expect(verify).toThrow() })
-  it('rejects unacknowledged package process cleanup', () => { mutate(installed('package-acceptance.json'), value => { value.shellIncarnations[0].exited = false }); expect(verify).toThrow() })
-  it('rejects an empty process cleanup observation', () => { mutate(installed('package-acceptance.json'), value => { value.shellIncarnations = [] }); expect(verify).toThrow() })
+  it('rejects unacknowledged package process cleanup', () => { mutate(installed('package-acceptance.json'), (value) => { object(array(value.shellIncarnations)[0]).exited = false }); expect(verify).toThrow() })
+  it('rejects an empty process cleanup observation', () => { mutate(installed('package-acceptance.json'), (value) => { value.shellIncarnations = [] }); expect(verify).toThrow() })
   it('rejects retained round failure alongside success', () => { save(installed('candidate-failure.json'), { error: 'failed' }); expect(verify).toThrow() })
-  it('rejects a changed reviewed plan', () => { mutate(current.options.planPath, value => { value.sequence++ }); expect(verify).toThrow() })
+  it('rejects a changed reviewed plan', () => { mutate(current.options.planPath, (value) => { if (typeof value.sequence !== 'number') throw new Error('Expected fixture sequence'); value.sequence++ }); expect(verify).toThrow() })
   it('rejects a changed finalized installer', () => { writeFileSync(current.candidate.installer, 'different inert text'); expect(verify).toThrow() })
-  it('rejects a changed build receipt', () => { mutate(join(current.options.releaseAssets, 'build-receipt.json'), value => { value.status = 'failed' }); expect(verify).toThrow() })
-  it('does not treat a canonical manifest hash as its raw file hash', () => { mutate(join(current.options.upgradeRoot, 'validated.json'), value => { value.candidate.manifestFileSha256 = value.candidate.manifest.manifestSha256 }); expect(verify).toThrow() })
+  it('rejects a changed build receipt', () => { mutate(join(current.options.releaseAssets, 'build-receipt.json'), (value) => { value.status = 'failed' }); expect(verify).toThrow() })
+  it('does not treat a canonical manifest hash as its raw file hash', () => { mutate(join(current.options.upgradeRoot, 'validated.json'), (value) => { object(value.candidate).manifestFileSha256 = objectAt(value, 'candidate', 'manifest').manifestSha256 }); expect(verify).toThrow() })
   it('rejects an oversized evidence file before parsing it', () => { writeFileSync(packaged('functional-results.json'), ' '.repeat(8 * 1024 * 1024 + 1)); expect(verify).toThrow(/bounded regular/u) })
   it('rejects a directory as evidence', () => { rmSync(packaged('packaged-suite.json')); mkdirSync(packaged('packaged-suite.json')); expect(verify).toThrow(/bounded regular/u) })
   it('rejects evidence reached through an ancestor junction', () => {
@@ -318,14 +368,14 @@ describe('CI-only fork qualification from retained evidence', () => {
     symlinkSync(current.options.packagedEvidence, alias, process.platform === 'win32' ? 'junction' : 'dir')
     expect(() => verifyForkQualification({ ...current.options, packagedEvidence: alias })).toThrow(/link|path differs/u)
   })
-  it.each(['', '0', 'foreign', '123\n'])('rejects invalid run identity %j', runId => { expect(() => verifyForkQualification({ ...current.options, runId })).toThrow() })
+  it.each(['', '0', 'foreign', '123\n'])('rejects invalid run identity %j', (runId) => { expect(() => verifyForkQualification({ ...current.options, runId })).toThrow() })
 })
 
 describe('canonical packaged cleanup guard used by the CLI', () => {
   function paths() {
     const home = join(current.directory, '.desktop-smoke', 'packaged-copilot-Synthetic')
     const graph = { executable: join(current.directory, 'apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe'), profile: join(home, 'profiles', 'desktop') }
-    return { home, graph, check: () => assertPackagedQualificationPaths(current.directory, graph) }
+    return { home, graph, check: () => { assertPackagedQualificationPaths(current.directory, graph) } }
   }
   it('accepts absent owned paths without reading an executable or ASAR interior', () => {
     const { check } = paths()
@@ -333,7 +383,7 @@ describe('canonical packaged cleanup guard used by the CLI', () => {
     expect(check).not.toThrow()
     expect(inventory(current.directory)).toEqual(before)
   })
-  it.each(['home', 'profile'])('rejects recreated packaged %s despite cleanup receipt assertions', kind => {
+  it.each(['home', 'profile'])('rejects recreated packaged %s despite cleanup receipt assertions', (kind) => {
     const { home, graph, check } = paths()
     mkdirSync(kind === 'home' ? home : graph.profile, { recursive: true })
     expect(check).toThrow(/Unexpected evidence/u)
@@ -341,7 +391,7 @@ describe('canonical packaged cleanup guard used by the CLI', () => {
   it('rejects a profile path escape before inspecting unowned state', () => {
     const { graph } = paths()
     graph.profile = join(current.directory, 'outside', 'profiles', 'desktop')
-    expect(() => assertPackagedQualificationPaths(current.directory, graph)).toThrow()
+    expect(() => { assertPackagedQualificationPaths(current.directory, graph) }).toThrow()
   })
   it('rejects a recreated owned-home junction', () => {
     const { home, check } = paths()
@@ -363,7 +413,7 @@ describe('fixed qualification CLI', () => {
   it('rejects expected source different from actual checkout', () => { cli({ 'expected-source': previousSource }); expect(runForkQualificationCli).toThrow(/Expected source/u); expect(boundary.gitCalls).toEqual(['rev-parse HEAD', 'rev-parse HEAD^{tree}']) })
   it('rejects GITHUB_SHA different from HEAD', () => { cli(); vi.stubEnv('GITHUB_SHA', previousSource); expect(runForkQualificationCli).toThrow(/GITHUB_SHA/u) })
   it('rejects output within public release assets', () => { cli({ output: join(root, 'dist/desktop-fork-release/qualification.json') }); expect(runForkQualificationCli).toThrow(/outside release assets/u) })
-  it.each(['plan', 'release-assets', 'packaged-evidence', 'upgrade-root', 'baseline-directory', 'output'])('rejects noncanonical --%s', name => { cli({ [name]: join(current.directory, 'foreign') }); expect(runForkQualificationCli).toThrow(/path differs/u) })
-  it.each(['run-id', 'run-attempt'])('rejects foreign --%s', name => { cli({ [name]: '999' }); expect(runForkQualificationCli).toThrow() })
+  it.each(['plan', 'release-assets', 'packaged-evidence', 'upgrade-root', 'baseline-directory', 'output'])('rejects noncanonical --%s', (name) => { cli({ [name]: join(current.directory, 'foreign') }); expect(runForkQualificationCli).toThrow(/path differs/u) })
+  it.each(['run-id', 'run-attempt'])('rejects foreign --%s', (name) => { cli({ [name]: '999' }); expect(runForkQualificationCli).toThrow() })
   it('rejects local invocation before evidence or output writes', () => { cli(); vi.stubEnv('GITHUB_ACTIONS', 'false'); expect(runForkQualificationCli).toThrow(); expect(boundary.gitCalls).toEqual([]) })
 })

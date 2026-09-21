@@ -143,14 +143,19 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
     assert.equal(object(value.installer).file, `cloga-deepseek-harness-${version}-win-x64.exe`)
     bounded(join(directory, text(object(value.installer).file)), 512 * 1024 * 1024)
     // The maintained verifier distinguishes raw manifest/receipt hashes from canonical self-hashes.
-    const verified = verifyUpgradeRelease(directory, { commit, version, upstreamVersion, ...(manifestHash === undefined ? {} : { manifestSha256: manifestHash }) }, managedUpdateJsonSha256)
+    const verified = verifyUpgradeRelease(directory, {
+      commit, version, upstreamVersion, ...(manifestHash === undefined ? {} : { manifestSha256: manifestHash }),
+    }, managedUpdateJsonSha256)
     inputs[`${directory === options.releaseAssets ? 'candidate' : 'baseline'}.installer`] = text(object(value.installer).sha256)
     return { verified, manifest, receipt }
   }
   const baselineManifest = input(options.baselineDirectory, 'release.json', 'baseline.manifest')
   assert.equal(baselineManifest.sha256, pinnedManifest.sha256, 'Baseline independent pin differs')
   assert.equal(baselineManifest.bytes, pinnedManifest.bytes)
-  const previous = release(options.baselineDirectory, text(object(baselineManifest.value.source).commit), text(pinned.version), text(pinned.upstreamVersion), text(pinnedManifest.sha256))
+  const previous = release(
+    options.baselineDirectory, text(object(baselineManifest.value.source).commit),
+    text(pinned.version), text(pinned.upstreamVersion), text(pinnedManifest.sha256),
+  )
   assert.equal(previous.manifest.value.sequence, pinned.sequence)
   assert.equal(object(previous.manifest.value.source).tag, pinned.tag)
   for (const field of ['file', 'bytes', 'sha256', 'sha512']) assert.equal(object(previous.manifest.value.installer)[field], pinnedInstaller[field])
@@ -235,7 +240,7 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
   assert.equal(menus.length, 2)
   const phases = ['initial', 'restart']
   let milliseconds = -1
-  const timeline = array(f.timeline).map(value => {
+  const timeline = array(f.timeline).map((value) => {
     const event = object(value)
     keys(event, ['event', 'milliseconds'])
     assert(typeof event.milliseconds === 'number' && Number.isFinite(event.milliseconds) && event.milliseconds >= milliseconds)
@@ -326,7 +331,8 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
   }
   assert.equal(failure.value.schemaVersion, 2)
   assert.equal(failure.value.scope, 'packaged-acceptance-failure')
-  assert.match(text(failure.value.error), /^Error: packaged observer cleanup canary [a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u)
+  assert.match(text(failure.value.error),
+    /^Error: packaged observer cleanup canary [a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u)
   flags(failure.value, ['cleanupCompleted', 'cleanupVerified'])
   assert.deepEqual(failure.value.cleanupErrors, [])
   assert.deepEqual(failure.value.diagnosticErrors, [])
@@ -360,8 +366,12 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
     samePath(text(bound.installer), actual.verified.installer)
   }
   const acquisition = input(options.baselineDirectory, 'acquisition.json', 'baseline.acquisition').value
-  assert.deepEqual(acquisition, { schemaVersion: 1, releaseId: pinned.releaseId, immutable: true, tag: pinned.tag, sourceCommit: object(previous.manifest.value.source).commit,
-    manifestSha256: previous.manifest.sha256, installerSha256: pinnedInstaller.sha256, receiptSha256: previous.receipt.sha256, installerExecuted: false })
+  assert.deepEqual(acquisition, {
+    schemaVersion: 1, releaseId: pinned.releaseId, immutable: true, tag: pinned.tag,
+    sourceCommit: object(previous.manifest.value.source).commit,
+    manifestSha256: previous.manifest.sha256, installerSha256: pinnedInstaller.sha256,
+    receiptSha256: previous.receipt.sha256, installerExecuted: false,
+  })
   const evidence = join(options.upgradeRoot, 'evidence')
   const upgrade = input(evidence, 'installer-upgrade.json', 'upgrade.result').value
   keys(upgrade, ['schemaVersion', 'sourceCommit', ...upgradeTrue, ...upgradeFalse, 'installationRoot', 'baselineProcessBinding', 'cleanupErrors', 'secondaryErrors', 'failure'])
@@ -420,7 +430,8 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
     sameVersionPackageAcceptanceVerified: true, normalPackagedAcceptanceCompleted: false,
     limits: { helperTransport: 'synthetic fetch only; receipt and installer requests forbidden', liveHandoff: false,
       menuObservation: 'intercepted-model-and-dispatch-not-native-popup-or-modal', realOAuth: false, realModelRound: false, realSearch: false, liveAccountQuota: false,
-      choicesAcrossInstallerUpgradeVerified: false, promotionFailureRollbackVerified: false, managedHandoffVerified: false, postSuccessDowngradeVerified: false } }
+      choicesAcrossInstallerUpgradeVerified: false, promotionFailureRollbackVerified: false,
+      managedHandoffVerified: false, postSuccessDowngradeVerified: false } }
 }
 
 /**

@@ -1,6 +1,6 @@
 /** Actual packaged receipt producers feed the real verifier; native/UI and installed evidence remain inert unit boundaries. */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -14,10 +14,10 @@ import { runPackagedCopilotAcceptance } from './fixtures/copilot-release-smoke.t
 import { runPackagedCopilotObserverCanary } from './fixtures/copilot-observer-smoke.ts'
 
 const boundary = vi.hoisted(() => ({
-  pin: '', launch: vi.fn(), exec: vi.fn(), runtimeRoot: vi.fn(), runtimeBytes: vi.fn(), environment: vi.fn(),
+  pin: '', temporaryBase: '', launch: vi.fn(), exec: vi.fn(), runtimeRoot: vi.fn(), runtimeBytes: vi.fn(), environment: vi.fn(),
   menu: vi.fn(), settings: vi.fn(), usage: vi.fn(), capability: vi.fn(), allocated: [] as string[],
 }))
-vi.mock('node:fs', async original => {
+vi.mock('node:fs', async (original) => {
   const fs = await original<typeof import('node:fs')>()
   return { ...fs,
     openSync: (...args: Parameters<typeof fs.openSync>) => {
@@ -27,10 +27,14 @@ vi.mock('node:fs', async original => {
     },
     mkdtempSync: (...args: Parameters<typeof fs.mkdtempSync>) => {
       const path = fs.mkdtempSync(...args)
-      boundary.allocated.push(String(path))
+      boundary.allocated.push(path)
       return path
     },
   }
+})
+vi.mock('node:os', async (original) => {
+  const os = await original<typeof import('node:os')>()
+  return { ...os, tmpdir: () => boundary.temporaryBase || os.tmpdir() }
 })
 vi.mock('node:child_process', () => ({ execFileSync: boundary.exec }))
 vi.mock('playwright', () => ({ _electron: { launch: boundary.launch } }))
@@ -65,18 +69,19 @@ const signedOut = { usageTriggerCount: 0, accountUsageTextCount: 0, usageSurface
 
 beforeEach(() => {
   vi.clearAllMocks()
-  boundary.pin = ''; boundary.allocated = []
+  boundary.pin = ''; boundary.temporaryBase = ''; boundary.allocated = []
   vi.stubEnv('GITHUB_RUN_ID', '123'); vi.stubEnv('GITHUB_RUN_ATTEMPT', '2'); vi.stubEnv('GITHUB_SHA', source)
 })
 afterEach(() => {
-  boundary.pin = ''
+  boundary.pin = ''; boundary.temporaryBase = ''
   vi.unstubAllEnvs()
   for (const path of boundary.allocated.reverse()) if (existsSync(path)) removeOwnedDirectory(path)
 })
 
 /** Assemble only preconditions and non-packaged evidence; production functions alone emit the packaged proof graph. */
 function integrationFixture() {
-  const directory = mkdtempSync(join(tmpdir(), 'packaged-proof-integration-'))
+  // Resolve the newly owned root before deriving identities; Windows tmpdir may use an 8.3 parent spelling.
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), 'packaged-proof-integration-')))
   const application = join(directory, 'unpacked', 'cloga-deepseek-harness.exe')
   const resources = join(directory, 'unpacked', 'resources')
   const releaseAssets = join(directory, 'assets')
@@ -131,8 +136,14 @@ function integrationFixture() {
   boundary.capability.mockReturnValue(capabilityEvidence)
   boundary.usage.mockResolvedValue(signedOut)
   type Locator = {
-    waitFor(): Promise<void>; click(): Promise<void>; isEnabled(): Promise<boolean>; count(): Promise<number>
-    innerText(): Promise<string>; screenshot(): Promise<void>; locator(selector: string): Locator; getByRole(role: string, options?: unknown): Locator
+    waitFor(): Promise<void>
+    click(): Promise<void>
+    isEnabled(): Promise<boolean>
+    count(): Promise<number>
+    innerText(): Promise<string>
+    screenshot(): Promise<void>
+    locator(selector: string): Locator
+    getByRole(role: string, options?: unknown): Locator
   }
   const locator: Locator = {
     waitFor: async () => {}, click: async () => {}, isEnabled: async () => true, count: async () => 0,
@@ -182,8 +193,11 @@ function integrationFixture() {
       source: { repository: 'cloga/deepseek-harness', tag: `dsh-desktop-v${version}`, version, commit, tree }, buildInputs: build,
       identity: { ...plan.identity, upstreamVersion, sequence },
       artifacts: { installer, executableSha256, runtimeSha256, helperSha256: hash('synthetic helper'), capabilitySha256: rawHash(capabilityPath),
-        provisioning: { file: 'desktop-provisioning.json', sha256: rawHash(provisioningPath), planSha256: capability.provisioning!.planSha256 } },
-      validation: { helperStandalone: true, nativeUpdaterEnabled: false, appUpdateYmlPresent: false, managedCapabilityMatches: true, provisioningPlanMatches: true, installerStarted: false, installedDesktopTouched: false },
+        provisioning: { file: 'desktop-provisioning.json', sha256: rawHash(provisioningPath), planSha256: capability.provisioning.planSha256 } },
+      validation: {
+        helperStandalone: true, nativeUpdaterEnabled: false, appUpdateYmlPresent: false, managedCapabilityMatches: true,
+        provisioningPlanMatches: true, installerStarted: false, installedDesktopTouched: false,
+      },
       network, installation,
     }
     const buildReceipt = { ...payload, receiptSha256: managedUpdateJsonSha256(payload) }
@@ -192,7 +206,9 @@ function integrationFixture() {
       schemaVersion: 3, owner: 'cloga/deepseek-harness', mode: 'interactive-windows-installer', channel: 'cloga-windows-x64', version, upstreamVersion, sequence,
       source: { repository: 'cloga/deepseek-harness', commit, tree, tag: `dsh-desktop-v${version}` }, build, identity: plan.identity, installer,
       buildReceipt: { file: 'build-receipt.json', sha256: rawHash(join(destination, 'build-receipt.json')), receiptSha256: buildReceipt.receiptSha256 },
-      installedEvidence: { executableSha256, runtimeSha256 }, pluginCompatibility: { capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, automaticProvisioning: false }, network, installation,
+      installedEvidence: { executableSha256, runtimeSha256 },
+      pluginCompatibility: { capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, automaticProvisioning: false },
+      network, installation,
     }
     const manifest = { ...manifestPayload, manifestSha256: managedUpdateJsonSha256(manifestPayload) }
     save(join(destination, 'release.json'), manifest)
@@ -220,7 +236,9 @@ function integrationFixture() {
     const expected = round === 'baseline' ? previous : candidate
     save(join(evidence, `${round}.json`), { sourceCommit: expected.manifest.source.commit, version: expected.manifest.version, executableSha256, runtimeSha256,
       actualInstalledApplication: true, actualHostSettingsViews: round === 'baseline' ? { modelRolesViewLoaded: true, searchProviderCatalogLoaded: true, registeredSearchProviders: ['github-copilot-hosted'], realSearch: false } : settings,
-      sameRetainedHome: true, retainedEnvSha256, isolatedUserData: true, pluginUserChoicesVerified: false, draftAttachmentRefusalVerified: false, realOAuth: false, realModelRound: false, managedHandoffVerified: false })
+      sameRetainedHome: true, retainedEnvSha256, isolatedUserData: true, pluginUserChoicesVerified: false,
+      draftAttachmentRefusalVerified: false, realOAuth: false, realModelRound: false, managedHandoffVerified: false,
+    })
   }
   save(join(evidence, 'profile-cleanup.json'), { ownedHomeRemoved: true, ownedElectronDataRemoved: true, isolatedPackageAcceptanceDataRemoved: true })
   save(join(evidence, 'package-acceptance.json'), {
@@ -239,6 +257,25 @@ function packagedHashes(directory: string): Record<string, string> {
 }
 
 describe('actual owner/wrapper receipt producer to real qualification consumer', () => {
+  it('canonicalizes an owned allocation under an aliased temp base without admitting aliased evidence', async () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'packaged-proof-alias-')))
+    const target = join(root, 'physical-temp')
+    const alias = join(root, 'temp-alias')
+    mkdirSync(target)
+    symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    boundary.temporaryBase = alias
+    const fixture = integrationFixture()
+    const allocated = boundary.allocated.at(-1)
+    if (allocated === undefined) throw new Error('Expected the fixture-owned allocation')
+    expect(allocated.startsWith(alias)).toBe(true)
+    expect(fixture.options.baselineDirectory).toBe(join(realpathSync.native(allocated), 'baseline'))
+    expect(fixture.options.baselineDirectory.startsWith(target)).toBe(true)
+    await runPackagedCopilotObserverCanary(fixture.ownerOptions, runPackagedCopilotAcceptance)
+    expect(verifyForkQualification(fixture.options).unexpectedObserverFailureCleanupVerified).toBe(true)
+    expect(() => verifyForkQualification({ ...fixture.options, baselineDirectory: join(allocated, 'baseline') }))
+      .toThrow(/link|Evidence path differs/u)
+  })
+
   it('verifies original emitted receipts and before-cleanup diagnostics without rewriting any packaged evidence', async () => {
     const fixture = integrationFixture()
     await runPackagedCopilotObserverCanary(fixture.ownerOptions, runPackagedCopilotAcceptance)
@@ -246,14 +283,16 @@ describe('actual owner/wrapper receipt producer to real qualification consumer',
     expect(existsSync(join(fixture.options.packagedEvidence, 'acceptance.json'))).toBe(false)
     const original = packagedHashes(fixture.options.packagedEvidence)
     const summary = verifyForkQualification(fixture.options)
-    expect(summary).toMatchObject({ packagedFunctionalVerified: true, unexpectedObserverFailureCleanupVerified: true, normalPackagedAcceptanceCompleted: false })
+    expect(summary).toMatchObject({
+      packagedFunctionalVerified: true, unexpectedObserverFailureCleanupVerified: true, normalPackagedAcceptanceCompleted: false,
+    })
     for (const [name, file] of [['functional', 'functional-results.json'], ['failure', 'failure.json'], ['observer', 'observer-cleanup.json'], ['suite', 'packaged-suite.json']] as const) {
       expect(summary.inputs[`packaged.${name}`]).toBe(original[file])
     }
     expect(packagedHashes(fixture.options.packagedEvidence)).toEqual(original)
   })
 
-  it.each(['functional-results.json', 'failure.json', 'observer-cleanup.json'])('rejects a changed real-producer %s without accepting a reconstructed expected receipt', async file => {
+  it.each(['functional-results.json', 'failure.json', 'observer-cleanup.json'])('rejects a changed real-producer %s without accepting a reconstructed expected receipt', async (file) => {
     const fixture = integrationFixture()
     await runPackagedCopilotObserverCanary(fixture.ownerOptions, runPackagedCopilotAcceptance)
     expect(verifyForkQualification(fixture.options).unexpectedObserverFailureCleanupVerified).toBe(true)
