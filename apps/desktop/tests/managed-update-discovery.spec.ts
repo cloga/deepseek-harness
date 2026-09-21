@@ -71,6 +71,17 @@ function catalog(entries: Release[]) {
 }
 
 describe('managed discovery validates all manifests but dereferences only scoped tags', () => {
+  for (const kind of ['minimum', 'exact'] as const) {
+    it.each([NaN, Infinity, -Infinity, -1, 0.5, Number.MAX_SAFE_INTEGER + 1])(`rejects invalid ${kind} sequence %s before any network`, async (sequence) => {
+      const fetch = vi.fn<typeof globalThis.fetch>(async () => { throw new Error('Network must not start') })
+      const result = kind === 'minimum'
+        ? discoverDesktopManagedSourceRelease(capability(), sequence, { fetch })
+        : discoverDesktopManagedInstalledRelease(managedCapability({ currentSequence: sequence }), '1.2.29', { fetch })
+      await expect(result).rejects.toThrow('discovery sequence must be a nonnegative safe integer')
+      expect(fetch).not.toHaveBeenCalled()
+    })
+  }
+
   it('validates nineteen older manifests with one REST call and no tag lookups at floor29', async () => {
     const entries = Array.from({ length: 19 }, (_, index) => release(index + 2))
     const transport = catalog(entries)

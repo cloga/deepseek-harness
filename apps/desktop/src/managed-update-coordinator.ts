@@ -140,6 +140,9 @@ async function discoverSourceReleases(
   operations: ManagedUpdateOperations,
   scope: SourceReleaseScope,
 ): Promise<DesktopManagedUpdateSelection[]> {
+  if (!Number.isSafeInteger(scope.sequence) || scope.sequence < 0) {
+    throw new Error('desktop managed update: discovery sequence must be a nonnegative safe integer')
+  }
   const response = await withDesktopUpdateNetworkError('release-list', () => requestDesktopGithubRelease(
     new URL(RELEASES_API),
     'application/vnd.github+json',
