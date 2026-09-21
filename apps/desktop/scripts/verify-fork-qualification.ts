@@ -6,10 +6,12 @@ import { closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, rea
 import { dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path'
 import { parseArgs } from 'node:util'
 import { createDesktopForkReleaseCapability, parseDesktopForkReleasePlan } from './fork-release.ts'
+import { assertReviewedCopilotUsageClient } from './copilot-usage-client-policy.ts'
 import { managedUpdateJsonSha256, parseDesktopManagedUpdateCapability, parseDesktopManagedUpdateManifest } from '../src/managed-update-protocol.ts'
 import { desktopPluginProvisioningPlanSha256, parseDesktopPluginProvisioningPlan, parseDesktopPluginProvisioningState } from '../src/plugin-provisioning.ts'
 import { parseDesktopPluginProvisionReceipt } from '../src/plugin-source.ts'
 import { verifyUpgradeRelease } from '../tests/fixtures/windows-installed-upgrade-contract.mjs'
+import { assertPositiveCopilotUsageEvidence } from '../tests/fixtures/copilot-usage-positive-smoke.ts'
 
 const repository = resolve(import.meta.dirname, '../../..')
 const pinPath = join(repository, 'apps/desktop/tests/fixtures/windows-upgrade-baseline.json')
@@ -221,8 +223,9 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
   }
   const f = functional.value
   keys(f, ['schemaVersion', 'scope', ...identityKeys, 'functionalAssertionsCompleted', 'normalAcceptanceCompleted', 'cleanupVerified',
-    ...packagedTrue, ...packagedFalse, 'desktopVersion', 'runtimeVersion', 'versionMenus', 'plugin', 'transport', 'restartReceiptSha256', 'copilotUsageCapability', 'signedOutCopilotUsage', 'hostQuotaNoNetworkEvidence', 'timeline'])
-  assert.equal(f.schemaVersion, 1)
+    ...packagedTrue, ...packagedFalse, 'desktopVersion', 'runtimeVersion', 'versionMenus', 'plugin', 'transport', 'restartReceiptSha256', 'copilotUsageCapability', 'signedOutCopilotUsage', 'hostQuotaNoNetworkEvidence', 'timeline',
+    'positiveCopilotUsage', 'positiveUsageHostTransport'])
+  assert.equal(f.schemaVersion, 2)
   assert.equal(f.scope, 'packaged-functional-observations')
   flags(f, [...packagedTrue, 'functionalAssertionsCompleted'], [...packagedFalse, 'normalAcceptanceCompleted', 'cleanupVerified'])
   assert.equal(f.desktopVersion, plan.version)
@@ -230,6 +233,20 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
   const copilot = plan.desktopProvisioning.plugins.find(entry => entry.source.packageName === 'dsh-github-copilot')
   assert(copilot?.required, 'Reviewed plan must require Copilot')
   assert.deepEqual(f.plugin, copilot.source)
+  const positive = input(options.packagedEvidence, 'positive-usage.json', 'packaged.positiveUsage').value
+  keys(positive, ['runtimeSha256', 'installedClientSha256', 'pluginSource', 'cases', 'originalSignedOutApplicationRestored', 'hostTransport'])
+  assert.equal(positive.runtimeSha256, runtime.sha256)
+  assert.deepEqual(positive.pluginSource, copilot.source)
+  assertReviewedCopilotUsageClient(copilot.source, text(positive.installedClientSha256))
+  assert.equal(positive.originalSignedOutApplicationRestored, true)
+  assert.equal(positive.hostTransport, 'not-provided-to-isolated-fixture')
+  assert.equal(f.positiveUsageHostTransport, positive.hostTransport)
+  assert.deepEqual(f.positiveCopilotUsage, positive.cases)
+  const positiveCases = array(positive.cases)
+  assert.equal(positiveCases.length, 2)
+  for (const [index, provider] of ['github-copilot', 'github-copilot-preview'].entries()) {
+    assertPositiveCopilotUsageEvidence(positiveCases[index], provider)
+  }
   assert.equal(f.transport, 'official Web-backed Desktop Host with packaged Electron dsh-app origin bridge')
   assert.equal(f.hostQuotaNoNetworkEvidence, 'immutable-plugin-ci-regression-only')
   const usageCapability = { id: 'account-quota-composer-usage', required: true, evidenceScope: 'synthetic-quota-and-public-remote-ui-contracts-not-live-account-access', signedOutNetworkRegressionDeclared: true, lifecycleRegressionDeclared: true }
@@ -248,7 +265,15 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
     return text(event.event)
   })
   const events = ['launch', 'version-menu', 'application', 'account', 'usage-readonly', 'settings-readonly', 'packaged-graph', 'closed']
-  assert.deepEqual(timeline.filter(event => !phases.some(phase => event === `${phase}:provider-deferred`)), ['package-identity', ...phases.flatMap(phase => events.map(event => `${phase}:${event}`))])
+  const expectedTimeline = ['package-identity']
+  for (const phase of phases) {
+    for (const event of events) {
+      expectedTimeline.push(`${phase}:${event}`)
+      if (event === 'application' && timeline.includes(`${phase}:provider-deferred`)) expectedTimeline.push(`${phase}:provider-deferred`)
+      if (phase === 'restart' && event === 'packaged-graph') expectedTimeline.push('restart:positive-usage')
+    }
+  }
+  assert.deepEqual(timeline, expectedTimeline)
   let previousGraph: RecordValue | undefined
   for (const [index, phase] of phases.entries()) {
     const menu = input(options.packagedEvidence, `${phase}-version-menu.json`, `packaged.${phase}.menu`).value

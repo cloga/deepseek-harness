@@ -112,6 +112,14 @@ Windows Ops 验证 `resources/managed-update/capability.json` 中的 `desktopNat
 
 ## 开发
 
+<a id="isolated-provisioning-acceptance"></a>
+
+### 隔离打包插件验收
+
+Fork release smoke 保留首次启动及重启后的未登录、无 Session 检查，并要求[用量正向验收](tests/fixtures/copilot-usage-positive-smoke.ts)。正向 fixture 使用打包的 module loader、未改动的官方 alpha2 renderer、真实 Session selector 与 Slot 错误边界，以及已安装的已发布 Copilot Client。独立 Cordis context 拥有合成 Session/model-selection observable 和 quota 响应，不提供 Host transport 或凭据。标准及 preview Copilot route 必须显示用量、处理继承与显式缺席的 Session binding、响应 Session 删除与重新打开、在其他 provider 下隐藏，并完整释放订阅与 Slot 注册，同时恢复原始未登录应用。证据绑定已验证 runtime 与原始已发布 Client 的 hash。这是使用合成数据的打包 renderer 验收，不证明已认证账户 quota、原生持久化 Session 或用户已安装 profile 的资格。[测试参考](tests/README.zh.md#verification-hosted)负责证据顺序及独立的真实安装升级要求。
+
+### 开发应用
+
 `dev:desktop` 会构建当前 Host、客户端 bundle、Web 前端和 Electron 壳，把已构建的 CLI 包、私有 Desktop Host 包及其 workspace 依赖投影为一次性桌面 npm 项目，然后直接启动 Electron；这条路径不从 npm 解析 dsh：
 
 ```sh
@@ -235,7 +243,7 @@ pnpm run package:desktop:win:x64:unsigned
 
 ### Fork 拥有的 Windows 发布
 
-最新验证的发布元数据标识不可变的 `0.1.6-alpha.1.cloga.14`，sequence 为 24，包含 Copilot `0.4.0-alpha.32`（Release 392640510）。此次元数据、源码和校验和验证未下载安装器，不构成独立的安装器字节验证或原生安装验收。alpha2 候选版本是 `0.1.6-alpha.2.cloga.1`，暂定 sequence 为 26；候选版本不会预留 sequence，发布前必须重新检查通道。其 plan 不构成发布或已安装升级证据。安装器升级 fixture（测试前置数据）仍锁定 `0.1.6-alpha.1.cloga.2`，sequence 为 12，使用 Copilot alpha.24，不证明从 `.cloga.14` 升级已通过验收。
+最新验证的发布元数据标识不可变的 `0.1.6-alpha.1.cloga.14`，sequence 为 24，包含 Copilot `0.4.0-alpha.32`（Release 392640510）。此次元数据、源码和校验和验证未下载安装器，不构成独立的安装器字节验证或原生安装验收。alpha2 候选版本是 `0.1.6-alpha.2.cloga.1`，暂定 sequence 为 28；候选版本不会预留 sequence，发布前必须重新检查通道。其 plan 不构成发布或已安装升级证据。安装器升级 fixture（测试前置数据）仍锁定 `0.1.6-alpha.1.cloga.2`，sequence 为 12，使用 Copilot alpha.24，不证明从 `.cloga.14` 升级已通过验收。
 
 `release/cloga-windows-x64.json` 中经过评审的 plan 同时推进语义版本与整数 sequence。每次手动触发 `Desktop fork release (Windows x64)` workflow 都必须提供 `confirm_version` 与 `expected_source_sha`。安装依赖之前，源码锁定值必须恰好为 40 个小写十六进制字符，并与检出的 `HEAD` 完全一致；确认未变的版本号不代表授权较新的 commit。Workflow 固定 Node 24.13.0 与 pnpm 11.7.0，从冻结 lockfile 安装，测试 Desktop，打包固定 cloga 身份，并验证独立 helper、capability、未签名 installer、已安装 executable、runtime descriptor 与原生/托管互斥。
 
@@ -247,9 +255,9 @@ Preparation 和 remote verification 使用步骤专属的只读 `DSH_DESKTOP_REL
 
 每个 release 包含交互式 NSIS installer、`release.json`、`build-receipt.json`、`SHA256SUMS` 与 `SHA512SUMS`。Manifest 与 receipt 锁定源码 commit 与 tree、lockfile 与 plan hash、构建工具与依赖 registry、fork package identity、installer size 与 hash、插件 capability 与结构化 source/receipt 版本、允许的 origin 与 redirect，以及重启后 completion 语义。独立的[已安装升级验收](tests/windows-installer-upgrade.ps1)只在一次性的 GitHub 托管 Windows runner 上执行经过验证的基线与候选安装器；这不授权在工作站上安装或重启。
 
-在 finalization 前，[打包 Copilot 验收](tests/fixtures/copilot-release-smoke.ts) 使用全新的 Harness 与 Electron 数据目录启动 unpacked Electron 应用。它要求真实 Settings > Models 账户、登录入口、不再包含已移除 compatibility disclosure 的展开 Manage 面板、成功加载的只读 Model roles 视图、仅提供方级别的 Search provider 与 Fallback provider 控件，以及已注册搜索提供方目录。它验证已安装插件依赖图和 provisioning 清单，再在退出后重新启动时重复这些观察。独立的七天 workflow artifact 记录截图、安全的设置观察、receipt、打包 runtime/capability/plan 记录、可执行文件元数据与精确源码身份。失败运行保留脱敏启动诊断和 receipt/state 是否存在，不保留凭据或 profile 副本。夹具绝不保存设置、创建 Session、登录、打开验证地址或调用模型与搜索提供方。目录注册不等于提供方可用；这些检查不证明 OAuth 成功、模型可用、搜索路由或回退行为，也不证明旧版本到新版本的 installer 升级。Rehearsal artifact 不是不可变 Release。
+在 finalization 前，[打包 Copilot 验收](tests/fixtures/copilot-release-smoke.ts) 使用全新的 Harness 与 Electron 数据目录启动 unpacked Electron 应用。它要求真实 Settings > Models 账户、登录入口、不再包含已移除 compatibility disclosure 的展开 Manage 面板、成功加载的只读 Model roles 视图、仅提供方级别的 Search provider 与 Fallback provider 控件，以及已注册搜索提供方目录。它验证已安装插件依赖图和 provisioning 清单，再在退出后重新启动时重复这些观察。独立的七天 workflow artifact 记录截图、安全的设置观察、receipt、打包 runtime/capability/plan 记录、可执行文件元数据与精确源码身份。失败运行保留脱敏启动诊断和 receipt/state 是否存在，不保留凭据或 profile 副本。夹具绝不保存设置、创建持久化 Session、登录、打开验证地址或调用模型与搜索提供方。目录注册不等于提供方可用；这些检查不证明 OAuth 成功、模型可用、搜索路由或回退行为，也不证明旧版本到新版本的 installer 升级。Rehearsal artifact 不是不可变 Release。
 
-alpha2 候选计划固定 Copilot `0.4.0-alpha.32`；采用该插件锁定不证明 Core 升级已经通过打包验收。只读验收保留 alpha.29 的仅提供方设置和 alpha.30 的登出 Manage 状态，绑定必需的 `account-quota-composer-usage` capability，并等待登出账户和登录入口出现后，再检查初始与重启页面不输出额度控件或 credit summary。这些 DOM 观察没有 Host request instrumentation，不证明实时 quota access 或 Session 计费；不可变插件的 gateway regression 拥有无启动/登出网络请求证据。`auth-rejection-recovery` capability 的 HTTP 401 处理仍属于源码与插件 CI 证据，而非实时模型拒绝验收。
+alpha2 候选计划固定 Copilot `0.4.0-alpha.33`，保留为未改动的官方 `useSession(selector)` hook 提供必需 selector 的修复；采用该插件锁定不证明 Core 升级已经通过打包验收。只读验收保留 alpha.29 的仅提供方设置和 alpha.30 的登出 Manage 状态，绑定必需的 `account-quota-composer-usage` capability，并等待登出账户和登录入口出现后，再检查初始与重启页面不输出额度控件或 credit summary。[隔离正向 renderer 检查](#isolated-provisioning-acceptance)另行验证符合条件的合成 Session。这些 DOM 观察没有 Host request instrumentation，不证明实时 quota access 或 Session 计费；不可变插件的 gateway regression 拥有无启动/登出网络请求证据。`auth-rejection-recovery` capability 的 HTTP 401 处理仍属于源码与插件 CI 证据，而非实时模型拒绝验收。
 
 Copilot 自己的合成 Client 测试覆盖 Desktop 同窗口验证交接、Web 新标签页行为以及可选择的手动验证地址；Desktop 打包不会发起该流程。Alpha.28 request-budget 与 compaction 行为和 alpha.29 账户拥有搜索模型解析继续属于由哈希绑定的插件行为，需要单独的模型/搜索验收。[托管 Copilot 维护决策](../../.agents/notes/implemented/architecture/2026-09-20-managed-desktop-copilot-maintenance.zh.md)记录精确发布证据、官方 Core alpha.2 重叠、保留缺口和迁移条件。
 

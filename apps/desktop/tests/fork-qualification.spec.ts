@@ -9,8 +9,19 @@ import { managedUpdateJsonSha256, DESKTOP_MANAGED_UPDATE_WORKFLOW } from '../src
 import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, parseDesktopPluginProvisionReceipt } from '../src/plugin-source.ts'
 import { buildDesktopProvisioningState } from '../src/plugin-provisioning.ts'
 import { assertPackagedQualificationPaths, verifyForkQualification, runForkQualificationCli } from '../scripts/verify-fork-qualification.ts'
+import type { PositiveCopilotUsageEvidence } from './fixtures/copilot-usage-positive-smoke.ts'
 
-const boundary = vi.hoisted(() => ({ syntheticPin: '', source: 'a'.repeat(40), tree: 'b'.repeat(40), gitCalls: [] as string[] }))
+const boundary = vi.hoisted(() => ({
+  syntheticPin: '', source: 'a'.repeat(40), tree: 'b'.repeat(40), gitCalls: [] as string[],
+  reviewedPlugin: undefined as unknown, installedClientSha256: '',
+}))
+vi.mock('../scripts/copilot-usage-client-policy.ts', () => ({
+  // Only Client admission is synthetic; keep the actual plan tuple and real hashes of inert bytes.
+  assertReviewedCopilotUsageClient(source: unknown, installedClientSha256: string): void {
+    expect(source).toEqual(boundary.reviewedPlugin)
+    expect(installedClientSha256).toBe(boundary.installedClientSha256)
+  },
+}))
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
   return { ...actual, openSync: (...args: Parameters<typeof actual.openSync>) => {
@@ -64,6 +75,23 @@ const packageFalse = ['newlyInstalledTargetHealthyAtFirstConsent', 'verifiedGith
 const settings = { ...truths(settingsTrue), registeredSearchProviders: ['github-copilot-hosted'], realSearch: false }
 const usageCapability = { id: 'account-quota-composer-usage', required: true, evidenceScope: 'synthetic-quota-and-public-remote-ui-contracts-not-live-account-access', signedOutNetworkRegressionDeclared: true, lifecycleRegressionDeclared: true }
 const signedOut = { usageTriggerCount: 0, accountUsageTextCount: 0, usageSurfaceAbsent: true, hostQuotaRequestInstrumentation: 'not-available-in-packaged-smoke' }
+
+const positiveFlags = [
+  'sessionSubscribed', 'removedSessionHidesUsage', 'otherProviderHidesUsage', 'clientDisposalRemovesUsage',
+  'applicationMountPreserved', 'syntheticSiblingPreserved', 'inheritedSessionScopeVerified',
+  'explicitUndefinedSessionScopeAbsent', 'removedSessionRestoresUsage', 'closedSessionHidesUsage',
+  'closedSessionRestoresUsage', 'restoredProviderShowsUsage', 'subscriptionsReleased', 'syntheticContextDisposed',
+]
+function positiveCase(provider: string): PositiveCopilotUsageEvidence {
+  return {
+    scope: 'packaged-renderer-released-client-synthetic-session-and-quota', provider, usageText: '7 used · 13 left',
+    quotaReads: 4, selectorErrors: 0, forbiddenRemoteCalls: 0, hostTransport: 'not-provided-to-isolated-fixture',
+    sessionSubscribed: true, removedSessionHidesUsage: true, otherProviderHidesUsage: true, clientDisposalRemovesUsage: true,
+    applicationMountPreserved: true, syntheticSiblingPreserved: true, inheritedSessionScopeVerified: true,
+    explicitUndefinedSessionScopeAbsent: true, removedSessionRestoresUsage: true, closedSessionHidesUsage: true,
+    closedSessionRestoresUsage: true, restoredProviderShowsUsage: true, subscriptionsReleased: true, syntheticContextDisposed: true,
+  }
+}
 
 const ownedRoots: string[] = []
 function fixture(temporaryRoot = tmpdir()) {
@@ -140,6 +168,15 @@ function fixture(temporaryRoot = tmpdir()) {
   save(join(evidence, 'package-acceptance.json'), { schemaVersion: 1, sourceCommit: source, scope: 'candidate-installed-desktop-same-version-isolated-home', ...truths(packageTrue), ...truths(packageFalse, false),
     checkpoints: ['synthetic-checkpoint'], shellIncarnations: [{ launchId: token, label: 'synthetic-shell', pid: 12, launcherPid: 13, ...truths(['launchReturned', 'bound', 'exited', 'launcherExited']) }], pageErrors: [], cleanupErrors: [], secondaryErrors: [] })
   const copilot = plan.desktopProvisioning.plugins[0]!.source
+  const clientPath = join(directory, 'inert-client.js')
+  writeFileSync(clientPath, '// INERT qualification Client identity bytes; never imported or executed.\n')
+  boundary.reviewedPlugin = copilot
+  boundary.installedClientSha256 = rawHash(clientPath)
+  const positiveCases = ['github-copilot', 'github-copilot-preview'].map(positiveCase)
+  save(join(packagedEvidence, 'positive-usage.json'), {
+    runtimeSha256, installedClientSha256: rawHash(clientPath), pluginSource: copilot, cases: positiveCases,
+    originalSignedOutApplicationRestored: true, hostTransport: 'not-provided-to-isolated-fixture',
+  })
   const pluginReceipt = { schemaVersion: 1, capability: DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, source: copilot, releaseId: 123,
     assetId: copilot.assetId, packageName: copilot.packageName, version: copilot.version, artifactSha256: copilot.sha256, states: { staged: true, health: 'passed' as const, activated: true, rolledBack: false, verified: true } }
   const menus: Json[] = []
@@ -157,12 +194,17 @@ function fixture(temporaryRoot = tmpdir()) {
   }
   const identity = { evidenceId: token, sourceCommit: source, sourceTree: tree, runId: '123', runAttempt: '2', planSha256: rawHash(planPath), runtimeSha256, executableSha256,
     provisioningSha256: rawHash(join(packagedEvidence, 'provisioning-plan.json')), capabilitySha256: rawHash(join(packagedEvidence, 'capability.json')) }
-  save(join(packagedEvidence, 'functional-results.json'), { schemaVersion: 1, scope: 'packaged-functional-observations', ...identity, functionalAssertionsCompleted: true, normalAcceptanceCompleted: false, cleanupVerified: false,
+  const timelineEvents = ['package-identity', ...['initial', 'restart'].flatMap(phase =>
+    ['launch', 'version-menu', 'application', 'account', 'usage-readonly', 'settings-readonly', 'packaged-graph', 'closed']
+      .map(event => `${phase}:${event}`))]
+  timelineEvents.splice(timelineEvents.indexOf('restart:closed'), 0, 'restart:positive-usage')
+  save(join(packagedEvidence, 'functional-results.json'), { schemaVersion: 2, scope: 'packaged-functional-observations', ...identity, functionalAssertionsCompleted: true, normalAcceptanceCompleted: false, cleanupVerified: false,
     ...truths(packagedTrue), ...truths(packagedFalse, false), desktopVersion: plan.version,
     runtimeVersion: plan.upstreamVersion, versionMenus: menus, plugin: copilot,
     transport: 'official Web-backed Desktop Host with packaged Electron dsh-app origin bridge', restartReceiptSha256: rawHash(join(packagedEvidence, 'initial-desktop-plugin-receipts.json')),
     copilotUsageCapability: usageCapability, signedOutCopilotUsage: [signedOut, signedOut], hostQuotaNoNetworkEvidence: 'immutable-plugin-ci-regression-only',
-    timeline: ['package-identity', ...['initial', 'restart'].flatMap(phase => ['launch', 'version-menu', 'application', 'account', 'usage-readonly', 'settings-readonly', 'packaged-graph', 'closed'].map(event => `${phase}:${event}`))].map((event, milliseconds) => ({ event, milliseconds })) })
+    positiveCopilotUsage: positiveCases, positiveUsageHostTransport: 'not-provided-to-isolated-fixture',
+    timeline: timelineEvents.map((event, milliseconds) => ({ event, milliseconds })) })
   save(join(packagedEvidence, 'failure.json'), { schemaVersion: 2, scope: 'packaged-acceptance-failure', ...identity, error: `Error: packaged observer cleanup canary ${token}`, cleanupCompleted: true, cleanupVerified: true, cleanupErrors: [], diagnosticErrors: [] })
   save(join(packagedEvidence, 'observer-cleanup.json'), { schemaVersion: 3, scope: 'unexpected-observer-failure-cleanup', ...identity,
     ...truths(['observerInvokedOnce', 'errorPropagationVerified', 'ordinaryAcceptanceWithheld', 'cleanupVerified', 'ownedHomeRemoved', 'ownedProfileRemoved', 'ownedLegacySdkRemoved']), normalAcceptanceCompleted: false, functionalSha256: '', failureSha256: '' })
@@ -181,7 +223,7 @@ function fixture(temporaryRoot = tmpdir()) {
     })
   }
   seal()
-  return { directory, options, edit, seal, evidence, candidate, previous }
+  return { directory, options, edit, seal, evidence, candidate, previous, clientPath }
 }
 let current: ReturnType<typeof fixture>
 beforeEach(() => { current = fixture(); boundary.gitCalls = [] })
@@ -197,6 +239,12 @@ const verify = () => verifyForkQualification(current.options)
 const packaged = (file: string) => join(current.options.packagedEvidence, file)
 const installed = (file: string) => join(current.evidence, file)
 const mutate = (file: string, callback: (value: Json) => void, seal = true) => { current.edit(file, callback); if (seal) current.seal() }
+function mutatePositive(callback: (value: Json) => void): void {
+  current.edit(packaged('positive-usage.json'), callback)
+  const positive = json(packaged('positive-usage.json'))
+  current.edit(packaged('functional-results.json'), (value) => { value.positiveCopilotUsage = positive.cases })
+  current.seal()
+}
 
 function inventory(directory: string): Record<string, string> {
   const result: Record<string, string> = {}
@@ -229,6 +277,88 @@ describe('CI-only fork qualification from retained evidence', () => {
     expect(summary.inputs['packaged.suite']).toBe(rawHash(packaged('packaged-suite.json')))
     expect(inventory(current.directory)).toEqual(before)
     expect(boundary.gitCalls).toEqual([])
+  })
+
+  it('requires functional schema2 rather than accepting a legacy functional receipt', () => {
+    mutate(packaged('functional-results.json'), (value) => { value.schemaVersion = 1 }); expect(verify).toThrow()
+  })
+  it.each(['positiveCopilotUsage', 'positiveUsageHostTransport'])('requires functional v2 field %s', (field) => {
+    mutate(packaged('functional-results.json'), (value) => { Reflect.deleteProperty(value, field) }); expect(verify).toThrow()
+  })
+  it('binds original positive usage bytes in the CI-only input inventory', () => {
+    expect(verify().inputs['packaged.positiveUsage']).toBe(rawHash(packaged('positive-usage.json')))
+  })
+  it('requires the original positive receipt', () => {
+    rmSync(packaged('positive-usage.json')); expect(verify).toThrow()
+  })
+  it.each(['runtimeSha256', 'installedClientSha256', 'pluginSource', 'cases', 'originalSignedOutApplicationRestored', 'hostTransport'])('rejects missing positive field %s', (field) => {
+    mutatePositive((value) => { Reflect.deleteProperty(value, field) }); expect(verify).toThrow()
+  })
+  it.each(['runtimeSha256', 'installedClientSha256', 'pluginSource', 'cases', 'originalSignedOutApplicationRestored', 'hostTransport'])('rejects altered positive field %s with resealed functional evidence', (field) => {
+    mutatePositive((value) => { value[field] = 'foreign' }); expect(verify).toThrow()
+  })
+  it('rejects a valid-looking but unreviewed Client digest', () => {
+    mutatePositive((value) => { value.installedClientSha256 = '0'.repeat(64) }); expect(verify).toThrow()
+  })
+  it('rejects the genuine digest of tampered inert Client bytes', () => {
+    writeFileSync(current.clientPath, '// ALTERED inert Client identity; never executed.\n')
+    mutatePositive((value) => { value.installedClientSha256 = rawHash(current.clientPath) }); expect(verify).toThrow()
+  })
+  it('rejects unknown positive authority fields', () => {
+    mutatePositive((value) => { value.liveQuotaVerified = true }); expect(verify).toThrow()
+  })
+  it.each(['missing', 'duplicate', 'reversed', 'foreign'])('rejects %s positive route cases even when functional cases agree', (damage) => {
+    mutatePositive((value) => {
+      const cases = array(value.cases)
+      if (damage === 'missing') cases.pop()
+      else if (damage === 'duplicate') cases[1] = cases[0]
+      else if (damage === 'reversed') cases.reverse()
+      else object(cases[0]).provider = 'unreviewed-provider'
+    }); expect(verify).toThrow()
+  })
+  it.each([0, 1].flatMap(index => positiveFlags.map(field => ({ index, field }))))('requires positive case $index observation $field', ({ index, field }) => {
+    mutatePositive((value) => { object(array(value.cases)[index])[field] = false }); expect(verify).toThrow()
+  })
+  it.each([0, 1].flatMap(index => [
+    'scope', 'provider', 'usageText', 'quotaReads', 'selectorErrors', 'forbiddenRemoteCalls', 'hostTransport', ...positiveFlags,
+  ].map(field => ({ index, field }))))('requires positive case $index key $field', ({ index, field }) => {
+    mutatePositive((value) => { Reflect.deleteProperty(object(array(value.cases)[index]), field) }); expect(verify).toThrow()
+  })
+  it.each([0, 1].flatMap(index => ['scope', 'hostTransport', 'usageText'].map(field => ({ index, field }))))('rejects foreign positive case $index $field', ({ index, field }) => {
+    mutatePositive((value) => { object(array(value.cases)[index])[field] = 'foreign' }); expect(verify).toThrow()
+  })
+  it.each([0, 1].flatMap(index => ['quotaReads', 'selectorErrors', 'forbiddenRemoteCalls'].map(field => ({ index, field }))))('rejects wrong positive case $index count $field', ({ index, field }) => {
+    mutatePositive((value) => { object(array(value.cases)[index])[field] = field === 'quotaReads' ? 2 : 1 }); expect(verify).toThrow()
+  })
+  it.each([
+    '7 used only', '13 left only', '17 used · 13 left', '7 used · 113 left', '0.7 used · 13 left',
+    '7 used · 13 leftover', '7 used · 13 left1', `7 used · 13 left${' '.repeat(256)}`,
+  ])('requires both bounded exact positive usage quantities: %s', (usageText) => {
+    mutatePositive((value) => { object(array(value.cases)[0]).usageText = usageText }); expect(verify).toThrow()
+  })
+  it.each(['Copilot credits7 used13 left', '7\tused · 13\nleft'])('accepts reviewed UI quantity formatting: %s', (usageText) => {
+    mutatePositive((value) => { object(array(value.cases)[0]).usageText = usageText })
+    expect(verify().packagedFunctionalVerified).toBe(true)
+  })
+  it.each([0, 1])('rejects unknown positive case %s fields instead of filtering them', (index) => {
+    mutatePositive((value) => { object(array(value.cases)[index]).liveQuotaVerified = true }); expect(verify).toThrow()
+  })
+  it('rejects positive cases that disagree with the provisional functional record', () => {
+    current.edit(packaged('positive-usage.json'), (value) => { object(array(value.cases)[0]).usageText = 'contradictory' })
+    expect(verify).toThrow()
+  })
+  it.each(['missing', 'duplicate', 'initial', 'after-close', 'unknown'])('rejects %s positive timeline event', (damage) => {
+    mutate(packaged('functional-results.json'), (value) => {
+      const timeline = array(value.timeline)
+      const index = timeline.findIndex(item => object(item).event === 'restart:positive-usage')
+      const event = timeline[index]
+      if (damage === 'missing') timeline.splice(index, 1)
+      else if (damage === 'duplicate') timeline.splice(index, 0, event)
+      else if (damage === 'initial') object(event).event = 'initial:positive-usage'
+      else if (damage === 'after-close') { timeline.splice(index, 1); timeline.push(event) }
+      else object(event).event = 'restart:unknown-usage'
+      timeline.forEach((item, milliseconds) => { object(item).milliseconds = milliseconds })
+    }); expect(verify).toThrow()
   })
 
   it('binds helper bootstrap/ACK/cancel to finalized helper bytes without claiming live handoff', () => {

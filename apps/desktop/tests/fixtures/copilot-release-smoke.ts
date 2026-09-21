@@ -6,6 +6,8 @@ import {
   closeSync,
   copyFileSync,
   existsSync,
+  fstatSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -19,6 +21,7 @@ import { parseArgs } from 'node:util'
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright'
 import { desktopSmokeEnvironment } from '../../scripts/smoke-environment.ts'
 import { parseDesktopForkReleasePlan } from '../../scripts/fork-release.ts'
+import { assertReviewedCopilotUsageClient } from '../../scripts/copilot-usage-client-policy.ts'
 import { assertDesktopProvisioningInventory } from '../../src/plugin-receipts.ts'
 import { readDesktopPluginProvisioningPlan } from '../../src/plugin-provisioning.ts'
 import type { DesktopRuntimeDescriptor } from '../../src/runtime-tree.ts'
@@ -39,6 +42,11 @@ import {
   type SignedOutCopilotUsageEvidence,
 } from './copilot-usage-smoke.ts'
 import { inspectDesktopVersionMenu, type DesktopVersionMenuEvidence } from './desktop-version-menu-smoke.ts'
+import {
+  capturePackagedUsageModules,
+  inspectPositiveCopilotUsage,
+  type PositiveCopilotUsageEvidence,
+} from './copilot-usage-positive-smoke.ts'
 
 /** Paths available only during the awaited, read-only post-acceptance inspection. */
 export interface PackagedCopilotProfileInspection {
@@ -101,7 +109,7 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
   const application = resolve(options.application)
   const output = resolve(options.output)
   mkdirSync(output, { recursive: true })
-  for (const file of ['functional-results.json', 'acceptance.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json']) {
+  for (const file of ['positive-usage.json', 'functional-results.json', 'acceptance.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json']) {
     assert(!existsSync(join(output, file)), `Packaged acceptance requires fresh ${file} evidence`)
   }
   const ownedDirectories: string[] = []
@@ -114,6 +122,7 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
   const versionMenus: DesktopVersionMenuEvidence[] = []
   const usageCapabilities: CopilotUsageCapabilityEvidence[] = []
   const signedOutUsage: SignedOutCopilotUsageEvidence[] = []
+  const positiveUsage: PositiveCopilotUsageEvidence[] = []
   const started = performance.now()
   const timeline: { event: string; milliseconds: number }[] = []
   const record = (event: string): void => { timeline.push({ event, milliseconds: performance.now() - started }) }
@@ -333,6 +342,56 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       'Packaged Electron Node mode must validate the ASAR runtime graph without source-runner overrides')
       assert(!existsSync(legacySdkLoaded), 'Packaged Host must not load the ancestor MCP SDK')
       record(`${phase}:packaged-graph`)
+      if (phase === 'restart') {
+        const clientPath = join(profile, 'node_modules', 'dsh-github-copilot', 'lib', 'client.js')
+        const readReviewedClient = (): string => {
+          const original = lstatSync(clientPath)
+          assert(original.isFile() && !original.isSymbolicLink() && original.size > 0 && original.size <= 2 * 1024 * 1024,
+            'Positive usage Client must be a bounded regular file')
+          const descriptor = openSync(clientPath, 'r')
+          let bytes: Buffer | undefined
+          try {
+            const before = fstatSync(descriptor)
+            assert(before.isFile() && before.dev === original.dev && before.ino === original.ino && before.size === original.size)
+            bytes = readFileSync(descriptor)
+            const after = fstatSync(descriptor)
+            assert(bytes.length === before.size && after.size === before.size && after.mtimeMs === before.mtimeMs
+              && after.ctimeMs === before.ctimeMs, 'Positive usage Client changed during inspection')
+          } catch (error) { retain(error); throw error }
+          finally {
+            try { closeSync(descriptor) } catch (error) { cleanupErrors.push(describeError(error)); retain(error) }
+          }
+          if (failed) throw failure
+          assert(bytes !== undefined)
+          const sha256 = digest(bytes)
+          assertReviewedCopilotUsageClient(copilot.source, sha256)
+          return sha256
+        }
+        const installedClientSha256 = readReviewedClient()
+        let restoreCapture: (() => Promise<void>) | undefined
+        try {
+          restoreCapture = await capturePackagedUsageModules(page)
+          for (const provider of ['github-copilot', 'github-copilot-preview']) {
+            positiveUsage.push(await inspectPositiveCopilotUsage(page, provider))
+          }
+        } catch (error) { retain(error); throw error }
+        finally {
+          try { await restoreCapture?.() } catch (error) { cleanupErrors.push(describeError(error)); retain(error) }
+        }
+        if (failed) throw failure
+        assert.equal(await page.locator('[data-desktop-usage-acceptance]').count(), 0)
+        await page.getByRole('button', { name: 'Settings', exact: true }).click()
+        const restoredSettings = page.getByRole('dialog', { name: 'Settings', exact: true })
+        await restoredSettings.getByRole('button', { name: 'Models', exact: true }).click()
+        assert.deepEqual(await inspectSignedOutCopilotUsage(page), usageEvidence)
+        await page.screenshot({ path: join(output, 'positive-usage-cleanup.png') })
+        assert.equal(readReviewedClient(), installedClientSha256, 'Positive usage Client bytes must remain unchanged')
+        writePackagedProof(output, 'positive-usage.json', {
+          runtimeSha256, installedClientSha256, pluginSource: copilot.source, cases: positiveUsage,
+          originalSignedOutApplicationRestored: true, hostTransport: 'not-provided-to-isolated-fixture',
+        })
+        record(`${phase}:positive-usage`)
+      }
       const receipts = readFileSync(join(profile, 'desktop-plugin-receipts.json'))
       inventories.push(createHash('sha256').update(receipts).digest('hex'))
       for (const file of ['desktop-plugin-receipts.json', 'desktop-plugin-provisioning-state.json', 'package.json']) {
@@ -347,7 +406,7 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
     assert.deepEqual(usageCapabilities[0], usageCapabilities[1], 'Restart must preserve the required usage capability')
     assert.deepEqual(signedOutUsage[0], signedOutUsage[1], 'Restart must preserve the absent signed-out usage surface')
     functional = {
-      ...identity, schemaVersion: 1, scope: 'packaged-functional-observations',
+      ...identity, schemaVersion: 2, scope: 'packaged-functional-observations',
       functionalAssertionsCompleted: true, normalAcceptanceCompleted: false, cleanupVerified: false,
       desktopVersion: reviewed.version,
       versionMenus,
@@ -369,6 +428,8 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       fallbackProviderLabel: true,
       copilotUsageCapability: usageCapabilities[0],
       signedOutCopilotUsage: signedOutUsage,
+      positiveCopilotUsage: positiveUsage,
+      positiveUsageHostTransport: 'not-provided-to-isolated-fixture',
       hostQuotaNoNetworkEvidence: 'immutable-plugin-ci-regression-only',
       liveAccountQuota: false,
       realOAuth: false,
