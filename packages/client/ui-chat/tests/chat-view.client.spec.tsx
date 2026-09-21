@@ -2440,7 +2440,7 @@ describe('ChatView', () => {
             'next-turn': [],
             'next-step': [{
               id: 'new-steering' as never, role: 'user', source: { kind: 'user' },
-              content: [{ type: 'text', text: 'new own words' }], preview: 'new own words', text: 'new own words',
+              content: [{ type: 'text', text: 'new own words' }],
             }],
           } })
         })
