@@ -68,6 +68,32 @@ export interface ExpectedCoreSource {
   readonly planSha256: string
 }
 
+const coreSourceFields = ['commit', 'tree', 'version', 'upstreamVersion', 'executableSha256', 'runtimeSha256', 'planSha256'] as const
+
+function snapshotExpectedCoreSource(value: unknown): ExpectedCoreSource {
+  assert(value !== null && typeof value === 'object' && !Array.isArray(value), 'expectedCoreSource must contain exactly seven facts')
+  const prototype: unknown = Object.getPrototypeOf(value)
+  assert(prototype === null || prototype === Object.prototype, 'expectedCoreSource must not inherit facts or extra fields')
+  assert(Reflect.ownKeys(value).length === coreSourceFields.length && coreSourceFields.every(field => Object.hasOwn(value, field)),
+    'expectedCoreSource must contain exactly seven own facts')
+  const leaf = (field: typeof coreSourceFields[number]): string => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, field)
+    assert(descriptor?.enumerable === true && Object.hasOwn(descriptor, 'value'), 'expectedCoreSource requires enumerable data fields')
+    const entry: unknown = descriptor.value
+    assert(typeof entry === 'string', 'expectedCoreSource facts must be strings')
+    return entry
+  }
+  const snapshot = {
+    commit: leaf('commit'), tree: leaf('tree'), version: leaf('version'), upstreamVersion: leaf('upstreamVersion'),
+    executableSha256: leaf('executableSha256'), runtimeSha256: leaf('runtimeSha256'), planSha256: leaf('planSha256'),
+  }
+  for (const field of ['commit', 'tree'] as const) assert.match(snapshot[field], /^[a-f0-9]{40}$/u)
+  for (const field of ['executableSha256', 'runtimeSha256', 'planSha256'] as const) assert.match(snapshot[field], /^[a-f0-9]{64}$/u)
+  assert.match(snapshot.version, /^0\.1\.6(?:-[A-Za-z0-9.-]+)?$/u)
+  assert.equal(snapshot.upstreamVersion, '0.1.6-alpha.2')
+  return Object.freeze(snapshot)
+}
+
 /**
  * Compare observed Core checkout and artifact facts without overriding the actual GitHub run identity.
  * @param observed - Facts read from the actual Core checkout, reviewed plan and packaged bytes.
@@ -135,7 +161,8 @@ export function packagedCopilotStartupReady(): boolean {
 /**
  * Exercise actual packaged Copilot UI and restart acceptance with an isolated, temporary profile.
  * @param options - Application and evidence paths; the optional observer must finish all read-only work before returning.
- * @returns Resolves after acceptance, any observer, and owned cleanup; no installed application qualification is implied.
+ * @returns Frozen observed Core facts for default and explicit calls, only after cleanup and acceptance publication;
+ * no installed application qualification is implied.
  */
 export async function runPackagedCopilotAcceptance(options: PackagedCopilotAcceptanceOptions): Promise<ExpectedCoreSource> {
   const application = resolve(options.application)
@@ -195,6 +222,8 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
     }
   }
   try {
+    const suppliedCoreSource: unknown = options.expectedCoreSource
+    const expected = suppliedCoreSource === undefined ? undefined : snapshotExpectedCoreSource(suppliedCoreSource)
     const resources = join(dirname(application), 'resources')
     const runtimeRoot = packagedDesktopRuntimeRoot(resources)
     const planBytes = readFileSync(join(coreCheckout, 'apps/desktop/release/cloga-windows-x64.json'))
@@ -206,7 +235,6 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
     const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: coreCheckout, encoding: 'utf8' }).trim()
     const sourceTree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: coreCheckout, encoding: 'utf8' }).trim()
     assert(/^[a-f0-9]{40}$/u.test(sourceCommit) && /^[a-f0-9]{40}$/u.test(sourceTree))
-    const expected = options.expectedCoreSource
     if (process.env.GITHUB_REPOSITORY !== undefined && process.env.GITHUB_REPOSITORY !== 'cloga/deepseek-harness') {
       assert(expected !== undefined, 'Cross-repository acceptance requires expectedCoreSource')
     } else if (process.env.GITHUB_SHA !== undefined) assert.equal(sourceCommit, process.env.GITHUB_SHA)
@@ -223,11 +251,16 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
     const runtimeBytes = readPackagedDesktopRuntimeDescriptor(application, runtimeRoot)
     // The production verifier validates this immutable descriptor through Electron's ASAR filesystem.
     const runtime = JSON.parse(runtimeBytes.toString('utf8')) as DesktopRuntimeDescriptor
+    assert.equal(runtime.release.version, reviewed.upstreamVersion, 'Observed Core runtime differs from the reviewed plan')
     const runtimeSha256 = digest(runtimeBytes)
-    observedCoreSource = verifyExpectedCoreSource({ ...observed, runtimeSha256 }, expected)
+    const executableSha256 = digest(readFileSync(application))
+    assert.equal(executableSha256, observed.executableSha256, 'Executable bytes changed during runtime verification')
+    observedCoreSource = verifyExpectedCoreSource({
+      ...observed, upstreamVersion: runtime.release.version, executableSha256, runtimeSha256,
+    }, expected)
     identity = {
-      ...identity, sourceCommit, sourceTree, planSha256: digest(planBytes), runtimeSha256,
-      executableSha256: digest(readFileSync(application)),
+      ...identity, sourceCommit, sourceTree, planSha256: observedCoreSource.planSha256, runtimeSha256,
+      executableSha256: observedCoreSource.executableSha256,
       provisioningSha256: digest(readFileSync(join(resources, 'desktop-provisioning', 'plan.json'))),
       capabilitySha256: digest(readFileSync(join(resources, 'managed-update', 'capability.json'))),
     }
@@ -535,18 +568,18 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
     writeFailure(true)
     throw failure
   }
-  assert(functional !== undefined, 'Functional observations must precede ordinary acceptance')
   try {
+    assert(functional !== undefined, 'Functional observations must precede ordinary acceptance')
+    assert(observedCoreSource !== undefined, 'Observed Core facts must precede ordinary acceptance')
     writePackagedProof(output, 'acceptance.json', {
       ...functional, scope: 'packaged-acceptance', normalAcceptanceCompleted: true, cleanupVerified: true,
     })
+    return observedCoreSource
   } catch (error) {
     retain(error)
     writeFailure(true)
     throw failure
   }
-  assert(observedCoreSource !== undefined)
-  return observedCoreSource
 }
 
 if (import.meta.main) {
