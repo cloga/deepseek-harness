@@ -34,6 +34,54 @@ export function preparePackageAcceptanceHome(root) {
   return home
 }
 
+/** Own only the public first-run credential choice while initial keyless setup completes.
+ * @param {object} page - Owned initial application page; its existing action timeout remains authoritative.
+ * @param {Function} action - Settings/bootstrap actions ending in positive provider readiness.
+ * @param {object[]} secondaryErrors - Owned failure observations; cleanup cannot replace the primary rejection.
+ * @returns {Promise<unknown>} The action result after the exact handler is removed.
+ */
+export async function withInitialKeylessOnboarding(page, action, secondaryErrors) {
+  const dialog = page.getByRole('dialog', { name: 'Add an API key to get started', exact: true })
+  let failed = false
+  let failure
+  let result
+  let handled = false
+  try {
+    await page.addLocatorHandler(dialog, async () => {
+      assert.equal(handled, false, 'Initial provider choice must occur at most once')
+      handled = true
+      await dialog.getByRole('button', { name: 'Configure later', exact: true }).click()
+      await dialog.waitFor({ state: 'detached' })
+    }, { times: 1 })
+    result = await action()
+  } catch (error) {
+    failed = true
+    failure = error
+  } finally {
+    // Removal is attempted even if registration rejected after a partial transport operation.
+    // The outer owner still closes the page if the transport cannot acknowledge removal.
+    try { await page.removeLocatorHandler(dialog) }
+    catch (error) {
+      if (!failed) { failed = true; failure = error }
+      else secondaryErrors.push({ stage: 'initial-onboarding-handler-removal', error: safeError(error) })
+    }
+  }
+  if (failed) throw failure
+  return result
+}
+
+/** Validate the user-written keyless loopback profile, not a derived display row or a fake credential.
+ * @param {object} settings - Parsed private settings document written by the actual Models UI.
+ * @param {string} baseURL - The owned empty-response mock provider's exact address.
+ */
+export function assertKeylessPackageProvider(settings, baseURL) {
+  assert.ok(settings !== null && typeof settings === 'object' && !Array.isArray(settings))
+  assert.deepEqual(settings['llm-pi-ai']?.providers?.['desktop-acceptance'], {
+    displayName: 'Desktop acceptance (local test)', api: 'openai-completions', baseURL,
+    models: [{ id: 'acceptance-local' }],
+  }, 'The actual UI must persist only the reviewed keyless loopback provider')
+}
+
 /** Hash files and link spellings without following package junctions. This reader never repairs a graph.
  * @param {string} root - Real profile or private candidate directory.
  * @returns {{fingerprint: string, entries: object[]}} Bounded ordered inventory and its exact digest.
@@ -119,11 +167,12 @@ export function packageCleanupVerified(launches, activeHelpers, cleanupErrors) {
  * @param {unknown} error - Later failure.
  * @param {string} stage - Bounded fixture-owned operation label.
  * @param {object[]} secondary - Mutable fixture-owned diagnostic list.
+ * @param {boolean} primaryPresent - Explicit presence when undefined itself was thrown.
  * @returns {unknown} The original primary, or the new error if no primary existed.
  */
-export function retainPrimaryFailure(primary, error, stage, secondary) {
+export function retainPrimaryFailure(primary, error, stage, secondary, primaryPresent = primary !== undefined) {
   secondary.push({ stage, error: safeError(error) })
-  return primary === undefined ? error : primary
+  return primaryPresent ? primary : error
 }
 
 /** Only the unchanged, explicitly private inert Web fixture may be archived by this lane.
@@ -195,6 +244,11 @@ export async function runPackagedPackageAcceptance(runRoot) {
   let mock
   let errors = []
   let failure
+  let failed = false
+  const retainError = (error, stage) => {
+    if (failed) failure = retainPrimaryFailure(failure, error, stage, secondaryErrors, true)
+    else { failed = true; failure = error }
+  }
   let navigationCount = 0
   const { desktopSmokeEnvironment } = await import('../../scripts/smoke-environment.ts')
   const environment = { ...desktopSmokeEnvironment(home), DSH_TELEMETRY_DISABLED: '1' }
@@ -423,19 +477,36 @@ export async function runPackagedPackageAcceptance(runRoot) {
     const { mockServer } = await import('../../../../packages/llm/llm-pi-ai/tests/mock-server.ts')
     mock = await mockServer([])
     await launch('initial')
-    await page.getByRole('button', { name: 'Settings', exact: true }).click()
-    const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
-    await settings.getByRole('button', { name: 'Models', exact: true }).click()
-    await settings.locator('[data-dsh-github-copilot-compact-account]').getByRole('button', { name: 'Sign in with GitHub', exact: true }).waitFor()
-    await settings.getByRole('button', { name: 'Add a custom provider', exact: true }).click()
-    await settings.getByLabel('Provider ID', { exact: true }).fill('desktop-acceptance')
-    await settings.getByLabel('Display name', { exact: true }).fill('Desktop acceptance (local test)')
-    await settings.getByLabel('API protocol', { exact: true }).selectOption('openai-completions')
-    await settings.getByLabel('Base URL', { exact: true }).fill(mock.url)
-    await settings.getByRole('button', { name: 'Add model', exact: true }).click()
-    await settings.getByLabel('Model ID 1', { exact: true }).fill('acceptance-local')
-    await settings.getByRole('button', { name: 'Create provider', exact: true }).click()
-    await settings.getByText('Desktop acceptance (local test)', { exact: true }).first().waitFor()
+    const settings = await withInitialKeylessOnboarding(page, async () => {
+      await page.getByRole('button', { name: 'Settings', exact: true }).click()
+      const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
+      await settings.getByRole('button', { name: 'Models', exact: true }).click()
+      // A deferred credential prompt is not a healthy packaged Copilot baseline.
+      await settings.locator('[data-dsh-github-copilot-compact-account]').getByRole('button', { name: 'Sign in with GitHub', exact: true }).waitFor()
+      await settings.getByRole('button', { name: 'Add a custom provider', exact: true }).click()
+      await settings.getByLabel('Provider ID', { exact: true }).fill('desktop-acceptance')
+      await settings.getByLabel('Display name', { exact: true }).fill('Desktop acceptance (local test)')
+      await settings.getByLabel('API protocol', { exact: true }).selectOption('openai-completions')
+      await settings.getByLabel('Base URL', { exact: true }).fill(mock.url)
+      await settings.getByRole('button', { name: 'Add model', exact: true }).click()
+      await settings.getByLabel('Model ID 1', { exact: true }).fill('acceptance-local')
+      await settings.getByRole('button', { name: 'Create provider', exact: true }).click()
+      await settings.getByRole('button', { name: 'Edit Desktop acceptance (local test) (desktop-acceptance)', exact: true }).waitFor()
+      const { load } = await import('js-yaml')
+      assertKeylessPackageProvider(load(readFileSync(join(home, 'settings.yaml'), 'utf8')), mock.url)
+      // The separate Models setup card was never dismissed. Its ordinary DeepSeek
+      // row therefore witnesses the same joined any-usable-provider decision as onboarding.
+      await settings.getByRole('button', { name: 'Edit DeepSeek (deepseek-official)', exact: true }).waitFor()
+      assert.equal(await settings.getByRole('alert').count(), 0, 'Provider setup reported an error')
+      await page.getByRole('dialog', { name: 'Add an API key to get started', exact: true }).waitFor({ state: 'detached' })
+      await page.waitForFunction(() => {
+        const root = document.getElementById('root')
+        return root !== null && !root.inert
+      })
+      assert.equal(mock.requests.length, 0)
+      assert.equal(mock.paths.length, 0)
+      return settings
+    }, secondaryErrors)
     await page.keyboard.press('Escape')
     await settings.waitFor({ state: 'hidden' })
     await Promise.all([native('ChooseWorkspace'), page.getByRole('textbox', { name: 'Choose workspace', exact: true }).click()])
@@ -601,16 +672,16 @@ export async function runPackagedPackageAcceptance(runRoot) {
     report.zeroModelRequestsVerified = true
     await closeNormally()
   } catch (error) {
-    failure = error
+    retainError(error, 'package-scenario')
     if (page !== undefined && !page.isClosed()) {
       try { await page.screenshot({ path: join(evidence, 'package-failure.png') }) }
-      catch (captureError) { failure = retainPrimaryFailure(failure, captureError, 'failure-screenshot', secondaryErrors) }
+      catch (captureError) { retainError(captureError, 'failure-screenshot') }
     }
   } finally {
     const cleanupErrors = []
     const cleanupFailure = (stage, error) => {
       cleanupErrors.push(`${stage}: ${safeError(error)}`)
-      failure = retainPrimaryFailure(failure, error, stage, secondaryErrors)
+      retainError(error, stage)
     }
     if (shells.some(shell => !shell.launchReturned || !shell.bound)) {
       cleanupFailure('unqualified-launch', new Error('A requested launch has no qualified owned-process exit; retain installation and profiles'))
@@ -649,28 +720,28 @@ export async function runPackagedPackageAcceptance(runRoot) {
     if (mock !== undefined) {
       if (mock.requests.length !== 0 || mock.paths.length !== 0) {
         report.zeroModelRequestsVerified = false
-        failure ??= new Error('The local provider observed an unexpected request')
+        retainError(new Error('The local provider observed an unexpected request'), 'unexpected-provider-request')
       }
       try { await (await import('../../../../packages/llm/llm-pi-ai/tests/mock-server.ts')).closeMockServers() }
       catch (error) { cleanupFailure('loopback-provider-close', error) }
     }
-    if (errors.length !== 0) failure ??= new Error('Product page errors were observed')
+    if (errors.length !== 0) retainError(new Error('Product page errors were observed'), 'product-page-errors')
     for (const shell of shells) {
       const launcher = launchers.get(shell.launchId)
       if (launcher !== undefined) shell.launcherExited = installedLauncherExited(launcher)
     }
     report.cleanupVerified = packageCleanupVerified(shells, children.size, cleanupErrors)
-    if (failure === undefined && !report.cleanupVerified) failure = new Error('Package acceptance cleanup is incomplete')
-    report.succeeded = failure === undefined && report.cleanupVerified
+    if (!failed && !report.cleanupVerified) retainError(new Error('Package acceptance cleanup is incomplete'), 'incomplete-cleanup')
+    report.succeeded = !failed && report.cleanupVerified
     try {
       save(join(evidence, 'package-acceptance.json'), { ...report, checkpoints: checkpoints.map(item => item.name), shellIncarnations: shells,
-        ...(failure === undefined ? {} : { error: safeError(failure) }), pageErrors: errors, cleanupErrors, secondaryErrors })
+        ...(!failed ? {} : { error: safeError(failure) }), pageErrors: errors, cleanupErrors, secondaryErrors })
     } catch (error) {
-      failure = retainPrimaryFailure(failure, error, 'package-acceptance-write', secondaryErrors)
+      retainError(error, 'package-acceptance-write')
       console.error('Package acceptance evidence failure:', safeError(failure), secondaryErrors)
     }
   }
-  if (failure !== undefined) throw failure
+  if (failed) throw failure
   return report
 }
 

@@ -6,9 +6,10 @@ import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { runInNewContext } from 'node:vm'
 import test from 'node:test'
 import { installedUpgradeApplication } from './fixtures/windows-installed-upgrade-contract.mjs'
-import { initialPackageAcceptance, packageCleanupVerified, packageGraphSnapshot, preparePackageAcceptanceHome, preparedTransactionId, retainPrimaryFailure, sameProcess, validatePackageFixture } from './fixtures/windows-packaged-package-acceptance.mjs'
+import { assertKeylessPackageProvider, initialPackageAcceptance, packageCleanupVerified, packageGraphSnapshot, preparePackageAcceptanceHome, preparedTransactionId, retainPrimaryFailure, sameProcess, validatePackageFixture, withInitialKeylessOnboarding } from './fixtures/windows-packaged-package-acceptance.mjs'
 
 const source = readFileSync(new URL('./fixtures/windows-packaged-package-acceptance.mjs', import.meta.url), 'utf8')
 const native = readFileSync(new URL('./windows-desktop-ui.ps1', import.meta.url), 'utf8')
@@ -116,6 +117,252 @@ test('private picker home preparation follows ownership validation and precedes 
   assert.ok(run.includes("const profile = join(home, 'profiles', 'desktop')"))
 })
 
+function onboardingPage({ registrationFailure, removalFailure, choiceFailure, choiceStage,
+  hasRegistrationFailure = false, hasRemovalFailure = false } = {}) {
+  const trace = []
+  let handler
+  let visible = false
+  const dialog = {
+    getByRole(role, options) {
+      assert.equal(role, 'button')
+      assert.deepEqual(options, { name: 'Configure later', exact: true })
+      return { async click(...args) {
+        assert.deepEqual(args, [])
+        trace.push('public-configure-later')
+        if (choiceStage === 'click') throw choiceFailure
+        visible = false
+      } }
+    },
+    async waitFor(options) {
+      assert.deepEqual(options, { state: 'detached' })
+      assert.equal(visible, false)
+      if (choiceStage === 'detached') throw choiceFailure
+      trace.push('detached')
+    },
+  }
+  const page = {
+    getByRole(role, options) {
+      assert.equal(role, 'dialog')
+      assert.deepEqual(options, { name: 'Add an API key to get started', exact: true })
+      return dialog
+    },
+    async addLocatorHandler(locator, callback, options) {
+      assert.equal(locator, dialog)
+      assert.deepEqual(options, { times: 1 })
+      trace.push('register')
+      handler = callback
+      if (hasRegistrationFailure) throw registrationFailure
+    },
+    async removeLocatorHandler(locator) {
+      assert.equal(locator, dialog)
+      trace.push('remove')
+      if (hasRemovalFailure) throw removalFailure
+      handler = undefined
+    },
+  }
+  return { page, trace, active: () => handler !== undefined, async attempt(title) {
+    trace.push('normal-action')
+    if (title !== undefined && title !== 'Add an API key to get started') throw new Error('unknown overlay still blocks')
+    if (title !== undefined) {
+      visible = true
+      assert.equal(typeof handler, 'function')
+      await handler()
+      assert.equal(visible, false)
+    }
+  } }
+}
+
+for (const prompt of ['absent', 'late']) {
+  test(`initial keyless bootstrap handles only the actual ${prompt} credential prompt and removes its handler`, async () => {
+    const fixture = onboardingPage()
+    const result = { owned: true }
+    const secondary = []
+    const observed = await withInitialKeylessOnboarding(fixture.page, async () => {
+      assert.equal(fixture.active(), true)
+      await Promise.resolve()
+      await fixture.attempt(prompt === 'late' ? 'Add an API key to get started' : undefined)
+      fixture.trace.push('provider-ready')
+      return result
+    }, secondary)
+    assert.equal(observed, result)
+    assert.equal(fixture.active(), false)
+    assert.deepEqual(fixture.trace, prompt === 'late'
+      ? ['register', 'normal-action', 'public-configure-later', 'detached', 'provider-ready', 'remove']
+      : ['register', 'normal-action', 'provider-ready', 'remove'])
+    assert.deepEqual(secondary, [])
+  })
+}
+
+test('initial keyless bootstrap never dismisses an unknown overlay or performs a later-phase choice', async () => {
+  const fixture = onboardingPage()
+  await assert.rejects(withInitialKeylessOnboarding(fixture.page, () => fixture.attempt('Unexpected confirmation'), []), /unknown overlay still blocks/u)
+  assert.equal(fixture.active(), false)
+  assert.equal(fixture.trace.includes('public-configure-later'), false)
+  await assert.rejects(fixture.attempt('Add an API key to get started'))
+})
+
+const failureLabel = value => value === undefined ? 'undefined' : value === null ? 'null' : 'Error'
+for (const stage of ['register', 'action', 'remove']) {
+  for (const primary of [new Error(`primary ${stage}`), undefined, null]) {
+    test(`initial onboarding ${stage} failure preserves ${failureLabel(primary)} and withholds return`, async () => {
+      const fixture = onboardingPage({ registrationFailure: primary, removalFailure: primary,
+        hasRegistrationFailure: stage === 'register', hasRemovalFailure: stage === 'remove' })
+      let actionCalled = false
+      let rejected = false
+      let caught
+      await withInitialKeylessOnboarding(fixture.page, async () => {
+        actionCalled = true
+        if (stage === 'action') throw primary
+        return 'must not escape failed cleanup'
+      }, []).then(() => assert.fail('A failed bootstrap returned'), error => { rejected = true; caught = error })
+      assert.equal(rejected, true)
+      assert.equal(caught, primary)
+      assert.equal(actionCalled, stage !== 'register')
+      assert.equal(fixture.trace.at(-1), 'remove')
+    })
+  }
+}
+
+for (const choiceStage of ['click', 'detached']) {
+  for (const choiceFailure of [new Error(`public choice ${choiceStage} failed`), undefined, null]) {
+    test(`public onboarding ${choiceStage} failure is not hidden (${failureLabel(choiceFailure)})`, async () => {
+      const fixture = onboardingPage({ choiceStage, choiceFailure })
+      let rejected = false
+      await withInitialKeylessOnboarding(fixture.page, () => fixture.attempt('Add an API key to get started'), [])
+        .then(() => assert.fail('Failed public choice returned'), error => { rejected = true; assert.equal(error, choiceFailure) })
+      assert.equal(rejected, true)
+      assert.equal(fixture.active(), false)
+      assert.equal(fixture.trace.at(-1), 'remove')
+    })
+  }
+}
+
+test('partial registration and removal failure preserve the original undefined rejection', async () => {
+  const secondary = []
+  const cleanup = new Error('remove after registration failure')
+  const fixture = onboardingPage({ hasRegistrationFailure: true, registrationFailure: undefined,
+    hasRemovalFailure: true, removalFailure: cleanup })
+  let rejected = false
+  await withInitialKeylessOnboarding(fixture.page, () => assert.fail('Action ran after registration failure'), secondary)
+    .then(() => assert.fail('Failed registration returned'), error => { rejected = true; assert.equal(error, undefined) })
+  assert.equal(rejected, true)
+  assert.deepEqual(fixture.trace, ['register', 'remove'])
+  assert.deepEqual(secondary, [{ stage: 'initial-onboarding-handler-removal', error: String(cleanup) }])
+})
+
+for (const primary of [new Error('original bootstrap failure'), undefined, null]) {
+  test(`onboarding removal failure cannot replace ${failureLabel(primary)} action failure`, async () => {
+    const removal = new Error('removal failure')
+    const secondary = []
+    const fixture = onboardingPage({ removalFailure: removal, hasRemovalFailure: true })
+    let rejected = false
+    await withInitialKeylessOnboarding(fixture.page, async () => { throw primary }, secondary)
+      .then(() => assert.fail('A failed bootstrap returned'), error => { rejected = true; assert.equal(error, primary) })
+    assert.equal(rejected, true)
+    assert.deepEqual(secondary, [{ stage: 'initial-onboarding-handler-removal', error: String(removal) }])
+    assert.equal(fixture.active(), true, 'A failed transport removal leaves final page disposal to the existing outer owner')
+  })
+}
+
+for (const primary of [undefined, null]) {
+test(`actual package failure retainer and success decision preserve a ${failureLabel(primary)} primary through later failures`, async () => {
+  const run = source.slice(source.indexOf('export async function runPackagedPackageAcceptance'))
+  const retainer = run.match(/  const retainError = \(error, stage\) => \{[^]*?\n  \}/u)?.[0]
+  const success = run.match(/    report\.succeeded = !failed && report\.cleanupVerified/u)?.[0]
+  const rethrow = run.match(/  if \(failed\) throw failure/u)?.[0]
+  assert.ok(retainer && success && rethrow)
+  const secondary = []
+  const removal = new Error('handler removal')
+  const cleanup = new Error('owned cleanup')
+  const receipt = new Error('receipt write')
+  const fixture = onboardingPage({ removalFailure: removal, hasRemovalFailure: true })
+  const observed = await runInNewContext(`(async () => {
+    let failure; let failed = false; const secondaryErrors = secondary;
+    ${retainer}
+    try { await withInitialKeylessOnboarding(page, async () => { throw primary }, secondaryErrors) }
+    catch (error) { retainError(error, 'package-scenario') }
+    retainError(cleanup, 'cleanup'); retainError(receipt, 'package-acceptance-write');
+    const report = { cleanupVerified: true };
+    ${success}
+    let rejected = false; let caught;
+    try { ${rethrow} } catch (error) { rejected = true; caught = error }
+    return { failed, succeeded: report.succeeded, rejected, caught }
+  })()`, { retainPrimaryFailure, withInitialKeylessOnboarding, page: fixture.page, secondary, cleanup, receipt, primary })
+  assert.equal(observed.failed, true)
+  assert.equal(observed.succeeded, false)
+  assert.equal(observed.rejected, true)
+  assert.equal(observed.caught, primary)
+  assert.deepEqual(secondary.map(entry => entry.stage), ['initial-onboarding-handler-removal', 'cleanup', 'package-acceptance-write'])
+  assert.ok(source.includes("retainError(error, 'package-scenario')"))
+  assert.ok(source.includes("retainError(error, 'package-acceptance-write')"))
+  assert.equal(source.includes('failure === undefined && report.cleanupVerified'), false)
+})
+}
+
+test('initial onboarding rejects an unexpected second invocation of its one-shot choice', async () => {
+  const fixture = onboardingPage()
+  await assert.rejects(withInitialKeylessOnboarding(fixture.page, async () => {
+    await fixture.attempt('Add an API key to get started')
+    await fixture.attempt('Add an API key to get started')
+  }, []), /Initial provider choice must occur at most once/u)
+  assert.equal(fixture.trace.filter(value => value === 'public-configure-later').length, 1)
+  assert.equal(fixture.active(), false)
+  assert.equal(fixture.trace.at(-1), 'remove')
+})
+
+for (const primary of [new Error('only owned cleanup failed'), undefined, null]) {
+  test(`actual root cleanup-only ${failureLabel(primary)} failure is promoted and cannot report success`, () => {
+    const run = source.slice(source.indexOf('export async function runPackagedPackageAcceptance'))
+    const retainer = run.match(/  const retainError = \(error, stage\) => \{[^]*?\n  \}/u)?.[0]
+    const cleanup = run.match(/    const cleanupFailure = \(stage, error\) => \{[^]*?\n    \}/u)?.[0]
+    const success = run.match(/    report\.succeeded = !failed && report\.cleanupVerified/u)?.[0]
+    const rethrow = run.match(/  if \(failed\) throw failure/u)?.[0]
+    const safe = source.match(/^const safeError = .+$/mu)?.[0]
+    assert.ok(retainer && cleanup && success && rethrow && safe)
+    const secondary = []
+    const observed = runInNewContext(`let failure; let failed = false; const secondaryErrors = secondary; const cleanupErrors = [];
+      ${safe}
+      ${retainer}
+      ${cleanup}
+      cleanupFailure('owned-close', primary);
+      const report = { cleanupVerified: true };
+      ${success}
+      let rejected = false; let caught;
+      try { ${rethrow} } catch (error) { rejected = true; caught = error }
+      ({ failed, succeeded: report.succeeded, rejected, caught, cleanupCount: cleanupErrors.length })`,
+    { retainPrimaryFailure, secondary, primary })
+    assert.equal(observed.failed, true)
+    assert.equal(observed.succeeded, false)
+    assert.equal(observed.rejected, true)
+    assert.equal(observed.caught, primary)
+    assert.equal(observed.cleanupCount, 1)
+    assert.deepEqual(secondary, [])
+  })
+}
+
+test('keyless bootstrap requires the canonical UI-written local provider without a credential reference', () => {
+  const baseURL = 'http://127.0.0.1:12345'
+  const profile = { displayName: 'Desktop acceptance (local test)', api: 'openai-completions', baseURL, models: [{ id: 'acceptance-local' }] }
+  const document = value => ({ 'llm-pi-ai': { providers: { 'desktop-acceptance': value } } })
+  assert.doesNotThrow(() => assertKeylessPackageProvider(document(profile), baseURL))
+  for (const value of [undefined, {}, { ...profile, api: 'wrong' }, { ...profile, baseURL: 'https://example.invalid' },
+    { ...profile, models: [{ id: 'other-model' }] }, { ...profile, apiKeyEnv: 'FAKE_KEY' }, { ...profile, apiKey: 'must not store' }]) {
+    assert.throws(() => assertKeylessPackageProvider(document(value), baseURL))
+  }
+  const bootstrap = source.slice(source.indexOf('const settings = await withInitialKeylessOnboarding(page'), source.indexOf("await page.keyboard.press('Escape')", source.indexOf('const settings = await withInitialKeylessOnboarding(page')))
+  assert.ok(bootstrap.includes("name: 'Sign in with GitHub', exact: true"))
+  assert.ok(bootstrap.indexOf("name: 'Sign in with GitHub'") < bootstrap.indexOf("name: 'Add a custom provider'"))
+  assert.ok(bootstrap.includes('assertKeylessPackageProvider(load('))
+  assert.ok(bootstrap.includes("name: 'Edit Desktop acceptance (local test) (desktop-acceptance)', exact: true"))
+  assert.ok(bootstrap.includes("name: 'Edit DeepSeek (deepseek-official)', exact: true"))
+  assert.ok(bootstrap.includes('return root !== null && !root.inert'))
+  assert.ok(bootstrap.includes('assert.equal(mock.requests.length, 0)'))
+  assert.ok(bootstrap.includes('assert.equal(mock.paths.length, 0)'))
+  assert.ok(bootstrap.endsWith('}, secondaryErrors)\n    '))
+  assert.equal(source.match(/await withInitialKeylessOnboarding\(page/gu).length, 1, 'No later document or restart auto-dismissal')
+  assert.ok(source.indexOf("native('ChooseWorkspace')", source.indexOf(bootstrap)) > source.indexOf(bootstrap) + bootstrap.length)
+})
+
 test('installed observers agree on the driver-owned nested application path', t => {
   const root = directory(t)
   assert.equal(installedUpgradeApplication(root), join(root, 'Installed App', 'cloga-deepseek-harness-desktop', 'cloga-deepseek-harness.exe'))
@@ -190,7 +437,8 @@ test('close and real evidence-write failures retain the original failure object'
   assert.equal(current, primary)
   assert.deepEqual(secondary.map(item => item.stage), ['owned-close', 'evidence-write'])
   assert.equal(retainPrimaryFailure(undefined, closeFailure, 'only-failure', []), closeFailure)
-  assert.ok(source.includes("retainPrimaryFailure(failure, error, 'package-acceptance-write'"))
+  assert.ok(source.includes("retainError(error, 'package-acceptance-write')"))
+  assert.ok(source.includes('retainPrimaryFailure(failure, error, stage, secondaryErrors, true)'))
   const installed = readFileSync(new URL('./fixtures/windows-installed-upgrade-smoke.mjs', import.meta.url), 'utf8')
   assert.ok(installed.includes("retainPrimaryFailure(roundFailure, error, 'round-owned-close'"))
   assert.ok(installed.includes("retainPrimaryFailure(roundFailure, error, 'round-failure-evidence-write'"))
