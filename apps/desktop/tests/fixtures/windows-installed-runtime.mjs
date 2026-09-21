@@ -10,9 +10,19 @@ import { ownedUpgradePath, upgradeFileHash } from './windows-installed-upgrade-c
  */
 export function inspectInstalledDesktopIdentity({ app }) {
   return {
-    executable: process.execPath, resourcesPath: process.resourcesPath,
+    pid: process.pid, executable: process.execPath, resourcesPath: process.resourcesPath,
     userData: app.getPath('userData'), version: app.getVersion(), packaged: app.isPackaged,
   }
+}
+
+/** Bind readiness authority to the observed main process, never the Playwright launcher.
+ * @param {unknown} mainPid - PID read alongside the validated live executable identity.
+ * @param {unknown} launcherPid - Optional launcher PID, retained only as a diagnostic leaf.
+ * @returns {{pid: number, launcherPid: number | null}} Validated main PID and non-authoritative launcher observation.
+ */
+export function installedProcessIds(mainPid, launcherPid) {
+  assert.ok(typeof mainPid === 'number' && Number.isSafeInteger(mainPid) && mainPid > 0, 'Installed main PID must be a positive safe integer')
+  return { pid: mainPid, launcherPid: typeof launcherPid === 'number' && Number.isSafeInteger(launcherPid) && launcherPid > 0 ? launcherPid : null }
 }
 
 /** Read exact descriptor bytes outside CDP, whose evaluate context has no dynamic-import callback.

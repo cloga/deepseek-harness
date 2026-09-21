@@ -66,6 +66,8 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 安装升级与同版本包操作的观察器均使用[已安装运行时读取器](fixtures/windows-installed-runtime.mjs)。CDP 求值只返回运行中应用的身份字段；描述文件通过维护中的 `readPackagedDesktopRuntimeDescriptor` 载体在 CDP 之外读取。在以 Node 模式启动打包 Electron 之前，读取器重新检查自有安装中的可执行文件哈希，并将观察到的 resources 目录绑定到该安装。描述文件校验对原始 ASAR 字节计算哈希，不使用解析或重新序列化的 JSON。此检查仅针对一次性的托管安装，绝不针对操作者的 Desktop。
 
+基线就绪凭据绑定由同一次运行中身份求值返回的正安全整数主进程 PID。Playwright 启动器 PID 只是独立的可空诊断，不作为选择进程的依据。驱动仍获取该精确主 PID，并要求可执行文件路径匹配已验证的安装。身份失败只保留有界的相等性、可用性、退出与可读性标志，然后重新抛出原始错误；不查找同名进程，也不改变清理行为。
+
 不可变的 `0.1.6-alpha.1.cloga.2` 基线使用 sequence 12 和 Copilot alpha.24；只有验证该安装的锁定身份后，才使用其[基线设置检查器](fixtures/baseline-copilot-settings-smoke.ts)。它保留该版本原有的只读模型角色与提供方目录检查，不要求后续版本的工作区或仅提供方 UI。候选及其重启仍使用针对 Copilot alpha.32 的严格[当前设置检查器](fixtures/copilot-settings-smoke.ts)。基线检查不能作为候选检查失败时的回退；两种检查器都不发起认证、保存设置或执行模型／搜索调用。
 
 安装轮次失败后，[启动诊断](fixtures/installed-startup-diagnostics.ts)在关闭自有应用之前运行，写入独立的 round-startup 记录。自包含回调只读取已识别的文档类别、DOM 状态标志和现有只读 backend status。消息前缀最多检查 4096 个字符，转换为固定类别；未知仍记为未知。不保留原始后端文本、URL、私有路径、profile 或 stdout。桥接与外层传输观察分别采用一秒和两秒预算，不改变就绪、恢复或原始失败。当前候选缺少该桥接时仍记为不可用，而非就绪；不恢复已移除的 IPC 或恢复动作。这项隐私规则适用于新增记录，不代表旧版通用错误格式化器具备同样保证。

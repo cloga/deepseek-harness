@@ -399,6 +399,36 @@ function Write-UninstallFailureDiagnostics($UninstallerProcess, $Errors, $Copy =
         $observation | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $root 'evidence/installer-uninstall-failure.json') -Encoding utf8NoBOM
     } catch { $Errors.Add('Post-uninstall diagnostic write failed') }
 }
+function Write-BaselineProcessIdentityDiagnostic($Ready, $Live, $Errors) {
+    $record = [ordered]@{ schemaVersion = 1; sourceCommit = $ExpectedSourceCommit
+        pathAvailable = $null; exactPathMatch = $null; pidMatchesRequested = $null; launcherMatchesMain = $null
+        exited = $null; category = 'process-unavailable'; observationErrors = @() }
+    $issues = [Collections.Generic.List[string]]::new()
+    if ($Ready.launcherPid -is [int] -or $Ready.launcherPid -is [long]) { $record.launcherMatchesMain = $Ready.launcherPid -eq $Ready.pid }
+    if ($null -ne $Live) {
+        $record.category = 'observed-after-failure'
+        try {
+            $observedPid = $Live.Id
+            if ($observedPid -isnot [int] -and $observedPid -isnot [long]) { throw 'PID unavailable' }
+            $record.pidMatchesRequested = $observedPid -eq $Ready.pid
+        } catch { $issues.Add('pid-unreadable') }
+        try {
+            $path = $Live.Path
+            $record.pathAvailable = $path -is [string] -and -not [string]::IsNullOrWhiteSpace($path)
+            if ($record.pathAvailable) {
+                $record.exactPathMatch = $path -eq $application
+                if (-not $record.exactPathMatch) { $record.category = 'executable-mismatch' }
+            } else { $record.category = 'path-unavailable' }
+        } catch { $issues.Add('path-unreadable'); $record.category = 'path-unavailable' }
+        try {
+            $record.exited = $Live.HasExited
+            if ($record.exited -isnot [bool]) { $record.exited = $null; throw 'Exit state unavailable' }
+        } catch { $issues.Add('exit-unreadable') }
+    }
+    $record.observationErrors = @($issues)
+    try { $record | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $root 'evidence/baseline-process-identity.json') -Encoding utf8NoBOM }
+    catch { $Errors.Add('Baseline process identity diagnostic write failed') }
+}
 function Installation-Inventory {
     $items = @(Get-ChildItem -LiteralPath $installPath -Recurse -Force)
     if (@($items | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) { throw 'Installed payload contains an unexpected filesystem alias' }
@@ -440,8 +470,16 @@ try {
     }
     $ready = Get-Content -LiteralPath (Join-Path $root 'baseline-ready.json') -Raw | ConvertFrom-Json
     if ($ready.ownerToken -ne $token -or $ready.application -ne $application) { throw 'Unexpected baseline readiness owner' }
-    $live = Get-Process -Id $ready.pid -ErrorAction Stop
-    if ($live.Path -ne $application) { throw 'Baseline PID does not own the installed executable' }
+    $live = $null
+    try {
+        $live = Get-Process -Id $ready.pid -ErrorAction Stop
+        if ($live.Path -ne $application) { throw 'Baseline PID does not own the installed executable' }
+    } catch {
+        $identityFailure = $_
+        try { Write-BaselineProcessIdentityDiagnostic $ready $live $secondaryErrors }
+        catch { $secondaryErrors.Add('Baseline process identity diagnostic unavailable') }
+        throw $identityFailure
+    }
     $refused = Start-Installer $validated.candidate
     $prompt = Wait-Control $refused $copy.INSTALLER_RUNNING -Seconds 600 -Dialog
     $okay = [InstallerCapture]::GetDlgItem([InstallerCapture]::TopLevel($prompt), 1)

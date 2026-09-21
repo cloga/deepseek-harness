@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { runInNewContext } from 'node:vm'
-import { inspectInstalledDesktopIdentity, readInstalledDesktopRuntimeDescriptor } from './fixtures/windows-installed-runtime.mjs'
+import { inspectInstalledDesktopIdentity, installedProcessIds, readInstalledDesktopRuntimeDescriptor } from './fixtures/windows-installed-runtime.mjs'
 import { assertUpgradeRunner, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeAssetPath, upgradeFileHash, verifyUpgradeRelease } from './fixtures/windows-installed-upgrade-contract.mjs'
 
 const uninstallObservationSource = readFileSync(new URL('./fixtures/windows-uninstall-observation.ps1', import.meta.url), 'utf8')
@@ -71,16 +71,94 @@ test('direct fixture invocation refuses a workstation before loading Playwright 
 test('installed identity callback serializes without an import loader or lexical closure', () => {
   const calls = []
   const identity = runInNewContext(`(${inspectInstalledDesktopIdentity.toString()})(electron)`, {
-    process: Object.freeze({ execPath: 'owned application', resourcesPath: 'owned resources' }),
+    process: Object.freeze({ pid: 17, execPath: 'owned application', resourcesPath: 'owned resources' }),
     electron: { app: {
       getPath(name) { calls.push(name); return 'isolated user data' },
       getVersion() { return 'synthetic version' }, isPackaged: true,
     } },
   })
   assert.deepEqual(JSON.parse(JSON.stringify(identity)), {
-    executable: 'owned application', resourcesPath: 'owned resources', userData: 'isolated user data', version: 'synthetic version', packaged: true,
+    pid: 17, executable: 'owned application', resourcesPath: 'owned resources', userData: 'isolated user data', version: 'synthetic version', packaged: true,
   })
   assert.deepEqual(calls, ['userData'])
+})
+
+test('installed main PID remains authority when Playwright launcher differs', () => {
+  assert.deepEqual(installedProcessIds(17, 99), { pid: 17, launcherPid: 99 })
+  assert.deepEqual(installedProcessIds(17, undefined), { pid: 17, launcherPid: null })
+  for (const invalid of [undefined, null, 0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '17']) {
+    assert.throws(() => installedProcessIds(invalid, 99), /positive safe integer/u)
+    assert.deepEqual(installedProcessIds(17, invalid), { pid: 17, launcherPid: null })
+  }
+  const fixture = readFileSync(new URL('./fixtures/windows-installed-upgrade-smoke.mjs', import.meta.url), 'utf8')
+  assert.ok(fixture.includes('const processIds = installedProcessIds(identity.pid, app.process().pid)'))
+  assert.ok(fixture.includes("save(join(root, 'baseline-ready.json'), { ownerToken: owner.token, ...processIds, application })"))
+  assert.doesNotMatch(fixture, /pid: app\.process\(\)\.pid/u)
+  const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  assert.ok(driver.includes('$live = Get-Process -Id $ready.pid -ErrorAction Stop'))
+  assert.ok(driver.includes("if ($live.Path -ne $application) { throw 'Baseline PID does not own the installed executable' }"))
+  assert.doesNotMatch(driver, /Get-Process[^\n]*launcherPid/u)
+})
+
+test('installed main PID callback survives the actual tsx loader serialization', () => {
+  const names = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'HOME', 'USERPROFILE'])
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => names.has(name.toUpperCase())))
+  const url = new URL('./fixtures/windows-installed-runtime.mjs', import.meta.url).href
+  const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx/esm'), '--input-type=module', '--eval',
+    `import {inspectInstalledDesktopIdentity} from ${JSON.stringify(url)}; console.log(JSON.stringify(inspectInstalledDesktopIdentity.toString()))`],
+  { env: { ...env, TSX_DISABLE_CACHE: '1' }, encoding: 'utf8', timeout: 15_000, maxBuffer: 256 * 1024 })
+  assert.equal(child.error, undefined)
+  assert.equal(child.signal, null)
+  assert.equal(child.status, 0, child.stderr)
+  const identity = runInNewContext(`(${JSON.parse(child.stdout)})(electron)`, {
+    process: { pid: 17, execPath: 'owned', resourcesPath: 'resources' },
+    electron: { app: { getPath: () => 'userData', getVersion: () => 'version', isPackaged: true } },
+  })
+  assert.equal(identity.pid, 17)
+  assert.equal(identity.executable, 'owned')
+})
+
+test('baseline PID diagnostic retains only bounded identity leaves and cannot replace primary failure', { skip: process.platform !== 'win32' }, t => {
+  const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const diagnostic = source.match(/function Write-BaselineProcessIdentityDiagnostic[^]*?\r?\n\}/u)?.[0]
+  assert.ok(diagnostic)
+  const observed = powershellUnit(t, `
+${diagnostic}
+$root = $PSScriptRoot; $ExpectedSourceCommit = 'a' * 40
+$application = Join-Path $root 'owned.exe'
+New-Item -ItemType Directory -Path (Join-Path $root 'evidence') | Out-Null
+$ready = [pscustomobject]@{ pid = 17; launcherPid = 99 }
+$cases = @()
+foreach ($mode in @('match', 'mismatch', 'missing', 'unreadable')) {
+    $live = [pscustomobject]@{ Id = 17; Path = $application; HasExited = $false }
+    if ($mode -eq 'mismatch') { $live.Path = 'C:\\SECRET\\foreign.exe'; $live.Id = 99 }
+    if ($mode -eq 'missing') { $live = $null }
+    if ($mode -eq 'unreadable') {
+        $live | Add-Member -Force ScriptProperty Path { throw 'SECRET-private-path' }
+        $live | Add-Member -Force ScriptProperty HasExited { throw 'SECRET-private-exit' }
+    }
+    $errors = [Collections.Generic.List[string]]::new()
+    Write-BaselineProcessIdentityDiagnostic $ready $live $errors
+    $data = Get-Content -LiteralPath (Join-Path $root 'evidence/baseline-process-identity.json') -Raw | ConvertFrom-Json
+    $cases += [pscustomobject]@{ mode = $mode; data = $data; errors = @($errors) }
+}
+ConvertTo-Json -InputObject $cases -Depth 5 -Compress
+`)
+  const cases = Object.fromEntries(observed.map(row => [row.mode, row.data]))
+  assert.equal(cases.match.exactPathMatch, true)
+  assert.equal(cases.match.pidMatchesRequested, true)
+  assert.equal(cases.match.launcherMatchesMain, false)
+  assert.equal(cases.mismatch.pathAvailable, true)
+  assert.equal(cases.mismatch.exactPathMatch, false)
+  assert.equal(cases.mismatch.pidMatchesRequested, false)
+  assert.equal(cases.missing.category, 'process-unavailable')
+  assert.equal(cases.unreadable.exited, null)
+  assert.ok(cases.unreadable.observationErrors.includes('exit-unreadable'))
+  assert.doesNotMatch(JSON.stringify(observed), /SECRET|foreign|owned\.exe|C:\\\\/u)
+  const capture = source.indexOf('$identityFailure = $_')
+  const rethrow = source.indexOf('throw $identityFailure', capture)
+  assert.ok(capture > 0 && rethrow > capture)
+  assert.ok(source.slice(capture, rethrow).includes("$secondaryErrors.Add('Baseline process identity diagnostic unavailable')"))
 })
 
 test('installed failure diagnostics retain only the bounded content-free collector', () => {

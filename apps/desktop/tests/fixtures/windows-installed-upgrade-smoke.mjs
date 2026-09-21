@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { assertUpgradeRunner, installedUpgradeApplication, ownedUpgradePath, pinnedUpgradeSourceCommit, upgradeFileHash, verifyUpgradeRelease } from './windows-installed-upgrade-contract.mjs'
 import { retainPrimaryFailure } from './windows-packaged-package-acceptance.mjs'
-import { inspectInstalledDesktopIdentity, readInstalledDesktopRuntimeDescriptor } from './windows-installed-runtime.mjs'
+import { inspectInstalledDesktopIdentity, installedProcessIds, readInstalledDesktopRuntimeDescriptor } from './windows-installed-runtime.mjs'
 
 const baseline = JSON.parse(readFileSync(new URL('./windows-upgrade-baseline.json', import.meta.url), 'utf8'))
 const json = path => JSON.parse(readFileSync(path, 'utf8'))
@@ -103,6 +103,7 @@ async function main() {
       assert.equal(resolve(identity.userData).toLowerCase(), userData.toLowerCase())
       assert.equal(identity.version, expected.manifest.version)
       assert.equal(identity.packaged, true)
+      const processIds = installedProcessIds(identity.pid, app.process().pid)
       const runtimeBytes = readInstalledDesktopRuntimeDescriptor(application, identity.resourcesPath, expected.manifest.installedEvidence.executableSha256)
       assert.equal(hash(runtimeBytes), expected.manifest.installedEvidence.runtimeSha256)
       const expectedUrl = values.phase === 'baseline' ? baseline.applicationUrl : 'dsh-app://app/'
@@ -119,7 +120,7 @@ async function main() {
       const settingsEvidence = await inspectSettings(settings)
       await page.screenshot({ path: join(evidence, `${round}-models.png`) })
       if (round === 'baseline') {
-        save(join(root, 'baseline-ready.json'), { ownerToken: owner.token, pid: app.process().pid, application })
+        save(join(root, 'baseline-ready.json'), { ownerToken: owner.token, ...processIds, application })
         const deadline = Date.now() + 600_000
         while (!existsSync(join(root, 'baseline-finish-request.json'))) {
           assert.ok(Date.now() < deadline, 'Native driver did not finish its running-app refusal case')
