@@ -5,6 +5,7 @@
 import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createContext, runInContext } from 'node:vm'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -89,10 +90,12 @@ interface ScrollWorld {
   readonly replayDir?: string
   readonly scaffold: WebScaffold
   readonly tripwire: ReturnType<typeof watchConsole>
+  readonly initialBottomDiagnostics: boolean
 }
 
 interface ScrollWorldOptions {
   readonly failureShot: string
+  readonly initialBottomDiagnostics?: boolean
   readonly replay?: ReplayOverrideDoc
   readonly seeds: readonly { fixture: ChatScrollFixture; id: string }[]
 }
@@ -147,6 +150,135 @@ function replayEntry(chunks: StreamChunk[]): ReplayEntry {
   return { kind: 'chunks', chunks }
 }
 
+const INITIAL_BOTTOM_DIAGNOSTIC = '__dshInitialBottomDiagnostic'
+
+interface InitialBottomDiagnostic {
+  observe(): void
+  read(): unknown
+  dispose(): void
+}
+
+/** Browser-serialized, observational only; no outer values, DOM writes or timers. */
+function installInitialBottomDiagnostic({ key, callId }: { key: string; callId: string }): void {
+  const scope = globalThis as unknown as Record<string, InitialBottomDiagnostic | undefined>
+  const records: Record<string, number | string | boolean | null>[] = []
+  const events = ['scroll', 'scrollend', 'wheel', 'keydown', 'pointerdown', 'focusin', 'click']
+  let dropped = 0
+  let samplingErrors = 0
+  let disposed = false
+  let host: HTMLElement | null = null
+  let flow: HTMLElement | null = null
+  let composer: HTMLElement | null = null
+  const state = {
+    bind(): void {
+      if (disposed) return
+      const nextHost = document.querySelector<HTMLElement>('[data-conversation-scroll]')
+      const nextFlow = nextHost?.querySelector<HTMLElement>('[data-chat-flow]') ?? null
+      const nextComposer = nextHost?.querySelector<HTMLElement>('[data-composer-seat]') ?? null
+      if (nextHost === host && nextFlow === flow && nextComposer === composer) return
+      observer.disconnect()
+      host = nextHost; flow = nextFlow; composer = nextComposer
+      for (const element of new Set([host, flow, composer])) if (element !== null) observer.observe(element)
+    },
+    sample(kind: string, event: Event | null): void {
+      if (disposed || host === null) return
+      const active = document.activeElement
+      const tool = host.querySelector<HTMLElement>(`[data-chat-call-id="${callId}"] [data-sample="bash"]`)
+      const rawState = tool?.getAttribute('data-state')
+      const rawExpanded = tool?.getAttribute('aria-expanded')
+      records.push({
+        milliseconds: performance.now(), kind,
+        scrollTop: host.scrollTop, scrollHeight: host.scrollHeight, clientHeight: host.clientHeight,
+        distanceFromBottom: host.scrollHeight - host.clientHeight - host.scrollTop,
+        flowHeight: flow?.getBoundingClientRect().height ?? null,
+        composerHeight: composer?.getBoundingClientRect().height ?? null,
+        backToBottom: host.querySelector('[aria-label="Back to bottom"]') !== null,
+        streamingRows: host.querySelectorAll('[data-streaming="true"]').length,
+        toolState: rawState === undefined ? 'absent'
+          : rawState === 'running' || rawState === 'done' || rawState === 'error' ? rawState : 'other',
+        toolExpanded: rawExpanded === 'true' || rawExpanded === 'false' ? rawExpanded : 'absent',
+        focus: active?.matches('[data-composer-input]') ? 'composer'
+          : active?.matches('[aria-label="Send message"]') ? 'send'
+            : active !== null && tool?.contains(active) ? 'tool' : active === null ? 'none' : 'other',
+        trusted: event?.isTrusted ?? false,
+      })
+      if (records.length > 128) { records.shift(); dropped += 1 }
+    },
+    capture(kind: string, event: Event | null): void {
+      try { state.bind(); state.sample(kind, event) }
+      catch (_diagnosticError) { samplingErrors += 1 }
+    },
+    onEvent(this: void, event: Event): void { state.capture(events.includes(event.type) ? event.type : 'other-event', event) },
+    onResize(this: void): void { state.capture('resize', null) },
+    observe(this: void): void { state.capture('geometry-poll', null) },
+    read(this: void): unknown {
+      state.capture('initial-bottom-failure', null)
+      return { schemaVersion: 1, dropped, samplingErrors, records: records.slice() }
+    },
+    dispose(this: void): void {
+      if (disposed) return
+      disposed = true
+      let failed = false
+      for (const event of events) {
+        try { document.removeEventListener(event, state.onEvent, true) }
+        catch (_diagnosticError) { failed = true }
+      }
+      try { observer.disconnect() } catch (_diagnosticError) { failed = true }
+      try { if (!Reflect.deleteProperty(scope, key)) failed = true }
+      catch (_diagnosticError) { failed = true }
+      if (failed) throw new Error('chat-scroll-diagnostic-dispose-failed')
+    },
+  }
+  const observer = new ResizeObserver(state.onResize)
+  scope[key] = { observe: state.observe, read: state.read, dispose: state.dispose }
+  for (const event of events) document.addEventListener(event, state.onEvent, { capture: true, passive: true })
+  state.capture('install', null)
+}
+
+/** Auxiliary failures cannot replace a business assertion or prevent owned-context teardown. */
+function reportDiagnosticLine(line: string, emit: (line: string) => void): void {
+  try { emit(line) } catch (_loggingError) { /* Diagnostic logging must not replace the original failure. */ }
+}
+
+async function disposeInitialBottomDiagnostic(
+  page: Pick<Page, 'evaluate'>,
+  emit: (line: string) => void = (line) => { console.error(line) },
+): Promise<void> {
+  try {
+    await page.evaluate((key) => {
+      const scope = globalThis as unknown as Record<string, InitialBottomDiagnostic | undefined>
+      scope[key]?.dispose()
+    }, INITIAL_BOTTOM_DIAGNOSTIC)
+  } catch (_diagnosticError) {
+    reportDiagnosticLine('CHAT_SCROLL_DIAGNOSTIC_DISPOSE_UNAVAILABLE', emit)
+  }
+}
+
+/** Collect before the tool-release finally; neither collection nor reporting can replace the exact assertion. */
+async function withInitialBottomDiagnostic(
+  page: Pick<Page, 'evaluate'>,
+  check: () => Promise<void>,
+  emit: (line: string) => void = (line) => { console.error(line) },
+): Promise<void> {
+  try {
+    await check()
+  } catch (primary) {
+    try {
+      const diagnostic: unknown = await page.evaluate((key) => {
+        const scope = globalThis as unknown as Record<string, InitialBottomDiagnostic | undefined>
+        return scope[key]?.read() ?? { schemaVersion: 1, unavailable: true }
+      }, INITIAL_BOTTOM_DIAGNOSTIC)
+      const line = `CHAT_SCROLL_INITIAL_BOTTOM ${JSON.stringify(diagnostic)}`
+      reportDiagnosticLine(line.length <= 65_536 ? line : 'CHAT_SCROLL_DIAGNOSTIC_TOO_LARGE', emit)
+    } catch (_diagnosticError) {
+      reportDiagnosticLine('CHAT_SCROLL_DIAGNOSTIC_READ_UNAVAILABLE', emit)
+    }
+    throw primary
+  } finally {
+    await disposeInitialBottomDiagnostic(page, emit)
+  }
+}
+
 async function launchScrollWorld(options: ScrollWorldOptions): Promise<ScrollWorld> {
   let replayDir: string | undefined
   let scaffold: WebScaffold | undefined
@@ -171,6 +303,9 @@ async function launchScrollWorld(options: ScrollWorldOptions): Promise<ScrollWor
     scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { events.push(event) })
     scaffold.ctx.on('agent/assistant-stream', ({ frame }) => { assistantFrames.push(frame) })
     page = await newEnglishPage(browser, 900)
+    if (options.initialBottomDiagnostics === true) {
+      await page.addInitScript(installInitialBottomDiagnostic, { key: INITIAL_BOTTOM_DIAGNOSTIC, callId: LIVE_TOOL_CALL_ID })
+    }
     const tripwire = watchConsole(page)
     await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
@@ -185,10 +320,12 @@ async function launchScrollWorld(options: ScrollWorldOptions): Promise<ScrollWor
       page,
       scaffold,
       tripwire,
+      initialBottomDiagnostics: options.initialBottomDiagnostics === true,
       ...(replayDir === undefined ? {} : { replayDir }),
     }
   } catch (error) {
     const failures: unknown[] = [error]
+    if (page !== undefined && options.initialBottomDiagnostics === true) await disposeInitialBottomDiagnostic(page)
     if (page !== undefined) await page.context().close().catch((cleanupError: unknown) => failures.push(cleanupError))
     if (scaffold !== undefined) await scaffold.close().catch((cleanupError: unknown) => failures.push(cleanupError))
     if (replayDir !== undefined) {
@@ -201,6 +338,7 @@ async function launchScrollWorld(options: ScrollWorldOptions): Promise<ScrollWor
 
 async function closeScrollWorld(world: ScrollWorld): Promise<void> {
   const failures: unknown[] = []
+  if (world.initialBottomDiagnostics) await disposeInitialBottomDiagnostic(world.page)
   // newEnglishPage/browser.newPage owns an isolated context. Close the whole
   // context so its SSE connection and cache cannot leak into the next world
   // in this file's shared Chromium process.
@@ -252,10 +390,15 @@ async function nextPaint(page: Page): Promise<void> {
 }
 
 function scrollGeometry(page: Page): Promise<ScrollGeometry> {
-  return page.locator('[data-conversation-scroll]').evaluate(host => ({
-    distanceFromBottom: host.scrollHeight - host.clientHeight - host.scrollTop,
-    scrollTop: host.scrollTop,
-  }))
+  return page.locator('[data-conversation-scroll]').evaluate((host) => {
+    // Piggyback the existing geometry read, never add another pre-submit CDP wait.
+    const scope = globalThis as unknown as Record<string, InitialBottomDiagnostic | undefined>
+    scope.__dshInitialBottomDiagnostic?.observe()
+    return {
+      distanceFromBottom: host.scrollHeight - host.clientHeight - host.scrollTop,
+      scrollTop: host.scrollTop,
+    }
+  })
 }
 
 /**
@@ -472,6 +615,114 @@ function assertClean(world: ScrollWorld): void {
   expect(world.tripwire.warnings).toEqual([])
 }
 
+/** Inert DOM boundary for the actual serialized collector; no browser, Host or server is created. */
+function diagnosticSandbox(failRemoval = false) {
+  type ObservedEvent = { type: string; isTrusted: boolean }
+  const listeners = new Map<string, (event: ObservedEvent) => void>()
+  const removed: string[] = []
+  const resizeCallbacks: (() => void)[] = []
+  let disconnects = 0
+  let milliseconds = 0
+  const box = { getBoundingClientRect: () => ({ height: 100 }) }
+  const tool = { getAttribute: () => 'PRIVATE_TEXT_URL', contains: () => false }
+  const host = {
+    scrollTop: 100, scrollHeight: 600, clientHeight: 323,
+    querySelector(selector: string) {
+      if (selector === '[data-chat-flow]' || selector === '[data-composer-seat]') return box
+      if (selector === '[aria-label="Back to bottom"]') return null
+      return tool
+    },
+    querySelectorAll: () => [],
+  }
+  const context = createContext({
+    performance: { now: () => ++milliseconds },
+    document: {
+      activeElement: { matches: () => false },
+      querySelector: () => host,
+      addEventListener(name: string, listener: (event: ObservedEvent) => void, options: { capture: boolean; passive: boolean }) {
+        if (options.capture !== true || options.passive !== true || Object.keys(options).length !== 2) {
+          throw new Error('Diagnostic listener is not passive capture')
+        }
+        listeners.set(name, listener)
+      },
+      removeEventListener(name: string) {
+        removed.push(name)
+        if (failRemoval && name === 'scroll') throw new Error('owned removal failure')
+        listeners.delete(name)
+      },
+    },
+    ResizeObserver: class {
+      constructor(callback: () => void) { resizeCallbacks.push(callback) }
+      observe(): void {}
+      disconnect(): void { disconnects += 1 }
+    },
+  })
+  runInContext(`(${installInitialBottomDiagnostic.toString()})({ key: 'diagnostic', callId: 'owned-call' })`, context)
+  return { context, listeners, removed, resizeCallbacks, disconnects: () => disconnects }
+}
+
+it('initial-bottom diagnostic serializes without captures, bounds records and excludes private strings', () => {
+  const fixture = diagnosticSandbox()
+  for (let index = 0; index < 140; index++) fixture.listeners.get('scroll')?.({ type: 'scroll', isTrusted: true })
+  const keyboardEvent = { type: 'keydown', isTrusted: true }
+  let keyReads = 0
+  Object.defineProperty(keyboardEvent, 'key', { get() { keyReads += 1; throw new Error('Keyboard text must not be read') } })
+  fixture.listeners.get('keydown')?.(keyboardEvent)
+  expect(keyReads).toBe(0)
+  fixture.listeners.get('scroll')?.({ type: 'PRIVATE_EVENT_TYPE', isTrusted: true })
+  const encoded: unknown = runInContext('JSON.stringify(diagnostic.read())', fixture.context)
+  expect(typeof encoded).toBe('string')
+  if (typeof encoded !== 'string') throw new Error('Expected owned diagnostic JSON')
+  expect(encoded).not.toContain('PRIVATE')
+  expect(encoded).toContain('"kind":"other-event"')
+  expect(encoded.length).toBeLessThan(65_536)
+  const diagnostic: unknown = JSON.parse(encoded)
+  expect(diagnostic).toMatchObject({ schemaVersion: 1, dropped: 16, samplingErrors: 0 })
+  const count: unknown = runInContext('diagnostic.read().records.length', fixture.context)
+  expect(count).toBe(128)
+  runInContext('globalThis.saved = diagnostic; diagnostic.dispose()', fixture.context)
+  expect(fixture.listeners.size).toBe(0)
+  expect(fixture.disconnects()).toBeGreaterThan(0)
+  const before: unknown = runInContext('JSON.stringify(saved.read())', fixture.context)
+  fixture.resizeCallbacks[0]?.()
+  const after: unknown = runInContext('JSON.stringify(saved.read())', fixture.context)
+  expect(after).toBe(before)
+})
+
+it('initial-bottom diagnostic attempts every disposal and ignores already-queued callbacks', () => {
+  const fixture = diagnosticSandbox(true)
+  runInContext('globalThis.saved = diagnostic', fixture.context)
+  expect(() => { runInContext('diagnostic.dispose()', fixture.context) }).toThrow('chat-scroll-diagnostic-dispose-failed')
+  expect(fixture.removed).toHaveLength(7)
+  expect(fixture.disconnects()).toBeGreaterThan(0)
+  const before: unknown = runInContext('JSON.stringify(saved.read())', fixture.context)
+  fixture.listeners.get('scroll')?.({ type: 'scroll', isTrusted: true })
+  fixture.resizeCallbacks[0]?.()
+  const after: unknown = runInContext('JSON.stringify(saved.read())', fixture.context)
+  expect(after).toBe(before)
+})
+
+it.each([new Error('owned primary assertion'), undefined])(
+  'initial-bottom diagnostic retains the exact primary value despite read, log and disposal failures: %s',
+  async (primary) => {
+    const calls: string[] = []
+    const page: Pick<Page, 'evaluate'> = {
+      evaluate: async () => { calls.push('evaluate'); throw new Error('auxiliary read or disposal failure') },
+    }
+    let rejected = false
+    try {
+      await withInitialBottomDiagnostic(page, async () => { calls.push('check'); throw primary }, () => {
+        throw new Error('auxiliary logger failure')
+      })
+    } catch (error) {
+      rejected = true
+      expect(error).toBe(primary)
+    }
+    expect(rejected).toBe(true)
+    expect(calls).toEqual(['check', 'evaluate', 'evaluate'])
+  },
+)
+
 it('generates a native V3 scroll seed with a protected system head and intact references', () => {
   const { header, events } = parseSeedFixture(HISTORY_FIXTURE.log)
   expect(header.version).toBe(3)
@@ -664,6 +915,7 @@ describe('web e2e: long Chat scroll contract', () => {
   it.skipIf(MODE === 'record')('keeps streaming ownership and tool disclosure state across a long scroll-away cycle', async () => {
     await withScrollWorld({
       failureShot: 'web-e2e-chat-scroll-live-tool',
+      initialBottomDiagnostics: true,
       replay: [
         replayEntry(toolStream()),
         replayEntry(textStream(LIVE_TOOL_FIRST, LIVE_TOOL_DONE, 84)),
@@ -683,7 +935,7 @@ describe('web e2e: long Chat scroll contract', () => {
         const liveRow = world.page.locator(`[data-chat-call-id="${LIVE_TOOL_CALL_ID}"] [data-sample="bash"]`)
         await liveRow.waitFor({ timeout: 15_000 })
         expect(await liveRow.getAttribute('data-state')).toBe('running')
-        await expectBottom(world.page)
+        await withInitialBottomDiagnostic(world.page, () => expectBottom(world.page))
         expect(await world.page.getByRole('button', { name: 'Back to bottom', exact: true }).count()).toBe(0)
 
         await wheelTranscript(world.page, -1_200)
