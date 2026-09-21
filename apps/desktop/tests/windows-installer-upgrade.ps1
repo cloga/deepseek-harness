@@ -106,6 +106,18 @@ function Stop-OwnedProcesses {
     foreach ($process in $OwnedProcesses) {
         if ($null -ne $AbortBudget -and $AbortBudget.Required -and [object]::ReferenceEquals($process, $AbortBudget.Process)) {
             try {
+                if ($null -ne $AbortBudget.Terminal) {
+                    $terminal = $AbortBudget.Terminal
+                    if (-not $AbortBudget.Requested -or $terminal.Acknowledged -isnot [bool] -or -not $terminal.Acknowledged -or
+                        -not [object]::ReferenceEquals($process, $terminal.Process) -or
+                        $process.Id -ne $terminal.Id -or $process.Id -ne $AbortBudget.MonitorId -or
+                        $process.StartTime -isnot [datetime] -or
+                        $process.StartTime.ToUniversalTime().Ticks -ne $terminal.Created -or $terminal.Created -ne $AbortBudget.MonitorCreated -or
+                        $process.HasExited -isnot [bool] -or -not $process.HasExited -or $process.ExitCode -ne 1) {
+                        throw 'Confirmed baseline terminal identity changed'
+                    }
+                    continue
+                }
                 if ($AbortBudget.Requested -and -not $process.HasExited) {
                     $remaining = [int][Math]::Max(0, 10000 - $AbortBudget.Clock.ElapsedMilliseconds)
                     $grace = [int][Math]::Min(5000, $remaining)

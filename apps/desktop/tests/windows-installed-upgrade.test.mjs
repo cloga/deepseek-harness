@@ -135,7 +135,7 @@ function Assert-InstallerOwnedPath($Root, $Path) {
     & $script:realPathGuard $Root $Path
 }
 $cases = @()
-foreach ($mode in @('grace', 'no-ack', 'wrong-ack', 'fallback', 'spent', 'write-expired', 'published-replaced', 'foreign-existing', 'wrong-object', 'changed-incarnation')) {
+foreach ($mode in @('grace', 'late-reap', 'terminal-wrong-object', 'terminal-changed-incarnation', 'late-first-ack', 'no-ack', 'wrong-ack', 'fallback', 'spent', 'write-expired', 'published-replaced', 'foreign-existing', 'wrong-object', 'changed-incarnation')) {
     $root = Join-Path $PSScriptRoot $mode
     New-Item -ItemType Directory -Path $root | Out-Null
     [ordered]@{ token = $token; runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT } | ConvertTo-Json | Set-Content (Join-Path $root 'owner.json')
@@ -152,8 +152,8 @@ foreach ($mode in @('grace', 'no-ack', 'wrong-ack', 'fallback', 'spent', 'write-
         param($Milliseconds)
         $script:waits.Add([pscustomobject]@{ requested = $Milliseconds; elapsed = $script:clock.ElapsedMilliseconds })
         if ($this.HasExited) { return $true }
-        if ($mode -in @('grace', 'no-ack', 'wrong-ack')) {
-            $script:clock.ElapsedMilliseconds += 1000
+        if ($mode -in @('grace', 'late-reap', 'terminal-wrong-object', 'terminal-changed-incarnation', 'late-first-ack', 'no-ack', 'wrong-ack')) {
+            $script:clock.ElapsedMilliseconds += $(if ($mode -eq 'late-first-ack') { 10000 } else { 1000 })
             $this.HasExited = $true; $this.ExitCode = 1
             if ($mode -ne 'no-ack') {
                 [ordered]@{ schemaVersion = 1; ownerToken = $token; runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT
@@ -177,11 +177,19 @@ foreach ($mode in @('grace', 'no-ack', 'wrong-ack', 'fallback', 'spent', 'write-
     if ($mode -eq 'spent') { $budget.Clock.ElapsedMilliseconds = 10000 }
     $stopped = Stop-OwnedProcesses @($monitor) $cleanup $budget
     $acknowledged = Confirm-OwnedBaselineAbort $budget $cleanup
-    # A second retained-handle pass must not reset this monitor's budget.
-    [void](Stop-OwnedProcesses @($monitor) $cleanup $budget)
+    # Only a timely acknowledged terminal result survives a later pass without a new wait/deadline.
+    $firstWaits = $script:waits.Count; $firstErrors = $cleanup.Count
+    if ($mode -in @('late-reap', 'terminal-wrong-object', 'terminal-changed-incarnation', 'late-first-ack', 'no-ack', 'wrong-ack', 'spent')) {
+        $budget.Clock.ElapsedMilliseconds = 20000
+    }
+    if ($mode -eq 'terminal-wrong-object') { $budget.Terminal.Process = [pscustomobject]@{ Id = 30 } }
+    if ($mode -eq 'terminal-changed-incarnation') { $monitor.StartTime = $monitor.StartTime.AddTicks(1) }
+    $secondStopped = Stop-OwnedProcesses @($monitor) $cleanup $budget
+    $secondWaits = $script:waits.Count - $firstWaits; $secondErrors = $cleanup.Count - $firstErrors
     $preserved = if ($mode -eq 'foreign-existing') { (Get-Content (Join-Path $root 'baseline-abort-request.json') -Raw) -ceq 'FOREIGN-request' } else { $true }
     $cases += [pscustomobject]@{ mode = $mode; requested = $budget.Requested; stopped = $stopped; acknowledged = $acknowledged
         waits = @($script:waits); kills = $script:kills; preserved = $preserved; primaryRetained = [object]::ReferenceEquals($original, $failure)
+        secondStopped = $secondStopped; secondWaits = $secondWaits; secondErrors = $secondErrors; terminal = ($null -ne $budget.Terminal)
         secondary = @($secondary); cleanup = @($cleanup) }
 }
 ConvertTo-Json -InputObject $cases -Depth 6 -Compress
@@ -189,12 +197,22 @@ ConvertTo-Json -InputObject $cases -Depth 6 -Compress
   for (const row of observed) {
     assert.equal(row.primaryRetained, true, row.mode)
     assert.equal(row.preserved, true, row.mode)
-    assert.equal(row.acknowledged, row.mode === 'grace', JSON.stringify(row))
+    assert.equal(row.acknowledged, ['grace', 'late-reap', 'terminal-wrong-object', 'terminal-changed-incarnation'].includes(row.mode), JSON.stringify(row))
     for (const wait of row.waits) assert.ok(wait.requested <= Math.max(0, 10000 - wait.elapsed), row.mode)
   }
   const cases = Object.fromEntries(observed.map(row => [row.mode, row]))
   assert.equal(cases.grace.kills, 0)
   assert.equal(cases.grace.waits[0].requested, 5000)
+  for (const mode of ['grace', 'late-reap']) {
+    assert.equal(cases[mode].secondStopped, true, mode)
+    assert.equal(cases[mode].secondWaits, 0, mode)
+    assert.equal(cases[mode].secondErrors, 0, mode)
+  }
+  for (const mode of ['terminal-wrong-object', 'terminal-changed-incarnation', 'late-first-ack', 'no-ack', 'wrong-ack', 'spent']) {
+    assert.equal(cases[mode].secondStopped, false, mode)
+    assert.ok(cases[mode].secondErrors > 0, mode)
+  }
+  for (const mode of ['late-first-ack', 'no-ack', 'wrong-ack', 'spent']) assert.equal(cases[mode].terminal, false, mode)
   assert.equal(cases.fallback.kills, 1)
   assert.equal(cases.spent.stopped, false)
   assert.ok(cases.spent.waits.every(wait => wait.requested === 0))

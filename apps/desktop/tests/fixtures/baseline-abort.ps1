@@ -1,7 +1,8 @@
 # Failure-only control of the exact retained baseline monitor. No process lookup or success request.
 function New-BaselineAbortClock { [Diagnostics.Stopwatch]::StartNew() }
 function Request-OwnedBaselineAbort($Monitor, $Binding, $OwnedProcesses, $Errors) {
-    $budget = [pscustomobject]@{ Process = $Monitor; Clock = (New-BaselineAbortClock); Requested = $false; Required = $true }
+    $budget = [pscustomobject]@{ Process = $Monitor; Clock = (New-BaselineAbortClock); Requested = $false; Required = $true
+        MonitorId = $null; MonitorCreated = $null; Terminal = $null }
     $temporary = $null; $stream = $null; $published = $null; $memory = $null; $created = $false; $stage = 'monitor-binding'
     try {
         if ($null -eq $Monitor -or $null -eq $Binding -or
@@ -10,6 +11,7 @@ function Request-OwnedBaselineAbort($Monitor, $Binding, $OwnedProcesses, $Errors
             $Monitor.Id -ne $Binding.Id -or $Monitor.StartTime -isnot [datetime] -or
             $Monitor.StartTime.ToUniversalTime().Ticks -ne $Binding.Created -or
             $Monitor.HasExited -isnot [bool]) { throw 'Baseline monitor ownership is unavailable' }
+        $budget.MonitorId = $Binding.Id; $budget.MonitorCreated = $Binding.Created
         if ($Monitor.HasExited) { $budget.Required = $false; return $budget }
         $stage = 'owner-binding'
         Assert-UninstallOwner
@@ -61,6 +63,8 @@ function Confirm-OwnedBaselineAbort($Budget, $Errors) {
     if ($null -eq $Budget -or -not $Budget.Required) { return $true }
     try {
         if (-not $Budget.Requested -or $Budget.Clock.ElapsedMilliseconds -ge 10000 -or
+            $Budget.Process.Id -ne $Budget.MonitorId -or $Budget.Process.StartTime -isnot [datetime] -or
+            $Budget.Process.StartTime.ToUniversalTime().Ticks -ne $Budget.MonitorCreated -or
             $Budget.Process.HasExited -isnot [bool] -or -not $Budget.Process.HasExited -or $Budget.Process.ExitCode -ne 1) {
             throw 'Baseline abort exit was not acknowledged within cleanup budget'
         }
@@ -77,6 +81,10 @@ function Confirm-OwnedBaselineAbort($Budget, $Errors) {
             $ack.failed -isnot [bool] -or -not $ack.failed -or $Budget.Clock.ElapsedMilliseconds -ge 10000) {
             throw 'Unbound baseline abort acknowledgement'
         }
+        # Cache only the timely, exact-incarnation terminal result after validating the owned ACK.
+        # Later unrelated cleanup cannot retroactively expire that completed observation.
+        $Budget.Terminal = [pscustomobject]@{ Process = $Budget.Process; Id = $Budget.MonitorId
+            Created = $Budget.MonitorCreated; Acknowledged = $true }
         return $true
     } catch { $Errors.Add('Baseline abort close acknowledgement unavailable'); return $false }
 }
