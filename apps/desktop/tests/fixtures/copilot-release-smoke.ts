@@ -538,6 +538,7 @@ export async function runPackagedCopilotAcceptance(
         record('native-composer:provider-deferred')
       }, { times: 1 })
       nativeObservation = await observeNativeComposerErrors(inspectedPage, async () => {
+        await inspectedPage.getByRole('button', { name: 'Settings', exact: true }).waitFor({ state: 'visible', timeout: 120_000 })
         const inspection = await inspectNativeComposerGeometry(inspectedPage, output)
         assert.equal(digest(readFileSync(join(profile, 'desktop-plugin-receipts.json'))), inventories[0])
         assert.equal(readNativeClient(), positiveClientSha256, 'Native inspection changed released Client bytes')

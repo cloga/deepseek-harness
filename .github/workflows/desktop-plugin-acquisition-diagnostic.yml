@@ -1,0 +1,81 @@
+name: Desktop anonymous plugin acquisition diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_source_sha:
+        description: Reviewed diagnostic checkout commit (40 lowercase hexadecimal characters)
+        required: true
+        type: string
+      expected_plan_sha256:
+        description: Independently reviewed raw Desktop release-plan SHA-256
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-plugin-acquisition-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    name: One anonymous source acquisition
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.expected_source_sha }}
+          persist-credentials: false
+
+      - name: Verify reviewed diagnostic source and plan
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_PLAN_SHA256: ${{ inputs.expected_plan_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:EXPECTED_SOURCE_SHA -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Invalid reviewed source SHA' }
+          if ($env:EXPECTED_PLAN_SHA256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'Invalid reviewed plan SHA-256' }
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:EXPECTED_SOURCE_SHA) { throw 'Checkout differs from reviewed source' }
+          $hash = (Get-FileHash apps/desktop/release/cloga-windows-x64.json -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -cne $env:EXPECTED_PLAN_SHA256) { throw 'Plan differs from reviewed bytes' }
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.7.0'
+          dest: ${{ runner.temp }}/diagnostic-pnpm
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.13.0'
+          package-manager-cache: false
+
+      - name: Install frozen diagnostic dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify offline diagnostic guards
+        run: pnpm exec vitest run apps/desktop/tests/plugin-acquisition-diagnostic.spec.ts --maxWorkers=1
+
+      - name: Observe one anonymous acquisition without installation
+        id: acquisition
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_PLAN_SHA256: ${{ inputs.expected_plan_sha256 }}
+          DIAGNOSTIC_ROOT: ${{ runner.temp }}/desktop-acquisition-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          node --import tsx/esm apps/desktop/scripts/diagnose-plugin-acquisition.ts --source-sha $env:EXPECTED_SOURCE_SHA --plan-sha256 $env:EXPECTED_PLAN_SHA256 --plan apps/desktop/release/cloga-windows-x64.json --scratch "$env:DIAGNOSTIC_ROOT/scratch" --output "$env:DIAGNOSTIC_ROOT/acquisition-diagnostic.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && (steps.acquisition.outcome == 'success' || steps.acquisition.outcome == 'failure') }}
+        with:
+          name: desktop-anonymous-acquisition-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/desktop-acquisition-${{ github.run_id }}-${{ github.run_attempt }}/acquisition-diagnostic.json
+          if-no-files-found: error
+          retention-days: 1

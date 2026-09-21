@@ -44,6 +44,10 @@ Alpha.34 的 Model roles 退役是产品决定，不代表官方已提供等价�
 
 ## 发布证据边界
 
+`.cloga.18` 正式运行通过其打包态原生几何检查，但全新 home 的 observer 在获取插件时遇到 HTTP 403；该运行没有发布 Desktop。单独的 HTTP 403 不能确定限流原因。[手动获取诊断](../../../../apps/desktop/README.zh.md#plugin-acquisition-diagnostic)隔离执行一次匿名获取，使用未改变的精确 alpha.35 plan，不修改产品源码、认证策略、完整性检查、版本或发布验收。协调操作者负责在合并后的 workflow 完成注册后发起 dispatch；此诊断不是重试发布。
+
+该诊断有意在托管 Node 下运行源码获取 helper，而非打包的 Electron 载体，runner IP 也可能不同。有界、脱敏的 HTTP 观察能够缩小失败路由范围并提供有效的 rate-limit header，但不能仅凭状态确定原始拒绝原因。它既不安装也不执行下载的插件，并删除自有临时目录；清理失败仍使运行失败。即使诊断成功，也不证明打包启动、原生 Session 几何、发布或本地安装/激活，不替代正式发布检查。
+
 Copilot alpha.35 的[合并后运行 35603503257](https://github.com/cloga/dsh-github-copilot/actions/runs/35603503257)通过兼容性、精确 alpha.2 Windows/Ubuntu、构建及不可变 GitHub 发布检查；整体运行在 npm 发布／完整性回读步骤失败。[只读验证运行 35605111730](https://github.com/cloga/dsh-github-copilot/actions/runs/35605111730)报告成功。独立原始资产评审检查了不可变 GitHub tarball、校验和清单、源码／tag／tree 绑定及 SHA-512 integrity，但未获取该验证器的 receipt 归档，也不作独立 npm 验证声明。插件字节验证不代表 Desktop 安装器或本地激活通过验收。
 
 历史 alpha.33 的 [run 35559690050](https://github.com/cloga/dsh-github-copilot/actions/runs/35559690050) 与后续 [verifier run 35560198211，第 2 次尝试](https://github.com/cloga/dsh-github-copilot/actions/runs/35560198211/attempts/2)仅涉及 alpha.33，不代表 alpha.35 或新的 Desktop 发布。其原始资产评审同样只验证 GitHub 字节，未取得 npm 验证器 receipt。每个维护版本都需要自己的不可变插件 lock 与 Desktop 验收；Desktop 使用已发布字节，不重新发布或改写插件 Release。

@@ -182,9 +182,17 @@ function ownerFixture() {
     locator: (_selector: string) => locator, getByRole: (_role: string, _options?: unknown) => locator,
   }
   const events = new EventEmitter()
+  const settingsReady = vi.fn(async (_options?: { state: string; timeout: number }) => {})
   const page = {
     ...locator, screenshot: vi.fn(async (_options?: { path?: string; timeout?: number }) => {}),
     setDefaultTimeout: vi.fn(), waitForFunction: vi.fn(async () => {}),
+    getByRole(role: string, options?: unknown): UnitLocator {
+      if (role === 'button' && typeof options === 'object' && options !== null && 'name' in options && options.name === 'Settings') {
+        expect(options).toEqual({ name: 'Settings', exact: true })
+        return { ...locator, waitFor: settingsReady }
+      }
+      return locator
+    },
     on: events.on.bind(events), off: events.off.bind(events),
     addLocatorHandler: vi.fn(async (_locator: unknown, _handler: () => Promise<void>) => {}),
     removeLocatorHandler: vi.fn(async () => {}),
@@ -233,7 +241,7 @@ function ownerFixture() {
   // Only acceptance-owned allocations belong to each lifecycle assertion.
   effects.allocated = []
   return {
-    options: { application, output }, close, page, events, reviewedSource, get launches() { return launches },
+    options: { application, output }, close, page, events, settingsReady, reviewedSource, get launches() { return launches },
     get profile() { return profile },
     get clientPath() { return join(profile, 'node_modules', 'dsh-github-copilot', 'lib', 'client.js') },
   }
@@ -510,6 +518,65 @@ it.each([
 })
 
 describe('native composer observations through the actual owner', () => {
+  it('waits for public Client readiness inside observation before testing restored sidebar state', async () => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    const reached = Promise.withResolvers<undefined>()
+    const ready = Promise.withResolvers<undefined>()
+    fixture.settingsReady.mockImplementation(async (options) => {
+      expect(options).toEqual({ state: 'visible', timeout: 120_000 })
+      expect(fixture.launches).toBe(3)
+      expect(fixture.page.addLocatorHandler).toHaveBeenCalledOnce()
+      expect(fixture.events.listenerCount('pageerror')).toBe(1)
+      expect(fixture.events.listenerCount('console')).toBe(1)
+      reached.resolve(undefined)
+      await ready.promise
+    })
+    const running = runPackagedCopilotAcceptance(fixture.options)
+    try {
+      await reached.promise
+      expect(effects.nativeGeometry).not.toHaveBeenCalled()
+      for (const file of ['native-composer-geometry.json', 'functional-results.json', 'acceptance.json']) {
+        expect(existsSync(join(fixture.options.output, file))).toBe(false)
+      }
+      expect(fixture.close).toHaveBeenCalledTimes(2)
+      ready.resolve(undefined)
+      await running
+      expect(fixture.settingsReady).toHaveBeenCalledOnce()
+      expect(effects.nativeGeometry).toHaveBeenCalledOnce()
+      expect(fixture.close).toHaveBeenCalledTimes(3)
+      expect(fixture.page.removeLocatorHandler).toHaveBeenCalledOnce()
+    } finally { ready.resolve(undefined); await running }
+  })
+
+  it.each([new Error('Client readiness rejected'), undefined])('preserves readiness failure %s without native or suite success', async (primary) => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    const { runPackagedCopilotObserverCanary } = await import('./fixtures/copilot-observer-smoke.ts')
+    const reached = Promise.withResolvers<undefined>()
+    const ready = Promise.withResolvers<undefined>()
+    fixture.settingsReady.mockImplementation(async () => { reached.resolve(undefined); await ready.promise })
+    const result = runPackagedCopilotObserverCanary(fixture.options, runPackagedCopilotAcceptance)
+    const rejected = expect(result).rejects.toBe(primary)
+    try {
+      await reached.promise
+      expect(effects.nativeGeometry).not.toHaveBeenCalled()
+      ready.reject(primary)
+      await rejected
+      expect(fixture.close).toHaveBeenCalledTimes(3)
+      expect(fixture.page.removeLocatorHandler).toHaveBeenCalledOnce()
+      expect(fixture.events.listenerCount('pageerror')).toBe(0)
+      expect(fixture.events.listenerCount('console')).toBe(0)
+      for (const file of ['native-composer-geometry.json', 'functional-results.json', 'acceptance.json', 'packaged-suite.json']) {
+        expect(existsSync(join(fixture.options.output, file))).toBe(false)
+      }
+      expect(receipt(fixture.options.output, 'failure.json')).toMatchObject({
+        error: String(primary), cleanupCompleted: true, cleanupVerified: true, cleanupErrors: [], diagnosticErrors: [],
+      })
+      expect(effects.allocated.every(path => !existsSync(path))).toBe(true)
+    } finally { ready.reject(primary); await rejected }
+  })
+
   it('closes all three rounds before one observer and binds native bytes into schema-3 functional evidence', async () => {
     const fixture = ownerFixture()
     const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
