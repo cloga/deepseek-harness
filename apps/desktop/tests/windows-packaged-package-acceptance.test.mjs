@@ -266,6 +266,193 @@ function powershellUnit(t, body, shell = 'pwsh', { timeout = 15_000, phases = fa
   return JSON.parse(result.stdout.trim())
 }
 
+test('first-party UIA initialization precedes every owned UI enumeration and readiness flag', () => {
+  const initialization = native.slice(native.indexOf('function Initialize-Native {'), native.indexOf('function Owned-Nodes('))
+  assert.ok(initialization.indexOf('Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing')
+    < initialization.indexOf('$script:providerInitialization = Register-DesktopClientProviders'))
+  assert.ok(initialization.includes('[System.Windows.Automation.AutomationElement].Assembly.GetName()'))
+  assert.ok(initialization.includes('[System.Windows.Automation.ClientSideProviderDescription]'))
+  assert.ok(initialization.includes('param([Reflection.AssemblyName]$Name)'))
+  assert.ok(initialization.includes('[Reflection.Assembly]::Load($Name)'))
+  assert.ok(initialization.indexOf('RegisterClientSideProviderAssembly($Name)') < initialization.indexOf('$script:nativeReady = $true'))
+  assert.doesNotMatch(initialization, /LoadFrom|LoadFile|GetProxyFactoryMappingTable|GetProxyDescriptionTable|RegisterClientSideProviders\(/u)
+  const action = native.slice(native.indexOf("if ($Action -in @('ReviewPackages','ChooseWorkspace','Exit'))"))
+  assert.ok(action.indexOf('Initialize-Native') < action.indexOf('Owned-Nodes -FolderDialog'))
+  assert.ok(action.indexOf('Initialize-Native') < action.indexOf('Wait-Control $label'))
+  const failure = native.slice(native.lastIndexOf('} catch {\n    $primaryFailure = $_'))
+  assert.ok(failure.indexOf('if ($nativeReady)') < failure.indexOf('$tree = @(Owned-Nodes'))
+  assert.ok(native.includes("$_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit"))
+  assert.ok(native.includes("$_.Current.AutomationId -in @('1148','1152')"))
+  assert.ok(native.includes('$timer.Elapsed.TotalSeconds -lt 25'))
+})
+
+test('matching first-party UIA identity and provider table fail closed before fake UI actions', { skip: process.platform !== 'win32' }, t => {
+  const helper = native.match(/function Register-DesktopClientProviders[^]*?\r?\n\}/u)?.[0]
+  assert.ok(helper)
+  const observed = powershellUnit(t, `
+${helper}
+# These are inert test-owned classes, not UIAutomation types or real provider assemblies.
+class UnitProviderDescription {
+    [string]$ClassName
+    [object]$ClientSideProviderFactoryCallback
+    UnitProviderDescription([string]$name, [object]$callback) { $this.ClassName = $name; $this.ClientSideProviderFactoryCallback = $callback }
+}
+class UnitProviderField {
+    [bool]$IsPublic = $true
+    [bool]$IsStatic = $true
+    [type]$FieldType = [UnitProviderDescription[]]
+    [object]$Value
+    [object] GetValue([object]$target) {
+        $script:events.Add('table-read')
+        if ($script:mode -eq 'initializer-error') { throw $script:original }
+        return $this.Value
+    }
+}
+class UnitProviderType {
+    [bool]$IsPublic = $true
+    [UnitProviderField]$Field
+    [object] GetField([string]$name, [Reflection.BindingFlags]$flags) {
+        $script:events.Add('field')
+        if ($name -cne 'ClientSideProviderDescriptionTable' -or $flags -ne ([Reflection.BindingFlags]::Public -bor [Reflection.BindingFlags]::Static)) { throw 'Wrong public field contract' }
+        return $this.Field
+    }
+}
+class UnitProviderAssembly {
+    [Reflection.AssemblyName]$Identity
+    [UnitProviderType]$ProviderType
+    [Reflection.AssemblyName] GetName() { $script:events.Add('identity'); return $this.Identity }
+    [object] GetType([string]$name, [bool]$throwOnError, [bool]$ignoreCase) {
+        $script:events.Add('type')
+        if ($name -cne 'UIAutomationClientsideProviders.UIAutomationClientSideProviders' -or -not $throwOnError -or $ignoreCase) { throw 'Wrong exact public provider type' }
+        return $this.ProviderType
+    }
+}
+$cases = @('positive', 'mixed-case', 'alternate-version', 'upper-bound', 'client-name', 'client-token', 'client-culture', 'client-version', 'load-null', 'load-error', 'loaded-name', 'loaded-version', 'loaded-culture', 'loaded-token', 'missing-type', 'private-type', 'missing-field', 'private-field', 'instance-field', 'field-type', 'null-table', 'empty-table', 'wrong-table', 'over-bound', 'missing-edit', 'missing-button', 'near-edit', 'null-edit-callback', 'null-button-callback', 'initializer-error', 'registration-error')
+$passed = @()
+foreach ($mode in $cases) {
+    $script:mode = $mode
+    $script:events = [Collections.Generic.List[string]]::new()
+    $script:original = [InvalidOperationException]::new('original-' + $mode)
+    $client = [Reflection.AssemblyName]::new('UIAutomationClient, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35')
+    if ($mode -eq 'alternate-version') { $client.Version = [version]'4.2.3.4' }
+    if ($mode -eq 'client-name') { $client.Name = 'OtherClient' }
+    if ($mode -eq 'client-token') { $client.SetPublicKeyToken([byte[]]@(1,2,3,4,5,6,7,8)) }
+    if ($mode -eq 'client-culture') { $client.CultureName = 'en-US' }
+    if ($mode -eq 'client-version') { $client.Version = $null }
+    $identity = [Reflection.AssemblyName]::new('UIAutomationClientsideProviders, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35')
+    if ($mode -eq 'alternate-version') { $identity.Version = $client.Version }
+    if ($mode -eq 'loaded-name') { $identity.Name = 'OtherProvider' }
+    if ($mode -eq 'loaded-version') { $identity.Version = [version]'9.0.0.0' }
+    if ($mode -eq 'loaded-culture') { $identity.CultureName = 'en-US' }
+    if ($mode -eq 'loaded-token') { $identity.SetPublicKeyToken([byte[]]@(1,2,3,4,5,6,7,8)) }
+    $table = [UnitProviderDescription[]]@([UnitProviderDescription]::new('Edit', {}), [UnitProviderDescription]::new('Button', {}))
+    if ($mode -eq 'mixed-case') { $table[0].ClassName = 'eDiT'; $table[1].ClassName = 'bUtToN' }
+    if ($mode -eq 'missing-edit') { $table[0].ClassName = 'Pane' }
+    if ($mode -eq 'near-edit') { $table[0].ClassName = 'EditLike' }
+    if ($mode -eq 'missing-button') { $table[1].ClassName = 'Pane' }
+    if ($mode -eq 'null-edit-callback') { $table[0].ClientSideProviderFactoryCallback = $null }
+    if ($mode -eq 'null-button-callback') { $table[1].ClientSideProviderFactoryCallback = $null }
+    if ($mode -in @('upper-bound', 'over-bound')) {
+        $count = if ($mode -eq 'upper-bound') { 256 } else { 257 }
+        $extra = @(for ($index = 2; $index -lt $count; $index++) { [UnitProviderDescription]::new('Other', {}) })
+        $table = [UnitProviderDescription[]](@($table) + $extra)
+    }
+    $field = [UnitProviderField]::new(); $field.Value = $table
+    if ($mode -eq 'private-field') { $field.IsPublic = $false }
+    if ($mode -eq 'instance-field') { $field.IsStatic = $false }
+    if ($mode -eq 'field-type') { $field.FieldType = [object[]] }
+    if ($mode -eq 'null-table') { $field.Value = $null }
+    if ($mode -eq 'empty-table') { $field.Value = [UnitProviderDescription[]]@() }
+    if ($mode -eq 'wrong-table') { $field.Value = [object[]]@($table) }
+    $providerType = [UnitProviderType]::new(); $providerType.Field = $field
+    if ($mode -eq 'missing-field') { $providerType.Field = $null }
+    if ($mode -eq 'private-type') { $providerType.IsPublic = $false }
+    $assembly = [UnitProviderAssembly]::new(); $assembly.Identity = $identity; $assembly.ProviderType = $providerType
+    if ($mode -eq 'missing-type') { $assembly.ProviderType = $null }
+    $ready = $false; $failure = $null; $result = $null
+    try {
+        $result = Register-DesktopClientProviders $client ([UnitProviderDescription]) {
+            param([Reflection.AssemblyName]$requested)
+            $script:events.Add('load')
+            if ($requested.Name -cne 'UIAutomationClientsideProviders' -or $requested.Version -ne $client.Version -or $requested.CultureName -cne $client.CultureName) { throw 'Identity derivation changed' }
+            if ([BitConverter]::ToString($requested.GetPublicKeyToken()) -cne [BitConverter]::ToString($client.GetPublicKeyToken())) { throw 'Token derivation changed' }
+            if ($mode -eq 'load-error') { throw $script:original }
+            if ($mode -eq 'load-null') { return $null }
+            return $assembly
+        } {
+            param([Reflection.AssemblyName]$requested)
+            $script:events.Add('register')
+            if ($requested.FullName -cne $identity.FullName) { throw 'Registration changed identity' }
+            if ($mode -eq 'registration-error') { throw $script:original }
+        }
+        $ready = $true
+        $script:events.Add('ready')
+        $script:events.Add('fake-owned-ui')
+    } catch { $failure = $_ }
+    $positive = $mode -in @('positive', 'mixed-case', 'alternate-version', 'upper-bound')
+    if ($positive) {
+        if ($null -ne $failure) { throw $failure }
+        if (-not $ready -or $result.scope -cne 'initialization-ready' -or -not $result.editDescriptionReady -or -not $result.buttonDescriptionReady -or -not $result.registrationReturned) { throw 'False initialization readiness' }
+        if (($script:events -join ',') -cne 'load,identity,type,field,table-read,register,ready,fake-owned-ui') { throw 'Initialization order changed' }
+        if ($result.requestedIdentity -cne $result.loadedIdentity -or $result.version -cne $client.Version.ToString()) { throw 'Incorrect bounded identity evidence' }
+        if ($result.Keys.Count -ne 8) { throw 'Unexpected initialization evidence fields' }
+    } else {
+        if ($null -eq $failure -or $ready -or $script:events.Contains('fake-owned-ui')) { throw ('Accepted invalid initialization: ' + $mode) }
+        if ($mode -ne 'registration-error' -and $script:events.Contains('register')) { throw ('Registered before validation: ' + $mode) }
+        if ($mode -like 'client-*' -and $script:events.Contains('load')) { throw 'Invalid client triggered provider loading' }
+        if ($mode -in @('load-error', 'registration-error') -and -not [object]::ReferenceEquals($failure.Exception, $script:original)) { throw 'Original callback failure was replaced' }
+        if ($mode -eq 'initializer-error' -and $failure.ToString() -notmatch 'original-initializer-error') { throw 'Initializer failure was hidden' }
+    }
+    $passed += $mode
+}
+@{ passed = $passed; providerInvocations = 0; actualUiCalls = 0 } | ConvertTo-Json -Compress
+`, join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
+  assert.equal(observed.passed.length, 31)
+  assert.equal(observed.providerInvocations, 0)
+  assert.equal(observed.actualUiCalls, 0)
+})
+
+test('native failure capture cannot enumerate UI before initialization readiness and preserves the original error', { skip: process.platform !== 'win32' }, t => {
+  const normalized = native.replaceAll('\r\n', '\n')
+  const marker = '} catch {\n    $primaryFailure = $_'
+  const start = normalized.lastIndexOf(marker)
+  assert.ok(start >= 0)
+  const body = normalized.slice(start + '} catch {\n'.length, normalized.lastIndexOf('\n}'))
+  const observed = powershellUnit(t, `
+# Fake capture class returns no windows; it never calls a native API.
+class DesktopAcceptanceWindows {
+    static [int[]] Owned([int]$processId) { return @() }
+}
+function Owned-Nodes { $script:enumerations++; return @() }
+$OwnerToken = 'unit-owner'; $RequestId = 'unit-request'; $Action = 'unit-only'; $ShellPid = 123
+$evidence = $PSScriptRoot
+$passed = @()
+foreach ($ready in @($false, $true)) {
+    $nativeReady = $ready
+    $providerInitialization = if ($ready) { @{ scope = 'initialization-ready'; registrationReturned = $true } } else { $null }
+    $script:enumerations = 0
+    $resultPath = Join-Path $PSScriptRoot ('capture-' + $ready + '.json')
+    $original = [InvalidOperationException]::new('original native initialization or action failure')
+    $caught = $null
+    try {
+        try { throw $original } catch {
+${body}
+        }
+    } catch { $caught = $_ }
+    if (-not [object]::ReferenceEquals($caught.Exception, $original)) { throw 'Native primary failure was replaced' }
+    if ($script:enumerations -ne [int]$ready) { throw 'Capture ignored initialization readiness' }
+    $record = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+    if ($record.succeeded -or $record.error -cne $original.Message) { throw 'Failure evidence claimed success or changed primary' }
+    if (-not $ready -and $null -ne $record.providerInitialization) { throw 'Uninitialized provider has readiness evidence' }
+    if ($ready -and $record.providerInitialization.scope -cne 'initialization-ready') { throw 'Initialization evidence lost its limited scope' }
+    $passed += [string]$ready
+}
+@{ passed = $passed; actualUiCalls = 0 } | ConvertTo-Json -Compress
+`, join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
+  assert.deepEqual(observed.passed, ['False', 'True'])
+  assert.equal(observed.actualUiCalls, 0)
+})
+
 test('package observer binds the observed Electron PID before native actions and retains transport ownership separately', () => {
   const launch = source.slice(source.indexOf('  const launch = async label => {'), source.indexOf('  const openNativeMenu'))
   assert.ok(launch.indexOf('app.evaluate(inspectInstalledDesktopIdentity)') < launch.indexOf("await native('Bind')"))

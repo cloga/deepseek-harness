@@ -132,8 +132,55 @@ function Observe-Family {
     return $family
 }
 $nativeReady = $false
+$providerInitialization = $null
+# Internal seams permit pure tests; the native caller supplies only loaded Framework identities and public APIs.
+function Register-DesktopClientProviders([Reflection.AssemblyName]$ClientName, [type]$DescriptionType, [scriptblock]$LoadAssembly, [scriptblock]$RegisterAssembly) {
+    if ($null -eq $ClientName -or $ClientName.Name -cne 'UIAutomationClient' -or $null -eq $ClientName.Version) { throw 'Unsupported Framework UIAutomationClient identity' }
+    $token = [BitConverter]::ToString($ClientName.GetPublicKeyToken()).Replace('-', '').ToLowerInvariant()
+    if ($token -cne '31bf3856ad364e35' -or -not [string]::IsNullOrEmpty($ClientName.CultureName)) { throw 'Untrusted Framework UIAutomationClient identity' }
+    $requested = [Reflection.AssemblyName]::new($ClientName.FullName)
+    $requested.Name = 'UIAutomationClientsideProviders'
+    $assembly = & $LoadAssembly $requested
+    if ($null -eq $assembly) { throw 'Framework UIA client-side provider assembly is unavailable' }
+    $loaded = $assembly.GetName()
+    if ($null -eq $loaded) { throw 'Framework UIA provider identity is unavailable' }
+    $loadedToken = [BitConverter]::ToString($loaded.GetPublicKeyToken()).Replace('-', '').ToLowerInvariant()
+    if ($loaded.Name -cne $requested.Name -or $loaded.Version -ne $requested.Version -or [string]$loaded.CultureName -cne [string]$requested.CultureName -or $loadedToken -cne $token) {
+        throw 'Framework UIA provider identity differs from the requested assembly'
+    }
+    $providerType = $assembly.GetType('UIAutomationClientsideProviders.UIAutomationClientSideProviders', $true, $false)
+    if ($null -eq $providerType -or -not $providerType.IsPublic) { throw 'Framework UIA provider type is unavailable or not public' }
+    $field = $providerType.GetField('ClientSideProviderDescriptionTable', ([Reflection.BindingFlags]::Public -bor [Reflection.BindingFlags]::Static))
+    if ($null -eq $DescriptionType -or $null -eq $field -or -not $field.IsPublic -or -not $field.IsStatic -or $field.FieldType -ne $DescriptionType.MakeArrayType()) {
+        throw 'Framework UIA provider description table has an unexpected contract'
+    }
+    $table = $field.GetValue($null)
+    if ($null -eq $table -or $table.GetType() -ne $DescriptionType.MakeArrayType() -or $table.Length -lt 1 -or $table.Length -gt 256) {
+        throw 'Framework UIA provider description table is empty, incompatible or exceeds its bound'
+    }
+    $editReady = $false
+    $buttonReady = $false
+    foreach ($description in $table) {
+        if ($description.ClassName -ieq 'Edit' -or $description.ClassName -ieq 'Button') {
+            if ($null -eq $description.ClientSideProviderFactoryCallback) { throw 'Required Framework UIA provider callback is unavailable' }
+            if ($description.ClassName -ieq 'Edit') { $editReady = $true } else { $buttonReady = $true }
+        }
+    }
+    if (-not $editReady -or -not $buttonReady) { throw 'Framework UIA Edit and Button descriptions are required' }
+    if ($requested.FullName.Length -gt 256 -or $loaded.FullName.Length -gt 256) { throw 'Framework UIA identity exceeds its evidence bound' }
+    & $RegisterAssembly $requested
+    # Structural initialization evidence only: the actual owned controls still must expose the required patterns.
+    return @{ scope = 'initialization-ready'; requestedIdentity = $requested.FullName; loadedIdentity = $loaded.FullName; version = $loaded.Version.ToString(); tableCount = $table.Length; editDescriptionReady = $editReady; buttonDescriptionReady = $buttonReady; registrationReturned = $true }
+}
 function Initialize-Native {
     Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing
+    $script:providerInitialization = Register-DesktopClientProviders ([System.Windows.Automation.AutomationElement].Assembly.GetName()) ([System.Windows.Automation.ClientSideProviderDescription]) {
+        param([Reflection.AssemblyName]$Name)
+        return [Reflection.Assembly]::Load($Name)
+    } {
+        param([Reflection.AssemblyName]$Name)
+        [System.Windows.Automation.ClientSettings]::RegisterClientSideProviderAssembly($Name)
+    }
     Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
 using System;
 using System.Text;
@@ -248,6 +295,7 @@ try {
         $result = @{ shell = $binding.shell; hosts = @($hosts | ForEach-Object { Identity $_ -AllowExited } | Where-Object { $null -ne $_ }) }
         if ($Action -in @('ReviewPackages','ChooseWorkspace','Exit')) {
             Initialize-Native
+            $result.providerInitialization = $providerInitialization
             if ($Action -eq 'ChooseWorkspace') {
                 if (-not (Test-Path -LiteralPath $workspace -PathType Container) -or ((Get-Item -LiteralPath $workspace).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Unsafe fixture workspace' }
                 $timer = [Diagnostics.Stopwatch]::StartNew()
@@ -288,7 +336,7 @@ try {
         } catch { $secondaryErrors.Add('Native evidence capture failed: ' + $_.Exception.Message) }
     }
     try {
-        @{ schemaVersion = 1; ownerToken = $OwnerToken; requestId = $RequestId; action = $Action; succeeded = $false; error = $diagnostic; accessibility = $tree; secondaryErrors = @($secondaryErrors) } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultPath -Encoding UTF8
+        @{ schemaVersion = 1; ownerToken = $OwnerToken; requestId = $RequestId; action = $Action; succeeded = $false; error = $diagnostic; providerInitialization = $providerInitialization; accessibility = $tree; secondaryErrors = @($secondaryErrors) } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultPath -Encoding UTF8
     } catch {
         $secondaryErrors.Add('Native failure evidence write failed: ' + $_.Exception.Message)
         try { [Console]::Error.WriteLine(('Secondary native failures: ' + ($secondaryErrors -join '; '))) }
