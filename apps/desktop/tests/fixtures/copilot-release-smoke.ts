@@ -33,6 +33,7 @@ import {
 import { inspectPackagedGraphResolution, packagedGraphCheckArguments } from './packaged-graph-check.ts'
 import { inspectPackagedCopilotSettings, type CopilotSettingsEvidence } from './copilot-settings-smoke.ts'
 import { inspectNativeComposerGeometry } from './native-composer-geometry.ts'
+import { observeNativeComposerErrors } from './native-composer-errors.ts'
 import {
   inspectCopilotUsageCapability,
   inspectSignedOutCopilotUsage,
@@ -318,12 +319,15 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
     page.setDefaultTimeout(120_000)
     await page.waitForURL('dsh-app://app/index.html', { timeout: 300_000 })
     await page.getByRole('button', { name: 'Settings', exact: true }).waitFor({ state: 'visible' })
-    const nativeErrors: string[] = []
-    page.on('pageerror', error => nativeErrors.push(error.message))
-    page.on('console', (message) => { if (message.type() === 'error') nativeErrors.push(message.text()) })
-    const nativeInspection = await inspectNativeComposerGeometry(page, output)
-    assert.deepEqual(nativeErrors, [], 'Native composer acceptance must not produce renderer errors')
-    assert.equal(createHash('sha256').update(readFileSync(join(profile, 'desktop-plugin-receipts.json'))).digest('hex'), inventories[0])
+    const inspectedPage = page
+    const nativeObservation = await observeNativeComposerErrors(inspectedPage, async () => {
+      // Inspection ends with an awaited browser focus roundtrip. Seal after
+      // its final receipt check, before initiating the owned Host shutdown.
+      const inspection = await inspectNativeComposerGeometry(inspectedPage, output)
+      assert.equal(createHash('sha256').update(readFileSync(join(profile, 'desktop-plugin-receipts.json'))).digest('hex'), inventories[0])
+      return inspection
+    })
+    const { inspection: nativeInspection, rendererErrors: nativeErrors } = nativeObservation
     const nativeComposerEvidence = {
       schemaVersion: 1, scope: 'actual-packaged-native-composer-and-released-client', sourceCommit,
       sessionHistory: 'synthetic-persisted-in-isolated-home', quota: 'signed-out-host-response-no-credentials',
