@@ -34,6 +34,7 @@ describe('positive packaged usage evidence validation', () => {
     if (fail) expect(() => facade.create()).toThrow(error)
     else expect(facade.create()).toBe(modules)
     expect(facade.create).toBe(create)
+    expect(create.mock.contexts).toEqual([facade])
     expect(window.__desktopUsageModules).toBe(fail ? undefined : modules)
     expect(Object.getOwnPropertyDescriptor(window, '__ModuleLoader__')?.value).toBe(facade)
   })

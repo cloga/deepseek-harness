@@ -8,7 +8,7 @@ interface FixtureModules {
   import(id: string, parent: string, attributes: Record<string, unknown>): Promise<unknown>
 }
 interface FixtureFacade {
-  create(options: unknown): FixtureModules
+  create: (this: FixtureFacade, options: unknown) => FixtureModules
 }
 interface FixtureFiber extends PromiseLike<void> {
   dispose(): Promise<void>
@@ -20,7 +20,7 @@ interface FixtureContext {
 }
 interface FixturePlugin {
   inject?: unknown
-  apply(context: FixtureContext): unknown
+  apply: (this: void, context: FixtureContext) => unknown
 }
 interface FixtureObservable {
   getSnapshot(): unknown
@@ -42,7 +42,7 @@ interface FixtureSlots {
   installScope(name: string, adapter: FixtureScope): unknown
   register(
     definition: { name: string; children: Record<string, { kind: string; scope: string }> },
-    component: (props: { renderSlot(name: string, props: object): unknown; SessionProvider: unknown }) => unknown,
+    component: (props: { renderSlot: (this: void, name: string, props: object) => unknown; SessionProvider: unknown }) => unknown,
   ): unknown
   entriesOfSlot(name: string): readonly unknown[]
 }
@@ -114,7 +114,7 @@ export async function runPositiveUsageInBrowser(route: string): Promise<Positive
   const container = document.createElement('section')
   container.setAttribute('data-desktop-usage-acceptance', route)
   document.body.append(container)
-  const source = <T,>(initial: T) => {
+  const source = <T>(initial: T) => {
     let value = initial
     const listeners = new Set<() => void>()
     return {
@@ -158,7 +158,7 @@ export async function runPositiveUsageInBrowser(route: string): Promise<Positive
     const deadline = performance.now() + 10_000
     while (!predicate()) {
       if (performance.now() >= deadline) throw new Error('Packaged usage fixture timed out')
-      await new Promise<void>(resolve => { requestAnimationFrame(() => { resolve() }) })
+      await new Promise<void>((resolve) => { requestAnimationFrame(() => { resolve() }) })
     }
   }
   const trigger = () => container.querySelector('[data-copilot-usage-trigger]')
@@ -192,7 +192,7 @@ export async function runPositiveUsageInBrowser(route: string): Promise<Positive
     requireMethods(uiRenderer, ['mount'], 'UiRenderer service')
     unmount = (uiRenderer as { mount(container: HTMLElement): () => void }).mount(container)
     await waitFor(() => trigger()?.textContent?.includes('7 used') === true)
-    const usageText = trigger()!.textContent!
+    const usageText = trigger()!.textContent
     const sibling = container.querySelector('[data-fixture-sibling]')
     const sessionSubscribed = session.subscribers() > 0 && projection.subscribers() > 0
     session.set({ sessionId: 'desktop-usage-fixture', removed: true, openState: 'open' })
