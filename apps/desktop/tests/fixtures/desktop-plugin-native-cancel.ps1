@@ -248,17 +248,27 @@ try {
     function Read-OwnedConfirmation([int]$ProcessId, [IntPtr]$MainHwnd) {
         [uint32]$windowPid = 0
         $matches = @()
+        # Some native TaskDialog providers do not expose the target ProcessId through UIA.
+        # Enumerate the bounded desktop root, then make native HWND PID checks authoritative.
         $windows = [Windows.Automation.AutomationElement]::RootElement.FindAll(
-            [Windows.Automation.TreeScope]::Children,
-            [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty, $ProcessId))
-        if ($windows.Count -gt 256) { throw 'Owned confirmation window enumeration exceeded bound' }
+            [Windows.Automation.TreeScope]::Children, [Windows.Automation.Condition]::TrueCondition)
+        if ($windows.Count -gt 8192) { throw 'Desktop confirmation window enumeration exceeded bound' }
+        $ownedCount = 0
         foreach ($candidate in $windows) {
             $candidateHwnd = [IntPtr]$candidate.Current.NativeWindowHandle
             if ($candidateHwnd -eq [IntPtr]::Zero -or $candidateHwnd -eq $MainHwnd -or
                 ![OwnedDialogWin32]::IsWindow($candidateHwnd)) { continue }
             $null = [OwnedDialogWin32]::GetWindowThreadProcessId($candidateHwnd, [ref]$windowPid)
+            if ($windowPid -ne $ProcessId) { continue }
+            if (++$ownedCount -gt 256) { throw 'Owned confirmation window enumeration exceeded bound' }
+            $null = [OwnedDialogWin32]::GetWindowThreadProcessId($candidateHwnd, [ref]$windowPid)
             if ($windowPid -ne $ProcessId -or [OwnedDialogWin32]::GetAncestor($candidateHwnd, 3) -ne $MainHwnd) { continue }
-            $elements = $candidate.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+            # Bind UIA controls to the natively verified HWND; never trust descendants from the enumerating provider object.
+            $canonical = [Windows.Automation.AutomationElement]::FromHandle($candidateHwnd)
+            if ($null -eq $canonical -or [IntPtr]$canonical.Current.NativeWindowHandle -ne $candidateHwnd) {
+                throw 'Cannot bind owned confirmation HWND to its canonical UIA element'
+            }
+            $elements = $canonical.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
             if ($elements.Count -gt 2048) { throw 'Owned confirmation control enumeration exceeded bound' }
             $cancel = @($elements | Where-Object {
                 $_.Current.ControlType -eq [Windows.Automation.ControlType]::Button -and $_.Current.Name -ceq 'Cancel'
@@ -270,7 +280,7 @@ try {
             if ($cancel.Count -eq 1 -and $apply.Count -eq 1 -and $message.Count -ge 1) {
                 # Descendant traversal can race destruction or handle reuse; native identity must still match afterward.
                 if (![OwnedDialogWin32]::IsWindow($candidateHwnd) -or
-                    [IntPtr]$candidate.Current.NativeWindowHandle -ne $candidateHwnd) { throw 'Owned confirmation changed during control enumeration' }
+                    [IntPtr]$canonical.Current.NativeWindowHandle -ne $candidateHwnd) { throw 'Owned confirmation changed during control enumeration' }
                 $null = [OwnedDialogWin32]::GetWindowThreadProcessId($candidateHwnd, [ref]$windowPid)
                 if ($windowPid -ne $ProcessId -or [OwnedDialogWin32]::GetAncestor($candidateHwnd, 3) -ne $MainHwnd) {
                     throw 'Owned confirmation identity changed during control enumeration'
@@ -278,7 +288,7 @@ try {
                 $title = [Text.StringBuilder]::new(1026)
                 $length = [OwnedDialogWin32]::GetWindowText($candidateHwnd, $title, $title.Capacity)
                 if ($length -gt 1024) { throw 'Owned confirmation title exceeded bound' }
-                $matches += @{ dialog = $candidate; hwnd = $candidateHwnd; title = $title.ToString();
+                $matches += @{ dialog = $canonical; hwnd = $candidateHwnd; title = $title.ToString();
                     cancel = $cancel[0]; apply = $apply[0]; messageCount = $message.Count }
             }
         }
