@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-20-managed-desktop-copilot-maintenance.md
-2026-09-20-managed-desktop-copilot-maintenance.md: 248c340201eb1824f559e58bee07a7218c0a8523
-2026-09-20-managed-desktop-copilot-maintenance.zh.md: 9d1c8040d1b4325124d2e2d3600069a792ceb142
+2026-09-20-managed-desktop-copilot-maintenance.md: 9850ca31764f5bcb4ba6dd9296ad36d139c4b21d
+2026-09-20-managed-desktop-copilot-maintenance.zh.md: c065dd359230cb3b3b626a3aa198055d7a9dce53
