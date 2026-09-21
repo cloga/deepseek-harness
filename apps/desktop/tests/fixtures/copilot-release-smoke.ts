@@ -31,6 +31,12 @@ import {
 } from '../../scripts/packaged-runtime.mjs'
 import { inspectPackagedGraphResolution, packagedGraphCheckArguments } from './packaged-graph-check.ts'
 import { inspectPackagedCopilotSettings } from './copilot-settings-smoke.ts'
+import {
+  inspectCopilotUsageCapability,
+  inspectSignedOutCopilotUsage,
+  type CopilotUsageCapabilityEvidence,
+  type SignedOutCopilotUsageEvidence,
+} from './copilot-usage-smoke.ts'
 import { inspectDesktopVersionMenu, type DesktopVersionMenuEvidence } from './desktop-version-menu-smoke.ts'
 
 /** Paths available only during the awaited, read-only post-acceptance inspection. */
@@ -122,6 +128,8 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
   const userData = join(home, 'electron-user-data')
   const inventories: string[] = []
   const versionMenus: DesktopVersionMenuEvidence[] = []
+  const usageCapabilities: CopilotUsageCapabilityEvidence[] = []
+  const signedOutUsage: SignedOutCopilotUsageEvidence[] = []
   const started = performance.now()
   const timeline: { event: string; milliseconds: number }[] = []
   const record = (event: string): void => { timeline.push({ event, milliseconds: performance.now() - started }) }
@@ -201,6 +209,14 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       record(`${phase}:account`)
       assert(await signIn.isEnabled(), 'The account must expose a writable device-authorization entry')
       assert.equal(await account.locator('[data-dsh-github-copilot-account-error]').count(), 0)
+      const usageCapability = inspectCopilotUsageCapability(profile)
+      const usageEvidence = await inspectSignedOutCopilotUsage(page)
+      usageCapabilities.push(usageCapability)
+      signedOutUsage.push(usageEvidence)
+      writeFileSync(join(output, `${phase}-usage-readonly.json`), JSON.stringify({
+        capability: usageCapability, signedOut: usageEvidence,
+      }, undefined, 2) + '\n')
+      record(`${phase}:usage-readonly`)
       await page.screenshot({ path: join(output, `${phase}-models.png`) })
       await account.getByRole('button', { name: 'Manage', exact: true }).click()
       const management = account.getByRole('region', { name: 'GitHub Copilot account management', exact: true })
@@ -271,6 +287,8 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       record(`${phase}:closed`)
     }
     assert.equal(inventories[0], inventories[1], 'Restart must reuse the verified plugin receipts')
+    assert.deepEqual(usageCapabilities[0], usageCapabilities[1], 'Restart must preserve the required usage capability')
+    assert.deepEqual(signedOutUsage[0], signedOutUsage[1], 'Restart must preserve the absent signed-out usage surface')
     await options.inspectProfile?.(Object.freeze({ application, runtimeRoot, home, profile, output }))
     writeFileSync(join(output, 'acceptance.json'), JSON.stringify({
       sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
@@ -292,6 +310,10 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       searchProviderCatalogLoaded: true,
       providerOnlySearchRouting: true,
       fallbackProviderLabel: true,
+      copilotUsageCapability: usageCapabilities[0],
+      signedOutCopilotUsage: signedOutUsage,
+      hostQuotaNoNetworkEvidence: 'immutable-plugin-ci-regression-only',
+      liveAccountQuota: false,
       realOAuth: false,
       verificationNavigationExercised: false,
       manualVerificationAddressObserved: false,

@@ -48,6 +48,7 @@ $packageAcceptanceAttempted = $false
 $registration = $null
 $monitor = $null
 $installationAttempted = $false
+$uninstallerCopy = $null
 $registrationIdentities = @()
 $installerProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
 . (Join-Path $PSScriptRoot 'fixtures/windows-installer-registration.ps1')
@@ -240,6 +241,76 @@ function Read-Registration([object[]]$Identities = $registrationIdentities) {
     }
     return $entry
 }
+function Close-UninstallStream($Stream, $Errors) {
+    if ($null -eq $Stream) { return }
+    try { $Stream.Dispose() }
+    catch { $Errors.Add('Owned uninstall stream disposal failed') }
+}
+function Get-UninstallStreamSha256([IO.Stream]$Stream) {
+    $Stream.Position = 0
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($algorithm.ComputeHash($Stream)).Replace('-', '').ToLowerInvariant() }
+    finally { $algorithm.Dispose() }
+}
+function Assert-UninstallOwner {
+    $marker = Join-Path $root 'owner.json'
+    Assert-InstallerOwnedPath $root $marker
+    $item = Get-Item -LiteralPath $marker -Force
+    if ($item.PSIsContainer -or $item.Length -gt 4096) { throw 'Invalid uninstall owner marker' }
+    $owner = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
+    if ($owner.token -cne $token -or $owner.runId -cne $env:GITHUB_RUN_ID -or $owner.runAttempt -cne $env:GITHUB_RUN_ATTEMPT) {
+        throw 'Uninstall ownership changed'
+    }
+}
+# app-builder-lib 26.15.3 installUtil.nsh copies outside INSTDIR and uses final _?= to wait without self-relocation.
+function New-OwnedUninstallerCopy([string]$CopyDirectory, $ExpectedRegistration, $Errors) {
+    $source = $null; $writer = $null; $guard = $null; $retained = $false
+    try {
+        Assert-UninstallOwner
+        $temporaryRoot = Join-Path $root 'process-temp'
+        if ([IO.Path]::GetFullPath($installPath) -cne $installPath -or $installPath.Length -gt 180 -or $installPath -match '["\r\n\t]' -or
+            [IO.Path]::GetFullPath($CopyDirectory) -cne $CopyDirectory -or [IO.Path]::GetDirectoryName($CopyDirectory) -cne $temporaryRoot -or
+            $CopyDirectory.StartsWith($installPath + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid owned uninstall copy location or target' }
+        Assert-InstallerOwnedPath $root $temporaryRoot
+        Assert-InstallerOwnedPath $root $uninstaller
+        if ((Get-Item -LiteralPath $uninstaller -Force).PSIsContainer) { throw 'Uninstall source is not a regular file' }
+        $source = [IO.File]::Open($uninstaller, 'Open', 'Read', 'Read')
+        Assert-InstallerOwnedPath $root $uninstaller
+        $before = Get-UninstallStreamSha256 $source
+        New-Item -ItemType Directory -Path $CopyDirectory -ErrorAction Stop | Out-Null
+        Assert-InstallerOwnedPath $root $CopyDirectory
+        $copyPath = Join-Path $CopyDirectory 'owned-uninstaller.exe'
+        $writer = [IO.File]::Open($copyPath, 'CreateNew', 'Write', 'None')
+        $source.Position = 0
+        $source.CopyTo($writer)
+        $writer.Flush($true)
+        $writer.Dispose(); $writer = $null
+        Assert-InstallerOwnedPath $root $copyPath
+        $guard = [IO.File]::Open($copyPath, 'Open', 'Read', 'Read')
+        Assert-InstallerOwnedPath $root $copyPath
+        $after = Get-UninstallStreamSha256 $source
+        $copied = Get-UninstallStreamSha256 $guard
+        if ($before -cne $after -or $before -cne $copied) { throw 'Owned uninstall copy hash mismatch' }
+        $current = Read-Registration
+        foreach ($field in @('Id', 'Key', 'OwnerKey', 'Version', 'Source', 'ExecutableSha256', 'InstallLocation')) {
+            if ($current.$field -cne $ExpectedRegistration.$field) { throw 'Uninstall registration changed during copy' }
+        }
+        Wait-NoProductProcesses
+        Assert-UninstallOwner
+        Assert-InstallerOwnedPath $root $installPath
+        Assert-InstallerOwnedPath $root $copyPath
+        # The installed source must be removable by stock uninstall; only the external copy stays read-locked.
+        $source.Dispose(); $source = $null
+        $retained = $true
+        return [pscustomobject]@{ Path = $copyPath; Guard = $guard; Sha256 = $copied
+            SourceBeforeSha256 = $before; SourceAfterSha256 = $after
+            InsideOwnedTemporaryRoot = $true; OutsideInstallation = $true; Target = $installPath }
+    } finally {
+        Close-UninstallStream $writer $Errors
+        Close-UninstallStream $source $Errors
+        if (-not $retained) { Close-UninstallStream $guard $Errors }
+    }
+}
 function Write-InstallerFailureDiagnostics($OwnedInstallers, $Errors) {
     foreach ($process in $OwnedInstallers) {
         try {
@@ -252,15 +323,21 @@ function Write-InstallerFailureDiagnostics($OwnedInstallers, $Errors) {
         ConvertTo-Json -InputObject @(Product-Registrations) -Depth 4 | Set-Content -LiteralPath (Join-Path $root 'evidence/installer-failure-registration.json') -Encoding utf8NoBOM
     } catch { $Errors.Add('Installer registration observation failed: ' + $_.Exception.Message) }
 }
-# A launcher exit is not proof that NSIS's relocated worker completed. Observe only owned paths and fixed product keys.
-function Write-UninstallFailureDiagnostics($UninstallerProcess, $Errors) {
+# Observe the retained copied execution handle, owned paths and fixed product keys; never adopt an observed PID.
+function Write-UninstallFailureDiagnostics($UninstallerProcess, $Errors, $Copy = $null) {
     $observation = [ordered]@{
-        schemaVersion = 1; sourceCommit = $ExpectedSourceCommit; arguments = '/currentuser /S'
+        schemaVersion = 1; sourceCommit = $ExpectedSourceCommit; arguments = '/currentuser /S _?=<owned-install-root>'
+        executionMode = 'owned-copy-no-relocation'; copyVerified = ($null -ne $Copy)
+        copySha256 = $(if ($null -ne $Copy) { $Copy.Sha256 } else { $null })
+        copyHashesAgree = [bool]($null -ne $Copy -and $Copy.Sha256 -ceq $Copy.SourceBeforeSha256 -and $Copy.Sha256 -ceq $Copy.SourceAfterSha256)
+        copyInsideOwnedTemporaryRoot = [bool]($null -ne $Copy -and $Copy.InsideOwnedTemporaryRoot)
+        copyOutsideInstallation = [bool]($null -ne $Copy -and $Copy.OutsideInstallation)
+        targetMatches = [bool]($null -ne $Copy -and $Copy.Target -ceq $installPath)
         launcherStarted = ($null -ne $UninstallerProcess); launcherPid = $null; launcherExited = $null; launcherExitCode = $null
         executablePresent = $null; uninstallerPresent = $null
         registrationCount = $null; registrations = @(); registrationsTruncated = $false
         productProcessCount = $null; ownedTemporaryProcessCount = $null; processes = @(); processesTruncated = $false
-        relocatedWorkers = $null; observationErrors = @()
+        ownedWorker = $null; observationErrors = @()
     }
     $observationErrors = [Collections.Generic.List[string]]::new()
     try {
@@ -312,10 +389,10 @@ function Write-UninstallFailureDiagnostics($UninstallerProcess, $Errors) {
                 inOwnedTemporaryRoot = [bool]($_.ExecutablePath -and $_.ExecutablePath.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase))
             }
         })
-        try {
-            $observation.relocatedWorkers = Get-UninstallWorkerObservation $UninstallerProcess $processSnapshot $root $uninstaller
-        } catch { $observationErrors.Add('worker-observation-unavailable') }
     } catch { $observationErrors.Add('process-state-unavailable') }
+    try {
+        $observation.ownedWorker = Get-OwnedUninstallerObservation $UninstallerProcess $Copy $root $installPath
+    } catch { $observationErrors.Add('worker-observation-unavailable') }
     $observation.observationErrors = @($observationErrors)
     foreach ($issue in $observationErrors) { $Errors.Add('Post-uninstall observation failed: ' + $issue) }
     try {
@@ -413,12 +490,14 @@ try {
             $hasPayload = (Test-Path -LiteralPath $installPath -PathType Container) -and @(Get-ChildItem -LiteralPath $installPath -Force).Count -ne 0
             if ($hasRegistration -or $hasPayload) {
                 # Finish-page assertions may fail after a complete install. Re-establish ownership from actual state.
-                [void](Read-Registration)
+                $uninstallRegistration = Read-Registration
                 if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) { throw 'Owned registration has no usable uninstaller; leave VM teardown to remove the partial installation' }
                 Wait-NoProductProcesses
-                # Bind the validated HKCU mode explicitly; never execute a registry-supplied command string.
                 $uninstallAttempted = $true
-                $ownedUninstaller = Start-Owned $uninstaller '/currentuser /S'
+                $copyDirectory = Join-Path (Join-Path $root 'process-temp') ('uninstall-' + [guid]::NewGuid().ToString())
+                $uninstallerCopy = New-OwnedUninstallerCopy $copyDirectory $uninstallRegistration $cleanupErrors
+                # NSIS requires _?= last and unquoted, including paths with spaces. Never execute registry-supplied arguments.
+                $ownedUninstaller = Start-Owned $uninstallerCopy.Path ('/currentuser /S _?=' + $uninstallerCopy.Target)
                 Wait-Exit $ownedUninstaller 120
                 $timer = [Diagnostics.Stopwatch]::StartNew()
                 while ((Test-Path -LiteralPath $application) -or @(Product-Registrations).Count -ne 0 -or @(Product-Processes).Count -ne 0) {
@@ -438,13 +517,15 @@ try {
             $cleanupErrors.Add('Installed product cleanup failed: ' + $cleanupFailure.Exception.Message)
             if ($null -eq $failure) { $failure = $cleanupFailure }
             if ($uninstallAttempted) {
-                try { Write-UninstallFailureDiagnostics $ownedUninstaller $secondaryErrors }
+                try { Write-UninstallFailureDiagnostics $ownedUninstaller $secondaryErrors $uninstallerCopy }
                 catch { $secondaryErrors.Add('Post-uninstall diagnostic collection failed') }
             }
         }
     }
     # Cleanup itself can start processes after the first pass; kill AND acknowledge every late handle before disposal.
     [void](Stop-OwnedProcesses $processes $cleanupErrors)
+    # Keep uncertain execution bytes for VM teardown; releasing a guard never establishes process exit.
+    if ($null -ne $uninstallerCopy) { Close-UninstallStream $uninstallerCopy.Guard $cleanupErrors }
     foreach ($process in $processes) {
         try { $process.Dispose() }
         catch { $cleanupErrors.Add('Owned process handle disposal failed: ' + $_.Exception.Message); if ($null -eq $failure) { $failure = $_ } }

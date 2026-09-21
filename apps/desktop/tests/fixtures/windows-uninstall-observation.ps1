@@ -1,6 +1,6 @@
-# Failure-only process observations. Loading this file performs no OS observations.
-# The 2s budget controls admission, not wall time: local process/file reads are not cancellable.
-# No window APIs are used. Narrow wrappers let pure tests replace every process/file observation.
+# Failure-only observations of the already retained direct copied-worker handle.
+# No PID discovery, process adoption, CIM or window APIs. Local reads are not cancellable;
+# the two-second budget is a soft admission limit, never a replacement for execution/removal gates.
 function New-UninstallObservationClock { [Diagnostics.Stopwatch]::StartNew() }
 function Get-UninstallObservationRemaining($Budget) {
     $elapsed = $Budget.Clock.ElapsedMilliseconds
@@ -10,47 +10,19 @@ function Get-UninstallObservationRemaining($Budget) {
     }
     return [int](2000 - $elapsed)
 }
-function Open-UninstallObservationProcess([int]$ProcessId, $Budget) {
-    [void](Get-UninstallObservationRemaining $Budget)
-    $process = [Diagnostics.Process]::GetProcessById($ProcessId)
-    try {
-        [void](Get-UninstallObservationRemaining $Budget)
-        if ($process.Handle -eq [IntPtr]::Zero) { throw 'Process handle unavailable' }
-        [void](Get-UninstallObservationRemaining $Budget)
-        return $process
-    } catch { $process.Dispose(); throw }
-}
-function Read-UninstallObservationProcess([int]$ProcessId, [int]$Seconds) {
-    if ($Seconds -lt 1 -or $Seconds -gt 2) { throw 'Invalid observation timeout' }
-    $entries = @(Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $ProcessId) -OperationTimeoutSec $Seconds -ErrorAction Stop)
-    if ($entries.Count -ne 1) { throw 'Process identity unavailable' }
-    return $entries[0]
-}
-function Read-UninstallWorkerSample([int]$ProcessId, $Budget) {
-    $remaining = Get-UninstallObservationRemaining $Budget
-    # CIM accepts whole seconds. Never round up or start below its one-second minimum.
-    # Reserve at most one second per call, with at most two seconds admitted across all workers.
-    $seconds = [int][Math]::Min(1, [Math]::Min($Budget.QuerySeconds, [Math]::Floor($remaining / 1000)))
-    if ($seconds -lt 1) { $Budget.Expired = $true; throw 'No query allowance remains' }
-    $Budget.QuerySeconds -= $seconds
-    $entry = Read-UninstallObservationProcess $ProcessId $seconds
-    [void](Get-UninstallObservationRemaining $Budget)
-    return $entry
-}
 function Assert-UninstallObservationPath([string]$Root, [string]$Path, $Budget) {
     $temporary = [IO.Path]::GetFullPath((Join-Path $Root 'process-temp')).TrimEnd('\')
     $full = [IO.Path]::GetFullPath($Path)
     if ($full -ine $Path -or $full.StartsWith('\\') -or
         -not $full.StartsWith($temporary + '\', [StringComparison]::OrdinalIgnoreCase) -or
-        [IO.Path]::GetExtension($full) -ine '.exe') { throw 'Worker path is not an ordinary owned executable' }
-    # Recheck every ancestor, including the run root and its parents, before and after process reads.
+        [IO.Path]::GetExtension($full) -ine '.exe') { throw 'Copy path is not an ordinary owned executable' }
     $cursor = $full
     while ($cursor) {
         [void](Get-UninstallObservationRemaining $Budget)
         $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.PSIsContainer -isnot [bool] -or
             ($cursor -ieq $full -and $item.PSIsContainer) -or ($cursor -ine $full -and -not $item.PSIsContainer)) {
-            throw 'Worker path has a filesystem alias or wrong kind'
+            throw 'Copy path has a filesystem alias or wrong kind'
         }
         $parent = Split-Path $cursor -Parent
         if ($parent -eq $cursor) { break }
@@ -58,118 +30,69 @@ function Assert-UninstallObservationPath([string]$Root, [string]$Path, $Budget) 
     }
     [void](Get-UninstallObservationRemaining $Budget)
 }
-# CIM CreationDate carries microseconds; Process.StartTime can carry another 100ns digit.
-function Get-UninstallCreationIdentity($Value) {
-    if ($Value -isnot [datetime]) { throw 'Creation time unavailable' }
-    $ticks = $Value.ToUniversalTime().Ticks
-    return ($ticks - ($ticks % 10))
+function Assert-UninstallCopyObservation($Copy, [string]$Root, [string]$Target, $Budget) {
+    [void](Get-UninstallObservationRemaining $Budget)
+    if ($null -eq $Copy -or $Copy.Path -isnot [string] -or $Copy.Target -cne $Target -or
+        $Copy.InsideOwnedTemporaryRoot -isnot [bool] -or -not $Copy.InsideOwnedTemporaryRoot -or
+        $Copy.OutsideInstallation -isnot [bool] -or -not $Copy.OutsideInstallation -or
+        $Copy.Path.StartsWith($Target + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        $Copy.Sha256 -isnot [string] -or $Copy.Sha256 -cnotmatch '^[a-f0-9]{64}$' -or
+        $Copy.Sha256 -cne $Copy.SourceBeforeSha256 -or $Copy.Sha256 -cne $Copy.SourceAfterSha256) {
+        throw 'Copy descriptor is not the verified execution source'
+    }
+    Assert-UninstallObservationPath $Root $Copy.Path $Budget
+    [void](Get-UninstallObservationRemaining $Budget)
+    if ($null -eq $Copy.Guard -or $Copy.Guard.CanRead -isnot [bool] -or -not $Copy.Guard.CanRead -or
+        $Copy.Guard.Name -isnot [string] -or $Copy.Guard.Name -ine $Copy.Path) { throw 'Copy read guard is unavailable' }
+    if ((Get-UninstallStreamSha256 $Copy.Guard) -cne $Copy.Sha256) { throw 'Copy bytes changed' }
+    [void](Get-UninstallObservationRemaining $Budget)
 }
-function Assert-UninstallWorkerIdentity($Entry, $Process, [int]$LauncherId, [long]$LauncherStart, $LauncherEnd, [string]$Root, [string]$Executable, [long]$Created, $Budget) {
+function Read-OwnedUninstallProcessState($Process, [string]$Path, [string]$Target, [int]$Identity, [long]$Created, [IntPtr]$Handle, $Budget) {
     [void](Get-UninstallObservationRemaining $Budget)
-    if ($Entry.ProcessId -ne $Process.Id -or $Entry.ParentProcessId -ne $LauncherId -or
-        (Get-UninstallCreationIdentity $Entry.CreationDate) -ne $Created -or
-        $Created -lt $LauncherStart -or ($null -ne $LauncherEnd -and $Created -gt $LauncherEnd) -or
-        $Entry.ExecutablePath -isnot [string] -or $Entry.ExecutablePath -ine $Executable) { throw 'Worker identity changed' }
-    [void](Get-UninstallObservationRemaining $Budget)
-    if ((Get-UninstallCreationIdentity $Process.StartTime) -ne $Created) { throw 'Worker incarnation changed' }
-    [void](Get-UninstallObservationRemaining $Budget)
-    $module = $Process.MainModule.FileName
-    if ($module -isnot [string] -or $module -ine $Executable) { throw 'Worker module identity unavailable' }
+    if ($Process.Id -ne $Identity -or $Process.Handle -ne $Handle -or $Process.StartTime -isnot [datetime] -or
+        $Process.StartTime.ToUniversalTime().Ticks -ne $Created -or $Process.StartInfo.FileName -isnot [string] -or
+        $Process.StartInfo.FileName -ine $Path -or $Process.StartInfo.Arguments -cne ('/currentuser /S _?=' + $Target)) {
+        throw 'Retained execution identity changed'
+    }
     [void](Get-UninstallObservationRemaining $Budget)
     $exited = $Process.HasExited
-    if ($exited -isnot [bool]) { throw 'Worker exit state unavailable' }
+    if ($exited -isnot [bool]) { throw 'Execution state unavailable' }
     $exitCode = $null
     if ($exited) {
         [void](Get-UninstallObservationRemaining $Budget)
         $exitCode = $Process.ExitCode
-        if ($exitCode -isnot [int]) { throw 'Worker exit code unavailable' }
+        if ($exitCode -isnot [int]) { throw 'Execution exit code unavailable' }
+    } else {
+        [void](Get-UninstallObservationRemaining $Budget)
+        $module = $Process.MainModule.FileName
+        if ($module -isnot [string] -or $module -ine $Path) { throw 'Running image differs from the guarded copy' }
     }
-    Assert-UninstallObservationPath $Root $Executable $Budget
+    [void](Get-UninstallObservationRemaining $Budget)
     return [pscustomobject]@{ Exited = $exited; ExitCode = $exitCode }
 }
-function Get-UninstallWorkerObservation($Launcher, [object[]]$Snapshot, [string]$Root, [string]$Uninstaller) {
-    $result = [ordered]@{ state = 'unknown'; category = 'launcher-identity-unavailable'; softAdmissionBudgetMs = 2000; admittedQuerySeconds = 0; candidateCount = 0; truncated = $false; workers = @() }
-    $budget = @{ Clock = (New-UninstallObservationClock); QuerySeconds = 2; Expired = $false }
+function Get-OwnedUninstallerObservation($Process, $Copy, [string]$Root, [string]$Target) {
+    $result = [ordered]@{ state = 'unknown'; category = 'copy-or-process-unavailable'; softAdmissionBudgetMs = 2000
+        pid = $null; creationTimeUtc = $null; ownershipVerified = $null; elapsedMilliseconds = $null; exited = $null; exitCode = $null }
+    $budget = @{ Clock = (New-UninstallObservationClock); Expired = $false }
     try {
+        Assert-UninstallCopyObservation $Copy $Root $Target $budget
         [void](Get-UninstallObservationRemaining $budget)
-        if ($null -eq $Launcher -or $Launcher.Id -isnot [int] -or $Launcher.Id -le 0 -or
-            $Launcher.StartInfo.FileName -isnot [string] -or
-            [IO.Path]::GetFullPath($Launcher.StartInfo.FileName) -ine [IO.Path]::GetFullPath($Uninstaller)) { return $result }
-        $launcherId = $Launcher.Id
-        [void](Get-UninstallObservationRemaining $budget)
-        if ($Launcher.Handle -isnot [IntPtr] -or $Launcher.Handle -eq [IntPtr]::Zero) { return $result }
-        [void](Get-UninstallObservationRemaining $budget)
-        $launcherStart = Get-UninstallCreationIdentity $Launcher.StartTime
-        [void](Get-UninstallObservationRemaining $budget)
-        $launcherExited = $Launcher.HasExited
-        if ($launcherExited -isnot [bool]) { return $result }
-        [void](Get-UninstallObservationRemaining $budget)
-        $launcherEnd = if ($launcherExited) { Get-UninstallCreationIdentity $Launcher.ExitTime } else { $null }
-        if ($null -ne $launcherEnd -and $launcherEnd -lt $launcherStart) { return $result }
+        if ($null -eq $Process -or $Process.Id -isnot [int] -or $Process.Id -le 0 -or
+            $Process.Handle -isnot [IntPtr] -or $Process.Handle -eq [IntPtr]::Zero -or $Process.StartTime -isnot [datetime]) { return $result }
+        $identity = $Process.Id; $handle = $Process.Handle; $started = $Process.StartTime
+        $created = $started.ToUniversalTime().Ticks
+        [void](Read-OwnedUninstallProcessState $Process $Copy.Path $Target $identity $created $handle $budget)
+        Assert-UninstallCopyObservation $Copy $Root $Target $budget
+        $state = Read-OwnedUninstallProcessState $Process $Copy.Path $Target $identity $created $handle $budget
+        Assert-UninstallObservationPath $Root $Copy.Path $budget
+        $remaining = Get-UninstallObservationRemaining $budget
+        $result.pid = $identity; $result.creationTimeUtc = $started.ToUniversalTime().ToString('o')
+        $result.ownershipVerified = $true; $result.elapsedMilliseconds = 2000 - $remaining
+        $result.exited = $state.Exited; $result.exitCode = $state.ExitCode
+        $result.state = 'observed'; $result.category = 'retained-copy-identity-bound'
     } catch {
-        if ($budget.Expired) { $result.category = 'soft-observation-budget' }
-        return $result
+        # The caller owns both handles; never dispose, wait, kill or adopt a process here.
+        $result.category = if ($budget.Expired) { 'soft-observation-budget' } else { 'identity-or-copy-unavailable' }
     }
-    $temporary = [IO.Path]::GetFullPath((Join-Path $Root 'process-temp')).TrimEnd('\') + '\'
-    # Candidate discovery is not admission: parent or temporary-path matches must pass every check below.
-    $candidates = @($Snapshot | Where-Object {
-        $_.ParentProcessId -eq $launcherId -or ($_.ExecutablePath -is [string] -and $_.ExecutablePath.StartsWith($temporary, [StringComparison]::OrdinalIgnoreCase))
-    })
-    $result.candidateCount = $candidates.Count
-    $result.truncated = $candidates.Count -gt 4
-    $result.state = 'observed'
-    $result.category = 'complete'
-    foreach ($candidate in @($candidates | Select-Object -First 4)) {
-        $worker = [ordered]@{ pid = $null; creationTimeUtc = $null; state = 'unknown'; category = 'identity-unavailable'; ownershipVerified = $null; elapsedMilliseconds = $null; exited = $null; exitCode = $null }
-        $process = $null
-        try {
-            [void](Get-UninstallObservationRemaining $budget)
-            if ($budget.QuerySeconds -lt 2) { $budget.Expired = $true; throw 'Insufficient query allowance for two identity observations' }
-            if (($candidate.ProcessId -isnot [int] -and $candidate.ProcessId -isnot [uint32]) -or
-                $candidate.ProcessId -le 0 -or $candidate.ProcessId -gt [int]::MaxValue) { continue }
-            $worker.pid = [int]$candidate.ProcessId
-            $worker.category = 'parent-or-creation-mismatch'
-            $created = Get-UninstallCreationIdentity $candidate.CreationDate
-            if ($candidate.ParentProcessId -ne $launcherId -or $created -lt $launcherStart -or
-                ($null -ne $launcherEnd -and $created -gt $launcherEnd)) { continue }
-            $worker.category = 'executable-ancestry-unavailable'
-            if ($candidate.ExecutablePath -isnot [string]) { continue }
-            $executable = $candidate.ExecutablePath
-            Assert-UninstallObservationPath $Root $executable $budget
-            $worker.category = 'process-identity-unavailable'
-            [void](Get-UninstallObservationRemaining $budget)
-            $process = Open-UninstallObservationProcess $worker.pid $budget
-            [void](Get-UninstallObservationRemaining $budget)
-            if ($null -eq $process -or $process.Id -ne $worker.pid -or $process.Handle -isnot [IntPtr] -or $process.Handle -eq [IntPtr]::Zero) { continue }
-            $current = Read-UninstallWorkerSample $worker.pid $budget
-            [void](Assert-UninstallWorkerIdentity $current $process $launcherId $launcherStart $launcherEnd $Root $executable $created $budget)
-            # Hold the same process handle through the second independent incarnation/ancestry observation.
-            $worker.category = 'post-observation-identity-unavailable'
-            $current = Read-UninstallWorkerSample $worker.pid $budget
-            $state = Assert-UninstallWorkerIdentity $current $process $launcherId $launcherStart $launcherEnd $Root $executable $created $budget
-            $remaining = Get-UninstallObservationRemaining $budget
-            $worker.creationTimeUtc = $candidate.CreationDate.ToUniversalTime().ToString('o')
-            $worker.ownershipVerified = $true
-            $worker.elapsedMilliseconds = 2000 - $remaining
-            $worker.exited = $state.Exited
-            $worker.exitCode = $state.ExitCode
-            $worker.state = 'observed'
-            $worker.category = 'identity-bound'
-        } catch {
-            # No raw exception or uncertain identity/state leaves enter retained evidence.
-            if ($budget.Expired) { $worker.category = 'soft-observation-budget' }
-        } finally {
-            if ($null -ne $process) {
-                try { $process.Dispose() }
-                catch { $worker.state = 'unknown'; $worker.category = 'process-handle-dispose-failed' }
-            }
-            if ($worker.state -ne 'observed') {
-                $worker.creationTimeUtc = $null; $worker.ownershipVerified = $null
-                $worker.elapsedMilliseconds = $null; $worker.exited = $null; $worker.exitCode = $null
-            }
-            $result.workers += $worker
-        }
-    }
-    $result.admittedQuerySeconds = 2 - $budget.QuerySeconds
     return $result
 }

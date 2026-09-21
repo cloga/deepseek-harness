@@ -83,6 +83,16 @@ test('installed identity callback serializes without an import loader or lexical
   assert.deepEqual(calls, ['userData'])
 })
 
+test('installed failure diagnostics retain only the bounded content-free collector', () => {
+  const source = readFileSync(new URL('./fixtures/windows-installed-upgrade-smoke.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /inspectInstalledPageDiagnostic|failureSnapshot|errorTextRawBytes/u)
+  const capture = source.indexOf('collectInstalledStartupDiagnostics(app, page)')
+  const close = source.indexOf('try { await app?.close() }', capture)
+  assert.ok(capture > 0 && close > capture)
+  assert.ok(source.includes("secondaryErrors.push('startup-diagnostic-unavailable')"))
+  assert.ok(source.includes('if (roundFailure !== undefined) throw roundFailure'))
+})
+
 test('installed descriptor reader binds fresh executable bytes and observed resources before inspection', t => {
   const root = directory(t)
   const application = join(root, 'cloga-deepseek-harness.exe')
@@ -448,8 +458,9 @@ function Product-Registrations { [pscustomobject]@{ Id = 'synthetic-registered-i
 function Resolve-InstallerRegistration { [pscustomobject]@{ ExecutableSha256 = ('a' * 64) } }
 function Get-FileHash { $script:hashCalls++; [pscustomobject]@{ Hash = ('a' * 64) } }
 function Wait-NoProductProcesses {}
+function New-OwnedUninstallerCopy { [pscustomobject]@{ Path = (Join-Path $root 'process-temp/copied.exe'); Target = $installPath } }
 function Start-Owned($File, $Arguments) {
-    if ($File -cne $uninstaller -or $Arguments -cne '/currentuser /S') { throw 'Unexpected synthetic launch' }
+    if ($File -cne $uninstallerCopy.Path -or $File -ceq $uninstaller -or $Arguments -cne ('/currentuser /S _?=' + $installPath)) { throw 'Unexpected synthetic launch' }
     $script:uninstallerCalls++
     return 'not-a-process'
 }
@@ -488,6 +499,189 @@ if ((Get-Content -LiteralPath $uninstaller -Raw) -cne 'synthetic uninstaller, ne
 [pscustomobject]@{ rejected = $rejected; hashCalls = $hashCalls; uninstallerCalls = $uninstallerCalls; payloadRetained = $true } | ConvertTo-Json -Compress
 `, { DSH_REGISTRATION_HELPER: fileURLToPath(new URL('./fixtures/windows-installer-registration.ps1', import.meta.url)) })
   assert.deepEqual(observed, { rejected: ['parent', 'root'], hashCalls: 0, uninstallerCalls: 0, payloadRetained: true })
+})
+
+function uninstallCopyUnit(t, body) {
+  const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const functions = source.slice(source.indexOf('function Close-UninstallStream'), source.indexOf('function Write-InstallerFailureDiagnostics'))
+  assert.ok(functions.includes('function New-OwnedUninstallerCopy'))
+  return powershellUnit(t, `
+. $env:DSH_REGISTRATION_HELPER
+${functions}
+$env:GITHUB_RUN_ID = '123'; $env:GITHUB_RUN_ATTEMPT = '1'
+$token = 'fixture-owned-token'
+function Initialize-CopyCase($Name) {
+    $script:root = Join-Path $PSScriptRoot $Name
+    $script:installPath = Join-Path $root 'Installed App/cloga-deepseek-harness-desktop'
+    $script:uninstaller = Join-Path $installPath 'Uninstall cloga-deepseek-harness.exe'
+    $script:sourcePath = $uninstaller
+    $script:temporaryRoot = Join-Path $root 'process-temp'
+    Microsoft.PowerShell.Management\\New-Item -ItemType Directory -Path $installPath, $temporaryRoot | Out-Null
+    [IO.File]::WriteAllText($uninstaller, 'inert uninstaller bytes')
+    @{ token = $token; runId = '123'; runAttempt = '1' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'owner.json')
+    $script:expectedRegistration = [pscustomobject]@{ Id = 'fixture-id'; Key = 'fixture-key'; OwnerKey = 'fixture-owner-key'
+        Version = '1.0.0'; Source = ('a' * 40); ExecutableSha256 = ('b' * 64); InstallLocation = $installPath }
+    $script:copyDirectory = Join-Path $temporaryRoot 'uninstall-fixture'
+    $script:copyPath = Join-Path $copyDirectory 'owned-uninstaller.exe'
+    $script:cleanupErrors = [Collections.Generic.List[string]]::new()
+    $script:readmissions = 0; $script:quiescenceChecks = 0
+}
+function Read-Registration { $script:readmissions++; return $expectedRegistration.PSObject.Copy() }
+function Wait-NoProductProcesses { $script:quiescenceChecks++ }
+${body}
+`, { DSH_REGISTRATION_HELPER: fileURLToPath(new URL('./fixtures/windows-installer-registration.ps1', import.meta.url)) })
+}
+
+test('owned uninstall copy hashes real streams, seals only the copy and releases the installed source', { skip: process.platform !== 'win32' }, t => {
+  const observed = uninstallCopyUnit(t, `
+Initialize-CopyCase 'stream-copy'
+$copy = New-OwnedUninstallerCopy $copyDirectory $expectedRegistration $cleanupErrors
+$guardDeniedWrite = $false; $guardDeniedDelete = $false
+try {
+    try { $probe = [IO.File]::Open($copy.Path, 'Open', 'Write', 'ReadWrite'); $probe.Dispose() } catch { $guardDeniedWrite = $true }
+    try { [IO.File]::Delete($copy.Path) } catch { $guardDeniedDelete = $true }
+    $sourceWritable = [IO.File]::Open($sourcePath, 'Open', 'ReadWrite', 'None')
+    $sourceWritable.Dispose()
+    $facts = [ordered]@{ before = $copy.SourceBeforeSha256; after = $copy.SourceAfterSha256; copied = $copy.Sha256
+        bytes = [IO.File]::ReadAllText($copy.Path); sourceReleased = $true; guardDeniedWrite = $guardDeniedWrite; guardDeniedDelete = $guardDeniedDelete
+        inTemporary = $copy.Path.StartsWith($temporaryRoot + '\\'); outsideInstallation = -not $copy.Path.StartsWith($installPath + '\\')
+        readmissions = $readmissions; quiescenceChecks = $quiescenceChecks }
+} finally { Close-UninstallStream $copy.Guard $cleanupErrors }
+$writable = [IO.File]::Open($copy.Path, 'Open', 'Write', 'None'); $writable.Dispose()
+$facts.copyReleased = $true; $facts.errors = @($cleanupErrors)
+$facts | ConvertTo-Json -Compress
+`)
+  assert.deepEqual(observed, {
+    before: digest('inert uninstaller bytes'), after: digest('inert uninstaller bytes'), copied: digest('inert uninstaller bytes'),
+    bytes: 'inert uninstaller bytes', sourceReleased: true, guardDeniedWrite: true, guardDeniedDelete: true,
+    inTemporary: true, outsideInstallation: true, readmissions: 1, quiescenceChecks: 1, copyReleased: true, errors: [],
+  })
+})
+
+test('owned uninstall copy rejects aliases, collisions, hash drift and stale readmission before launch', { skip: process.platform !== 'win32' }, t => {
+  const observed = uninstallCopyUnit(t, `
+$originalHash = (Get-Command Get-UninstallStreamSha256).ScriptBlock
+function Get-UninstallStreamSha256([IO.Stream]$Stream) {
+    $script:hashCalls++
+    $actual = & $originalHash $Stream
+    if (($damage -eq 'source-hash-drift' -and $hashCalls -eq 2) -or ($damage -eq 'copy-hash-drift' -and $hashCalls -eq 3)) { return ('f' * 64) }
+    return $actual
+}
+function Read-Registration {
+    $script:readmissions++
+    if ($damage -eq 'owner-changed') { @{ token = 'changed'; runId = '123'; runAttempt = '1' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'owner.json') }
+    $value = $expectedRegistration.PSObject.Copy()
+    if ($damage -eq 'registration-changed') { $value.Version = '2.0.0' }
+    return $value
+}
+function Wait-NoProductProcesses {
+    $script:quiescenceChecks++
+    if ($damage -eq 'process-became-live') { throw 'Owned application became live' }
+}
+function New-Item($ItemType, $Path, $ErrorAction) {
+    Microsoft.PowerShell.Management\\New-Item -ItemType $ItemType -Path $Path -ErrorAction Stop | Out-Null
+    if ($damage -eq 'file-collision') { [IO.File]::WriteAllText((Join-Path $Path 'owned-uninstaller.exe'), 'retained collision bytes') }
+    if ($damage -eq 'copy-directory-junction') {
+        $real = $Path + '-real'
+        Move-Item -LiteralPath $Path -Destination $real
+        Microsoft.PowerShell.Management\\New-Item -ItemType Junction -Path $Path -Target $real | Out-Null
+    }
+}
+$results = @()
+foreach ($damage in @('directory-collision', 'file-collision', 'source-junction', 'temporary-junction', 'copy-directory-junction', 'outside-owned-temp', 'invalid-target', 'source-hash-drift', 'copy-hash-drift', 'registration-changed', 'owner-changed', 'process-became-live')) {
+    Initialize-CopyCase $damage
+    $hashCalls = 0
+    if ($damage -eq 'directory-collision') {
+        Microsoft.PowerShell.Management\\New-Item -ItemType Directory -Path $copyDirectory | Out-Null
+        [IO.File]::WriteAllText((Join-Path $copyDirectory 'sentinel'), 'retained collision bytes')
+    }
+    if ($damage -eq 'source-junction') {
+        $moved = Join-Path $root 'physical-install'
+        Move-Item -LiteralPath $installPath -Destination $moved
+        Microsoft.PowerShell.Management\\New-Item -ItemType Junction -Path $installPath -Target $moved | Out-Null
+    }
+    if ($damage -eq 'temporary-junction') {
+        $moved = $temporaryRoot + '-real'
+        Move-Item -LiteralPath $temporaryRoot -Destination $moved
+        Microsoft.PowerShell.Management\\New-Item -ItemType Junction -Path $temporaryRoot -Target $moved | Out-Null
+    }
+    if ($damage -eq 'outside-owned-temp') { $copyDirectory = Join-Path $installPath 'in-place-forbidden' }
+    if ($damage -eq 'invalid-target') { $installPath += [char]34 }
+    $failure = $null
+    try { $unexpected = New-OwnedUninstallerCopy $copyDirectory $expectedRegistration $cleanupErrors } catch { $failure = $_ }
+    if ($null -eq $failure) { Close-UninstallStream $unexpected.Guard $cleanupErrors; throw ('Accepted unsafe case: ' + $damage) }
+    # Hash fault injection wraps the real stream hashing; both mismatches must follow all three observations.
+    if ($damage -in @('source-hash-drift', 'copy-hash-drift') -and $hashCalls -ne 3) { throw 'Hash comparison skipped a real stream' }
+    if ($damage -eq 'directory-collision' -and [IO.File]::ReadAllText((Join-Path $copyDirectory 'sentinel')) -cne 'retained collision bytes') { throw 'Directory collision was overwritten' }
+    if ($damage -eq 'file-collision' -and [IO.File]::ReadAllText($copyPath) -cne 'retained collision bytes') { throw 'File collision was overwritten' }
+    $probe = [IO.File]::Open($sourcePath, 'Open', 'ReadWrite', 'None'); $probe.Dispose()
+    if (Test-Path -LiteralPath $copyPath -PathType Leaf) { $probe = [IO.File]::Open($copyPath, 'Open', 'ReadWrite', 'None'); $probe.Dispose() }
+    $results += [pscustomobject]@{ damage = $damage; rejected = $true; streamsReleased = $true; errors = @($cleanupErrors) }
+}
+ConvertTo-Json -InputObject $results -Depth 4 -Compress
+`)
+  assert.deepEqual(observed.map(item => item.damage), ['directory-collision', 'file-collision', 'source-junction', 'temporary-junction', 'copy-directory-junction', 'outside-owned-temp', 'invalid-target', 'source-hash-drift', 'copy-hash-drift', 'registration-changed', 'owner-changed', 'process-became-live'])
+  for (const item of observed) assert.deepEqual({ rejected: item.rejected, streamsReleased: item.streamsReleased, errors: item.errors }, { rejected: true, streamsReleased: true, errors: [] })
+})
+
+test('owned copied-worker launch uses final unquoted target and waits only its tracked handle', { skip: process.platform !== 'win32' }, t => {
+  const source = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const start = source.indexOf('                $copyDirectory = Join-Path')
+  const end = source.indexOf('                $timer = ', start)
+  assert.ok(start >= 0 && end > start)
+  const launch = source.slice(start, end)
+  const observed = uninstallCopyUnit(t, `
+function Start-Owned($File, $Arguments) {
+    if ($File -cne $uninstallerCopy.Path -or $File -ceq $uninstaller -or $File.StartsWith($installPath + '\\')) { throw 'Uninstaller ran in place or another file was selected' }
+    if ($Arguments -cne ('/currentuser /S _?=' + $installPath) -or $Arguments.Contains([char]34)) { throw 'Unbound NSIS arguments' }
+    if (-not $uninstallerCopy.Guard.CanRead) { throw 'Copied bytes lost their read guard' }
+    $probe = [IO.File]::Open($sourcePath, 'Open', 'ReadWrite', 'None'); $probe.Dispose()
+    $script:actual = [pscustomobject]@{ Id = 71; HasExited = ($outcome -ne 'timeout'); ExitCode = $(if ($outcome -eq 'nonzero') { 2 } else { 0 }) }
+    $processes.Add($actual)
+    return $actual
+}
+function Wait-Exit($Process, $Seconds) {
+    if (-not [object]::ReferenceEquals($Process, $actual) -or $Seconds -ne 120 -or $processes.Count -ne 1 -or -not [object]::ReferenceEquals($processes[0], $actual)) { throw 'Wrong execution handle or deadline' }
+    $script:waited = $true
+    if (-not $Process.HasExited) { throw 'Owned qualification process exceeded its deadline' }
+    if ($Process.ExitCode -ne 0) { throw 'Owned qualification process returned nonzero' }
+}
+$cases = @()
+foreach ($outcome in @('success', 'timeout', 'nonzero')) {
+    Initialize-CopyCase $outcome
+    $processes = [Collections.Generic.List[object]]::new()
+    $uninstallRegistration = $expectedRegistration
+    $uninstallerCopy = $null; $failure = $null; $waited = $false; $postconditionsReached = $false
+    try {
+${launch}
+        $postconditionsReached = $true
+    } catch { $failure = $_ } finally { if ($null -ne $uninstallerCopy) { Close-UninstallStream $uninstallerCopy.Guard $cleanupErrors } }
+    $cases += [pscustomobject]@{ outcome = $outcome; waited = $waited; postconditionsReached = $postconditionsReached; failed = ($null -ne $failure); errors = @($cleanupErrors) }
+}
+ConvertTo-Json -InputObject $cases -Depth 4 -Compress
+`)
+  assert.deepEqual(observed, [
+    { outcome: 'success', waited: true, postconditionsReached: true, failed: false, errors: [] },
+    { outcome: 'timeout', waited: true, postconditionsReached: false, failed: true, errors: [] },
+    { outcome: 'nonzero', waited: true, postconditionsReached: false, failed: true, errors: [] },
+  ])
+  const finalReaper = source.lastIndexOf('[void](Stop-OwnedProcesses $processes $cleanupErrors)')
+  assert.ok(finalReaper < source.indexOf('Close-UninstallStream $uninstallerCopy.Guard', finalReaper))
+  assert.ok(source.includes('$processes.Add($process)'))
+  assert.doesNotMatch(launch, /Start-Owned \$uninstaller\s|--updated|--delete-app-data|\/NCRC|\/D=/u)
+})
+
+test('owned uninstall stream disposal failures aggregate without replacing the active error', { skip: process.platform !== 'win32' }, t => {
+  const observed = uninstallCopyUnit(t, `
+$errors = [Collections.Generic.List[string]]::new()
+$stream = [pscustomobject]@{}
+$stream | Add-Member ScriptMethod Dispose { throw 'private disposal error' }
+try { throw 'primary copy failure' } catch { $failure = $_; $original = $_ }
+Close-UninstallStream $stream $errors
+Close-UninstallStream $null $errors
+[pscustomobject]@{ originalRetained = [object]::ReferenceEquals($failure, $original); errors = @($errors) } | ConvertTo-Json -Compress
+`)
+  assert.deepEqual(observed, { originalRetained: true, errors: ['Owned uninstall stream disposal failed'] })
 })
 
 test('production registration GUID is bound to the exact appId and pinned builder namespace', () => {
@@ -654,170 +848,124 @@ Write-InstallerFailureDiagnostics @() $errors
   assert.match(observed.messages[1], /Installer registration observation failed:/u)
 })
 
-test('relocated uninstall worker observation binds process incarnation ancestry and parent', { skip: process.platform !== 'win32' }, t => {
-  const registration = readFileSync(new URL('./fixtures/windows-installer-registration.ps1', import.meta.url), 'utf8')
+test('owned copied uninstall observation binds retained handle descriptor and original bytes', { skip: process.platform !== 'win32' }, t => {
   const observed = powershellUnit(t, `
-${registration}
 ${uninstallObservationSource}
 $root = $PSScriptRoot
-$uninstaller = Join-Path $root 'Installed App/Uninstall cloga-deepseek-harness.exe'
-$executable = Join-Path $root 'process-temp/ns-owned/worker.exe'
-$start = [datetime]'2026-09-20T22:00:00Z'
-$fixtureCreated = $start.AddSeconds(1)
+$target = Join-Path $root 'Installed App'
+$executable = Join-Path $root 'process-temp/owned/owned-uninstaller.exe'
+$fixtureCreated = [datetime]'2026-09-20T22:00:01Z'
+function Get-CimInstance { throw 'No PID discovery permitted' }
 function Get-Item($LiteralPath) {
-    $attributes = [IO.FileAttributes]::Directory
-    if ($LiteralPath -ieq $executable) { $attributes = [IO.FileAttributes]::Normal }
-    if (($mode -eq 'reparse' -or ($mode -eq 'post-reparse' -and $script:queries -gt 1)) -and
-        $LiteralPath -ieq (Join-Path $root 'process-temp')) { $attributes = [IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Directory }
-    if ($mode -eq 'unreadable-path') { throw 'SECRET-path-observation' }
-    if ($mode -eq 'directory-executable' -and $LiteralPath -ieq $executable) { $attributes = [IO.FileAttributes]::Directory }
-    [pscustomobject]@{ Attributes = $attributes; PSIsContainer = [bool]($attributes -band [IO.FileAttributes]::Directory) }
+    if ($mode -eq 'unreadable-path') { throw 'SECRET-private-path' }
+    $directory = $LiteralPath -ine $executable
+    $attributes = if ($directory) { [IO.FileAttributes]::Directory } else { [IO.FileAttributes]::Normal }
+    if (($mode -eq 'reparse' -or ($mode -eq 'post-reparse' -and $script:hashReads -ge 2)) -and
+        $LiteralPath -ieq (Join-Path $root 'process-temp')) { $attributes = [IO.FileAttributes]::ReparsePoint }
+    [pscustomobject]@{ Attributes = $attributes; PSIsContainer = $directory }
 }
-function Get-CimInstance { throw 'Real CIM query forbidden in pure worker tests' }
+function Get-UninstallStreamSha256($Guard) {
+    $script:hashReads++
+    if ($mode -eq 'hash-denied') { throw 'SECRET-private-hash-error' }
+    if ($mode -eq 'changed-bytes' -and $script:hashReads -gt 1) { return ('b' * 64) }
+    return ('a' * 64)
+}
 function New-UninstallObservationClock {
-    [pscustomobject]@{ ElapsedMilliseconds = $(if ($mode -eq 'budget') { 2000 } else { 0 }) }
-}
-function Open-UninstallObservationProcess($ProcessId) {
-    $script:opens++
-    if ($mode -eq 'open-denied') { throw 'SECRET-process-access' }
-    $handle = [pscustomobject]@{
-        Id = $ProcessId; Handle = [IntPtr]1; HasExited = ($mode -eq 'exited-valid'); ExitCode = 7
-        StartTime = $(if ($mode -eq 'pid-reuse') { $fixtureCreated.AddSeconds(1) } else { $fixtureCreated })
-        MainModule = [pscustomobject]@{ FileName = $(if ($mode -eq 'module-mismatch') { 'C:\\foreign\\worker.exe' } else { $executable }) }
+    $clock = [pscustomobject]@{}
+    $clock | Add-Member ScriptProperty ElapsedMilliseconds {
+        $script:clockReads++
+        if ($mode -eq 'budget') { return 2000 }
+        if ($mode -eq 'negative-clock') { return -1 }
+        if ($mode -eq 'advancing-budget') { return (100 * $script:clockReads) }
+        return 0
     }
-    if ($mode -eq 'missing-handle') { $handle.Handle = $null }
-    if ($mode -eq 'unreadable-start') { $handle.StartTime = $null }
-    $handle | Add-Member ScriptMethod Dispose { $script:disposals++; if ($mode -eq 'dispose-denied') { throw 'SECRET-dispose' } }
-    return $handle
-}
-function Read-UninstallObservationProcess($ProcessId, $Seconds) {
-    if ($Seconds -ne 1) { throw 'Unexpected query timeout' }
-    $script:queries++
-    if ($mode -eq 'query-denied') { throw 'SECRET-query-access' }
-    [pscustomobject]@{
-        ProcessId = $ProcessId; ParentProcessId = $(if ($mode -eq 'query-parent') { 99 } else { 20 })
-        CreationDate = $(if ($mode -eq 'post-pid-reuse' -and $script:queries -gt 1) { $fixtureCreated.AddSeconds(1) } else { $fixtureCreated })
-        ExecutablePath = $executable; CommandLine = 'SECRET-not-evidence'
-    }
+    return $clock
 }
 $cases = @()
-foreach ($mode in @('valid', 'wrong-parent', 'parent-pid-reuse', 'before-launcher', 'outside', 'prefix-escape', 'dot-escape', 'non-executable',
-    'reparse', 'unreadable-path', 'directory-executable', 'pid-reuse', 'module-mismatch', 'exited-valid', 'missing-handle', 'unreadable-start',
-    'open-denied', 'query-denied', 'query-parent', 'post-pid-reuse', 'post-reparse', 'dispose-denied', 'missing-creation',
-    'launcher-mismatch', 'launcher-unreadable', 'budget', 'capped')) {
-    $script:opens = 0; $script:disposals = 0; $script:queries = 0
-    $launcher = [pscustomobject]@{ Id = 20; Handle = [IntPtr]2; StartTime = $start; HasExited = $true; ExitTime = $start.AddSeconds(2)
-        StartInfo = [pscustomobject]@{ FileName = $uninstaller } }
-    if ($mode -eq 'launcher-mismatch') { $launcher.StartInfo.FileName = 'C:\\foreign\\uninstall.exe' }
-    if ($mode -eq 'launcher-unreadable') { $launcher.StartTime = $null }
-    $path = $executable
-    if ($mode -eq 'outside') { $path = 'C:\\foreign\\worker.exe' }
-    if ($mode -eq 'prefix-escape') { $path = Join-Path $root 'process-temp-foreign/worker.exe' }
-    if ($mode -eq 'dot-escape') { $path = Join-Path $root 'process-temp/../foreign/worker.exe' }
-    if ($mode -eq 'non-executable') { $path = Join-Path $root 'process-temp/worker.txt' }
-    $time = $fixtureCreated
-    if ($mode -eq 'parent-pid-reuse') { $time = $start.AddSeconds(3) }
-    if ($mode -eq 'before-launcher') { $time = $start.AddSeconds(-1) }
-    if ($mode -eq 'missing-creation') { $time = $null }
-    $snapshot = @([pscustomobject]@{ ProcessId = 30; ParentProcessId = $(if ($mode -eq 'wrong-parent') { 99 } else { 20 })
-        CreationDate = $time; ExecutablePath = $path; CommandLine = 'SECRET-commandline' })
-    if ($mode -eq 'capped') { $snapshot = @(1..9 | ForEach-Object { [pscustomobject]@{ ProcessId = (30 + $_); ParentProcessId = 20; CreationDate = $fixtureCreated; ExecutablePath = $executable } }) }
-    $data = Get-UninstallWorkerObservation $launcher $snapshot $root $uninstaller
-    $cases += [pscustomobject]@{ mode = $mode; data = $data; opens = $script:opens; disposals = $script:disposals; queries = $script:queries }
+foreach ($mode in @('valid', 'exited', 'missing-process', 'missing-copy', 'bad-hash', 'changed-bytes', 'hash-denied',
+    'guard-closed', 'guard-name', 'wrong-target', 'inside-installation', 'outside', 'reparse', 'post-reparse', 'unreadable-path',
+    'wrong-file', 'wrong-arguments', 'wrong-module', 'zero-handle', 'missing-start', 'pid-drift', 'creation-drift',
+    'exit-unreadable', 'budget', 'negative-clock', 'advancing-budget')) {
+    $script:hashReads = 0; $script:clockReads = 0
+    $guard = [pscustomobject]@{ CanRead = $true; Name = $executable }
+    $copy = [pscustomobject]@{ Path = $executable; Target = $target; Guard = $guard; Sha256 = ('a' * 64)
+        SourceBeforeSha256 = ('a' * 64); SourceAfterSha256 = ('a' * 64); InsideOwnedTemporaryRoot = $true; OutsideInstallation = $true }
+    $handle = [pscustomobject]@{ Id = 30; Handle = [IntPtr]1; StartTime = $fixtureCreated; HasExited = ($mode -eq 'exited'); ExitCode = 7
+        StartInfo = [pscustomobject]@{ FileName = $executable; Arguments = ('/currentuser /S _?=' + $target) }
+        MainModule = [pscustomobject]@{ FileName = $executable } }
+    $handle | Add-Member ScriptMethod Dispose { throw 'Observer must not dispose caller-owned handle' }
+    if ($mode -eq 'bad-hash') { $copy.SourceAfterSha256 = 'SECRET' }
+    if ($mode -eq 'guard-closed') { $guard.CanRead = $false }
+    if ($mode -eq 'guard-name') { $guard.Name = 'SECRET' }
+    if ($mode -eq 'wrong-target') { $copy.Target = 'SECRET' }
+    if ($mode -eq 'inside-installation') { $copy.OutsideInstallation = $false }
+    if ($mode -eq 'outside') { $copy.Path = 'C:\\foreign\\copy.exe' }
+    if ($mode -eq 'wrong-file') { $handle.StartInfo.FileName = 'SECRET' }
+    if ($mode -eq 'wrong-arguments') { $handle.StartInfo.Arguments = '/S SECRET' }
+    if ($mode -eq 'wrong-module') { $handle.MainModule.FileName = 'SECRET' }
+    if ($mode -eq 'zero-handle') { $handle.Handle = [IntPtr]::Zero }
+    if ($mode -eq 'missing-start') { $handle.StartTime = $null }
+    if ($mode -eq 'pid-drift') { $handle | Add-Member -Force ScriptProperty Id { if ($script:hashReads -ge 2) { return 31 }; return 30 } }
+    if ($mode -eq 'creation-drift') { $handle | Add-Member -Force ScriptProperty StartTime { if ($script:hashReads -ge 2) { return $fixtureCreated.AddTicks(1) }; return $fixtureCreated } }
+    if ($mode -eq 'exit-unreadable') { $handle | Add-Member -Force ScriptProperty HasExited { throw 'SECRET-exit' } }
+    if ($mode -eq 'missing-process') { $handle = $null }
+    if ($mode -eq 'missing-copy') { $copy = $null }
+    $data = Get-OwnedUninstallerObservation $handle $copy $root $target
+    $cases += [pscustomobject]@{ mode = $mode; data = $data; hashReads = $script:hashReads }
 }
-ConvertTo-Json -InputObject $cases -Depth 9 -Compress
+ConvertTo-Json -InputObject $cases -Depth 5 -Compress
 `)
   const cases = Object.fromEntries(observed.map(value => [value.mode, value]))
-  assert.equal(cases.valid.data.workers[0].state, 'observed', JSON.stringify(cases.valid))
-  assert.equal(cases.valid.data.workers[0].category, 'identity-bound')
-  assert.equal(cases.valid.queries, 2)
-  assert.equal(cases.valid.disposals, 1)
-  assert.equal(cases.valid.data.admittedQuerySeconds, 2)
-  assert.equal(cases.valid.data.workers[0].ownershipVerified, true)
-  assert.equal(cases.valid.data.workers[0].exited, false)
-  assert.equal(cases.valid.data.workers[0].exitCode, null)
-  assert.match(cases.valid.data.workers[0].creationTimeUtc, /^2026-09-20T22:00:01/u)
-  assert.equal(cases['exited-valid'].data.workers[0].state, 'observed')
-  assert.equal(cases['exited-valid'].data.workers[0].exited, true)
-  assert.equal(cases['exited-valid'].data.workers[0].exitCode, 7)
-  for (const [mode, result] of Object.entries(cases)) {
-    if (mode === 'valid' || mode === 'exited-valid' || mode === 'capped') continue
-    for (const worker of result.data.workers) {
-      assert.equal(worker.state, 'unknown', mode)
-      for (const field of ['creationTimeUtc', 'ownershipVerified', 'elapsedMilliseconds', 'exited', 'exitCode']) assert.equal(worker[field], null, `${mode}:${field}`)
-      assert.equal(Object.hasOwn(worker, 'windows'), false)
-    }
-    if (result.opens > 0 && mode !== 'open-denied') assert.equal(result.disposals, 1, mode)
+  assert.equal(cases.valid.data.state, 'observed', JSON.stringify(cases.valid))
+  assert.equal(cases.valid.data.ownershipVerified, true)
+  assert.equal(cases.valid.data.exited, false)
+  assert.equal(cases.valid.data.exitCode, null)
+  assert.equal(cases.valid.hashReads, 2)
+  assert.equal(cases.exited.data.state, 'observed')
+  assert.equal(cases.exited.data.exitCode, 7)
+  for (const [mode, row] of Object.entries(cases)) {
+    if (mode === 'valid' || mode === 'exited') continue
+    assert.equal(row.data.state, 'unknown', mode)
+    for (const field of ['pid', 'creationTimeUtc', 'ownershipVerified', 'elapsedMilliseconds', 'exited', 'exitCode']) assert.equal(row.data[field], null, `${mode}:${field}`)
   }
-  assert.equal(cases.capped.data.candidateCount, 9)
-  assert.equal(cases.capped.data.truncated, true)
-  assert.equal(cases.capped.data.workers.length, 4)
-  assert.equal(cases.capped.queries, 2)
-  assert.equal(cases.capped.disposals, 1)
-  assert.equal(cases.capped.data.workers.filter(worker => worker.state === 'observed').length, 1)
-  assert.equal(cases.budget.data.category, 'soft-observation-budget')
-  assert.equal(cases.budget.opens, 0)
-  assert.doesNotMatch(JSON.stringify(observed), /SECRET|foreign|ExecutablePath|CommandLine|process-temp|Installed App/u)
+  assert.equal(cases.budget.hashReads, 0)
+  assert.equal(cases['negative-clock'].hashReads, 0)
+  assert.equal(cases['advancing-budget'].data.category, 'soft-observation-budget')
+  assert.doesNotMatch(JSON.stringify(observed), /SECRET|foreign|FileName|CommandLine|process-temp|Installed App/u)
 })
 
-test('relocated uninstall queries share advancing soft admission and finite timeout allowances', { skip: process.platform !== 'win32' }, t => {
+test('owned copied uninstall observations reject expired or invalid soft budgets without PID discovery', { skip: process.platform !== 'win32' }, t => {
   const observed = powershellUnit(t, `
 ${uninstallObservationSource}
-function Read-UninstallObservationProcess($ProcessId, $Seconds) {
-    if ($ProcessId -ne 30 -or $Seconds -ne 1) { throw 'Unexpected bounded query' }
-    $script:queryCount++; $script:querySeconds += $Seconds
-    $script:clockMs += $script:step
-    return 'synthetic identity'
-}
 $cases = @()
-foreach ($case in @(
-    @('advancing', 0, 250), @('zero-remainder', 2000, 0), @('negative-remainder', 2001, 0),
-    @('invalid-clock', -1, 0), @('below-minimum', 1001, 0), @('last-moment', 1999, 0),
-    @('second-below-minimum', 0, 1001), @('deadline', 0, 1000), @('overrun', 0, 2200)
-)) {
-    $script:clockMs = [int]$case[1]; $script:step = [int]$case[2]
-    $script:queryCount = 0; $script:querySeconds = 0
-    $clock = [pscustomobject]@{}
-    $clock | Add-Member ScriptProperty ElapsedMilliseconds { return $script:clockMs }
-    $budget = @{ Clock = $clock; QuerySeconds = 2; Expired = $false }
-    $accepted = 0
-    for ($attempt = 0; $attempt -lt 3; $attempt++) {
-        try { [void](Read-UninstallWorkerSample 30 $budget); $accepted++ }
-        catch { break }
-    }
-    $cases += [pscustomobject]@{ name = $case[0]; queries = $script:queryCount; seconds = $script:querySeconds
-        accepted = $accepted; elapsed = $script:clockMs; expired = $budget.Expired }
+foreach ($elapsed in @(0, 500, 1999, 2000, 2001, -1)) {
+    $budget = @{ Clock = [pscustomobject]@{ ElapsedMilliseconds = $elapsed }; Expired = $false }
+    $remaining = $null
+    try { $remaining = Get-UninstallObservationRemaining $budget } catch {}
+    $cases += [pscustomobject]@{ elapsed = $elapsed; remaining = $remaining; expired = $budget.Expired }
 }
 ConvertTo-Json -InputObject $cases -Compress
 `)
-  const cases = Object.fromEntries(observed.map(row => [row.name, row]))
-  for (const row of observed) assert.ok(row.seconds <= 2, row.name)
-  assert.deepEqual(cases.advancing, { name: 'advancing', queries: 2, seconds: 2, accepted: 2, elapsed: 500, expired: true })
-  for (const name of ['zero-remainder', 'negative-remainder', 'invalid-clock', 'below-minimum', 'last-moment']) {
-    assert.equal(cases[name].queries, 0, name)
-    assert.equal(cases[name].accepted, 0, name)
-  }
-  assert.equal(cases['second-below-minimum'].queries, 1)
-  assert.equal(cases.deadline.queries, 2)
-  assert.equal(cases.deadline.accepted, 1)
-  assert.equal(cases.overrun.queries, 1)
-  assert.equal(cases.overrun.accepted, 0)
-  assert.equal(cases.overrun.elapsed, 2200, 'An overrun is discarded, not misreported as a hard deadline')
+  assert.deepEqual(observed, [
+    { elapsed: 0, remaining: 2000, expired: false }, { elapsed: 500, remaining: 1500, expired: false },
+    { elapsed: 1999, remaining: 1, expired: false }, { elapsed: 2000, remaining: null, expired: true },
+    { elapsed: 2001, remaining: null, expired: true }, { elapsed: -1, remaining: null, expired: true },
+  ])
 })
 
-test('relocated uninstall diagnostics remain failure-only bounded reads with no action authority', () => {
+test('owned copied uninstall diagnostics remain process-only with no discovery or action authority', () => {
   const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
-  assert.ok(uninstallObservationSource.includes('Select-Object -First 4'))
+  const diagnostic = driver.match(/function Write-UninstallFailureDiagnostics[^]*?\r?\n\}/u)?.[0]
+  assert.ok(diagnostic)
+  assert.doesNotMatch(diagnostic, /InstallerCapture|HWND|DiagnosticText|workerWindow/u)
+  assert.ok(diagnostic.includes('Get-OwnedUninstallerObservation $UninstallerProcess $Copy $root $installPath'))
   assert.ok(uninstallObservationSource.includes('$elapsed -ge 2000'))
-  assert.ok(uninstallObservationSource.includes('-OperationTimeoutSec $Seconds'))
-  assert.ok(uninstallObservationSource.includes('$Budget.QuerySeconds -= $seconds'))
-  assert.doesNotMatch(uninstallObservationSource, /InstallerCapture|HWND|DiagnosticSummary|ProjectDiagnosticControl|DiagnosticText|Read-UninstallObservationWindows|EnumWindows|WM_GETTEXT/u)
-  assert.equal(uninstallObservationSource.match(/Assert-UninstallWorkerIdentity \$current/gu)?.length, 2)
-  assert.doesNotMatch(uninstallObservationSource, /Stop-Process|\.Kill\(|Remove-Item|Click\(|DiagnosticText|CommandLine/u)
-  assert.ok(driver.includes("$ownedUninstaller = Start-Owned $uninstaller '/currentuser /S'"))
+  assert.equal(uninstallObservationSource.match(/Read-OwnedUninstallProcessState \$Process \$Copy.Path/gu)?.length, 2)
+  assert.doesNotMatch(uninstallObservationSource, /InstallerCapture|HWND|Get-CimInstance|GetProcessById|Read-UninstallObservationWindows|EnumWindows|WM_GETTEXT/u)
+  assert.doesNotMatch(uninstallObservationSource, /Stop-Process|\.Kill\(|Remove-Item|Click\(|\.Dispose\(|CommandLine/u)
+  assert.ok(driver.includes("$ownedUninstaller = Start-Owned $uninstallerCopy.Path ('/currentuser /S _?=' + $uninstallerCopy.Target)"))
   assert.ok(driver.includes('Wait-Exit $ownedUninstaller 120'))
   assert.ok(driver.includes("$timer.Elapsed.TotalSeconds -gt 30) { throw 'Owned uninstaller did not remove executable, registration and product processes'"))
-  assert.ok(driver.includes('if ($uninstallAttempted) {\n                try { Write-UninstallFailureDiagnostics'))
 })
 
 test('post-uninstall diagnostics distinguish remaining predicates and bound private observations', { skip: process.platform !== 'win32' }, t => {
@@ -869,7 +1017,10 @@ foreach ($mode in @('clean', 'executable', 'owner', 'uninstall-key', 'product', 
     $launcher = [pscustomobject]@{ Id = 20; HasExited = ($mode -ne 'worker') }
     $launcher | Add-Member ScriptProperty ExitCode { if (-not $this.HasExited) { throw 'Do not read live exit status' }; return 0 }
     if ($mode -eq 'not-started') { $launcher = $null }
-    Write-UninstallFailureDiagnostics $launcher $errors
+    $copy = [pscustomobject]@{ Sha256 = ('b' * 64); SourceBeforeSha256 = ('b' * 64); SourceAfterSha256 = ('b' * 64)
+        InsideOwnedTemporaryRoot = $true; OutsideInstallation = $true; Target = $installPath; Path = 'private-copy-path'; Guard = 'credential-sentinel' }
+    if ($mode -eq 'not-started') { $copy = $null }
+    Write-UninstallFailureDiagnostics $launcher $errors $copy
     $data = Get-Content -LiteralPath (Join-Path $root 'evidence/installer-uninstall-failure.json') -Raw | ConvertFrom-Json
     $cases += [pscustomobject]@{ mode = $mode; data = $data; errors = @($errors) }
 }
@@ -879,7 +1030,7 @@ ConvertTo-Json -InputObject $cases -Depth 8 -Compress
   const cases = Object.fromEntries(observed.map(({ mode, data, errors }) => {
     assert.deepEqual(errors, [])
     assert.deepEqual(data.observationErrors, [])
-    assert.equal(data.arguments, '/currentuser /S')
+    assert.equal(data.arguments, '/currentuser /S _?=<owned-install-root>')
     assert.equal(data.sourceCommit, 'a'.repeat(40))
     return [mode, data]
   }))
@@ -901,6 +1052,13 @@ ConvertTo-Json -InputObject $cases -Depth 8 -Compress
   assert.deepEqual(cases.worker.processes, [{ pid: 30, parentPid: 20, inInstallation: false, inOwnedTemporaryRoot: true }])
   assert.equal(cases.worker.launcherExited, false)
   assert.equal(cases.worker.launcherExitCode, null)
+  for (const row of Object.values(cases)) {
+    assert.equal(Object.keys(row).some(key => key.startsWith('workerWindow') || key.includes('VisibleWindow') || key.includes('UnresponsiveWindow')), false)
+    assert.equal(row.ownedWorker.state, 'unknown', 'Synthetic summary has no retained execution/read-guard capability')
+  }
+  assert.equal(cases.worker.copyVerified, true)
+  assert.equal(cases.worker.copySha256, 'b'.repeat(64))
+  for (const key of ['copyHashesAgree', 'copyInsideOwnedTemporaryRoot', 'copyOutsideInstallation', 'targetMatches']) assert.equal(cases.worker[key], true)
   assert.equal(cases.capped.registrationCount, 6)
   assert.equal(cases.capped.registrations.length, 4)
   assert.equal(cases.capped.registrationsTruncated, true)
@@ -910,7 +1068,9 @@ ConvertTo-Json -InputObject $cases -Depth 8 -Compress
   assert.equal(cases['not-started'].launcherStarted, false)
   assert.equal(cases['not-started'].launcherPid, null)
   assert.equal(cases['not-started'].launcherExitCode, null)
-  assert.doesNotMatch(JSON.stringify(observed), /credential-sentinel|private-display-name|foreign\.exe|ExecutablePath|CommandLine|Installed App/u)
+  assert.equal(cases['not-started'].copyVerified, false)
+  assert.equal(cases['not-started'].copySha256, null)
+  assert.doesNotMatch(JSON.stringify(observed), /credential-sentinel|private-copy-path|private-handle|another-handle|private-display-name|foreign\.exe|ExecutablePath|CommandLine|Installed App/u)
 })
 
 test('post-uninstall observation failures retain partial evidence without exposing raw errors', { skip: process.platform !== 'win32' }, t => {
@@ -1132,8 +1292,8 @@ test('cleanup admission precedes Finish and rechecks actual registration before 
   assert.ok(cleanup)
   assert.ok(cleanup.includes('$hasRegistration = @(Product-Registrations).Count -ne 0'))
   assert.ok(cleanup.includes('Get-ChildItem -LiteralPath $installPath -Force'))
-  assert.ok(cleanup.indexOf('[void](Read-Registration)') < cleanup.indexOf("Start-Owned $uninstaller '/currentuser /S'"))
-  assert.ok(cleanup.indexOf('Wait-NoProductProcesses') < cleanup.indexOf("Start-Owned $uninstaller '/currentuser /S'"))
+  assert.ok(cleanup.indexOf('$uninstallRegistration = Read-Registration') < cleanup.indexOf('Start-Owned $uninstallerCopy.Path'))
+  assert.ok(cleanup.indexOf('Wait-NoProductProcesses') < cleanup.indexOf('Start-Owned $uninstallerCopy.Path'))
   assert.ok(cleanup.includes("throw 'Owned registration has no usable uninstaller; leave VM teardown to remove the partial installation'"))
   assert.ok(cleanup.includes("$cleanupErrors.Add('Installed product cleanup failed: '"))
 })
