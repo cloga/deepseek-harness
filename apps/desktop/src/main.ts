@@ -20,7 +20,7 @@ import {
   type MenuItemConstructorOptions,
 } from 'electron'
 import { resolveDesktopPaths } from './paths.ts'
-import { assertNoLegacyDesktopActivation, isDesktopLegacyActivationRefusal } from './legacy-profile-activation.ts'
+import { assertNoLegacyDesktopActivation, isDesktopLegacyActivationFailure } from './legacy-profile-activation.ts'
 import { DesktopProjectManager } from './project-manager.ts'
 import { DesktopHostProcess, DesktopHostUncleanExitError } from './host-process.ts'
 import { installDesktopDirectoryPicker } from './directory-picker.ts'
@@ -597,7 +597,7 @@ async function main(): Promise<void> {
     let state: DesktopPluginProvisioningState
     try { state = await packageTransactions.commitSatisfiedProvisioning(assessment.assessmentFingerprint) }
     catch (error) {
-      if (isDesktopLegacyActivationRefusal(error)) throw error
+      if (isDesktopLegacyActivationFailure(error)) throw error
       // A stale assessment or failed evidence-only write is not a reason to discard a usable profile.
       // A fresh invalid-evidence classification still propagates through assessBaseline.
       console.error('Desktop baseline evidence remains pending:', error)
@@ -691,7 +691,7 @@ async function main(): Promise<void> {
             const prepared = await packageTransactions.stageProvisioning(randomUUID(), baselineAbort.signal)
             await reviewPackageChanges(true, prepared.transactionId)
           } catch (error) {
-            if (isDesktopLegacyActivationRefusal(error)) throw error
+            if (isDesktopLegacyActivationFailure(error)) throw error
             // Never mask an uncertain activation/rollback or execute an unrepaired damaged release-owned graph.
             if (hasEverStartedHost() || pendingDesktopActivationTransactions(activeProject).length > 0
               || assessment.reason === 'release-owned-repair' || baselineAbort.signal.aborted) throw error

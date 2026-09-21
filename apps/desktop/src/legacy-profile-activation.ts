@@ -19,6 +19,14 @@ export function isDesktopLegacyActivationRefusal(error: unknown): error is Deskt
   return error instanceof DesktopLegacyActivationRefusal
 }
 
+/** Recognize the existing staging cleanup wrapper only through its own data-valued primary cause. */
+export function isDesktopLegacyActivationFailure(error: unknown): error is DesktopLegacyActivationRefusal | AggregateError {
+  if (isDesktopLegacyActivationRefusal(error)) return true
+  if (!(error instanceof AggregateError)) return false
+  const cause = Object.getOwnPropertyDescriptor(error, 'cause')
+  return cause !== undefined && Object.hasOwn(cause, 'value') && isDesktopLegacyActivationRefusal(cause.value)
+}
+
 function refuse(reason: string): never {
   throw new DesktopLegacyActivationRefusal(reason)
 }

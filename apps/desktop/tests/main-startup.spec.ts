@@ -1382,10 +1382,13 @@ describe('desktop main startup', () => {
     expect(baseline.commit).not.toHaveBeenCalled()
   })
 
-  it('preserves a one-shot legacy preparation refusal even after later inspection would clear', async () => {
+  it.each([false, true])('one-shot legacy refusal stays fatal after probe clears (wrapper=%s)', async (wrapped) => {
     managedFixture()
     const { DesktopLegacyActivationRefusal } = await import('../src/legacy-profile-activation.ts')
-    const primary = new DesktopLegacyActivationRefusal('one-shot retained journal')
+    const refusal = new DesktopLegacyActivationRefusal('one-shot retained journal')
+    const cleanup = new Error('private staging cleanup failed')
+    const primary = wrapped ? new AggregateError([refusal, cleanup],
+      'desktop package staging: preparation failed and cleanup is incomplete', { cause: refusal }) : refusal
     baseline.assess.mockResolvedValue({ status: 'provisionable', reason: 'fresh-profile', packageName: 'fixture-provider',
       planSha256: 'a'.repeat(64), planResourceSha256: 'b'.repeat(64) })
     baseline.stage.mockImplementation(async () => {
@@ -1479,7 +1482,7 @@ describe('desktop main startup', () => {
         expect.objectContaining({ baseline: { status: 'preserved-user-choice', packageName: 'fixture-provider' } }))
     })
 
-  it.each(['qualified', 'unhealthy', 'work-observed', 'stale-assessment'] as const)(
+  it.each(['qualified', 'unhealthy', 'work-observed', 'stale-assessment', 'stale-aggregate'] as const)(
     'qualifies exact user-owned baseline only under readiness admission: %s', async (mode) => {
       managedFixture()
       baseline.assess.mockResolvedValue({ status: 'exact-satisfied', packageOwner: 'user', qualification: 'pending',
@@ -1488,6 +1491,10 @@ describe('desktop main startup', () => {
           dependencyRegistry: 'https://registry.example.test/', configPaths: [] },
         baseFingerprint: 'd'.repeat(64), baseGraphFingerprint: 'e'.repeat(64), assessmentFingerprint: 'f'.repeat(64) })
       if (mode === 'stale-assessment') baseline.commit.mockRejectedValue(new Error('stale assessment'))
+      if (mode === 'stale-aggregate') {
+        const stale = new Error('stale assessment')
+        baseline.commit.mockRejectedValue(new AggregateError([stale], 'ordinary stale assessment', { cause: stale }))
+      }
       await import('../src/main.ts')
       await harness.preparing.promise
       harness.prepared.resolve()
@@ -1500,18 +1507,19 @@ describe('desktop main startup', () => {
       expect(host.initiallyLocked).toBe(true)
       expect(baseline.stage).not.toHaveBeenCalled()
       expect(baseline.completion.mock.lastCall?.[8]).toBe(mode === 'qualified' ? undefined : 'pending')
-      if (mode === 'qualified' || mode === 'stale-assessment') {
+      if (mode === 'qualified' || mode === 'stale-assessment' || mode === 'stale-aggregate') {
         expect(baseline.commit).toHaveBeenCalledExactlyOnceWith('f'.repeat(64))
       } else expect(baseline.commit).not.toHaveBeenCalled()
       expect(host.updateTasks).toHaveBeenLastCalledWith('unlock')
     })
 
-  it('keeps fresh usable Core available when private baseline preparation fails', async () => {
+  it.each([false, true])('keeps usable Core after ordinary preparation failure (aggregate=%s)', async (aggregate) => {
     managedFixture()
     baseline.createdProfile = true
     baseline.assess.mockResolvedValue({ status: 'provisionable', reason: 'fresh-profile', packageName: 'fixture-provider',
       planSha256: 'a'.repeat(64), planResourceSha256: 'b'.repeat(64) })
-    baseline.stage.mockRejectedValue(new Error('fixture registry unavailable'))
+    const network = new Error('fixture registry unavailable')
+    baseline.stage.mockRejectedValue(aggregate ? new AggregateError([network], 'ordinary network failure', { cause: network }) : network)
     await readyForUpdate()
     await expect(invoke(DESKTOP_IPC.boot)).resolves.toMatchObject({ streamBaseUrl: 'http://127.0.0.1:3080' })
     expect(baseline.create.mock.calls[0]?.[4]).toBe(true)

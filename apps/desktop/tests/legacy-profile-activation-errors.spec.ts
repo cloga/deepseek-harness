@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { assertNoLegacyDesktopActivation, DesktopLegacyActivationRefusal, isDesktopLegacyActivationRefusal } from '../src/legacy-profile-activation.ts'
+import { assertNoLegacyDesktopActivation, DesktopLegacyActivationRefusal, isDesktopLegacyActivationRefusal, isDesktopLegacyActivationFailure } from '../src/legacy-profile-activation.ts'
 import { resolveDesktopPaths } from '../src/paths.ts'
 import { retainedTree } from './legacy-activation-fixture.ts'
 
@@ -120,3 +120,35 @@ it('classifies only errors from within legacy inspection and retains their cause
   expect(isDesktopLegacyActivationRefusal(new Error('desktop legacy activation: same words'))).toBe(false)
   expect(isDesktopLegacyActivationRefusal({ name: 'DesktopLegacyActivationRefusal' })).toBe(false)
 })
+
+it('classifies the actual staging cleanup wrapper without changing its original causes', () => {
+  const primary = new DesktopLegacyActivationRefusal('retained legacy evidence')
+  const cleanup = new Error('private stage cleanup failed')
+  const error = new AggregateError([primary, cleanup],
+    'desktop package staging: preparation failed and cleanup is incomplete', { cause: primary })
+  expect(isDesktopLegacyActivationRefusal(error)).toBe(false)
+  expect(isDesktopLegacyActivationFailure(primary)).toBe(true)
+  expect(isDesktopLegacyActivationFailure(error)).toBe(true)
+  expect(error.cause).toBe(primary)
+  expect(error.errors[0]).toBe(primary)
+  expect(error.errors[1]).toBe(cleanup)
+})
+
+it.each(['network', 'stale', 'nested', 'inherited', 'accessor', 'errors-only', 'lookalike', 'ordinary-error'] as const)(
+  'does not broaden aggregate classification to %s causes or invoke getters', (kind) => {
+    const primary = new DesktopLegacyActivationRefusal('typed leaf')
+    const getter = vi.fn(() => primary)
+    const error = new AggregateError([], 'desktop legacy activation: message is not authority')
+    let value: unknown = error
+    if (kind === 'accessor') Object.defineProperty(error, 'cause', { get: getter })
+    else if (kind === 'inherited') {
+      Object.setPrototypeOf(error, new AggregateError([], 'inherited cause', { cause: primary }))
+    } else if (kind === 'lookalike') value = { name: 'AggregateError', cause: primary, errors: [primary] }
+    else if (kind === 'ordinary-error') value = new Error('ordinary error with a typed cause', { cause: primary })
+    else if (kind === 'errors-only') value = new AggregateError([primary], 'only the errors list mentions the refusal')
+    else Object.defineProperty(error, 'cause', { value: kind === 'nested'
+      ? new AggregateError([primary], 'nested aggregate', { cause: primary }) : new Error(kind) })
+    expect(isDesktopLegacyActivationFailure(value)).toBe(false)
+    expect(getter).not.toHaveBeenCalled()
+  },
+)
