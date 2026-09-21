@@ -62,6 +62,8 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 [cloga 发布工作流](../../../.github/workflows/desktop-fork-release.yml)仅在一次性的 GitHub 托管 Windows runner 上运行[安装器验收](windows-installer-upgrade.ps1)。选择经过评审的分支，设置 `rehearsal: true` 并填写精确的[发布计划版本](../release/cloga-windows-x64.json)；演练不能发布。驱动会拒绝已有的产品安装，并在调用真实交互式安装器前验证基线与候选版本的身份。它关闭自动启动，使用隔离数据启动已安装应用，检查自定义安装路径和重启，最后卸载。获取产物所用的凭据不会传给应用或原生辅助程序。
 
+原生包交互 fixture 在启动前独占创建私有 home 及其真实的 `Desktop` 子目录。当 `USERPROFILE` 指向隔离 home 时，Windows Shell 文件夹选择需要该位置。已存在的包操作 home 和文件系统别名会被拒绝，不会被接纳；不会回退到真实用户 profile，也不修改全局已知文件夹或注册表。环境构建器仍保持纯函数。父级拥有的 home 清理只在进程静止后删除这个子目录。文件系统测试验证准备和隔离行为，不证明原生选择器的可访问性或成功选择；这些仍需托管场景验收。
+
 应用正在运行时的拒绝提示采用安装器的 `MB_OK` 确认操作，不依赖数字按钮 ID 或英文标题。点击前，原生辅助程序验证自有且存活的模态窗口、精确的本地化消息，以及唯一、直接隶属该窗口、可见且启用的普通或默认按压按钮；额外、嵌套、隐藏或禁用的按钮选项都会导致失败。驱动仍要求退出码为 2、基线文件与注册信息不变、基线应用保持存活，并且不存在事务目录。屏幕外的自有 Win32 回归检查选择与拒绝行为，不启动安装器；只有托管安装验收才能验证正常拒绝和清理。
 
 安装升级与同版本包操作的观察器均使用[已安装运行时读取器](fixtures/windows-installed-runtime.mjs)。CDP 求值只返回运行中应用的身份字段；描述文件通过维护中的 `readPackagedDesktopRuntimeDescriptor` 载体在 CDP 之外读取。在以 Node 模式启动打包 Electron 之前，读取器重新检查自有安装中的可执行文件哈希，并将观察到的 resources 目录绑定到该安装。描述文件校验对原始 ASAR 字节计算哈希，不使用解析或重新序列化的 JSON。此检查仅针对一次性的托管安装，绝不针对操作者的 Desktop。

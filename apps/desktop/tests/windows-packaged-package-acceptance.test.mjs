@@ -2,13 +2,13 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { installedUpgradeApplication } from './fixtures/windows-installed-upgrade-contract.mjs'
-import { initialPackageAcceptance, packageCleanupVerified, packageGraphSnapshot, preparedTransactionId, retainPrimaryFailure, sameProcess, validatePackageFixture } from './fixtures/windows-packaged-package-acceptance.mjs'
+import { initialPackageAcceptance, packageCleanupVerified, packageGraphSnapshot, preparePackageAcceptanceHome, preparedTransactionId, retainPrimaryFailure, sameProcess, validatePackageFixture } from './fixtures/windows-packaged-package-acceptance.mjs'
 
 const source = readFileSync(new URL('./fixtures/windows-packaged-package-acceptance.mjs', import.meta.url), 'utf8')
 const native = readFileSync(new URL('./windows-desktop-ui.ps1', import.meta.url), 'utf8')
@@ -32,6 +32,88 @@ test('fixture allocation resolves an aliased temporary base before ownership che
   assert.equal(dirname(root), realpathSync.native(physical))
   assert.equal(root, realpathSync.native(root))
   assert.equal(installedUpgradeApplication(root), join(root, 'Installed App', 'cloga-deepseek-harness-desktop', 'cloga-deepseek-harness.exe'))
+})
+
+test('fresh private package home includes the empty physical Desktop required by the native picker', t => {
+  const root = directory(t)
+  const expectedHome = join(root, 'package-home')
+  const desktop = join(expectedHome, 'Desktop')
+  assert.equal(existsSync(desktop), false)
+  const home = preparePackageAcceptanceHome(root)
+  assert.equal(home, expectedHome)
+  assert.deepEqual(readdirSync(root), ['package-home'])
+  assert.deepEqual(readdirSync(home), ['Desktop'])
+  assert.deepEqual(readdirSync(desktop), [])
+  for (const path of [home, desktop]) {
+    assert.ok(lstatSync(path).isDirectory())
+    assert.equal(lstatSync(path).isSymbolicLink(), false)
+    assert.equal(realpathSync.native(path), path)
+  }
+})
+
+for (const collision of ['file', 'empty-home', 'home-without-Desktop', 'Desktop-file']) {
+  test(`private home preparation rejects an existing ${collision} without adopting or altering it`, t => {
+    const root = directory(t)
+    const home = join(root, 'package-home')
+    if (collision === 'file') writeFileSync(home, 'owned collision sentinel')
+    else {
+      mkdirSync(home)
+      if (collision === 'home-without-Desktop') writeFileSync(join(home, 'retained.txt'), 'retained home sentinel')
+      if (collision === 'Desktop-file') writeFileSync(join(home, 'Desktop'), 'not a Desktop directory')
+    }
+    const before = packageGraphSnapshot(root)
+    assert.throws(() => preparePackageAcceptanceHome(root), /new isolated home/u)
+    assert.deepEqual(packageGraphSnapshot(root), before)
+  })
+}
+
+for (const alias of ['home', 'root']) {
+  test(`private home preparation refuses a linked ${alias} without creating an external Desktop`, t => {
+    const parent = directory(t)
+    const root = join(parent, 'owned')
+    const outside = join(parent, 'outside')
+    mkdirSync(root)
+    mkdirSync(outside)
+    writeFileSync(join(outside, 'retained.txt'), 'outside sentinel')
+    const link = alias === 'home' ? join(root, 'package-home') : join(parent, 'root-alias')
+    symlinkSync(alias === 'home' ? outside : root, link, process.platform === 'win32' ? 'junction' : 'dir')
+    const before = packageGraphSnapshot(parent)
+    assert.throws(() => preparePackageAcceptanceHome(alias === 'home' ? root : link), /strict owned descendant|traverse a link|filesystem alias/u)
+    assert.deepEqual(packageGraphSnapshot(parent), before)
+    assert.equal(existsSync(join(outside, 'Desktop')), false)
+    assert.equal(readFileSync(join(outside, 'retained.txt'), 'utf8'), 'outside sentinel')
+  })
+}
+
+test('private Desktop remains owned by home cleanup and preparation never adopts a prior run', t => {
+  const root = directory(t)
+  const home = preparePackageAcceptanceHome(root)
+  writeFileSync(join(home, 'Desktop', 'owned.txt'), 'owned file')
+  writeFileSync(join(root, 'retained.txt'), 'root sentinel')
+  const before = packageGraphSnapshot(root)
+  assert.throws(() => preparePackageAcceptanceHome(root), /new isolated home/u)
+  assert.deepEqual(packageGraphSnapshot(root), before)
+  rmSync(home, { recursive: true })
+  assert.equal(existsSync(join(home, 'Desktop')), false)
+  assert.equal(readFileSync(join(root, 'retained.txt'), 'utf8'), 'root sentinel')
+})
+
+test('private picker home preparation follows ownership validation and precedes every launch', () => {
+  const run = source.slice(source.indexOf('export async function runPackagedPackageAcceptance'))
+  const prepare = run.indexOf('const home = preparePackageAcceptanceHome(root)')
+  assert.ok(prepare >= 0)
+  for (const earlier of ['assertUpgradeRunner(process.env)', 'ownedUpgradePath(process.env.RUNNER_TEMP, runRoot)',
+    'assert.equal(validated.ownerToken, owner.token)', 'assert.equal(expected.source.commit, process.env.GITHUB_SHA)',
+    'validated.candidate.manifestFileSha256']) {
+    const index = run.indexOf(earlier)
+    assert.ok(index >= 0 && index < prepare, earlier)
+  }
+  for (const later of ["await import('../../scripts/smoke-environment.ts')", "._electron.launch(", "await import('../../../../packages/llm/llm-pi-ai/tests/mock-server.ts')", "native('ChooseWorkspace')"]) {
+    assert.ok(run.indexOf(later) > prepare, later)
+  }
+  assert.ok(run.includes('for (const directory of [userData, workspace, data])'))
+  assert.ok(run.includes('const environment = { ...desktopSmokeEnvironment(home),'))
+  assert.ok(run.includes("const profile = join(home, 'profiles', 'desktop')"))
 })
 
 test('installed observers agree on the driver-owned nested application path', t => {

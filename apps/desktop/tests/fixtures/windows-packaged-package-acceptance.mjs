@@ -20,6 +20,20 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const save = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + '\n', { flag: 'wx' })
 const safeError = error => String(error).replace(/(https?:\/\/[^?\s"'<>]+)\?[^\s"'<>]*/gu, '$1?[redacted]')
 
+/** Allocate only the private home and Desktop required by the native workspace picker.
+ * @param {string} root - Existing, validated qualification root owned by this run.
+ * @returns {string} Newly created home; the outer fixture owns its eventual cleanup.
+ */
+export function preparePackageAcceptanceHome(root) {
+  const home = ownedUpgradePath(root, join(root, 'package-home'))
+  assert.equal(existsSync(home), false, 'Package acceptance requires a new isolated home')
+  mkdirSync(home)
+  const desktop = ownedUpgradePath(root, join(home, 'Desktop'))
+  assert.equal(existsSync(desktop), false, 'Private Desktop must be newly created')
+  mkdirSync(desktop)
+  return home
+}
+
 /** Hash files and link spellings without following package junctions. This reader never repairs a graph.
  * @param {string} root - Real profile or private candidate directory.
  * @returns {{fingerprint: string, entries: object[]}} Bounded ordered inventory and its exact digest.
@@ -157,12 +171,12 @@ export async function runPackagedPackageAcceptance(runRoot) {
   const application = installedUpgradeApplication(root)
   assert.equal(upgradeFileHash(application), expected.installedEvidence.executableSha256)
   assert.equal(upgradeFileHash(validated.candidate.manifestPath), validated.candidate.manifestFileSha256)
-  const home = ownedUpgradePath(root, join(root, 'package-home'))
+  const home = preparePackageAcceptanceHome(root)
   const userData = ownedUpgradePath(root, join(root, 'package-electron-user-data'))
   const workspace = ownedUpgradePath(root, join(root, 'package-workspace'))
   const data = ownedUpgradePath(root, join(root, 'package-fixture-data'))
   const evidence = ownedUpgradePath(root, join(root, 'evidence'))
-  for (const directory of [home, userData, workspace, data]) {
+  for (const directory of [userData, workspace, data]) {
     assert.equal(existsSync(directory), false, 'Package acceptance requires new isolated state')
     mkdirSync(directory)
   }
