@@ -661,7 +661,6 @@ describe('Desktop fork release plan', () => {
     const acceptance = steps.findIndex(step => step.name === 'Verify packaged Copilot account and restart')
     expect(acceptance).toBeGreaterThan(runtimeCanaries)
     expect(finalize).toBeGreaterThan(acceptance)
-    expect(steps.filter(step => step.run?.includes('fixtures/copilot-release-smoke.ts'))).toHaveLength(1)
     expect(steps[acceptance]?.run?.trim()).toBe([
       'pnpm exec tsx apps/desktop/tests/fixtures/copilot-release-smoke.ts',
       '--application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe',
@@ -672,6 +671,14 @@ describe('Desktop fork release plan', () => {
     const observerCleanup = steps.findIndex(step => step.name === 'Verify real acceptance observer failure cleanup')
     expect(observerCleanup).toBeGreaterThan(acceptance)
     expect(finalize).toBeGreaterThan(observerCleanup)
+    const assertAcceptancePair = (candidates: typeof steps): void => {
+      deepStrictEqual(candidates.filter(step => step.run?.includes('fixtures/copilot-release-smoke.ts')),
+        [steps[acceptance], steps[observerCleanup]])
+    }
+    assertAcceptancePair(steps)
+    expect(() => assertAcceptancePair([...steps, steps[acceptance]!])).toThrow()
+    expect(() => assertAcceptancePair(steps.filter((_, index) => index !== acceptance))).toThrow()
+    expect(() => assertAcceptancePair(steps.filter((_, index) => index !== observerCleanup))).toThrow()
     expect(steps[observerCleanup]?.run).toBe([
       'pnpm exec tsx apps/desktop/tests/fixtures/copilot-release-smoke.ts --observer-cleanup-canary',
       '--application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe',
