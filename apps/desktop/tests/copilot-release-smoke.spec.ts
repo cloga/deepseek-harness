@@ -4,12 +4,14 @@ import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PackagedCopilotProfileInspection } from './fixtures/copilot-release-smoke.ts'
+import type { PositiveCopilotUsageEvidence } from './fixtures/copilot-usage-positive-smoke.ts'
 
 const effects = vi.hoisted(() => ({
   parseArgs: vi.fn(() => { throw new Error('Import must not parse CLI arguments') }),
   launch: vi.fn(), runtimeRoot: vi.fn(), runtimeBytes: vi.fn(), verifyRuntime: vi.fn(),
   exec: vi.fn(), menu: vi.fn(), settings: vi.fn(), usage: vi.fn(), capability: vi.fn(),
-  environment: vi.fn(), graph: vi.fn(), inventory: vi.fn(), captureUsage: vi.fn(), positiveUsage: vi.fn(),
+  environment: vi.fn(), graph: vi.fn(), inventory: vi.fn(), captureUsage: vi.fn(),
+  positiveUsage: vi.fn<(page: unknown, provider: string) => Promise<PositiveCopilotUsageEvidence>>(),
   fault: undefined as ((operation: string, path: unknown) => void) | undefined,
   removed: [] as string[], allocated: [] as string[], descriptors: new Map<number, string>(),
 }))

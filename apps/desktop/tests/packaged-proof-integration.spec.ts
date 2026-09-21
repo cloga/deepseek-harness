@@ -12,11 +12,13 @@ import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, parseDesktopPluginProvision
 import { removeOwnedDirectory } from '../src/owned-directory.ts'
 import { runPackagedCopilotAcceptance } from './fixtures/copilot-release-smoke.ts'
 import { runPackagedCopilotObserverCanary } from './fixtures/copilot-observer-smoke.ts'
+import type { PositiveCopilotUsageEvidence } from './fixtures/copilot-usage-positive-smoke.ts'
 
 const boundary = vi.hoisted(() => ({
   pin: '', temporaryBase: '', launch: vi.fn(), exec: vi.fn(), runtimeRoot: vi.fn(), runtimeBytes: vi.fn(), environment: vi.fn(),
   menu: vi.fn(), settings: vi.fn(), usage: vi.fn(), capability: vi.fn(),
-  captureUsage: vi.fn(), positiveUsage: vi.fn(), allocated: [] as string[],
+  captureUsage: vi.fn(), positiveUsage: vi.fn<(page: unknown, provider: string) => Promise<PositiveCopilotUsageEvidence>>(),
+  allocated: [] as string[],
 }))
 vi.mock('node:fs', async (original) => {
   const fs = await original<typeof import('node:fs')>()
