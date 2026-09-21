@@ -36,6 +36,8 @@ Target packages declaration-merge their snapshot and Location data maps, then re
 <a id="shell-and-standard-props"></a>
 ## Shell and standard props
 
+The alpha2 input card retains its shared dock and ContextMeter below the card. The public `conversation.composer.dock` entries remain eligible only for the ordinary composer with input and Session identity; the dock wrapper also hosts ContextMeter independently. The centered row and intrinsic native statistics group can wrap, with spacing owned only by InputBar. A genuinely empty dock, including its sole empty layout-neutral Slot outlet, consumes no space; text, other entries, ContextMeter and crash markers are not treated as empty. This retains alpha2 queue, focus and writer-error behavior rather than restoring the earlier alpha1 toolbar layout.
+
 The shared image slot props keep display choices separate from durable references: `thumbnail` requests a contained attachment-list thumbnail, while `compact` requests a cropped gallery tile. An optional per-image `label` supplies the accessible display name; loading and cache identity still use the original attachment reference. [ui-attachment](../ui-attachment/README.md) owns rendering and the lightbox.
 
 The context-occupancy button shows a ring and percentage below the input card, after the Session statistics. Clicking it opens the token breakdown in a panel kept inside the viewport, including when no statistics are shown; the button stays hidden until context usage and capacity are available.

@@ -3,17 +3,12 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { Locator } from 'playwright'
 import { inspectPackagedCopilotSettings } from './fixtures/copilot-settings-smoke.ts'
 
-function fixture(): { root: HTMLElement; settings: Locator } {
+function fixture(beforeWait?: (selector: string) => Promise<void>): { root: HTMLElement; settings: Locator } {
   const root = document.createElement('div')
   root.innerHTML = `
-    <section data-dsh-dual-model-card aria-busy="false">
-      <input data-dsh-dual-model-enabled type="checkbox">
-      <button data-dsh-dual-model-save>Save</button>
-      <p data-dsh-dual-model-workspace>No workspace selected</p>
-      <button data-dsh-dual-model-create disabled>Create</button>
-      <select data-dsh-dual-model-planner><option value="">Choose</option></select>
-      <select data-dsh-dual-model-executor><option value="">Choose</option></select>
-      <p role="status"></p>
+    <section data-dsh-github-copilot-compact-account>
+      <span role="status">Signed out</span>
+      <button>Sign in with GitHub</button>
     </section>
     <section data-dsh-web-search-routing>
       <label><span>Search provider</span>
@@ -31,28 +26,33 @@ function fixture(): { root: HTMLElement; settings: Locator } {
       <p role="status"></p>
     </section>`
   document.body.append(root)
-  const locator = (elements: Element[]): Locator => ({
-    locator: (selector: string) => locator(elements.flatMap(element => [...element.querySelectorAll(selector)])),
-    waitFor: async () => { if (elements.length !== 1) throw new Error('Expected one ready settings control') },
-    getAttribute: async (name: string) => elements[0]!.getAttribute(name),
-    allTextContents: async () => elements.map(element => element.textContent ?? ''),
-    isChecked: async () => (elements[0] as HTMLInputElement).checked,
-    isEnabled: async () => !(elements[0] as HTMLInputElement).disabled,
-    inputValue: async () => (elements[0] as HTMLSelectElement).value,
-    evaluateAll: async (read: (nodes: Element[]) => unknown) => read(elements),
+  // Resolve each read again so a deferred readiness wait observes later DOM updates.
+  const locator = (select: () => Element[], selector: string): Locator => ({
+    locator: (child: string) => locator(() => select().flatMap(element => [...element.querySelectorAll(child)]), child),
+    filter: ({ hasText }: { hasText: RegExp }) => locator(() => select().filter(element => hasText.test(element.textContent ?? '')), selector),
+    waitFor: async () => {
+      await beforeWait?.(selector)
+      const elements = select()
+      if (elements.length !== 1 || elements[0]!.hasAttribute('hidden')) throw new Error('Expected one ready settings control')
+    },
+    count: async () => select().length,
+    allTextContents: async () => select().map(element => element.textContent ?? ''),
+    inputValue: async () => (select()[0] as HTMLSelectElement).value,
+    evaluateAll: async (read: (nodes: Element[]) => unknown) => read(select()),
   }) as unknown as Locator
-  return { root, settings: locator([root]) }
+  return { root, settings: locator(() => [root], '') }
 }
 
 afterEach(() => { document.body.replaceChildren() })
 
 describe('read-only packaged Copilot settings acceptance', () => {
-  it('accepts loaded signed-out views without mutating controls or assuming provider usability', async () => {
+  it('records schema v3 retirement after retained views load without mutating controls or assuming provider usability', async () => {
     const { root, settings } = fixture()
     const before = root.innerHTML
     await expect(inspectPackagedCopilotSettings(settings)).resolves.toEqual({
-      modelRolesViewLoaded: true,
-      currentWorkspaceReadOnly: true,
+      schemaVersion: 3,
+      accountViewLoaded: true,
+      retiredModelRolesAbsent: true,
       searchProviderCatalogLoaded: true,
       providerOnlySearchRouting: true,
       fallbackProviderLabel: true,
@@ -74,41 +74,65 @@ describe('read-only packaged Copilot settings acceptance', () => {
       .toEqual(['another-provider', 'deepseek-official', 'github-copilot-hosted'])
   })
 
-  it.each(['missing', 'empty', 'select', 'editable', 'editable-empty'] as const)('rejects a %s current-workspace display', async (damage) => {
+  it.each([
+    '<section data-dsh-dual-model-card></section>',
+    '<section data-dsh-dual-model-card hidden></section>',
+    '<select data-dsh-dual-model-planner></select>',
+    '<select data-dsh-dual-model-executor></select>',
+    '<button data-dsh-dual-model-create>Create</button>',
+    '<button>Copilot · Model roles</button>',
+    '<h3>Model roles</h3>',
+  ])('rejects a stale role surface: %s', async (html) => {
     const { root, settings } = fixture()
-    const workspace = root.querySelector('[data-dsh-dual-model-workspace]')!
-    if (damage === 'missing') workspace.remove()
-    else if (damage === 'empty') workspace.textContent = ' '
-    else if (damage === 'editable' || damage === 'editable-empty') workspace.setAttribute('contenteditable', damage === 'editable' ? 'true' : '')
-    else workspace.outerHTML = '<select data-dsh-dual-model-workspace><option>Workspace</option></select>'
-    await expect(inspectPackagedCopilotSettings(settings)).rejects.toThrow()
+    root.insertAdjacentHTML('beforeend', html)
+    await expect(inspectPackagedCopilotSettings(settings)).rejects.toThrow('Retired Model roles')
+  })
+
+  it.each(['account', 'search'] as const)('does not establish absence before %s readiness', async (surface) => {
+    const selector = surface === 'account' ? '[role="status"]' : '[data-dsh-web-search-mode]:enabled'
+    let release!: () => void
+    let reached!: () => void
+    const ready = new Promise<void>((resolve) => { release = resolve })
+    const waiting = new Promise<void>((resolve) => { reached = resolve })
+    const { root, settings } = fixture(async (current) => {
+      if (current === selector) { reached(); await ready }
+    })
+    const status = root.querySelector('[data-dsh-github-copilot-compact-account] [role="status"]')!
+    const primary = root.querySelector<HTMLSelectElement>('[data-dsh-web-search-mode]')!
+    if (surface === 'account') status.textContent = 'Checking status…'
+    else primary.disabled = true
+    const inspection = inspectPackagedCopilotSettings(settings)
+    await waiting
+    root.insertAdjacentHTML('beforeend', '<section data-dsh-dual-model-card></section>')
+    status.textContent = 'Signed out'
+    primary.disabled = false
+    release()
+    await expect(inspection).rejects.toThrow('Retired Model roles')
   })
 
   it.each([
-    'missing-view', 'view-error', 'busy', 'enabled', 'save-disabled', 'create', 'models',
-    'catalog-disabled', 'catalog-error', 'catalog-mismatch', 'duplicate', 'duplicate-fallback',
+    'empty-dialog', 'missing-account', 'account-loading', 'account-error', 'sign-in-disabled', 'signed-in',
+    'missing-search', 'catalog-disabled', 'catalog-error', 'catalog-mismatch', 'duplicate', 'duplicate-fallback',
     'copilot-unavailable', 'legacy-fixed', 'non-auto-primary',
     'legacy-primary-label', 'legacy-fallback-label', 'model-input', 'model-prerequisite',
   ] as const)(
     'rejects %s instead of reporting successful Remote reads', async (damage) => {
       const { root, settings } = fixture()
-      const input = root.querySelector<HTMLInputElement>('[data-dsh-dual-model-enabled]')!
+      const account = root.querySelector('[data-dsh-github-copilot-compact-account]')!
       const primary = root.querySelector<HTMLSelectElement>('[data-dsh-web-search-mode]')!
       const fallback = root.querySelector<HTMLSelectElement>('[data-dsh-web-search-provider]')!
-      if (damage === 'missing-view') {
-        input.disabled = true
-      } else if (damage === 'view-error') {
-        root.querySelector('[data-dsh-dual-model-card] [role="status"]')!.textContent = 'Could not load model roles'
-      } else if (damage === 'busy') {
-        root.querySelector('[data-dsh-dual-model-card]')!.setAttribute('aria-busy', 'true')
-      } else if (damage === 'enabled') {
-        input.checked = true
-      } else if (damage === 'save-disabled') {
-        root.querySelector<HTMLButtonElement>('[data-dsh-dual-model-save]')!.disabled = true
-      } else if (damage === 'create') {
-        root.querySelector<HTMLButtonElement>('[data-dsh-dual-model-create]')!.disabled = false
-      } else if (damage === 'models') {
-        root.querySelector('[data-dsh-dual-model-planner]')!.insertAdjacentHTML('beforeend', '<option value="model">Model</option>')
+      if (damage === 'empty-dialog') {
+        root.replaceChildren()
+      } else if (damage === 'missing-account') {
+        account.remove()
+      } else if (damage === 'account-loading' || damage === 'signed-in') {
+        account.querySelector('[role="status"]')!.textContent = damage === 'account-loading' ? 'Checking status…' : 'Signed in'
+      } else if (damage === 'account-error') {
+        account.insertAdjacentHTML('beforeend', '<p data-dsh-github-copilot-account-error>Could not load status</p>')
+      } else if (damage === 'sign-in-disabled') {
+        account.querySelector('button')!.disabled = true
+      } else if (damage === 'missing-search') {
+        root.querySelector('[data-dsh-web-search-routing]')!.remove()
       } else if (damage === 'catalog-disabled') {
         fallback.disabled = true
       } else if (damage === 'catalog-error') {

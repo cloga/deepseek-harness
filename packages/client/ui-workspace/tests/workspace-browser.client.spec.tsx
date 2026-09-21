@@ -125,6 +125,28 @@ function rerender(b: ReturnType<typeof mount>, overrides: Partial<WorkspaceBrows
 }
 
 describe('WorkspaceBrowser', () => {
+  it.each(['synthetic-composer-workspace', 'DESKTOP_INLINE_STATS_SYNTHETIC'])('distinguishes a persisted %s title from its workspace and provisional row', (title) => {
+    const name = 'synthetic-composer-workspace'
+    const b = mount({
+      useSessions: hook(sessionState([
+        summary('blank', 20, { blank: true, displayTitle: name }),
+        summary('persisted', 10, { displayTitle: title }),
+      ], { current: sid('blank') })),
+      useWorkspaces: hook(workspaceState([workspace(name, ['blank', 'persisted'], name)])),
+    })
+    const group = b.view.container.querySelector<HTMLElement>('[role="treeitem"][aria-expanded]')!
+    expect(group.getAttribute('aria-selected')).toBeNull()
+    if (group.getAttribute('aria-expanded') === 'false') fireEvent.click(group)
+    const titles = /^(?:DESKTOP_INLINE_STATS_SYNTHETIC|synthetic-composer-workspace)$/u
+    const candidates = [...b.view.container.querySelectorAll<HTMLElement>('[role="treeitem"][aria-selected]')]
+      .filter(row => [...row.querySelectorAll('span')].some(span => titles.test(span.textContent ?? '')))
+    expect(candidates).toHaveLength(1)
+    expect(candidates[0]!.getAttribute('aria-selected')).toBe('false')
+    fireEvent.click(candidates[0]!)
+    expect(b.props.open).toHaveBeenCalledExactlyOnceWith(sid('persisted'))
+    expect(b.props.startSession).not.toHaveBeenCalled()
+  })
+
   it.each(['workspace', 'flat', 'ungrouped'] as const)('keeps %s recency independent of arrival order and saved manual positions', (mode) => {
     localStorage.clear()
     const preferences = createWorkspaceViewStore().create()

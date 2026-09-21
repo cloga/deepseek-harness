@@ -7,12 +7,13 @@ import { chdir, cwd } from 'node:process'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ExpectedCoreSource, PackagedCopilotProfileInspection } from './fixtures/copilot-release-smoke.ts'
 import type { PositiveCopilotUsageEvidence } from './fixtures/copilot-usage-positive-smoke.ts'
+import { currentCopilotSettings, nativeComposerInspection, nativeComposerSeed } from './native-composer-fixture.ts'
 
 const effects = vi.hoisted(() => ({
   parseArgs: vi.fn(() => { throw new Error('Import must not parse CLI arguments') }),
   launch: vi.fn(), runtimeRoot: vi.fn(), runtimeBytes: vi.fn(), verifyRuntime: vi.fn(),
   exec: vi.fn(), menu: vi.fn(), settings: vi.fn(), usage: vi.fn(), capability: vi.fn(),
-  environment: vi.fn(), graph: vi.fn(), inventory: vi.fn(),
+  environment: vi.fn(), graph: vi.fn(), inventory: vi.fn(), native: vi.fn(), seed: vi.fn(),
   captureUsage: vi.fn<() => Promise<() => Promise<void>>>(), restoreUsage: vi.fn<() => Promise<void>>(),
   positiveUsage: vi.fn<(page: unknown, provider: string) => Promise<PositiveCopilotUsageEvidence>>(),
   clientPolicy: vi.fn<(source: unknown, clientSha256: string) => void>(),
@@ -65,7 +66,12 @@ vi.mock('../src/plugin-provisioning.ts', () => ({ readDesktopPluginProvisioningP
 vi.mock('../src/plugin-receipts.ts', () => ({ assertDesktopProvisioningInventory: effects.inventory }))
 vi.mock('../scripts/smoke-environment.ts', () => ({ desktopSmokeEnvironment: effects.environment }))
 vi.mock('./fixtures/desktop-version-menu-smoke.ts', () => ({ inspectDesktopVersionMenu: effects.menu }))
-vi.mock('./fixtures/copilot-settings-smoke.ts', () => ({ inspectPackagedCopilotSettings: effects.settings }))
+vi.mock('./fixtures/copilot-settings-smoke.ts', async original => ({
+  ...await original<typeof import('./fixtures/copilot-settings-smoke.ts')>(), inspectPackagedCopilotSettings: effects.settings,
+}))
+vi.mock('./fixtures/native-composer-geometry.ts', async original => ({
+  ...await original<typeof import('./fixtures/native-composer-geometry.ts')>(), inspectNativeComposerGeometry: effects.native,
+}))
 vi.mock('./fixtures/copilot-usage-positive-smoke.ts', () => ({
   capturePackagedUsageModules: effects.captureUsage, inspectPositiveCopilotUsage: effects.positiveUsage,
 }))
@@ -145,7 +151,9 @@ function ownerFixture() {
   effects.runtimeBytes.mockReturnValue(runtimeBytes)
   effects.verifyRuntime.mockResolvedValue(undefined)
   effects.menu.mockResolvedValue({ nativePopupOpened: false, nativeModalOpened: false })
-  effects.settings.mockResolvedValue({ modelRolesViewLoaded: true })
+  effects.settings.mockResolvedValue(currentCopilotSettings())
+  effects.native.mockResolvedValue(nativeComposerInspection())
+  effects.seed.mockReturnValue(nativeComposerSeed())
   effects.capability.mockReturnValue({ id: 'account-quota-composer-usage' })
   effects.usage.mockResolvedValue({ usageSurfaceAbsent: true })
   effects.inventory.mockReturnValue(undefined)
@@ -177,7 +185,7 @@ function ownerFixture() {
   }
   const page = {
     ...locator, screenshot: vi.fn(async (_options?: { path?: string; timeout?: number }) => {}),
-    setDefaultTimeout: vi.fn(), waitForFunction: vi.fn(async () => {}),
+    setDefaultTimeout: vi.fn(), waitForFunction: vi.fn(async () => {}), on: vi.fn(), off: vi.fn(),
     url: () => 'dsh-app://app/', isClosed: () => false,
   }
   effects.environment.mockImplementation((value: string) => {
@@ -211,6 +219,10 @@ function ownerFixture() {
     }
     const descriptor = options.stdio?.[1]
     expect(typeof descriptor).toBe('number')
+    if (args[0]?.endsWith('seed-native-composer.mjs')) {
+      writeFileSync(descriptor as number, JSON.stringify(effects.seed()))
+      return
+    }
     writeFileSync(descriptor as number, JSON.stringify({
       valid: true, runtimeSha256: hash(runtimeBytes), nodePath: null, nodeOptionsPresent: false,
       nodeVersion: 'unit-node', electronVersion: 'unit-electron', runAsNode: '1', electronNoAsarPresent: false,
@@ -220,7 +232,7 @@ function ownerFixture() {
   // Only acceptance-owned allocations belong to each lifecycle assertion.
   effects.allocated = []
   return {
-    options: { application, output }, close, page, reviewedSource, get launches() { return launches },
+    options: { application, output }, close, page, reviewedSource, get launches() { return launches }, get profile() { return profile },
     get clientPath() { return join(profile, 'node_modules', 'dsh-github-copilot', 'lib', 'client.js') },
   }
 }
@@ -259,7 +271,7 @@ describe('Core fact snapshots through the actual acceptance owner', () => {
       if (committed) throw new Error('Filesystem operation after acceptance publication')
       if (operation === 'publish' && basename(String(path)) === 'acceptance.json') {
         expect(effects.allocated.every(directory => !existsSync(directory))).toBe(true)
-        expect(fixture.close).toHaveBeenCalledTimes(2)
+        expect(fixture.close).toHaveBeenCalledTimes(3)
         committed = true
       }
     }
@@ -552,6 +564,75 @@ it.each([
   expect(packagedCopilotStartupReady()).toBe(ready)
 })
 
+describe('third owned native-composer phase', () => {
+  it('closes all phases and binds original native/seed/settings bytes before the observer', async () => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    await runPackagedCopilotAcceptance({ ...fixture.options, inspectProfile() {
+      expect(fixture.launches).toBe(3)
+      expect(fixture.close).toHaveBeenCalledTimes(3)
+      const native = receipt(fixture.options.output, 'native-composer-geometry.json')
+      const functional = receipt(fixture.options.output, 'functional-results.json')
+      expect(native.schemaVersion).toBe(2)
+      expect(native.seedSha256).toBe(hash(readFileSync(join(fixture.options.output, 'native-composer-seed.json'))))
+      expect(native.installedClientSha256).toBe(hash(inertClient))
+      expect(functional).toMatchObject({ schemaVersion: 3, nativeComposer: native,
+        settingsAcceptance: [currentCopilotSettings(), currentCopilotSettings()] })
+      expect(existsSync(join(fixture.options.output, 'acceptance.json'))).toBe(false)
+    } })
+    expect(effects.native).toHaveBeenCalledOnce()
+    const native = receipt(fixture.options.output, 'native-composer-geometry.json')
+    expect(receipt(fixture.options.output, 'acceptance.json').nativeComposer).toEqual(native)
+  })
+
+  it.each(['seed-exec', 'seed-close', 'third-launch', 'native-inspection', 'third-close', 'native-write'] as const)(
+    'retains the exact primary and withholds functional/observer/normal evidence on %s failure', async (stage) => {
+      const fixture = ownerFixture()
+      const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+      const primary = new Error(stage)
+      const observer = vi.fn()
+      if (stage === 'seed-exec') effects.seed.mockImplementation(() => { throw primary })
+      else if (stage === 'third-launch') {
+        const launch = effects.launch.getMockImplementation()!
+        effects.launch.mockImplementationOnce(launch).mockImplementationOnce(launch).mockRejectedValueOnce(primary)
+      } else if (stage === 'native-inspection') effects.native.mockRejectedValueOnce(primary)
+      else if (stage === 'third-close') fixture.close.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined).mockRejectedValueOnce(primary)
+      else effects.fault = (operation, path) => {
+        if (stage === 'seed-close' && operation === 'closed' && basename(String(path)) === 'native-composer-seed.json') throw primary
+        if (stage === 'native-write' && operation === 'publish' && basename(String(path)) === 'native-composer-geometry.json') throw primary
+      }
+      await expect(runPackagedCopilotAcceptance({ ...fixture.options, inspectProfile: observer })).rejects.toBe(primary)
+      expect(observer).not.toHaveBeenCalled()
+      for (const file of ['functional-results.json', 'acceptance.json', 'packaged-suite.json']) {
+        expect(existsSync(join(fixture.options.output, file))).toBe(false)
+      }
+      expect(effects.allocated.every(path => !existsSync(path))).toBe(true)
+    },
+  )
+
+  it.each(['seed', 'client', 'receipt', 'closed-client', 'closed-receipt', 'schema2-settings', 'retired-roles'] as const)('rejects %s mismatch without completing native proof', async (damage) => {
+    const fixture = ownerFixture()
+    const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
+    if (damage === 'seed') effects.seed.mockReturnValue({ ...nativeComposerSeed(), seederModelCalls: 1 })
+    else if (damage === 'schema2-settings') effects.settings.mockResolvedValue({ modelRolesViewLoaded: true })
+    else if (damage === 'retired-roles') effects.settings.mockResolvedValue({ ...currentCopilotSettings(), retiredModelRolesAbsent: false })
+    else if (damage === 'closed-client' || damage === 'closed-receipt') {
+      fixture.close.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined).mockImplementationOnce(async () => {
+        writeFileSync(damage === 'closed-client' ? fixture.clientPath : join(fixture.profile, 'desktop-plugin-receipts.json'), 'changed during close')
+      })
+    } else effects.native.mockImplementation(async () => {
+      if (damage === 'client') writeFileSync(fixture.clientPath, 'changed native Client')
+      else writeFileSync(join(fixture.profile, 'desktop-plugin-receipts.json'), 'changed receipts')
+      return nativeComposerInspection()
+    })
+    const observer = vi.fn()
+    await expect(runPackagedCopilotAcceptance({ ...fixture.options, inspectProfile: observer })).rejects.toThrow()
+    expect(observer).not.toHaveBeenCalled()
+    expect(existsSync(join(fixture.options.output, 'functional-results.json'))).toBe(false)
+    expect(existsSync(join(fixture.options.output, 'acceptance.json'))).toBe(false)
+  })
+})
+
 describe('actual acceptance owner lifecycle with mocked business boundaries', () => {
   it('keeps the synthetic Client policy bound to the original source tuple as well as real inert-byte hashing', () => {
     const fixture = ownerFixture()
@@ -560,7 +641,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
       .toThrow('original reviewed source tuple')
   })
 
-  it('publishes both restart-only positive routes and genuine Client byte identity before schema-2 functional evidence', async () => {
+  it('publishes both restart-only positive routes and genuine Client byte identity before schema-3 functional evidence', async () => {
     const fixture = ownerFixture()
     const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
     effects.captureUsage.mockImplementation(async () => {
@@ -576,7 +657,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
       expect(positive.installedClientSha256).toBe(hash(inertClient))
       expect(positive.cases).toEqual(['github-copilot', 'github-copilot-preview'].map(positiveCase))
       const functional = receipt(fixture.options.output, 'functional-results.json')
-      expect(functional).toMatchObject({ schemaVersion: 2, positiveCopilotUsage: positive.cases })
+      expect(functional).toMatchObject({ schemaVersion: 3, positiveCopilotUsage: positive.cases })
       const timeline: unknown = functional.timeline
       expect(Array.isArray(timeline)).toBe(true)
       const events = (timeline as unknown[]).map((item) => {
@@ -588,7 +669,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     } })
     expect(effects.captureUsage).toHaveBeenCalledTimes(1)
     expect(effects.positiveUsage.mock.calls.map(call => call[1])).toEqual(['github-copilot', 'github-copilot-preview'])
-    expect(receipt(fixture.options.output, 'acceptance.json')).toMatchObject({ schemaVersion: 2, cleanupVerified: true })
+    expect(receipt(fixture.options.output, 'acceptance.json')).toMatchObject({ schemaVersion: 3, cleanupVerified: true })
   })
 
   it.each(['capture', 'first-route', 'second-route', 'capture-restore', 'page-restore', 'screenshot', 'client-read', 'positive-write'] as const)(
@@ -648,12 +729,12 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     expect(existsSync(join(fixture.options.output, 'functional-results.json'))).toBe(false)
   })
 
-  it('publishes ordinary acceptance only after both rounds, observer and every owned cleanup', async () => {
+  it('publishes ordinary acceptance only after all three owned phases, observer and every owned cleanup', async () => {
     const fixture = ownerFixture()
     const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
     const observer = vi.fn(async (paths: PackagedCopilotProfileInspection) => {
       expect(Object.isFrozen(paths)).toBe(true)
-      expect(fixture.launches).toBe(2)
+      expect(fixture.launches).toBe(3)
       expect(receipt(fixture.options.output, 'functional-results.json')).toMatchObject({
         functionalAssertionsCompleted: true, normalAcceptanceCompleted: false, cleanupVerified: false,
       })
@@ -662,7 +743,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     effects.fault = (operation, path) => {
       if (operation === 'publish' && basename(String(path)) === 'acceptance.json') {
         expect(effects.allocated.every(directory => !existsSync(directory))).toBe(true)
-        expect(fixture.close).toHaveBeenCalledTimes(2)
+        expect(fixture.close).toHaveBeenCalledTimes(3)
       }
     }
     await runPackagedCopilotAcceptance({ ...fixture.options, inspectProfile: observer })
@@ -722,7 +803,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
     const { runPackagedCopilotObserverCanary } = await import('./fixtures/copilot-observer-smoke.ts')
     await runPackagedCopilotObserverCanary(fixture.options, runPackagedCopilotAcceptance)
-    expect(fixture.launches).toBe(2)
+    expect(fixture.launches).toBe(3)
     expect(effects.allocated).toHaveLength(2)
     expect(receipt(fixture.options.output, 'packaged-suite.json')).toMatchObject({
       functionalAssertionsCompleted: true, errorPropagationVerified: true, cleanupVerified: true, normalAcceptanceCompleted: false,
@@ -892,7 +973,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     expect(existsSync(join(fixture.options.output, 'functional-results.json'))).toBe(false)
   })
 
-  it.each(['positive-usage.json', 'functional-results.json', 'failure.json', 'acceptance.json', 'observer-cleanup.json', 'packaged-suite.json'])('refuses stale %s before acquiring resources', async (file) => {
+  it.each(['positive-usage.json', 'native-composer-seed.json', 'native-composer-geometry.json', 'functional-results.json', 'failure.json', 'acceptance.json', 'observer-cleanup.json', 'packaged-suite.json'])('refuses stale %s before acquiring resources', async (file) => {
     const fixture = ownerFixture()
     const { runPackagedCopilotAcceptance } = await import('./fixtures/copilot-release-smoke.ts')
     mkdirSync(fixture.options.output)

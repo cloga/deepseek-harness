@@ -10,6 +10,7 @@ import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, parseDesktopPluginProvision
 import { buildDesktopProvisioningState } from '../src/plugin-provisioning.ts'
 import { assertPackagedQualificationPaths, verifyForkQualification, runForkQualificationCli } from '../scripts/verify-fork-qualification.ts'
 import type { PositiveCopilotUsageEvidence } from './fixtures/copilot-usage-positive-smoke.ts'
+import { currentCopilotSettings, nativeComposerInspection, nativeComposerSeed } from './native-composer-fixture.ts'
 
 const boundary = vi.hoisted(() => ({
   syntheticPin: '', source: 'a'.repeat(40), tree: 'b'.repeat(40), gitCalls: [] as string[],
@@ -65,14 +66,13 @@ const json = (path: string): Json => object(JSON.parse(readFileSync(path, 'utf8'
 const save = (path: string, value: unknown): void => { writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`) }
 const rawHash = (path: string) => sha(readFileSync(path))
 const truths = (names: string[], value = true): Record<string, boolean> => Object.fromEntries(names.map(name => [name, value] as const))
-const packagedTrue = ['isolatedHome', 'onboardingNoticeDismissed', 'actualGraphVerified', 'ancestorSdkJunction', 'accountEntryVisible', 'manageCompatibilityDisclosureAbsent', 'modelRolesViewLoaded', 'currentWorkspaceReadOnly', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
+const packagedTrue = ['isolatedHome', 'onboardingNoticeDismissed', 'actualGraphVerified', 'ancestorSdkJunction', 'accountEntryVisible', 'manageCompatibilityDisclosureAbsent', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
 const packagedFalse = ['ancestorSdkLoaded', 'liveAccountQuota', 'realOAuth', 'verificationNavigationExercised', 'manualVerificationAddressObserved', 'realModelRound', 'realSearch', 'installerUpgradeVerified']
-const settingsTrue = ['modelRolesViewLoaded', 'currentWorkspaceReadOnly', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
 const upgradeTrue = ['succeeded', 'installerUpgradeVerified', 'runningApplicationRefusalVerified', 'sameCustomPathVerified', 'actualInstalledHostAndClientVerified', 'candidateRestartVerified', 'retainedHomeFileVerified', 'separateSameVersionPackagedPluginAcceptanceVerified']
 const upgradeFalse = ['pluginUserChoicesVerified', 'draftAttachmentRefusalVerified', 'promotionFailureRollbackVerified', 'managedHandoffVerified', 'postSuccessDowngradeVerified']
 const packageTrue = ['succeeded', 'preparedGraphVerified', 'declinePreservedGraphVerified', 'discardPreservedGraphVerified', 'liveDraftAttachmentVetoVerified', 'attachmentOnlyVetoVerified', 'draftOnlyVetoVerified', 'consentGraphPromotionVerified', 'newHostGenerationVerified', 'installedDisabledAfterConsentVerified', 'enabledFixtureRunningAfterSeparateRestartVerified', 'copilotDisabledChoiceAcrossRestartVerified', 'copilotRemovalChoiceAcrossRestartVerified', 'zeroModelRequestsVerified', 'cleanupVerified']
 const packageFalse = ['newlyInstalledTargetHealthyAtFirstConsent', 'verifiedGithubReleaseReceiptForFixture', 'choicesAcrossInstallerUpgradeVerified', 'draftPersistedAcrossQuitVerified', 'promotionFailureRollbackVerified', 'managedHandoffVerified']
-const settings = { ...truths(settingsTrue), registeredSearchProviders: ['github-copilot-hosted'], realSearch: false }
+const settings = currentCopilotSettings()
 const usageCapability = { id: 'account-quota-composer-usage', required: true, evidenceScope: 'synthetic-quota-and-public-remote-ui-contracts-not-live-account-access', signedOutNetworkRegressionDeclared: true, lifecycleRegressionDeclared: true }
 const signedOut = { usageTriggerCount: 0, accountUsageTextCount: 0, usageSurfaceAbsent: true, hostQuotaRequestInstrumentation: 'not-available-in-packaged-smoke' }
 
@@ -187,6 +187,7 @@ function fixture(temporaryRoot = tmpdir()) {
     save(join(packagedEvidence, `${phase}-version-menu.json`), menu)
     save(join(packagedEvidence, `${phase}-usage-readonly.json`), { capability: usageCapability, signedOut })
     save(join(packagedEvidence, `${phase}-settings-readonly.json`), settings)
+    save(join(ordinaryEvidence, `${phase}-settings-readonly.json`), settings)
     save(join(packagedEvidence, `${phase}-packaged-graph.json`), { valid: true, runtimeSha256, executable: 'C:\\synthetic\\cloga-deepseek-harness.exe', nodeVersion: '24.18.1', electronVersion: '44.0.0', runAsNode: '1', nodePath: null, nodeOptionsPresent: false, electronNoAsarPresent: false,
       cwd: 'C:\\synthetic-home\\profiles\\desktop', profile: 'C:\\synthetic-home\\profiles\\desktop', runtimeRoot: 'C:\\synthetic\\resources\\app.asar\\dsh', resolutionMode: 'runtime' })
     save(join(packagedEvidence, `${phase}-desktop-plugin-receipts.json`), { schemaVersion: 1, receipts: { [copilot.packageName]: pluginReceipt }, owners: { [copilot.packageName]: 'release' } })
@@ -199,19 +200,34 @@ function fixture(temporaryRoot = tmpdir()) {
     ['launch', 'version-menu', 'application', 'account', 'usage-readonly', 'settings-readonly', 'packaged-graph', 'closed']
       .map(event => `${phase}:${event}`))]
   timelineEvents.splice(timelineEvents.indexOf('restart:closed'), 0, 'restart:positive-usage')
-  save(join(packagedEvidence, 'functional-results.json'), { schemaVersion: 2, scope: 'packaged-functional-observations', ...identity, functionalAssertionsCompleted: true, normalAcceptanceCompleted: false, cleanupVerified: false,
+  timelineEvents.push('native-composer:seeded', 'native-composer:launch', 'native-composer:application',
+    'native-composer:observed', 'native-composer:closed')
+  const nativeProof = (root: string, evidenceId: string) => {
+    save(join(root, 'native-composer-seed.json'), nativeComposerSeed())
+    const proof = { ...identity, evidenceId, schemaVersion: 2, scope: 'actual-packaged-native-composer-and-released-client',
+      seedSha256: rawHash(join(root, 'native-composer-seed.json')), sessionHistory: 'synthetic-persisted-in-isolated-home',
+      quota: 'signed-out-host-response-no-credentials', pluginSource: copilot, installedClientSha256: rawHash(clientPath),
+      ...nativeComposerInspection(), rendererErrors: [], realModelRound: false, realOAuth: false }
+    save(join(root, 'native-composer-geometry.json'), proof)
+    return proof
+  }
+  const packagedNative = nativeProof(packagedEvidence, token)
+  const ordinaryId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+  const ordinaryNative = nativeProof(ordinaryEvidence, ordinaryId)
+  save(join(packagedEvidence, 'functional-results.json'), { schemaVersion: 3, scope: 'packaged-functional-observations', ...identity, functionalAssertionsCompleted: true, normalAcceptanceCompleted: false, cleanupVerified: false,
     ...truths(packagedTrue), ...truths(packagedFalse, false), desktopVersion: plan.version,
     runtimeVersion: plan.upstreamVersion, versionMenus: menus, plugin: copilot,
     transport: 'official Web-backed Desktop Host with packaged Electron dsh-app origin bridge', restartReceiptSha256: rawHash(join(packagedEvidence, 'initial-desktop-plugin-receipts.json')),
     copilotUsageCapability: usageCapability, signedOutCopilotUsage: [signedOut, signedOut], hostQuotaNoNetworkEvidence: 'immutable-plugin-ci-regression-only',
     positiveCopilotUsage: positiveCases, positiveUsageHostTransport: 'not-provided-to-isolated-fixture',
+    settingsAcceptance: [settings, settings], nativeComposer: packagedNative,
     timeline: timelineEvents.map((event, milliseconds) => ({ event, milliseconds })) })
   save(join(packagedEvidence, 'failure.json'), { schemaVersion: 2, scope: 'packaged-acceptance-failure', ...identity, error: `Error: packaged observer cleanup canary ${token}`, cleanupCompleted: true, cleanupVerified: true, cleanupErrors: [], diagnosticErrors: [] })
   save(join(packagedEvidence, 'observer-cleanup.json'), { schemaVersion: 3, scope: 'unexpected-observer-failure-cleanup', ...identity,
     ...truths(['observerInvokedOnce', 'errorPropagationVerified', 'ordinaryAcceptanceWithheld', 'cleanupVerified', 'ownedHomeRemoved', 'ownedProfileRemoved', 'ownedLegacySdkRemoved']), normalAcceptanceCompleted: false, functionalSha256: '', failureSha256: '' })
   save(join(packagedEvidence, 'packaged-suite.json'), { schemaVersion: 1, scope: 'packaged-functional-with-unexpected-observer-failure', ...identity, functionalAssertionsCompleted: true, errorPropagationVerified: true, cleanupVerified: true, normalAcceptanceCompleted: false, receipts: {} })
   save(join(ordinaryEvidence, 'acceptance.json'), { ...json(join(packagedEvidence, 'functional-results.json')),
-    evidenceId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', scope: 'packaged-acceptance', normalAcceptanceCompleted: true, cleanupVerified: true })
+    evidenceId: ordinaryId, nativeComposer: ordinaryNative, scope: 'packaged-acceptance', normalAcceptanceCompleted: true, cleanupVerified: true })
   const options = { planPath, releaseAssets, ordinaryEvidence, packagedEvidence, upgradeRoot, baselineDirectory, expectedSource: source, runId: '123', runAttempt: '2' }
   const edit = (path: string, mutate: (value: Json) => void) => { const value = json(path); mutate(value); save(path, value) }
   const seal = () => {
@@ -283,7 +299,7 @@ describe('positive usage evidence in both original directories', () => {
       mutate(join(roots()[index]!, 'positive-usage.json'), (value) => { object(array(value.cases)[0]).quotaReads = quotaReads })
       expect(verify).toThrow()
     })
-    it(`requires schema2 and precise optional deferred-event placement in directory ${index}`, () => {
+    it(`requires schema3 and precise optional deferred-event placement in directory ${index}`, () => {
       const file = index === 0 ? join(current.options.ordinaryEvidence, 'acceptance.json') : packaged('functional-results.json')
       mutate(file, (value) => { value.schemaVersion = 1 }); expect(verify).toThrow()
       mutate(file, (value) => { value.schemaVersion = 2 })
@@ -361,6 +377,106 @@ describe('positive usage evidence in both original directories', () => {
   })
 })
 
+describe('strict dual-v2 native composer and current settings input edges', () => {
+  const rootFor = (label: string) => label === 'ordinary' ? current.options.ordinaryEvidence : current.options.packagedEvidence
+  function syncNative(label: string): void {
+    const root = rootFor(label)
+    current.edit(join(root, label === 'ordinary' ? 'acceptance.json' : 'functional-results.json'), (value) => {
+      value.nativeComposer = json(join(root, 'native-composer-geometry.json'))
+    })
+    current.seal()
+  }
+  it('emits explicit summary2 and exactly51 independently hashed original inputs', () => {
+    const summary = verify()
+    expect(summary.schemaVersion).toBe(2)
+    expect(Object.keys(summary.inputs)).toHaveLength(51)
+    for (const label of ['ordinary', 'packaged']) {
+      const root = rootFor(label)
+      expect(summary.inputs[`${label}.nativeComposer`]).toBe(rawHash(join(root, 'native-composer-geometry.json')))
+      expect(summary.inputs[`${label}.nativeComposerSeed`]).toBe(rawHash(join(root, 'native-composer-seed.json')))
+      for (const phase of ['initial', 'restart']) expect(summary.inputs[`${label}.${phase}.settings`]).toBe(rawHash(join(root, `${phase}-settings-readonly.json`)))
+    }
+  })
+  it.each(['ordinary', 'packaged'].flatMap(label => ['native-composer-geometry.json', 'native-composer-seed.json',
+    'initial-settings-readonly.json', 'restart-settings-readonly.json'].map(file => ({ label, file }))))(
+    'refuses missing original $label/$file', ({ label, file }) => {
+      rmSync(join(rootFor(label), file))
+      expect(verify).toThrow()
+    },
+  )
+  it.each(['ordinary', 'packaged'].flatMap(label => [1280, 400].flatMap(width => ['above', 'below'].map(position => ({ label, width, position })))))(
+    'refuses resealed $label native controls $position their dock at $width', ({ label, width, position }) => {
+      current.edit(join(rootFor(label), 'native-composer-geometry.json'), (native) => {
+        const geometry = object(array(native.geometry)[width === 1280 ? 0 : 1])
+        const dock = object(geometry.dock)
+        const y = Number(dock.y) + (position === 'above' ? -100 : Number(dock.height) + 100)
+        for (const name of ['time', 'usage', 'copilot']) object(geometry[name]).y = y
+      })
+      syncNative(label)
+      expect(verify).toThrow('vertically within the dock')
+    },
+  )
+  it.each(['ordinary', 'packaged'].flatMap(label => ['legacy-schema', 'seed-hash', 'Client', 'identity', 'dialog', 'error', 'missing-field']
+    .map(damage => ({ label, damage }))))('refuses resealed $label native $damage', ({ label, damage }) => {
+    current.edit(join(rootFor(label), 'native-composer-geometry.json'), (native) => {
+      if (damage === 'legacy-schema') native.schemaVersion = 1
+      else if (damage === 'seed-hash') native.seedSha256 = '0'.repeat(64)
+      else if (damage === 'Client') native.installedClientSha256 = '0'.repeat(64)
+      else if (damage === 'identity') native.evidenceId = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'
+      else if (damage === 'dialog') object(object(native.nativeDialogs).time).closedOnEscape = false
+      else if (damage === 'error') native.rendererErrors = ['renderer error']
+      else Reflect.deleteProperty(native, 'copilotDialog')
+    })
+    syncNative(label)
+    expect(verify).toThrow()
+  })
+  it.each(['ordinary', 'packaged'])('refuses a semantically false $label seed even with a matching new raw hash', (label) => {
+    const root = rootFor(label)
+    current.edit(join(root, 'native-composer-seed.json'), (seed) => { seed.seederModelCalls = 1 })
+    current.edit(join(root, 'native-composer-geometry.json'), (native) => { native.seedSha256 = rawHash(join(root, 'native-composer-seed.json')) })
+    syncNative(label)
+    expect(verify).toThrow()
+  })
+  it.each(['ordinary', 'packaged'])('rejects schema2 or role-loading settings in $label rather than relabeling them', (label) => {
+    const root = rootFor(label)
+    const legacy = { modelRolesViewLoaded: true, currentWorkspaceReadOnly: true, searchProviderCatalogLoaded: true,
+      providerOnlySearchRouting: true, fallbackProviderLabel: true, registeredSearchProviders: ['github-copilot-hosted'], realSearch: false }
+    for (const phase of ['initial', 'restart']) save(join(root, `${phase}-settings-readonly.json`), legacy)
+    current.edit(join(root, label === 'ordinary' ? 'acceptance.json' : 'functional-results.json'), (value) => { value.settingsAcceptance = [legacy, legacy] })
+    current.seal()
+    expect(verify).toThrow()
+  })
+  it.each(['candidate', 'candidate-restart'])('requires schema3 settings for installed %s but retains legacy baseline separately', (round) => {
+    const path = installed(`${round}.json`)
+    current.edit(path, (value) => { value.actualHostSettingsViews = json(installed('baseline.json')).actualHostSettingsViews })
+    expect(verify).toThrow()
+  })
+  it.each(['ordinary', 'packaged'].flatMap(label => [-1, -0.5].map(milliseconds => ({ label, milliseconds }))))(
+    'rejects negative initial $label timeline timestamp $milliseconds', ({ label, milliseconds }) => {
+      const root = rootFor(label)
+      current.edit(join(root, label === 'ordinary' ? 'acceptance.json' : 'functional-results.json'), (value) => {
+        object(array(value.timeline)[0]).milliseconds = milliseconds
+      })
+      current.seal()
+      expect(verify).toThrow()
+    },
+  )
+  it('accepts zero as the first timestamp of both current timelines', () => {
+    for (const label of ['ordinary', 'packaged']) {
+      const root = rootFor(label)
+      expect(object(array(json(join(root, label === 'ordinary' ? 'acceptance.json' : 'functional-results.json')).timeline)[0]).milliseconds).toBe(0)
+    }
+    expect(verify().schemaVersion).toBe(2)
+  })
+  it('permits independent geometry observations while retaining own-run binding', () => {
+    current.edit(join(current.options.ordinaryEvidence, 'native-composer-geometry.json'), (native) => {
+      for (const value of array(native.geometry)) object(object(value).dock).height = 42
+    })
+    syncNative('ordinary')
+    expect(verify().schemaVersion).toBe(2)
+  })
+})
+
 describe('CI-only fork qualification from retained evidence', () => {
   it('canonicalizes newly owned allocations before constructing evidence paths through a temporary-root alias', () => {
     const parent = join(current.directory, 'allocation-parent')
@@ -403,10 +519,10 @@ describe('CI-only fork qualification from retained evidence', () => {
     rmSync(join(current.options.ordinaryEvidence, 'acceptance.json')); expect(verify).toThrow()
   })
 
-  it('requires functional schema2 rather than accepting a legacy functional receipt', () => {
+  it('requires functional schema3 rather than accepting a legacy functional receipt', () => {
     mutate(packaged('functional-results.json'), (value) => { value.schemaVersion = 1 }); expect(verify).toThrow()
   })
-  it.each(['positiveCopilotUsage', 'positiveUsageHostTransport'])('requires functional v2 field %s', (field) => {
+  it.each(['positiveCopilotUsage', 'positiveUsageHostTransport'])('retains required positive-v2 field %s in current functional3', (field) => {
     mutate(packaged('functional-results.json'), (value) => { Reflect.deleteProperty(value, field) }); expect(verify).toThrow()
   })
   it('binds original positive usage bytes in the CI-only input inventory', () => {

@@ -13,6 +13,7 @@ import { removeOwnedDirectory } from '../src/owned-directory.ts'
 import { runPackagedCopilotAcceptance } from './fixtures/copilot-release-smoke.ts'
 import { runPackagedCopilotObserverCanary } from './fixtures/copilot-observer-smoke.ts'
 import type { PositiveCopilotUsageEvidence } from './fixtures/copilot-usage-positive-smoke.ts'
+import { currentCopilotSettings, nativeComposerInspection, nativeComposerSeed } from './native-composer-fixture.ts'
 
 const boundary = vi.hoisted(() => ({
   pin: '', temporaryBase: '', launch: vi.fn(), exec: vi.fn(), runtimeRoot: vi.fn(), runtimeBytes: vi.fn(), environment: vi.fn(),
@@ -55,7 +56,13 @@ vi.mock('../scripts/packaged-runtime.mjs', () => ({
 vi.mock('../scripts/smoke-environment.ts', () => ({ desktopSmokeEnvironment: boundary.environment }))
 vi.mock('../src/plugin-receipts.ts', () => ({ assertDesktopProvisioningInventory: vi.fn() }))
 vi.mock('./fixtures/desktop-version-menu-smoke.ts', () => ({ inspectDesktopVersionMenu: boundary.menu }))
-vi.mock('./fixtures/copilot-settings-smoke.ts', () => ({ inspectPackagedCopilotSettings: boundary.settings }))
+vi.mock('./fixtures/copilot-settings-smoke.ts', async original => ({
+  ...await original<typeof import('./fixtures/copilot-settings-smoke.ts')>(), inspectPackagedCopilotSettings: boundary.settings,
+}))
+vi.mock('./fixtures/native-composer-geometry.ts', async original => ({
+  ...await original<typeof import('./fixtures/native-composer-geometry.ts')>(),
+  inspectNativeComposerGeometry: async () => nativeComposerInspection(),
+}))
 vi.mock('./fixtures/copilot-usage-smoke.ts', () => ({ inspectCopilotUsageCapability: boundary.capability, inspectSignedOutCopilotUsage: boundary.usage }))
 
 const source = 'a'.repeat(40)
@@ -71,10 +78,7 @@ function readRecord(path: string): Record<string, unknown> {
   return value as Record<string, unknown>
 }
 const flags = (names: readonly string[], value: boolean): Record<string, boolean> => Object.fromEntries(names.map(name => [name, value]))
-const settings = {
-  modelRolesViewLoaded: true, currentWorkspaceReadOnly: true, searchProviderCatalogLoaded: true,
-  providerOnlySearchRouting: true, fallbackProviderLabel: true, registeredSearchProviders: ['github-copilot-hosted'], realSearch: false,
-}
+const settings = currentCopilotSettings()
 const capabilityEvidence = {
   id: 'account-quota-composer-usage', required: true, evidenceScope: 'synthetic-quota-and-public-remote-ui-contracts-not-live-account-access',
   signedOutNetworkRegressionDeclared: true, lifecycleRegressionDeclared: true,
@@ -155,7 +159,6 @@ function integrationFixture(alteredClientBytes?: string) {
   let home = ''
   let profile = ''
   let rounds = 0
-  let evaluations = 0
   boundary.runtimeRoot.mockReturnValue(runtimeRoot)
   boundary.runtimeBytes.mockReturnValue(runtimeBytes)
   boundary.environment.mockImplementation((path: string) => { home = path; profile = join(path, 'profiles', 'desktop'); return {} })
@@ -185,6 +188,7 @@ function integrationFixture(alteredClientBytes?: string) {
   let captureRestored = false
   const page = {
     ...locator, setDefaultTimeout() {}, waitForFunction: async () => {}, url: () => 'dsh-app://app/', isClosed: () => false,
+    on() {}, off() {},
     addInitScript: async (script: string) => {
       captureDisposed = false; captureRestored = false
       expect(script.endsWith('\ncaptureUsageModulesInBrowser()')).toBe(true)
@@ -206,6 +210,7 @@ function integrationFixture(alteredClientBytes?: string) {
   }
   boundary.launch.mockImplementation(async () => {
     rounds++
+    let evaluations = 0
     mkdirSync(profile, { recursive: true })
     const clientDirectory = join(profile, 'node_modules', plugin.packageName, 'lib')
     mkdirSync(clientDirectory, { recursive: true })
@@ -225,6 +230,13 @@ function integrationFixture(alteredClientBytes?: string) {
     }
     if (file.endsWith('powershell.exe')) return JSON.stringify(metadata)
     expect(file).toBe(application)
+    if (args[0]?.endsWith('seed-native-composer.mjs')) {
+      expect(args.slice(1, 3)).toEqual([runtimeRoot, home])
+      const descriptor = options?.stdio?.[1]
+      if (typeof descriptor !== 'number') throw new Error('Missing owned seed output descriptor')
+      writeFileSync(descriptor, JSON.stringify(nativeComposerSeed()))
+      return
+    }
     // The actual graph-argument producer supplies the profile/runtime; no Electron child is executed.
     expect(args.slice(0, 2)).toEqual(['--input-type=module', '--eval'])
     expect(args[3]).toBe(profile); expect(args[4]).toBe(runtimeRoot)
@@ -344,7 +356,7 @@ describe('actual owner/wrapper receipt producer to real qualification consumer',
     expect(fixture.captureRestored).toBe(true)
     expect(fixture.positiveRoutes).toEqual(['github-copilot', 'github-copilot-preview'])
     await runPackagedCopilotObserverCanary(fixture.ownerOptions, runPackagedCopilotAcceptance)
-    expect(fixture.rounds).toBe(4)
+    expect(fixture.rounds).toBe(6)
     expect(fixture.positiveRoutes).toEqual(['github-copilot', 'github-copilot-preview', 'github-copilot', 'github-copilot-preview'])
     expect(fixture.captureDisposed).toBe(true)
     expect(fixture.captureRestored).toBe(true)
@@ -357,11 +369,20 @@ describe('actual owner/wrapper receipt producer to real qualification consumer',
     expect(summary.inputs['ordinary.helper']).toBe(originalOrdinary['helper-acceptance.json'])
     expect(summary.inputs['ordinary.positiveUsage']).toBe(originalOrdinary['positive-usage.json'])
     expect(summary.inputs['packaged.positiveUsage']).toBe(original['positive-usage.json'])
+    expect(summary.schemaVersion).toBe(2)
+    expect(Object.keys(summary.inputs)).toHaveLength(51)
+    for (const [label, hashes] of [['ordinary', originalOrdinary], ['packaged', original]] as const) {
+      expect(summary.inputs[`${label}.nativeComposer`]).toBe(hashes['native-composer-geometry.json'])
+      expect(summary.inputs[`${label}.nativeComposerSeed`]).toBe(hashes['native-composer-seed.json'])
+      for (const phase of ['initial', 'restart']) expect(summary.inputs[`${label}.${phase}.settings`]).toBe(hashes[`${phase}-settings-readonly.json`])
+    }
     expect(packagedHashes(fixture.options.ordinaryEvidence)).toEqual(originalOrdinary)
     for (const [root, file] of [[fixture.options.ordinaryEvidence, 'acceptance.json'], [fixture.options.packagedEvidence, 'functional-results.json']]) {
       const functional = readRecord(join(root!, file!))
       const positive = readRecord(join(root!, 'positive-usage.json'))
-      expect(functional.schemaVersion).toBe(2)
+      expect(functional.schemaVersion).toBe(3)
+      expect(functional.nativeComposer).toEqual(readRecord(join(root!, 'native-composer-geometry.json')))
+      expect(functional.settingsAcceptance).toEqual(['initial', 'restart'].map(phase => readRecord(join(root!, `${phase}-settings-readonly.json`))))
       expect(functional.positiveCopilotUsage).toEqual(positive.cases)
       expect(positive.installedClientSha256).toBe(boundary.installedClientSha256)
     }

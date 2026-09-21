@@ -176,8 +176,8 @@ describe('fail-closed fork publication', () => {
     await expect(publishForkRelease(options)).rejects.toThrow('owned draft')
     expect(publicWrites(state)).toEqual([])
   })
-  it('publishes the exact alpha2 sequence-29 source plan through one owned and fully verified draft', async () => {
-    expect(reviewedPlan).toMatchObject({ version, upstreamVersion: '0.1.6-alpha.2', sequence: 29, channel: 'cloga-windows-x64' })
+  it('publishes the exact alpha2 sequence-31 source plan through one owned and fully verified draft', async () => {
+    expect(reviewedPlan).toMatchObject({ version, upstreamVersion: '0.1.6-alpha.2', sequence: 31, channel: 'cloga-windows-x64' })
     const { state, options, files } = await fixture()
     expect(await publishForkRelease(options)).toEqual({
       release_url: `https://github.com/${repository}/releases/tag/${tag}`,

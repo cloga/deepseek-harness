@@ -1,4 +1,4 @@
-/** Read-only packaged evidence for the alpha32 Copilot account-usage capability. */
+/** Read-only packaged evidence for the required Copilot account-usage capability. */
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -24,7 +24,7 @@ export interface SignedOutCopilotUsageEvidence {
 /**
  * Read the installed plugin's immutable capability declaration without loading its code.
  * @param profile - Isolated packaged Desktop profile after provisioning.
- * @returns Minimal owned evidence for the required alpha32 capability and its regressions.
+ * @returns Minimal owned evidence for the required account-usage capability and its regressions.
  */
 export function inspectCopilotUsageCapability(profile: string): CopilotUsageCapabilityEvidence {
   const raw: unknown = JSON.parse(readFileSync(join(

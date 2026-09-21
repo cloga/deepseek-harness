@@ -47,7 +47,7 @@ function isolatedRunner(damage?: Damage) {
     catch (error) { marker = error }
     if (damage === 'repeat-observer') await actual.inspectProfile?.(Object.freeze(paths))
     const functional = {
-      ...identity, schemaVersion: damage === 'legacy-functional-schema' ? 1 : 2,
+      ...identity, schemaVersion: damage === 'legacy-functional-schema' ? 2 : 3,
       scope: damage === 'foreign-functional-scope' ? 'other' : 'packaged-functional-observations',
       functionalAssertionsCompleted: damage !== 'functional-not-complete',
       normalAcceptanceCompleted: damage === 'functional-success', cleanupVerified: damage === 'functional-cleanup',

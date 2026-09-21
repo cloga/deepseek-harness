@@ -36,6 +36,8 @@ target package 通过 declaration merge 扩展 snapshot 与 Location data map，
 <a id="shell-and-standard-props"></a>
 ## Shell 与标准 props
 
+alpha2 输入卡片保留卡片下方的共享 dock 和 ContextMeter。公开 `conversation.composer.dock` entry 仍仅在具有 input 与 Session 身份的普通 composer 中启用；dock 容器还独立承载 ContextMeter。居中行及按内容宽度排列的原生统计组均可换行，间距仅由 InputBar 拥有。真正为空的 dock（包括其唯一的空布局中立 Slot outlet）不占空间；文本、其他 entry、ContextMeter 和崩溃标记均不视为空。这保留 alpha2 的队列、焦点及 writer 错误行为，不恢复早期 alpha1 的工具栏布局。
+
 共享图片插槽属性将展示选择与持久化引用分开：`thumbnail` 请求完整缩放的附件列表缩略图，`compact` 请求裁剪的图片方块。每张图片可通过可选的 `label` 提供无障碍展示名称；加载和缓存标识仍使用原始附件引用。[ui-attachment](../ui-attachment/README.zh.md) 负责渲染与灯箱。
 
 上下文占用按钮在输入卡片下方、会话统计右侧显示圆环和百分比。点击按钮可在视口内的面板查看 token 构成，没有统计项时面板也不会越界；上下文用量和容量尚不可用时，按钮保持隐藏。

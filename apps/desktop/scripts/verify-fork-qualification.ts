@@ -8,6 +8,9 @@ import { parseArgs } from 'node:util'
 import { createDesktopForkReleaseCapability, parseDesktopForkReleasePlan } from './fork-release.ts'
 import { assertReviewedCopilotUsageClient } from './copilot-usage-client-policy.ts'
 import { assertPositiveCopilotUsageEvidence } from '../tests/fixtures/copilot-usage-positive-smoke.ts'
+import { assertCopilotSettingsEvidence } from '../tests/fixtures/copilot-settings-smoke.ts'
+import { assertNativeComposerProof, assertNativeComposerSeed } from '../tests/fixtures/native-composer-proof.ts'
+import type { PackagedProofIdentity } from '../tests/fixtures/copilot-observer-smoke.ts'
 import { managedUpdateJsonSha256, parseDesktopManagedUpdateCapability, parseDesktopManagedUpdateManifest } from '../src/managed-update-protocol.ts'
 import { desktopPluginProvisioningPlanSha256, parseDesktopPluginProvisioningPlan, parseDesktopPluginProvisioningState } from '../src/plugin-provisioning.ts'
 import { parseDesktopPluginProvisionReceipt } from '../src/plugin-source.ts'
@@ -17,9 +20,8 @@ const repository = resolve(import.meta.dirname, '../../..')
 const pinPath = join(repository, 'apps/desktop/tests/fixtures/windows-upgrade-baseline.json')
 const identityKeys = ['evidenceId', 'sourceCommit', 'sourceTree', 'runId', 'runAttempt', 'planSha256', 'runtimeSha256', 'executableSha256', 'provisioningSha256', 'capabilitySha256']
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u
-const packagedTrue = ['isolatedHome', 'onboardingNoticeDismissed', 'actualGraphVerified', 'ancestorSdkJunction', 'accountEntryVisible', 'manageCompatibilityDisclosureAbsent', 'modelRolesViewLoaded', 'currentWorkspaceReadOnly', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
+const packagedTrue = ['isolatedHome', 'onboardingNoticeDismissed', 'actualGraphVerified', 'ancestorSdkJunction', 'accountEntryVisible', 'manageCompatibilityDisclosureAbsent', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
 const packagedFalse = ['ancestorSdkLoaded', 'liveAccountQuota', 'realOAuth', 'verificationNavigationExercised', 'manualVerificationAddressObserved', 'realModelRound', 'realSearch', 'installerUpgradeVerified']
-const settingsTrue = ['modelRolesViewLoaded', 'currentWorkspaceReadOnly', 'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel']
 const upgradeTrue = ['succeeded', 'installerUpgradeVerified', 'runningApplicationRefusalVerified', 'sameCustomPathVerified', 'actualInstalledHostAndClientVerified', 'candidateRestartVerified', 'retainedHomeFileVerified', 'separateSameVersionPackagedPluginAcceptanceVerified']
 const upgradeFalse = ['pluginUserChoicesVerified', 'draftAttachmentRefusalVerified', 'promotionFailureRollbackVerified', 'managedHandoffVerified', 'postSuccessDowngradeVerified']
 const packageTrue = ['succeeded', 'preparedGraphVerified', 'declinePreservedGraphVerified', 'discardPreservedGraphVerified', 'liveDraftAttachmentVetoVerified', 'attachmentOnlyVetoVerified', 'draftOnlyVetoVerified', 'consentGraphPromotionVerified', 'newHostGenerationVerified', 'installedDisabledAfterConsentVerified', 'enabledFixtureRunningAfterSeparateRestartVerified', 'copilotDisabledChoiceAcrossRestartVerified', 'copilotRemovalChoiceAcrossRestartVerified', 'zeroModelRequestsVerified', 'cleanupVerified']
@@ -85,8 +87,10 @@ function read(path: string): { value: RecordValue; sha256: string; bytes: number
 }
 function absent(path: string): void { physical(path); assert.equal(lstatSync(path, { throwIfNoEntry: false }), undefined, `Unexpected evidence: ${path}`) }
 function settings(value: unknown, baseline = false): void {
+  if (!baseline) { assertCopilotSettingsEvidence(value); return }
+  // The immutable cloga.2 baseline keeps its exact legacy role-loading contract.
   const record = object(value)
-  const required = baseline ? ['modelRolesViewLoaded', 'searchProviderCatalogLoaded'] : settingsTrue
+  const required = ['modelRolesViewLoaded', 'searchProviderCatalogLoaded']
   keys(record, [...required, 'registeredSearchProviders', 'realSearch'])
   flags(record, required, ['realSearch'])
   const providers = array(record.registeredSearchProviders)
@@ -215,9 +219,10 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
   const failure = input(options.packagedEvidence, 'failure.json', 'packaged.failure')
   const observer = input(options.packagedEvidence, 'observer-cleanup.json', 'packaged.observer')
   const suite = input(options.packagedEvidence, 'packaged-suite.json', 'packaged.suite')
-  const identity = { evidenceId: text(functional.value.evidenceId), sourceCommit: options.expectedSource, sourceTree: manifest.source.tree,
+  const identity: PackagedProofIdentity = {
+    evidenceId: text(functional.value.evidenceId), sourceCommit: options.expectedSource, sourceTree: manifest.source.tree,
     runId: options.runId, runAttempt: options.runAttempt, planSha256: reviewed.sha256, runtimeSha256: runtime.sha256,
-    executableSha256: executable.value.sha256, provisioningSha256: provisioning.sha256, capabilitySha256: rawCapability.sha256 }
+    executableSha256: text(executable.value.sha256), provisioningSha256: provisioning.sha256, capabilitySha256: rawCapability.sha256 }
   assert.match(identity.evidenceId, uuid)
   for (const record of [functional.value, failure.value, observer.value, suite.value]) {
     for (const field of identityKeys) assert.deepEqual(record[field], object(identity)[field], `Packaged identity differs: ${field}`)
@@ -225,8 +230,8 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
   assert.notEqual(physical(options.ordinaryEvidence), physical(options.packagedEvidence), 'Independent evidence directories are required')
   const ordinary = input(options.ordinaryEvidence, 'acceptance.json', 'ordinary.acceptance').value
   keys(ordinary, ['schemaVersion', 'scope', ...identityKeys, 'functionalAssertionsCompleted', 'normalAcceptanceCompleted', 'cleanupVerified',
-    ...packagedTrue, ...packagedFalse, 'desktopVersion', 'runtimeVersion', 'versionMenus', 'plugin', 'transport', 'restartReceiptSha256', 'copilotUsageCapability', 'signedOutCopilotUsage', 'positiveCopilotUsage', 'positiveUsageHostTransport', 'hostQuotaNoNetworkEvidence', 'timeline'])
-  assert.equal(ordinary.schemaVersion, 2)
+    ...packagedTrue, ...packagedFalse, 'desktopVersion', 'runtimeVersion', 'versionMenus', 'plugin', 'transport', 'restartReceiptSha256', 'copilotUsageCapability', 'signedOutCopilotUsage', 'positiveCopilotUsage', 'positiveUsageHostTransport', 'hostQuotaNoNetworkEvidence', 'settingsAcceptance', 'nativeComposer', 'timeline'])
+  assert.equal(ordinary.schemaVersion, 3)
   assert.equal(ordinary.scope, 'packaged-acceptance')
   assert.match(text(ordinary.evidenceId), uuid)
   for (const field of identityKeys.filter(field => field !== 'evidenceId')) {
@@ -238,14 +243,15 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
   }
   const f = functional.value
   keys(f, ['schemaVersion', 'scope', ...identityKeys, 'functionalAssertionsCompleted', 'normalAcceptanceCompleted', 'cleanupVerified',
-    ...packagedTrue, ...packagedFalse, 'desktopVersion', 'runtimeVersion', 'versionMenus', 'plugin', 'transport', 'restartReceiptSha256', 'copilotUsageCapability', 'signedOutCopilotUsage', 'positiveCopilotUsage', 'positiveUsageHostTransport', 'hostQuotaNoNetworkEvidence', 'timeline'])
-  assert.equal(f.schemaVersion, 2)
+    ...packagedTrue, ...packagedFalse, 'desktopVersion', 'runtimeVersion', 'versionMenus', 'plugin', 'transport', 'restartReceiptSha256', 'copilotUsageCapability', 'signedOutCopilotUsage', 'positiveCopilotUsage', 'positiveUsageHostTransport', 'hostQuotaNoNetworkEvidence', 'settingsAcceptance', 'nativeComposer', 'timeline'])
+  assert.equal(f.schemaVersion, 3)
   assert.equal(f.scope, 'packaged-functional-observations')
   flags(f, [...packagedTrue, 'functionalAssertionsCompleted'], [...packagedFalse, 'normalAcceptanceCompleted', 'cleanupVerified'])
   assert.equal(f.desktopVersion, plan.version)
   assert.equal(f.runtimeVersion, plan.upstreamVersion)
   const copilot = plan.desktopProvisioning.plugins.find(entry => entry.source.packageName === 'dsh-github-copilot')
   assert(copilot?.required, 'Reviewed plan must require Copilot')
+  assert.equal(copilot.source.version, '0.4.0-alpha.35', 'Current dual schema-2 qualification requires the reviewed alpha35 family')
   assert.deepEqual(f.plugin, copilot.source)
   assert.equal(f.transport, 'official Web-backed Desktop Host with packaged Electron dsh-app origin bridge')
   assert.equal(f.hostQuotaNoNetworkEvidence, 'immutable-plugin-ci-regression-only')
@@ -273,6 +279,20 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
     for (const [index, provider] of ['github-copilot', 'github-copilot-preview'].entries()) {
       assertPositiveCopilotUsageEvidence(cases[index], provider)
     }
+    const observedSettings = array(record.settingsAcceptance)
+    assert.equal(observedSettings.length, 2)
+    for (const [index, phase] of ['initial', 'restart'].entries()) {
+      const original = input(root, `${phase}-settings-readonly.json`, `${label}.${phase}.settings`).value
+      settings(original)
+      assert.deepEqual(observedSettings[index], original, 'Current settings must match their original per-run receipt')
+    }
+    assert.deepEqual(observedSettings[0], observedSettings[1], 'Restart settings must remain equal')
+    const seed = input(root, 'native-composer-seed.json', `${label}.nativeComposerSeed`)
+    assertNativeComposerSeed(seed.value)
+    const native = input(root, 'native-composer-geometry.json', `${label}.nativeComposer`)
+    assertNativeComposerProof(native.value, { ...identity, evidenceId: text(record.evidenceId) },
+      copilot.source, seed.sha256, installedClientSha256)
+    assert.deepEqual(record.nativeComposer, native.value, 'Native composer proof must match its own run receipt')
   }
   const menus = array(f.versionMenus)
   assert.equal(menus.length, 2)
@@ -285,7 +305,8 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
     const timeline = array(record.timeline).map((value) => {
       const event = object(value)
       keys(event, ['event', 'milliseconds'])
-      assert(typeof event.milliseconds === 'number' && Number.isFinite(event.milliseconds) && event.milliseconds >= milliseconds)
+      assert(typeof event.milliseconds === 'number' && Number.isFinite(event.milliseconds)
+        && event.milliseconds >= 0 && event.milliseconds >= milliseconds)
       milliseconds = event.milliseconds
       return text(event.event)
     })
@@ -297,6 +318,8 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
         if (phase === 'restart' && event === 'packaged-graph') expectedTimeline.push('restart:positive-usage')
       }
     }
+    expectedTimeline.push('native-composer:seeded', 'native-composer:launch', 'native-composer:application',
+      'native-composer:observed', 'native-composer:closed')
     assert.deepEqual(timeline, expectedTimeline)
   }
   let previousGraph: RecordValue | undefined
@@ -474,7 +497,8 @@ export function verifyForkQualification(options: ForkQualificationOptions) {
     assert.match(text(shell.launchId), uuid)
   }
   assert(array(packages.checkpoints).length > 0)
-  return { schemaVersion: 1 as const, scope: 'ci-only-fork-qualification' as const, sourceCommit: options.expectedSource, sourceTree: manifest.source.tree,
+  assert.equal(Object.keys(inputs).length, 51, 'Current dual qualification requires all 45 retained and six new input hashes')
+  return { schemaVersion: 2 as const, scope: 'ci-only-fork-qualification' as const, sourceCommit: options.expectedSource, sourceTree: manifest.source.tree,
     runId: options.runId, runAttempt: options.runAttempt, version: plan.version, sequence: plan.sequence, inputs,
     packagedFunctionalVerified: true, unexpectedObserverFailureCleanupVerified: true, actualInstalledUpgradeVerified: true,
     sameVersionPackageAcceptanceVerified: true, normalPackagedAcceptanceCompleted: true, canaryNormalAcceptanceCompleted: false,

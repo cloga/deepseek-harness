@@ -17,6 +17,16 @@ Status: implemented
 - **渲染纪律。** 该行只折叠已定稿节点（`chat.legacy.nodes` 身份），流式 chunk 帧零重渲染——由渲染计数单测钉住。无已完成步且无计费 token 的会话什么都不渲染。
 - **输入框负责 dock 间距。** `InputBar` 将 slot 贡献项和 `ContextMeter` 放在同一个居中的 flex 行中，在 dock 上下各提供 4px 留白，即使 slot 没有可见贡献项也保持该间距。hero 保持无底部留白，并隐藏空 dock。`StatsPills` 提供可收缩的时间与计费内容，不占满整行宽度，也不添加外部 padding。
 
+## 共享 dock 布局
+
+Composer 拥有居中、可换行的单个 dock 行；StatsPills 提供按内容宽度排列的分组，而不是全宽行。后续公开 dock entry 可紧随原生缓存命中 pill，无需导入 Chat 组件或操作其他插件的 DOM。外部行和原生分组在窄宽度下都可换行；各原生锚点与弹层保持独立。真正为空的 dock 或唯一的空布局中立 outlet 不增加 padding。当前 alpha2 壳保留官方 4px 底部留白及 dock 内的 ContextMeter，不恢复 alpha1 根据统计标记有条件调整底部留白的策略。
+
+官方 Core `0.1.6-alpha.2` 已提供共享 flex dock 和按内容宽度排列的统计分组。保留 alpha.1 的 Desktop 只采用这种呈现排列并增加换行，同时保留 alpha.1 的 ContextMeter 工具栏位置及 composer 渲染资格。它不升级 Core、不采用 alpha.2 的 ContextMeter 移位，也不改变 Session 投影或 token 记账。该 alpha.1 回移保留为历史背景。当前 alpha.2 集成保留官方 ContextMeter／dock 结构，仅增加换行和空 outlet 处理；整合后的精确源码仍须通过相同的打包几何验收。
+
+现有有序公开 dock 已支持这种位置，因此不需要新的统计项 Slot。也不需要将原生 StatsPills 组改为 `display: contents`：保留其盒可保留其几何并避免改变可访问性分组。打包几何验收通过已发布应用打开测试拥有的持久化 Session，测量真实 InputBar、StatsPills 和已发布插件控件；合成历史与登出账户状态不代表模型推理或实时额度访问。
+
+Renderer 稳定的公开 `[data-slot="conversation.composer.dock"]` outlet 本身使用 `display: contents`，在空、返回 null 和卸载状态下也保留。Shell 隐藏唯一的空 outlet，不会把纯文本内容或崩溃标记误当成空。几何验收一起测量有界查找得到的实体 flex 所有者及其真实控件，而不是 outlet 不存在的盒。只有缺失或暂未布局的控件可在现有期限内重置采样；错误锚点、错误所有者和歧义直接失败。
+
 ## 备选方案
 
 - **单行变体（StatsLine，A/B 落选方）。** 全部数字常驻一行文本，悬停提示只在截断时复述整行。败在拥挤与可达性：精确 token 计数无处可看（行内和提示里都只有紧凑总量），单行也无法给时间与计费数字分组。

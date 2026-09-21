@@ -27,8 +27,9 @@ export interface PackagedProofIdentity {
  * @param replace - Only the owner's already-created failure receipt may be replaced.
  */
 export function writePackagedProof(output: string, file: string, value: unknown, replace = false): void {
-  assert(['positive-usage.json', 'functional-results.json', 'acceptance.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json'].includes(file),
-    'Unknown packaged proof filename')
+  assert(['positive-usage.json', 'native-composer-geometry.json', 'functional-results.json', 'acceptance.json',
+    'failure.json', 'observer-cleanup.json', 'packaged-suite.json'].includes(file),
+  'Unknown packaged proof filename')
   assert(!replace || file === 'failure.json', 'Only owned failure diagnostics can be finalized')
   const target = join(output, file)
   const temporary = join(output, `.${file}.${randomUUID()}.tmp`)
@@ -158,7 +159,7 @@ export async function runPackagedCopilotObserverCanary(
   assert(!existsSync(join(output, 'acceptance.json')), 'Unexpected observer failure must withhold ordinary acceptance')
   const functional = readProof(output, 'functional-results.json')
   const failure = readProof(output, 'failure.json')
-  assert.equal(functional.value.schemaVersion, 2)
+  assert.equal(functional.value.schemaVersion, 3)
   assert.equal(functional.value.scope, 'packaged-functional-observations')
   assert.equal(functional.value.functionalAssertionsCompleted, true)
   assert.equal(functional.value.normalAcceptanceCompleted, false)

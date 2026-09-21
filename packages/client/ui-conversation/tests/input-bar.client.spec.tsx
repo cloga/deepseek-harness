@@ -1595,7 +1595,22 @@ describe('strips and variants', () => {
     expect(view.getByTestId('ov')).toBeTruthy()
     expect(view.getByTestId('li')).toBeTruthy()
     expect(view.getByTestId('ri')).toBeTruthy()
-    expect(view.getByTestId('foot')).toBeTruthy()
+    const footer = view.getByTestId('foot')
+    expect(footer.parentElement?.className).toContain('dock')
+    expect(view.container.querySelector('[data-composer-card]')?.contains(footer)).toBe(false)
+  })
+
+  it('keeps alpha2 ContextMeter dock ownership while limiting slot entries to the eligible composer', () => {
+    const { view, props } = bench({ footer: <i data-testid="foot" /> })
+    const dock = view.container.querySelector('[class*="dock"]')
+    expect(dock).not.toBeNull()
+    expect(dock?.contains(view.getByTestId('foot'))).toBe(true)
+    view.rerender(<InputBar {...props} variant="hero" />)
+    expect(view.container.querySelector('[class*="dock"]')).toBe(dock)
+    expect(view.queryByTestId('foot')).toBeNull()
+    view.rerender(<InputBar {...props} sessionId={undefined} />)
+    expect(view.container.querySelector('[class*="dock"]')).toBe(dock)
+    expect(view.queryByTestId('foot')).toBeNull()
   })
 })
 

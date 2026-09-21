@@ -2,15 +2,32 @@
 import assert from 'node:assert/strict'
 import type { Locator } from 'playwright'
 
-/** Read-only settings evidence; registration does not imply provider availability or a search call. */
+/** V3 records role retirement, not V2's legacy role loading; registration does not imply provider availability or a search call. */
 export interface CopilotSettingsEvidence {
-  readonly modelRolesViewLoaded: true
-  readonly currentWorkspaceReadOnly: true
+  readonly schemaVersion: 3
+  readonly accountViewLoaded: true
+  readonly retiredModelRolesAbsent: true
   readonly searchProviderCatalogLoaded: true
   readonly providerOnlySearchRouting: true
   readonly fallbackProviderLabel: true
   readonly registeredSearchProviders: readonly string[]
   readonly realSearch: false
+}
+
+/** Validate current schema-3 settings receipts without reinterpreting historical role-loading observations. */
+export function assertCopilotSettingsEvidence(value: unknown): asserts value is CopilotSettingsEvidence {
+  assert(value !== null && typeof value === 'object' && !Array.isArray(value), 'Expected current Copilot settings evidence')
+  const evidence = value as Record<string, unknown>
+  assert.deepEqual(Object.keys(evidence).sort(), ['schemaVersion', 'accountViewLoaded', 'retiredModelRolesAbsent',
+    'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel', 'registeredSearchProviders', 'realSearch'].sort())
+  assert.equal(evidence.schemaVersion, 3)
+  for (const field of ['accountViewLoaded', 'retiredModelRolesAbsent', 'searchProviderCatalogLoaded',
+    'providerOnlySearchRouting', 'fallbackProviderLabel']) assert.equal(evidence[field], true)
+  assert.equal(evidence.realSearch, false)
+  const providers = evidence.registeredSearchProviders
+  assert(Array.isArray(providers) && providers.every(value => typeof value === 'string' && value.length > 0 && value.length <= 256))
+  assert.equal(new Set(providers).size, providers.length)
+  assert(providers.includes('github-copilot-hosted'))
 }
 
 /**
@@ -19,31 +36,11 @@ export interface CopilotSettingsEvidence {
  * @returns Observed registration IDs and read-only completion markers.
  */
 export async function inspectPackagedCopilotSettings(settings: Locator): Promise<CopilotSettingsEvidence> {
-  const roles = settings.locator('[data-dsh-dual-model-card]')
-  await roles.locator('[data-dsh-dual-model-enabled]:enabled').waitFor({ state: 'visible' })
-  assert.equal(await roles.getAttribute('aria-busy'), 'false')
-  assert.equal((await roles.locator('[role="status"]').allTextContents()).join('').trim(), '',
-    'Model roles must not show a view-load error')
-  assert.equal(await roles.locator('[data-dsh-dual-model-enabled]').isChecked(), false)
-  assert.equal(await roles.locator('[data-dsh-dual-model-save]').isEnabled(), true, 'A valid disabled configuration must be writable')
-  assert.equal(await roles.locator('[data-dsh-dual-model-create]').isEnabled(), false)
-  for (const selector of ['[data-dsh-dual-model-planner]', '[data-dsh-dual-model-executor]']) {
-    assert.equal(await roles.locator(selector).inputValue(), '')
-    const values = await roles.locator(`${selector} option`)
-      .evaluateAll(options => options.map(option => (option as HTMLOptionElement).value))
-    assert.deepEqual(values, [''])
-  }
-
-  const workspaces = await roles.locator('[data-dsh-dual-model-workspace]')
-    .evaluateAll(elements => elements.map(element => ({
-      tag: element.tagName,
-      label: element.textContent?.trim(),
-      editable: element.getAttribute('contenteditable'),
-    })))
-  assert.equal(workspaces.length, 1, 'Model roles must show the current workspace')
-  assert.equal(workspaces[0]!.tag, 'P', 'The current workspace is read-only, not a workspace selector')
-  assert(workspaces[0]!.label, 'The current workspace must have a visible label or unavailable explanation')
-  assert(workspaces[0]!.editable === null || workspaces[0]!.editable === 'false')
+  const account = settings.locator('[data-dsh-github-copilot-compact-account]')
+  await account.locator('[role="status"]').filter({ hasText: /^Signed out$/ }).waitFor({ state: 'visible' })
+  await account.locator('button:enabled').filter({ hasText: /^Sign in with GitHub$/ }).waitFor({ state: 'visible' })
+  assert.equal(await account.locator('[data-dsh-github-copilot-account-error]').count(), 0,
+    'The signed-out account view must load without an error')
 
   const search = settings.locator('[data-dsh-web-search-routing]')
   const primarySelector = '[data-dsh-web-search-mode]'
@@ -72,8 +69,15 @@ export async function inspectPackagedCopilotSettings(settings: Locator): Promise
   assert.equal(new Set(fallbackIds).size, fallbackIds.length)
   assert(primaryIds.includes('github-copilot-hosted'), 'The signed-out Copilot provider must still be registered')
   assert.deepEqual(primaryIds, fallbackIds, 'Both selectors must project the same registered provider catalog')
+  // Check retirement only after retained account and search views have loaded.
+  const roleControls = await settings.locator('*').evaluateAll(elements => elements.filter(element =>
+    element.getAttributeNames().some(name => name.startsWith('data-dsh-dual-model-'))).length)
+  assert.equal(roleControls, 0, 'Retired Model roles controls must be absent, including hidden controls')
+  assert.equal(await settings.locator('button, [role="tab"], h1, h2, h3')
+    .filter({ hasText: /^(?:Copilot\s*·\s*)?(?:Model roles|模型分工)$/i }).count(), 0,
+  'Retired Model roles settings entries must be absent')
   return {
-    modelRolesViewLoaded: true, currentWorkspaceReadOnly: true, searchProviderCatalogLoaded: true,
+    schemaVersion: 3, accountViewLoaded: true, retiredModelRolesAbsent: true, searchProviderCatalogLoaded: true,
     providerOnlySearchRouting: true, fallbackProviderLabel: true,
     registeredSearchProviders: primaryIds, realSearch: false,
   }
