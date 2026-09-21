@@ -134,6 +134,9 @@ function Observe-Family {
 $nativeReady = $false
 function Initialize-Native {
     Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing
+    # Classic Win32 folder and menu controls require the framework's standard client-side providers.
+    [System.Windows.Automation.ClientSettings]::RegisterClientSideProviderAssembly(
+        [Reflection.AssemblyName]::new('UIAutomationClientsideProviders, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'))
     Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
 using System;
 using System.Text;

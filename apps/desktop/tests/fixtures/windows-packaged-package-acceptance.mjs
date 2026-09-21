@@ -82,6 +82,58 @@ export function assertKeylessPackageProvider(settings, baseURL) {
   }, 'The actual UI must persist only the reviewed keyless loopback provider')
 }
 
+/** Select the fixture's legitimate local model and observe the settled public selection twice.
+ * @param {object} page - Owned application page with the real provider catalog.
+ * @returns {Promise<void>} Resolves only after current selection and checked model agree and the menu closes.
+ */
+export async function selectPackageAcceptanceModel(page) {
+  const trigger = page.getByRole('button', { name: /^Select model, current/ })
+  const menu = page.getByRole('menu', { name: 'Model and reasoning effort', exact: true })
+  const option = () => menu.getByRole('group', { name: 'Desktop acceptance (local test)', exact: true })
+    .getByRole('menuitemradio', { name: 'acceptance-local', exact: true })
+  await trigger.click()
+  await menu.getByRole('menuitem', { name: /^Model\b/ }).click()
+  await option().click()
+  await menu.waitFor({ state: 'hidden' })
+  const selected = page.getByRole('button', { name: 'Select model, current acceptance-local', exact: true })
+  await selected.waitFor({ state: 'visible' })
+  await selected.click()
+  await menu.getByRole('menuitem', { name: /^Model\b/ }).click()
+  assert.equal(await option().getAttribute('aria-checked'), 'true', 'The local model selection did not settle')
+  await selected.click()
+  await menu.waitFor({ state: 'hidden' })
+}
+
+/** Observe one Electron page through its business lifetime, including same-page Host replacement.
+ * @param {object} page - Owned page whose deliberate close is outside the observation interval.
+ * @returns {object} Read-only snapshots and an idempotent seal which disables collection before removing its listener.
+ */
+export function observePackagePageErrors(page) {
+  const errors = []
+  let active = true
+  let sealed
+  const onError = error => {
+    if (!active) return
+    try { errors.push(safeError(error)) }
+    catch { errors.push('Unprintable product page error') }
+  }
+  const seal = () => {
+    if (sealed !== undefined) return sealed
+    active = false
+    sealed = Object.freeze([...errors])
+    page.off('pageerror', onError)
+    return sealed
+  }
+  try { page.on('pageerror', onError) }
+  catch (error) {
+    active = false
+    // A partially registered listener cannot collect after admission failed;
+    // the existing outer page owner still closes its transport.
+    throw error
+  }
+  return Object.freeze({ snapshot: () => sealed ?? Object.freeze([...errors]), seal })
+}
+
 /** Hash files and link spellings without following package junctions. This reader never repairs a graph.
  * @param {string} root - Real profile or private candidate directory.
  * @returns {{fingerprint: string, entries: object[]}} Bounded ordered inventory and its exact digest.
@@ -242,7 +294,9 @@ export async function runPackagedPackageAcceptance(runRoot) {
   let page
   let boundPid
   let mock
-  let errors = []
+  const pageErrorObservers = []
+  let activePageErrors
+  const observedPageErrors = () => pageErrorObservers.flatMap(observer => observer.snapshot())
   let failure
   let failed = false
   const retainError = (error, stage) => {
@@ -306,7 +360,7 @@ export async function runPackagedPackageAcceptance(runRoot) {
     return response.result
   }
   const checkpoint = async (name, facts) => {
-    assert.deepEqual(errors, [], 'Real product page reported JavaScript errors')
+    assert.deepEqual(observedPageErrors(), [], 'Real product page reported JavaScript errors')
     assert.equal(mock.requests.length, 0, 'An unsent-input acceptance must not request model output')
     assert.equal(mock.paths.length, 0, 'The declared local catalog must not need discovery or model requests')
     await page.screenshot({ path: join(evidence, `package-${name}.png`) })
@@ -356,10 +410,10 @@ export async function runPackagedPackageAcceptance(runRoot) {
     if (bindFailure !== undefined) throw bindFailure
     const runtime = readInstalledDesktopRuntimeDescriptor(application, identity.resourcesPath, expected.installedEvidence.executableSha256)
     assert.equal(hash(runtime), expected.installedEvidence.runtimeSha256)
-    errors = []
     page = await app.firstWindow()
     page.setDefaultTimeout(120_000)
-    page.on('pageerror', error => errors.push(safeError(error)))
+    activePageErrors = observePackagePageErrors(page)
+    pageErrorObservers.push(activePageErrors)
     const launchedPage = page
     page.on('framenavigated', frame => { if (frame === launchedPage.mainFrame()) navigationCount++ })
     await page.waitForFunction(() => location.href === 'dsh-app://app/' || Boolean(document.querySelector('#error:not([hidden])')?.textContent?.trim()), undefined, { timeout: 300_000 })
@@ -381,6 +435,8 @@ export async function runPackagedPackageAcceptance(runRoot) {
   }
   const closeNormally = async () => {
     await native('Observe')
+    activePageErrors.seal()
+    assert.deepEqual(observedPageErrors(), [], 'Product page errors cannot be discarded by a restart')
     const launcher = app.process()
     await openNativeMenu('Exit')
     await until('owned launch transport exit', () => installedLauncherExited(launcher), Boolean, 60_000)
@@ -510,10 +566,7 @@ export async function runPackagedPackageAcceptance(runRoot) {
     await page.keyboard.press('Escape')
     await settings.waitFor({ state: 'hidden' })
     await Promise.all([native('ChooseWorkspace'), page.getByRole('textbox', { name: 'Choose workspace', exact: true }).click()])
-    const modelTrigger = page.getByRole('button', { name: /^Select model, current/ })
-    await modelTrigger.click()
-    await page.getByRole('menuitem', { name: /^Model\b/ }).click()
-    await page.getByRole('menuitemradio', { name: 'acceptance-local', exact: true }).click()
+    await selectPackageAcceptanceModel(page)
     await page.locator('[data-composer-input][contenteditable="true"]').first().waitFor()
     assert.ok(readFileSync(join(home, 'settings.yaml'), 'utf8').includes('desktop-acceptance'))
     await checkpoint('keyless-composer', { legitimateProviderConfiguration: true, realWorkspacePicker: true, provider: 'desktop-acceptance', model: 'acceptance-local', providerRequests: 0 })
@@ -564,6 +617,7 @@ export async function runPackagedPackageAcceptance(runRoot) {
     const secondPrepared = prepared(second)
     const candidateHash = packageGraphSnapshot(join(secondPrepared.directory, 'profile')).fingerprint
     await page.getByRole('button', { name: 'New session', exact: true }).first().click()
+    await page.getByRole('button', { name: 'Select model, current acceptance-local', exact: true }).waitFor()
     const text = `Unsent package acceptance draft ${owner.token}`
     const attachmentName = 'package-acceptance-unsent.txt'
     const attachmentBytes = Buffer.from('Local unsent attachment; never sent to a model.\n')
@@ -683,6 +737,10 @@ export async function runPackagedPackageAcceptance(runRoot) {
       cleanupErrors.push(`${stage}: ${safeError(error)}`)
       retainError(error, stage)
     }
+    for (const observer of pageErrorObservers) {
+      try { observer.seal() }
+      catch (error) { cleanupFailure('page-error-observer-remove', error) }
+    }
     if (shells.some(shell => !shell.launchReturned || !shell.bound)) {
       cleanupFailure('unqualified-launch', new Error('A requested launch has no qualified owned-process exit; retain installation and profiles'))
     }
@@ -725,6 +783,7 @@ export async function runPackagedPackageAcceptance(runRoot) {
       try { await (await import('../../../../packages/llm/llm-pi-ai/tests/mock-server.ts')).closeMockServers() }
       catch (error) { cleanupFailure('loopback-provider-close', error) }
     }
+    const errors = Object.freeze(observedPageErrors())
     if (errors.length !== 0) retainError(new Error('Product page errors were observed'), 'product-page-errors')
     for (const shell of shells) {
       const launcher = launchers.get(shell.launchId)

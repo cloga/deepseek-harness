@@ -1,7 +1,8 @@
-/** Keyless unit/guard checks only: never launches Desktop, native UI or an installer. */
+/** Keyless guards and owned off-screen Win32 controls only: never launches Desktop or an installer. */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -9,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import test from 'node:test'
 import { installedUpgradeApplication } from './fixtures/windows-installed-upgrade-contract.mjs'
-import { assertKeylessPackageProvider, initialPackageAcceptance, packageCleanupVerified, packageGraphSnapshot, preparePackageAcceptanceHome, preparedTransactionId, retainPrimaryFailure, sameProcess, validatePackageFixture, withInitialKeylessOnboarding } from './fixtures/windows-packaged-package-acceptance.mjs'
+import { assertKeylessPackageProvider, initialPackageAcceptance, observePackagePageErrors, packageCleanupVerified, packageGraphSnapshot, preparePackageAcceptanceHome, preparedTransactionId, retainPrimaryFailure, sameProcess, selectPackageAcceptanceModel, validatePackageFixture, withInitialKeylessOnboarding } from './fixtures/windows-packaged-package-acceptance.mjs'
 
 const source = readFileSync(new URL('./fixtures/windows-packaged-package-acceptance.mjs', import.meta.url), 'utf8')
 const native = readFileSync(new URL('./windows-desktop-ui.ps1', import.meta.url), 'utf8')
@@ -363,6 +364,238 @@ test('keyless bootstrap requires the canonical UI-written local provider without
   assert.ok(source.indexOf("native('ChooseWorkspace')", source.indexOf(bootstrap)) > source.indexOf(bootstrap) + bootstrap.length)
 })
 
+function modelSelectionPage({ checked = 'true', selectionFailure } = {}) {
+  const committed = Promise.withResolvers()
+  const clicked = Promise.withResolvers()
+  const trace = []
+  let open = false
+  let selected = false
+  const trigger = { async click() { trace.push('trigger'); open = !open } }
+  const selectedTrigger = {
+    async waitFor(options) { assert.deepEqual(options, { state: 'visible' }); assert.equal(selected, true); trace.push('selected-visible') },
+    async click() { assert.equal(selected, true); trace.push('selected-trigger'); open = !open },
+  }
+  const option = {
+    async click() {
+      assert.equal(open, true)
+      trace.push('choose')
+      clicked.resolve()
+      void committed.promise.then(() => { if (selectionFailure === undefined) { selected = true; open = false } })
+    },
+    async getAttribute(name) { assert.equal(name, 'aria-checked'); trace.push('checked'); return checked },
+  }
+  const group = { getByRole(role, options) {
+    assert.equal(role, 'menuitemradio'); assert.deepEqual(options, { name: 'acceptance-local', exact: true }); return option
+  } }
+  const menu = {
+    getByRole(role, options) {
+      assert.equal(open, true)
+      if (role === 'group') { assert.deepEqual(options, { name: 'Desktop acceptance (local test)', exact: true }); return group }
+      assert.equal(role, 'menuitem'); assert.equal(options.name.source, '^Model\\b')
+      return { async click() { trace.push('model-pane') } }
+    },
+    async waitFor(options) {
+      assert.deepEqual(options, { state: 'hidden' })
+      trace.push('await-menu-hidden')
+      await committed.promise
+      if (selectionFailure !== undefined) throw selectionFailure
+      assert.equal(open, false)
+    },
+  }
+  const page = { getByRole(role, options) {
+    if (role === 'menu') { assert.deepEqual(options, { name: 'Model and reasoning effort', exact: true }); return menu }
+    assert.equal(role, 'button')
+    if (typeof options.name !== 'string') { assert.equal(options.name.source, '^Select model, current'); return trigger }
+    assert.deepEqual(options, { name: 'Select model, current acceptance-local', exact: true }); return selectedTrigger
+  } }
+  return { page, trace, clicked: clicked.promise, commit: committed.resolve }
+}
+
+test('model setup waits for real selection settlement then observes the checked route before proceeding', async () => {
+  const fixture = modelSelectionPage()
+  let resolved = false
+  const action = selectPackageAcceptanceModel(fixture.page).then(() => { resolved = true })
+  await fixture.clicked
+  await Promise.resolve()
+  assert.equal(resolved, false, 'Existing composer visibility cannot complete selection')
+  fixture.commit()
+  await action
+  assert.deepEqual(fixture.trace, ['trigger', 'model-pane', 'choose', 'await-menu-hidden', 'selected-visible',
+    'selected-trigger', 'model-pane', 'checked', 'selected-trigger', 'await-menu-hidden'])
+})
+
+for (const mode of ['selection-failed', 'not-checked']) {
+  test(`model setup refuses ${mode} instead of writing a successful local-model checkpoint`, async () => {
+    const failure = new Error('selection did not settle')
+    const fixture = modelSelectionPage({ checked: mode === 'not-checked' ? 'false' : 'true',
+      selectionFailure: mode === 'selection-failed' ? failure : undefined })
+    const action = selectPackageAcceptanceModel(fixture.page)
+    const rejection = assert.rejects(action, mode === 'selection-failed' ? error => error === failure : /selection did not settle/u)
+    await fixture.clicked
+    fixture.commit()
+    await rejection
+  })
+}
+
+test('package checkpoints require model selection and the new-session default witness before drafts', () => {
+  const selection = source.indexOf('await selectPackageAcceptanceModel(page)')
+  const keyless = source.indexOf("await checkpoint('keyless-composer'")
+  assert.ok(selection > source.indexOf("native('ChooseWorkspace')") && keyless > selection)
+  const newSession = source.indexOf("name: 'New session', exact: true")
+  const restoredModel = source.indexOf("name: 'Select model, current acceptance-local', exact: true }).waitFor()", newSession)
+  assert.ok(newSession > keyless && restoredModel > newSession)
+  assert.ok(restoredModel < source.indexOf('const input = await writeDraft(text)'))
+})
+
+test('page error observation spans same-page Host navigation and seals only after the final business interaction', async () => {
+  const page = new EventEmitter()
+  const foreign = () => {}
+  page.on('pageerror', foreign)
+  const observer = observePackagePageErrors(page)
+  try {
+    const firstCheckpoint = observer.snapshot()
+    assert.deepEqual(firstCheckpoint, [])
+    assert.equal(Object.isFrozen(firstCheckpoint), true)
+    page.emit('framenavigated', { owned: true })
+    await Promise.resolve()
+    page.emit('pageerror', new Error('after activation navigation'))
+    const observed = observer.snapshot()
+    assert.deepEqual(observed, ['Error: after activation navigation'])
+    assert.throws(() => assert.deepEqual(observed, []))
+    const sealed = observer.seal()
+    assert.equal(Object.isFrozen(sealed), true)
+    assert.equal(page.listenerCount('pageerror'), 1, 'Only the owned error listener is removed')
+    assert.equal(page.listeners('pageerror')[0], foreign)
+    page.emit('pageerror', new Error('deliberate teardown'))
+    assert.equal(observer.snapshot(), sealed)
+    assert.deepEqual(sealed, ['Error: after activation navigation'])
+    assert.deepEqual(firstCheckpoint, [])
+  } finally { observer.seal(); page.off('pageerror', foreign) }
+})
+
+test('new Electron pages retain all earlier observations without mutable array rebinding', () => {
+  const firstPage = new EventEmitter()
+  const nextPage = new EventEmitter()
+  const first = observePackagePageErrors(firstPage)
+  const next = observePackagePageErrors(nextPage)
+  try {
+    firstPage.emit('pageerror', new Error('first generation'))
+    const sealed = first.seal()
+    nextPage.emit('pageerror', new Error('second generation'))
+    firstPage.emit('pageerror', new Error('late old page'))
+    assert.deepEqual([first, next].flatMap(observer => observer.snapshot()), ['Error: first generation', 'Error: second generation'])
+    assert.equal(first.snapshot(), sealed)
+  } finally { first.seal(); next.seal() }
+})
+
+test('page-error removal failure disables collection before removal and preserves a frozen snapshot', () => {
+  const page = new EventEmitter()
+  const observer = observePackagePageErrors(page)
+  page.emit('pageerror', new Error('business error'))
+  const remove = page.off.bind(page)
+  page.off = () => { throw new Error('transport removal failed') }
+  try {
+    assert.throws(() => observer.seal(), /transport removal failed/u)
+    const sealed = observer.snapshot()
+    page.emit('pageerror', new Error('after failed removal'))
+    assert.equal(observer.seal(), sealed)
+    assert.deepEqual(sealed, ['Error: business error'])
+    assert.equal(Object.isFrozen(sealed), true)
+  } finally {
+    for (const listener of page.listeners('pageerror')) remove('pageerror', listener)
+  }
+})
+
+for (const primary of [new Error('original action failed'), undefined, null]) {
+  test(`page observer cleanup failure cannot replace ${failureLabel(primary)} primary or stop later cleanup`, () => {
+    const page = new EventEmitter()
+    const observer = observePackagePageErrors(page)
+    const remove = page.off.bind(page)
+    const removal = new Error('observer removal failed')
+    page.off = () => { throw removal }
+    const run = source.slice(source.indexOf('export async function runPackagedPackageAcceptance'))
+    const retainer = run.match(/  const retainError = \(error, stage\) => \{[^]*?\n  \}/u)?.[0]
+    const cleanup = run.match(/    const cleanupFailure = \(stage, error\) => \{[^]*?\n    \}/u)?.[0]
+    const sealLoop = run.match(/    for \(const observer of pageErrorObservers\) \{[^]*?\n    \}/u)?.[0]
+    assert.ok(retainer && cleanup && sealLoop)
+    const secondary = []
+    try {
+      const result = runInNewContext(`let failure; let failed=false; const secondaryErrors=secondary; const cleanupErrors=[];
+        ${retainer}
+        ${cleanup}
+        retainError(primary, 'package-scenario');
+        ${sealLoop}
+        const ownedCloseReached=true;
+        ({ failure, failed, cleanupCount:cleanupErrors.length, ownedCloseReached })`,
+      { retainPrimaryFailure, safeError: String, primary, secondary, pageErrorObservers: [observer] })
+      assert.equal(result.failure, primary)
+      assert.equal(result.failed, true)
+      assert.equal(result.cleanupCount, 1)
+      assert.equal(result.ownedCloseReached, true)
+      assert.deepEqual(secondary, [{ stage: 'page-error-observer-remove', error: String(removal) }])
+      page.emit('pageerror', new Error('late after rejected removal'))
+      assert.deepEqual(observer.snapshot(), [])
+    } finally {
+      for (const listener of page.listeners('pageerror')) remove('pageerror', listener)
+    }
+  })
+}
+
+test('observer-only removal failure becomes the actual root failure and cannot qualify success', () => {
+  const page = new EventEmitter()
+  const observer = observePackagePageErrors(page)
+  const remove = page.off.bind(page)
+  const removal = new Error('only observer removal failed')
+  page.off = () => { throw removal }
+  const run = source.slice(source.indexOf('export async function runPackagedPackageAcceptance'))
+  const retainer = run.match(/  const retainError = \(error, stage\) => \{[^]*?\n  \}/u)?.[0]
+  const cleanup = run.match(/    const cleanupFailure = \(stage, error\) => \{[^]*?\n    \}/u)?.[0]
+  const sealLoop = run.match(/    for \(const observer of pageErrorObservers\) \{[^]*?\n    \}/u)?.[0]
+  const success = run.match(/    report\.succeeded = !failed && report\.cleanupVerified/u)?.[0]
+  assert.ok(retainer && cleanup && sealLoop && success)
+  try {
+    const result = runInNewContext(`let failure; let failed=false; const secondaryErrors=[]; const cleanupErrors=[];
+      ${retainer}
+      ${cleanup}
+      ${sealLoop}
+      const report={cleanupVerified:true};
+      ${success};
+      ({failure,failed,succeeded:report.succeeded,cleanupCount:cleanupErrors.length})`,
+    { retainPrimaryFailure, safeError: String, pageErrorObservers: [observer] })
+    assert.equal(result.failure, removal)
+    assert.equal(result.failed, true)
+    assert.equal(result.succeeded, false)
+    assert.equal(result.cleanupCount, 1)
+  } finally { for (const listener of page.listeners('pageerror')) remove('pageerror', listener) }
+})
+
+test('partially registered error observers stop collecting after registration rejects', () => {
+  const page = new EventEmitter()
+  const add = page.on.bind(page)
+  const failure = new Error('partial registration')
+  let attemptedConversion = 0
+  page.on = (event, callback) => { add(event, callback); throw failure }
+  assert.throws(() => observePackagePageErrors(page), error => error === failure)
+  page.emit('pageerror', { toString() { attemptedConversion++; return 'must remain unobserved' } })
+  assert.equal(attemptedConversion, 0)
+  for (const listener of page.listeners('pageerror')) page.off('pageerror', listener)
+})
+
+test('actual package owner seals and checks every page before deliberate Exit and before failure cleanup close', () => {
+  const close = source.slice(source.indexOf('  const closeNormally = async'), source.indexOf('  const openPlugins'))
+  assert.ok(close.indexOf("await native('Observe')") < close.indexOf('activePageErrors.seal()'))
+  assert.ok(close.indexOf('activePageErrors.seal()') < close.indexOf('assert.deepEqual(observedPageErrors(), []'))
+  assert.ok(close.indexOf('assert.deepEqual(observedPageErrors(), []') < close.indexOf("await openNativeMenu('Exit')"))
+  assert.ok(source.includes('pageErrorObservers.push(activePageErrors)'))
+  assert.equal(source.includes('    errors = []'), false)
+  const activation = source.slice(source.indexOf('  const accept = async'), source.indexOf('  const writeDraft'))
+  assert.equal(activation.includes('.seal('), false, 'Host replacement within this Page stays in scope')
+  const outer = source.slice(source.indexOf("retainError(error, 'package-scenario')"))
+  assert.ok(outer.indexOf('for (const observer of pageErrorObservers)') < outer.indexOf('await app.close()'))
+  assert.ok(outer.includes('const errors = Object.freeze(observedPageErrors())'))
+  assert.ok(outer.includes("retainError(new Error('Product page errors were observed'), 'product-page-errors')"))
+})
+
 test('installed observers agree on the driver-owned nested application path', t => {
   const root = directory(t)
   assert.equal(installedUpgradeApplication(root), join(root, 'Installed App', 'cloga-deepseek-harness-desktop', 'cloga-deepseek-harness.exe'))
@@ -479,7 +712,7 @@ test('unit child diagnostics cannot accept a timeout with zero status or hide as
   assert.equal(unitChildEvidence({ stderr: 'parser echo: [fixture-phase:assertions-start]' }, 1, 10).lastPhase, 'no-script-marker-observed')
 })
 
-/** Run only extracted pure error/reaper code with fake process handles; never load the native driver or application. */
+/** Run extracted helper code against owned test inputs; never load the driver entrypoint or application. */
 function powershellUnit(t, body, shell = 'pwsh', { timeout = 15_000, phases = false } = {}) {
   const root = directory(t)
   const script = join(root, 'pure-unit.ps1')
@@ -521,6 +754,97 @@ test('package observer binds the observed Electron PID before native actions and
   assert.ok(native.includes('Same-Identity $launcher $binding.launcher'))
   assert.ok(native.includes('Same-Identity (Read-Process $LauncherPid) $binding.launcher'))
   assert.ok(native.includes("throw 'Owned launch transport remains live; exit is not verified'"))
+})
+
+test('native helper initializes standard providers for owned classic Win32 controls', { skip: process.platform !== 'win32' }, t => {
+  const initialize = native.match(/function Initialize-Native \{[^]*?\$script:nativeReady = \$true\r?\n\}/u)?.[0]
+  const invoke = native.match(/function Invoke-Control\(\$Node\) \{[^]*?\r?\n\}/u)?.[0]
+  assert.ok(initialize && invoke)
+  assert.ok(initialize.includes('RegisterClientSideProviderAssembly'))
+  const observed = powershellUnit(t, `
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing
+${initialize}
+${invoke}
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class OwnedNativeControls {
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern IntPtr CreateWindowEx(uint exStyle, string kind, string title, uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr data);
+    [DllImport("user32.dll")] public static extern bool DestroyWindow(IntPtr window);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr window);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+    public static IntPtr Create(string kind, string text, IntPtr parent, int id) {
+        IntPtr handle = CreateWindowEx(0x08000000, kind, text, parent==IntPtr.Zero ? 0x90000000u : 0x50000000u,
+            parent==IntPtr.Zero ? -30000 : 10, parent==IntPtr.Zero ? -30000 : 10, 320, 120, parent, (IntPtr)id, IntPtr.Zero, IntPtr.Zero);
+        if(handle==IntPtr.Zero) throw new InvalidOperationException("Owned native test window creation failed");
+        return handle;
+    }
+    public static bool Owned(IntPtr window, int pid) { uint owner; GetWindowThreadProcessId(window,out owner); return IsWindow(window) && owner==(uint)pid; }
+}
+'@
+$handles = [Collections.Generic.List[IntPtr]]::new()
+$primary = $null
+$cleanupErrors = [Collections.Generic.List[Exception]]::new()
+function Observe-Control([IntPtr]$Handle) {
+    if (-not [OwnedNativeControls]::Owned($Handle,$PID)) { throw 'Foreign native test handle' }
+    $node = [System.Windows.Automation.AutomationElement]::FromHandle($Handle)
+    if ($node.Current.ProcessId -ne $PID) { throw 'Foreign UIA test owner' }
+    $value = $null; $invokePattern = $null
+    [pscustomobject]@{ type=$node.Current.ControlType.ProgrammaticName; id=$node.Current.AutomationId;
+        value=$node.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$value);
+        invoke=$node.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$invokePattern) }
+}
+try {
+    $window = [OwnedNativeControls]::Create('#32770','Owned synthetic folder picker',[IntPtr]::Zero,0); $handles.Add($window)
+    $edit = [OwnedNativeControls]::Create('Edit','owned-path',$window,1152); $handles.Add($edit)
+    $button = [OwnedNativeControls]::Create('Button','Select Folder',$window,1); $handles.Add($button)
+    # Negative control: the exact former assembly-only setup cannot supply classic providers.
+    $before = @(Observe-Control $edit; Observe-Control $button)
+    if ($before[0].type -ne 'ControlType.Pane' -or $before[0].value -or $before[1].type -ne 'ControlType.Pane' -or $before[1].invoke) {
+        throw 'The isolated provider-omission negative control no longer reproduces'
+    }
+    Initialize-Native
+    if (-not $nativeReady) { throw 'Actual native initialization did not finish' }
+    $after = @(Observe-Control $edit; Observe-Control $button)
+    if ($after[0].type -ne 'ControlType.Edit' -or -not $after[0].value -or $after[1].type -ne 'ControlType.Button' -or -not $after[1].invoke) {
+        throw 'Actual helper did not initialize actionable standard control providers'
+    }
+    # Execute the actual owner rejection before its InvokePattern call. Never invoke any control.
+    $ShellPid = $PID + 1
+    $foreign = $null
+    try { Invoke-Control ([System.Windows.Automation.AutomationElement]::FromHandle($button)) } catch { $foreign = $_ }
+    if ($null -eq $foreign -or $foreign.Exception.Message -notmatch 'enabled and owned') { throw 'Foreign control owner was not refused' }
+} catch { $primary = $_ } finally {
+    for ($i=$handles.Count-1;$i -ge 0;$i--) {
+        if ([OwnedNativeControls]::IsWindow($handles[$i]) -and -not [OwnedNativeControls]::DestroyWindow($handles[$i])) {
+            $cleanupErrors.Add([InvalidOperationException]::new('Owned native test window destruction failed'))
+        }
+    }
+    foreach ($handle in $handles) {
+        if ([OwnedNativeControls]::IsWindow($handle)) { $cleanupErrors.Add([InvalidOperationException]::new('Owned native test handle survived cleanup')) }
+    }
+}
+if ($null -ne $primary) {
+    if ($cleanupErrors.Count -eq 0) { throw $primary }
+    $failures = [Collections.Generic.List[Exception]]::new(); $failures.Add($primary.Exception)
+    foreach ($error in $cleanupErrors) { $failures.Add($error) }
+    throw [AggregateException]::new('Native test and cleanup failed', $failures.ToArray())
+}
+if ($cleanupErrors.Count -gt 0) { throw [AggregateException]::new('Native test cleanup failed', $cleanupErrors.ToArray()) }
+[pscustomobject]@{ before=$before; after=$after; foreignRejected=$true; cleanupVerified=$true; appLaunched=$false; invoked=$false } | ConvertTo-Json -Depth 4 -Compress
+`, join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
+  assert.deepEqual(observed.before, [
+    { type: 'ControlType.Pane', id: '1152', value: false, invoke: false },
+    { type: 'ControlType.Pane', id: '1', value: false, invoke: false },
+  ])
+  assert.deepEqual(observed.after, [
+    { type: 'ControlType.Edit', id: '1152', value: true, invoke: false },
+    { type: 'ControlType.Button', id: '1', value: false, invoke: true },
+  ])
+  assert.equal(observed.foreignRejected, true)
+  assert.equal(observed.cleanupVerified, true)
+  assert.equal(observed.appLaunched, false)
+  assert.equal(observed.invoked, false)
 })
 
 test('native launch lineage admits only the retained CMD chain or exact direct-child launch', { skip: process.platform !== 'win32' }, t => {

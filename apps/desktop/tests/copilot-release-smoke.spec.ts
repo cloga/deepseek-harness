@@ -728,7 +728,7 @@ describe('actual acceptance owner lifecycle with mocked business boundaries', ()
     expect(observer).toHaveBeenCalledTimes(1)
     expect(receipt(fixture.options.output, 'acceptance.json')).toMatchObject({ normalAcceptanceCompleted: true, cleanupVerified: true })
     expect(existsSync(join(fixture.options.output, 'failure.json'))).toBe(false)
-    const metadataCall = effects.exec.mock.calls.find(([file]) => String(file).endsWith('powershell.exe'))
+    const metadataCall = effects.exec.mock.calls.find(([file]) => file.endsWith('powershell.exe'))
     expect(metadataCall?.[2]).toMatchObject({ timeout: 120_000 })
   })
 
