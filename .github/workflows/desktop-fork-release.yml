@@ -113,6 +113,10 @@ jobs:
           node --test apps/desktop/tests/windows-installed-upgrade.test.mjs apps/desktop/tests/windows-packaged-package-acceptance.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Prepare development Electron for navigation tests
+        shell: pwsh
+        run: node apps/desktop/node_modules/electron/install.js
+
       - name: Prepare browser for isolated Desktop acceptance
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/desktop-playwright

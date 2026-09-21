@@ -3,6 +3,8 @@
 export const en = {
   application: 'Application',
   aboutMenu: 'About Desktop {version}…',
+  externalLinkFailedTitle: 'Could not open the browser',
+  externalLinkFailedAdvice: 'Check that a default browser is configured, then try opening the link again.',
   edit: 'Edit',
   menuBar: 'Application menu',
   delete: 'Delete',
@@ -132,6 +134,8 @@ export type DesktopMessages = { readonly [Key in keyof typeof en]: string }
 export const zh = {
   application: '应用',
   aboutMenu: '关于 Desktop {version}…',
+  externalLinkFailedTitle: '无法打开浏览器',
+  externalLinkFailedAdvice: '请检查系统是否已设置默认浏览器，然后重新打开链接。',
   edit: '编辑',
   menuBar: '应用菜单',
   delete: '删除',

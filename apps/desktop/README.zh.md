@@ -58,6 +58,8 @@ macOS 上自定义应用菜单还会声明标准的 File、Window 和应用菜�
 
 应用菜单（macOS 上为应用名称菜单）的首项是 **关于 Desktop {version}…**，直接显示正在运行的 Electron 应用的完整版本号，保留预发布和 fork 后缀；点击后打开显示相同 Desktop 版本的原生“关于”面板。此入口在 Host 就绪前的启动加载期间即可访问。版本取自 Electron，无需检查更新或访问网络。这里不会显示可用的新版本或独立安装的 CLI 版本。
 
+官方 alpha2 导航已将外部 HTTP 和 HTTPS 目标交给系统浏览器，并拒绝创建 Electron 弹出窗口。同窗口 `dsh-app:` 导航以及到当前自有 Host HTTP origin 的导航保留在内部；其他外部 URI scheme 仍被阻止。Fork 额外拒绝格式错误的目标，并接住浏览器打开操作的同步失败与异步拒绝，以不暴露 URL 或底层错误的本地化建议报告。失败报告不能替换应用文档，也不改变原生致命恢复、顶栏／上下文菜单或共享 PluginManager。Web 客户端浏览器预览保持不变；[外链决策](../../.agents/notes/implemented/bug-fix/2026-09-20-desktop-external-links.zh.md)说明安全和验证边界。
+
 Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.png)，它是共享[鲸鱼 favicon](../web/public/favicon.svg) 的 256 像素透明栅格图。打包会把该图片放入应用归档，并用于可执行文件和安装器创建的快捷方式图标；图片缺失或格式错误时拒绝打包。单独修改快捷方式不会改变运行中窗口的图标。应先保存当前工作，再安装更新并重新打开 Desktop。
 
 ### 运行时与插件激活
@@ -243,7 +245,7 @@ pnpm run package:desktop:win:x64:unsigned
 
 ### Fork 拥有的 Windows 发布
 
-最新验证的发布元数据标识不可变的 `0.1.6-alpha.1.cloga.16`，sequence 为 27，包含内置 Core `0.1.6-alpha.1` 和 Copilot `0.4.0-alpha.33`（Release 392765616）。五个原始配套资产、源码绑定和校验和已核验；安装器未下载或逐字节验证，且该 workflow 不包含安装升级通道。这些观察不构成原生安装验收，也不将当前 Ops lock 从 `.cloga.14`/Copilot alpha.32 提升。alpha2 候选版本仍为 `0.1.6-alpha.2.cloga.1`，暂定 sequence 为 28；候选版本不会预留 sequence，发布前必须重新检查通道。其 plan 不构成发布或已安装升级证据。安装器升级 fixture（测试前置数据）仍锁定 `0.1.6-alpha.1.cloga.2`，sequence 为 12，使用 Copilot alpha.24，不证明从 `.cloga.16` 升级已通过验收。
+最新验证的发布元数据标识不可变的 `0.1.6-alpha.1.cloga.16`，sequence 为 27，包含内置 Core `0.1.6-alpha.1` 和 Copilot `0.4.0-alpha.33`（Release 392765616）。五个原始配套资产、源码绑定和校验和已核验；安装器未下载或逐字节验证，且该 workflow 不包含安装升级通道。这些观察不构成原生安装验收，也不将当前 Ops lock 从 `.cloga.14`/Copilot alpha.32 提升。alpha2 候选版本仍为 `0.1.6-alpha.2.cloga.1`，暂定 sequence 为 29；候选版本不会预留 sequence，发布前必须重新检查通道。其 plan 不构成发布或已安装升级证据。安装器升级 fixture（测试前置数据）仍锁定 `0.1.6-alpha.1.cloga.2`，sequence 为 12，使用 Copilot alpha.24，不证明从 `.cloga.16` 升级已通过验收。
 
 `release/cloga-windows-x64.json` 中经过评审的 plan 同时推进语义版本与整数 sequence。每次手动触发 `Desktop fork release (Windows x64)` workflow 都必须提供 `confirm_version` 与 `expected_source_sha`。安装依赖之前，源码锁定值必须恰好为 40 个小写十六进制字符，并与检出的 `HEAD` 完全一致；确认未变的版本号不代表授权较新的 commit。Workflow 固定 Node 24.13.0 与 pnpm 11.7.0，从冻结 lockfile 安装，测试 Desktop，打包固定 cloga 身份，并验证独立 helper、capability、未签名 installer、已安装 executable、runtime descriptor 与原生/托管互斥。
 

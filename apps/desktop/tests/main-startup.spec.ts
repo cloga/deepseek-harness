@@ -215,7 +215,7 @@ const harness = await vi.hoisted(async () => {
     get publishUpdate() { return publishUpdate! },
     set publishUpdate(value: (state: DesktopUpdateState) => DesktopUpdateState) { publishUpdate = value },
     dialog: { showOpenDialog: vi.fn(), showErrorBox: vi.fn(), showMessageBox: vi.fn() },
-    openExternal: vi.fn(),
+    openExternal: vi.fn<(url: string) => Promise<void>>(async () => {}),
     applyRelease: vi.fn(() => { preparing.resolve(); return prepared.promise }),
     disableAllPlugins: vi.fn(async () => {
       pluginsEnabled = false
@@ -404,6 +404,7 @@ beforeEach(() => {
   testAuth.login.mockResolvedValue('cancelled')
   vi.useFakeTimers()
   harness.reset()
+  harness.openExternal.mockReset().mockResolvedValue(undefined)
   harness.dialog.showMessageBox.mockImplementation((options: { title?: string }) => {
     if (options.title !== en.startupFailed) return Promise.resolve({ response: 1 })
     harness.dialogShown.resolve()
@@ -433,6 +434,98 @@ afterEach(async () => {
 })
 
 describe('desktop main startup', () => {
+  it.each(['https://example.com/document', 'http://example.com/document'])('opens a popup link externally without creating a window: %s', async (url) => {
+    await readyForUpdate()
+    const window = harness.windows[0]!
+    const before = [...window.urls]
+    const open = window.webContents.setWindowOpenHandler.mock.calls.at(-1)![0] as
+      (details: { url: string }) => { action: string }
+    expect(open({ url })).toEqual({ action: 'deny' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.openExternal).toHaveBeenCalledExactlyOnceWith(url)
+    expect(window.urls).toEqual(before)
+    expect(harness.windows).toHaveLength(1)
+  })
+
+  it.each(['https://example.com/document', 'http://example.com/document'])('opens an external navigation without replacing the application: %s', async (url) => {
+    await readyForUpdate()
+    const window = harness.windows[0]!
+    const before = [...window.urls]
+    const event = { preventDefault: vi.fn() }
+    window.webContents.emit('will-navigate', event, url)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(harness.openExternal).toHaveBeenCalledExactlyOnceWith(url)
+    expect(window.urls).toEqual(before)
+  })
+
+  it.each([
+    ['en-US', 'Could not open the browser', 'Check that a default browser is configured, then try opening the link again.'],
+    ['zh-CN', '无法打开浏览器', '请检查系统是否已设置默认浏览器，然后重新打开链接。'],
+  ])('reports an external-browser failure in %s without exposing the rejected URL', async (locale, title, advice) => {
+    vi.spyOn(harness.app, 'getLocale').mockReturnValue(locale)
+    await readyForUpdate()
+    harness.openExternal.mockRejectedValueOnce(new Error('https://example.com/?private=must-not-escape'))
+    harness.windows[0]!.webContents.emit('will-navigate', { preventDefault: vi.fn() }, 'https://example.com/?private=must-not-escape')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showErrorBox).toHaveBeenCalledExactlyOnceWith(title, advice)
+    expect(harness.openExternal).toHaveBeenCalledOnce()
+  })
+
+  it('uses the current Windows document locale for redacted browser-opening failures', async () => {
+    vi.spyOn(harness.app, 'getLocale').mockReturnValue('en-US')
+    await readyForUpdate()
+    const window = harness.windows[0]!
+    const appearance = harness.ipcOn.mock.calls.find(([channel]) => channel === DESKTOP_IPC.windowsAppearance)![1]
+    appearance({ sender: window.webContents, senderFrame: window.webContents.mainFrame }, 'zh-CN', '#fff', '#000')
+    harness.openExternal.mockImplementationOnce(() => { throw new Error('private browser error') })
+    window.webContents.emit('will-navigate', { preventDefault: vi.fn() }, 'https://example.com/?private=must-not-escape')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showErrorBox).toHaveBeenCalledExactlyOnceWith(zh.externalLinkFailedTitle, zh.externalLinkFailedAdvice)
+    expect(harness.app.relaunch).not.toHaveBeenCalled()
+  })
+
+  it.each(['restart', 'plugins', 'reset'])('blocks a %s URL without granting renderer recovery authority', async (action) => {
+    const host = await readyForUpdate()
+    const event = { preventDefault: vi.fn() }
+    harness.windows[0]!.webContents.emit('will-navigate', event, `dsh-recovery://${action}/`)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(harness.openExternal).not.toHaveBeenCalled()
+    expect(harness.disableAllPlugins).not.toHaveBeenCalled()
+    expect(host.stop).not.toHaveBeenCalled()
+    expect(harness.app.relaunch).not.toHaveBeenCalled()
+    expect(harness.app.quit).not.toHaveBeenCalled()
+  })
+
+  it('does not report a delayed browser failure after shutdown admission', async () => {
+    const host = await readyForUpdate()
+    let reject!: (error: Error) => void
+    harness.openExternal.mockReturnValueOnce(new Promise<void>((_resolve, decline) => { reject = decline }))
+    harness.windows[0]!.webContents.emit('will-navigate', { preventDefault: vi.fn() }, 'https://example.com/document')
+    await vi.advanceTimersByTimeAsync(0)
+    harness.app.quit()
+    reject(new Error('private late browser error'))
+    await host.stopping.promise
+    host.exited.resolve()
+    await harness.quitCompleted.promise
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showErrorBox).not.toHaveBeenCalled()
+  })
+
+  it('does not report a delayed browser failure after the originating window closes', async () => {
+    await readyForUpdate()
+    let reject!: (error: Error) => void
+    harness.openExternal.mockReturnValueOnce(new Promise<void>((_resolve, decline) => { reject = decline }))
+    const window = harness.windows[0]!
+    window.webContents.emit('will-navigate', { preventDefault: vi.fn() }, 'https://example.com/document')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.openExternal).toHaveBeenCalledOnce()
+    window.close()
+    reject(new Error('browser unavailable'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showErrorBox).not.toHaveBeenCalled()
+  })
   it.each([
     ['darwin', true, 'en-US'],
     ['darwin', false, 'zh-CN'],
@@ -842,16 +935,24 @@ describe('desktop main startup', () => {
       (details: { url: string }) => { action: string }
     const source = 'https://example.com/source?q=reference'
     expect(openWindow({ url: source })).toEqual({ action: 'deny' })
+    await vi.advanceTimersByTimeAsync(0)
     expect(harness.openExternal).toHaveBeenCalledWith(source)
     harness.openExternal.mockClear()
     const external = { preventDefault: vi.fn() }
     window.webContents.emit('will-navigate', external, 'https://example.com/document')
+    await vi.advanceTimersByTimeAsync(0)
     expect(external.preventDefault).toHaveBeenCalledOnce()
     expect(harness.openExternal).toHaveBeenCalledWith('https://example.com/document')
     harness.openExternal.mockClear()
     const internal = { preventDefault: vi.fn() }
     window.webContents.emit('will-navigate', internal, 'dsh-app://app/session/task-1')
     expect(internal.preventDefault).not.toHaveBeenCalled()
+    expect(harness.openExternal).not.toHaveBeenCalled()
+    vi.spyOn(window.webContents, 'getURL').mockReturnValue('http://127.0.0.1:3080/')
+    const hostNavigation = { preventDefault: vi.fn() }
+    window.webContents.emit('will-navigate', hostNavigation, 'http://127.0.0.1:3080/session/task-1')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(hostNavigation.preventDefault).not.toHaveBeenCalled()
     expect(harness.openExternal).not.toHaveBeenCalled()
   })
 
