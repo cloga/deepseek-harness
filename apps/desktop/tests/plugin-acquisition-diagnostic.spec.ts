@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { diagnosePluginAcquisition } from '../scripts/diagnose-plugin-acquisition.ts'
 import { observePluginAcquisition, type AcquisitionTarget } from '../scripts/plugin-acquisition-observer.ts'
 import { desktopSmokeEnvironment } from '../scripts/smoke-environment.ts'
+import { acquireDesktopPluginArtifact } from '../src/plugin-source.ts'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -30,7 +31,7 @@ async function acquisitionFixture(damage?: 'bytes' | 'mutable' | 'forbidden-scri
     ...(damage === 'forbidden-script' ? { scripts: { install: 'must-not-execute' } } : {}),
   }))
   const archive = join(directory, 'fixture.tgz')
-  await c({ cwd: directory, file: archive, gzip: true }, ['package'])
+  await c({ cwd: directory, file: archive, gzip: true }, ['package/package.json'])
   const bytes = readFileSync(archive)
   const asset = 'dsh-github-copilot-0.4.0-alpha.35.tgz'
   const checksum = Buffer.from(`${hash(bytes)}  ${asset}\n`)
@@ -67,7 +68,7 @@ async function acquisitionFixture(damage?: 'bytes' | 'mutable' | 'forbidden-scri
     if (url.pathname.endsWith('/assets/11')) return new Response(Uint8Array.from(checksum))
     throw new Error('Unexpected offline request')
   })
-  return { options, fetcher }
+  return { options, fetcher, source, directory }
 }
 
 describe('bounded anonymous acquisition diagnostic', () => {
@@ -126,8 +127,18 @@ describe('bounded anonymous acquisition diagnostic', () => {
   })
 
   it('verifies one complete acquisition and removes all downloaded bytes', async () => {
-    const { options, fetcher } = await acquisitionFixture()
-    await expect(diagnosePluginAcquisition(options, fetcher)).resolves.toMatchObject({
+    const { options, fetcher, source, directory } = await acquisitionFixture()
+    await expect(acquireDesktopPluginArtifact(source, join(directory, 'direct'), fetcher)).resolves.toMatchObject({ assetId: 10 })
+    fetcher.mockClear()
+    // Inspect only the sanitized report first so a future failure identifies its route/status without leaking raw errors.
+    const diagnostic = await diagnosePluginAcquisition(options, fetcher).catch(() => undefined)
+    const saved: unknown = JSON.parse(readFileSync(options.output, 'utf8'))
+    expect(saved).toMatchObject({ outcome: 'verified', cleanup: 'removed', observerRejection: 'none', requests: [
+      { route: 'release-metadata', status: 200 }, { route: 'tag-reference', status: 200 },
+      { route: 'tag-object', status: 200 }, { route: 'package-asset', status: 302 },
+      { route: 'asset-redirect', status: 200 }, { route: 'checksum-asset', status: 200 },
+    ] })
+    expect(diagnostic).toMatchObject({
       attemptCount: 1, outcome: 'verified', cleanup: 'removed', observerRejection: 'none',
       releaseId: 12, installed: false, executedPlugin: false,
     })
@@ -137,7 +148,14 @@ describe('bounded anonymous acquisition diagnostic', () => {
   })
 
   it.each(['bytes', 'mutable', 'forbidden-script'] as const)('keeps product %s validation fatal with safe evidence', async (damage) => {
-    const { options, fetcher } = await acquisitionFixture(damage)
+    const { options, fetcher, source, directory } = await acquisitionFixture(damage)
+    const reason = {
+      bytes: 'release asset size does not match the lock',
+      mutable: 'GitHub release is mutable or lacks immutable metadata',
+      'forbidden-script': 'archive declares forbidden lifecycle script install',
+    }[damage]
+    await expect(acquireDesktopPluginArtifact(source, join(directory, 'direct'), fetcher)).rejects.toThrow(reason)
+    fetcher.mockClear()
     await expect(diagnosePluginAcquisition(options, fetcher)).rejects.toThrow('Anonymous acquisition diagnostic failed')
     const report: unknown = JSON.parse(readFileSync(options.output, 'utf8'))
     expect(report).toMatchObject({ outcome: 'failed', cleanup: 'removed', attemptCount: 1 })
