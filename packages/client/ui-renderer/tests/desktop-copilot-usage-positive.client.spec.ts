@@ -103,7 +103,7 @@ describe('official alpha2 renderer with the actual positive-fixture adapter', ()
     expect(absentSnapshot.props.sessionId).toBeUndefined()
     expect(adapter.bindingSource(undefined)).toBe(absent)
     expect(adapter.current.getSnapshot()).toBe(adapter.current.getSnapshot())
-    expect(() => { Reflect.apply(adapter.bindingSource, adapter, [{ sessionId: 'unsupported' }]) })
+    expect(() => { Reflect.apply(adapter.bindingSource.bind(adapter), undefined, [{ sessionId: 'unsupported' }]) })
       .toThrow('Unsupported explicit fixture Session reference')
   })
 

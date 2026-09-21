@@ -75,13 +75,14 @@ describe('Desktop window navigation', () => {
     expect(view.actions.openExternal).not.toHaveBeenCalled()
   })
 
-  it('blocks legacy recovery URLs without a recovery action or OS dispatch', async () => {
+  it.each(['restart', 'plugins', 'reset'])('blocks legacy recovery %s without a recovery action or OS dispatch', async (action) => {
     const view = fixture()
-    const url = 'dsh-recovery://restart/?'
+    const url = `dsh-recovery://${action}/`
     expect(view.popup(url)).toEqual({ action: 'deny' })
     expect(view.navigate(url).preventDefault).toHaveBeenCalledOnce()
     await settledTurn()
     expect(view.actions.openExternal).not.toHaveBeenCalled()
+    expect(view.actions.openFailed).not.toHaveBeenCalled()
   })
 
   it('retains same-origin HTTP navigation but dispatches the same popup through the OS', async () => {
@@ -102,6 +103,8 @@ describe('Desktop window navigation', () => {
     ['http://app.example:1234/', 'http://app.example:1235/next'],
     ['https://app.example/', 'https://app.example/next'],
     ['https://app.example/', 'http://app.example/next'],
+    ['about:blank', 'http://app.example/next'],
+    ['http://127.0.0.1:19387/', 'http://localhost:19387/next'],
   ])('does not widen the official HTTP exception from %s to %s', async (current, destination) => {
     const view = fixture(current)
     expect(view.navigate(destination).preventDefault).toHaveBeenCalledOnce()
@@ -109,8 +112,8 @@ describe('Desktop window navigation', () => {
     expect(view.actions.openExternal).toHaveBeenCalledExactlyOnceWith(destination)
   })
 
-  it.each(['malformed', 'throws'])('fails closed when the owned current document is %s', async (damage) => {
-    const view = fixture('not a valid URL')
+  it.each(['empty', 'malformed', 'throws'])('fails closed when the owned current document is %s', async (damage) => {
+    const view = fixture(damage === 'empty' ? '' : 'not a valid URL')
     if (damage === 'throws') view.getURL.mockImplementation(() => { throw new Error('private current URL failure') })
     for (const destination of ['http://app.example/next', 'https://example.com/', 'dsh-app://app/next', 'dsh-recovery://restart']) {
       expect(view.navigate(destination).preventDefault).toHaveBeenCalledOnce()

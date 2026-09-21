@@ -506,6 +506,22 @@ describe('external links in alpha2 Desktop windows', () => {
     expect(harness.dialog.showErrorBox).not.toHaveBeenCalled()
   })
 
+  it('does not report a late browser failure during shutdown while its window remains alive', async () => {
+    await startApplication()
+    let reject!: (error: Error) => void
+    harness.openExternal.mockReturnValueOnce(new Promise<void>((_resolve, decline) => { reject = decline }))
+    const window = harness.windows[0]!
+    window.webContents.emit('will-navigate', { preventDefault: vi.fn() }, 'https://example.com/?private=shutdown')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.openExternal).toHaveBeenCalledOnce()
+    harness.app.quit()
+    expect(window.isDestroyed()).toBe(false)
+    reject(new Error('private delayed browser failure'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(window.isDestroyed()).toBe(false)
+    expect(harness.dialog.showErrorBox).not.toHaveBeenCalled()
+  })
+
   it('blocks malformed/current-unavailable and obsolete recovery navigation without reviving recovery plumbing', async () => {
     await startApplication()
     const window = harness.windows[0]!

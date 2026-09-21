@@ -164,7 +164,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
   installDesktopWindowNavigation(window.webContents, {
     openExternal: url => shell.openExternal(url),
     openFailed: () => {
-      if (window.isDestroyed()) return
+      if (shuttingDown || window.isDestroyed()) return
       const messages = currentDesktopLocale().messages
       dialog.showErrorBox(messages.externalLinkFailedTitle, messages.externalLinkFailedAdvice)
     },
