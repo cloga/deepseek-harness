@@ -676,7 +676,7 @@ Source: [`packages/llm/model-routing/src/routing-state.ts:37`](../packages/llm/m
 'model/routing-request': RoutingClassifierRequestEvent
 ```
 
-Source: [`packages/llm/model-routing/src/classifier-types.ts:72`](../packages/llm/model-routing/src/classifier-types.ts)
+Source: [`packages/llm/model-routing/src/classifier-types.ts:75`](../packages/llm/model-routing/src/classifier-types.ts)
 
 <a id="modelrouting-result--log-only"></a>
 
@@ -687,7 +687,7 @@ Source: [`packages/llm/model-routing/src/classifier-types.ts:72`](../packages/ll
 'model/routing-result': RoutingClassifierResultEvent
 ```
 
-Source: [`packages/llm/model-routing/src/classifier-types.ts:74`](../packages/llm/model-routing/src/classifier-types.ts)
+Source: [`packages/llm/model-routing/src/classifier-types.ts:77`](../packages/llm/model-routing/src/classifier-types.ts)
 
 <a id="modelselection--log-only"></a>
 
@@ -5812,7 +5812,7 @@ Sources: [`packages/llm/llm/src/types.ts:445`](../packages/llm/llm/src/types.ts)
 
 SHA-256: `c0fc107404a8f07646d7a3a7e563252569d3375a94175a4707893ce20933eb3d`
 
-Sources: [`packages/llm/model-routing/src/classifier-types.ts:30`](../packages/llm/model-routing/src/classifier-types.ts)
+Sources: [`packages/llm/model-routing/src/classifier-types.ts:33`](../packages/llm/model-routing/src/classifier-types.ts)
 
 One of:
 
@@ -5850,7 +5850,7 @@ Sources: [`packages/llm/model-routing/src/classifier-types.ts:10`](../packages/l
 
 SHA-256: `ae1d5a1281027bfc0a5c1c02c8dddaa1f53b4a3c082ace446b1bc05bc2650110`
 
-Sources: [`packages/llm/model-routing/src/classifier-types.ts:49`](../packages/llm/model-routing/src/classifier-types.ts)
+Sources: [`packages/llm/model-routing/src/classifier-types.ts:52`](../packages/llm/model-routing/src/classifier-types.ts)
 
 | Property | Presence | Type |
 |---|---|---|
@@ -5867,7 +5867,7 @@ Sources: [`packages/llm/model-routing/src/classifier-types.ts:49`](../packages/l
 
 SHA-256: `d31b52a2bb5ac9c5a6102337f1038285c6dc76a0c96da610d059a759981e9c40`
 
-Sources: [`packages/llm/model-routing/src/classifier-types.ts:60`](../packages/llm/model-routing/src/classifier-types.ts)
+Sources: [`packages/llm/model-routing/src/classifier-types.ts:63`](../packages/llm/model-routing/src/classifier-types.ts)
 
 | Property | Presence | Type |
 |---|---|---|
@@ -5929,7 +5929,7 @@ One of:
 
 SHA-256: `b93771efe9a9f4eb3dcae3e6af8eb2ad4629d0e1d23ce82d75541c1ae26a4a8b`
 
-Sources: [`packages/llm/model-routing/src/types.ts:43`](../packages/llm/model-routing/src/types.ts)
+Sources: [`packages/llm/model-routing/src/types.ts:46`](../packages/llm/model-routing/src/types.ts)
 
 | Property | Presence | Type |
 |---|---|---|
@@ -5973,7 +5973,7 @@ Sources: [`packages/llm/model-routing/src/types.ts:34`](../packages/llm/model-ro
 
 SHA-256: `cfd9a8456dd63a7ea35990926228be922b56ece6933de56a5822628bf9f2735c`
 
-Sources: [`packages/llm/model-routing/src/types.ts:53`](../packages/llm/model-routing/src/types.ts)
+Sources: [`packages/llm/model-routing/src/types.ts:58`](../packages/llm/model-routing/src/types.ts)
 
 One of:
 

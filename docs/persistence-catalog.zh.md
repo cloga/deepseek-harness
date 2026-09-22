@@ -678,7 +678,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'model/routing-request': RoutingClassifierRequestEvent
 ```
 
-来源：[`packages/llm/model-routing/src/classifier-types.ts:72`](../packages/llm/model-routing/src/classifier-types.ts)
+来源：[`packages/llm/model-routing/src/classifier-types.ts:75`](../packages/llm/model-routing/src/classifier-types.ts)
 
 <a id="modelrouting-result--log-only"></a>
 
@@ -689,7 +689,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'model/routing-result': RoutingClassifierResultEvent
 ```
 
-来源：[`packages/llm/model-routing/src/classifier-types.ts:74`](../packages/llm/model-routing/src/classifier-types.ts)
+来源：[`packages/llm/model-routing/src/classifier-types.ts:77`](../packages/llm/model-routing/src/classifier-types.ts)
 
 <a id="modelselection--log-only"></a>
 
@@ -5814,7 +5814,7 @@ SHA-256: `7f5f2a8618c2ece530a18b1358b890fb57fb8c35705e47b66bff2296f8c6e889`
 
 SHA-256: `c0fc107404a8f07646d7a3a7e563252569d3375a94175a4707893ce20933eb3d`
 
-来源：[`packages/llm/model-routing/src/classifier-types.ts:30`](../packages/llm/model-routing/src/classifier-types.ts)
+来源：[`packages/llm/model-routing/src/classifier-types.ts:33`](../packages/llm/model-routing/src/classifier-types.ts)
 
 以下类型之一：
 
@@ -5852,7 +5852,7 @@ SHA-256: `5bf0192623222b684717936060f6886d3e2d5d4cbcfe242f8274f8f518043d33`
 
 SHA-256: `ae1d5a1281027bfc0a5c1c02c8dddaa1f53b4a3c082ace446b1bc05bc2650110`
 
-来源：[`packages/llm/model-routing/src/classifier-types.ts:49`](../packages/llm/model-routing/src/classifier-types.ts)
+来源：[`packages/llm/model-routing/src/classifier-types.ts:52`](../packages/llm/model-routing/src/classifier-types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -5869,7 +5869,7 @@ SHA-256: `ae1d5a1281027bfc0a5c1c02c8dddaa1f53b4a3c082ace446b1bc05bc2650110`
 
 SHA-256: `d31b52a2bb5ac9c5a6102337f1038285c6dc76a0c96da610d059a759981e9c40`
 
-来源：[`packages/llm/model-routing/src/classifier-types.ts:60`](../packages/llm/model-routing/src/classifier-types.ts)
+来源：[`packages/llm/model-routing/src/classifier-types.ts:63`](../packages/llm/model-routing/src/classifier-types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -5931,7 +5931,7 @@ SHA-256: `db699ae874f45c6519463734b8db3804d526781a30975ee17162b7f79052e0de`
 
 SHA-256: `b93771efe9a9f4eb3dcae3e6af8eb2ad4629d0e1d23ce82d75541c1ae26a4a8b`
 
-来源：[`packages/llm/model-routing/src/types.ts:43`](../packages/llm/model-routing/src/types.ts)
+来源：[`packages/llm/model-routing/src/types.ts:46`](../packages/llm/model-routing/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -5975,7 +5975,7 @@ SHA-256: `9cd390b74bae4556a0ab0287331a6b04e3da31aac043a4c1024b858aebbc6764`
 
 SHA-256: `cfd9a8456dd63a7ea35990926228be922b56ece6933de56a5822628bf9f2735c`
 
-来源：[`packages/llm/model-routing/src/types.ts:53`](../packages/llm/model-routing/src/types.ts)
+来源：[`packages/llm/model-routing/src/types.ts:58`](../packages/llm/model-routing/src/types.ts)
 
 以下类型之一：
 

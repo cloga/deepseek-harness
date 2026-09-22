@@ -57361,7 +57361,7 @@
         "packages/llm/model-routing/src/classifier-types.ts#RoutingClassifierRequestEvent"
       ],
       "sources": [
-        "packages/llm/model-routing/src/classifier-types.ts:49"
+        "packages/llm/model-routing/src/classifier-types.ts:52"
       ]
     },
     {
@@ -59590,7 +59590,7 @@
         "packages/llm/model-routing/src/types.ts#ModelRoutingPolicy"
       ],
       "sources": [
-        "packages/llm/model-routing/src/types.ts:43"
+        "packages/llm/model-routing/src/types.ts:46"
       ]
     },
     {
@@ -60910,7 +60910,7 @@
         "packages/llm/model-routing/src/classifier-types.ts#RoutingClassificationOutcome"
       ],
       "sources": [
-        "packages/llm/model-routing/src/classifier-types.ts:30"
+        "packages/llm/model-routing/src/classifier-types.ts:33"
       ]
     },
     {
@@ -64181,7 +64181,7 @@
         "packages/llm/model-routing/src/types.ts#RoutingDecisionReason"
       ],
       "sources": [
-        "packages/llm/model-routing/src/types.ts:53"
+        "packages/llm/model-routing/src/types.ts:58"
       ]
     },
     {
@@ -65298,7 +65298,7 @@
         "packages/llm/model-routing/src/classifier-types.ts#RoutingClassifierResultEvent"
       ],
       "sources": [
-        "packages/llm/model-routing/src/classifier-types.ts:60"
+        "packages/llm/model-routing/src/classifier-types.ts:63"
       ]
     },
     {
