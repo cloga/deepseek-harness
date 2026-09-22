@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { smokeDesktopRuntime } from '../scripts/smoke-runtime.ts'
 import { smokeDesktopRuntimeBrowser } from '../scripts/smoke-runtime-browser.ts'
 import type { DesktopRuntimeDescriptor } from '../src/runtime-tree.ts'
+import { DESKTOP_HOST_PROTOCOL_VERSION } from '../src/host-protocol.ts'
 
 const owned = vi.hoisted(() => ({
   stop: vi.fn(async () => {}),
@@ -45,7 +46,10 @@ const runtime: DesktopRuntimeDescriptor = {
   platform: process.platform,
   arch: process.arch,
   files: [],
-  release: { schemaVersion: 1, version: '1.0.0', hostProtocolVersion: 3, nodeVersion: '24.13.0', pnpmVersion: '11.7.0' },
+  release: {
+    schemaVersion: 1, version: '1.0.0', hostProtocolVersion: DESKTOP_HOST_PROTOCOL_VERSION,
+    nodeVersion: '24.13.0', pnpmVersion: '11.7.0',
+  },
   sharedPackages: [
     '@deepseek-ai/cordis', '@deepseek-ai/schemastery', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-credentials',
   ].map(name => ({ name, version: '1.0.0', path: `node_modules/${name}` })),

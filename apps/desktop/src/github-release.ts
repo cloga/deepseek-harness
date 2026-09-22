@@ -34,6 +34,24 @@ function validateRequestUrl(url: URL, download: boolean, subject: string): void 
   if (!allowed.has(url.hostname)) throw new Error(`${subject}: rejected redirect host ${url.hostname}`)
 }
 
+function githubFailureMessage(response: Response, url: URL, download: boolean, subject: string): string {
+  const category = download ? 'asset-download'
+    : /\/releases\/tags\//u.test(url.pathname) ? 'release-metadata'
+      : /\/git\/ref\/tags\//u.test(url.pathname) ? 'tag-reference'
+        : /\/git\/tags\//u.test(url.pathname) ? 'annotated-tag' : 'api'
+  const details = [`request=${category}`]
+  for (const [header, label] of [
+    ['x-ratelimit-remaining', 'rateRemaining'],
+    ['x-ratelimit-reset', 'rateReset'],
+    ['retry-after', 'retryAfter'],
+  ] as const) {
+    const value = response.headers.get(header)
+    if (value !== null && /^(?:0|[1-9][0-9]{0,11})$/u.test(value)) details.push(`${label}=${value}`)
+  }
+  // Never echo response bodies, URLs, request IDs, cookies, or arbitrary header values.
+  return `${subject}: GitHub request failed with ${String(response.status)} (${details.join(', ')})`
+}
+
 /**
  * Fetch one GitHub API or asset response through the fixed Desktop redirect policy.
  * @param initial - Initial GitHub URL.
@@ -64,7 +82,11 @@ export async function requestDesktopGithubRelease(
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
     if (!REDIRECTS.has(response.status)) {
-      if (!response.ok) throw new Error(`${subject}: GitHub request failed with ${String(response.status)}`)
+      if (!response.ok) {
+        const message = githubFailureMessage(response, url, download, subject)
+        try { await response.body?.cancel() } catch (_error) { /* Body cleanup must not replace the HTTP diagnostic. */ }
+        throw new Error(message)
+      }
       return response
     }
     if (redirect === MAX_REDIRECTS) throw new Error(`${subject}: GitHub redirect limit exceeded`)

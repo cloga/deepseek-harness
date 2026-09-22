@@ -12,6 +12,7 @@ import {
   encodeDesktopRequestData,
   encodeDesktopRequestEnd,
   encodeDesktopRequestStart,
+  isDesktopPluginCommandOperation,
 } from '../src/host-protocol.ts'
 
 function decodeInPieces<T>(bytes: Buffer, push: (chunk: Buffer) => readonly T[]): T[] {
@@ -21,6 +22,33 @@ function decodeInPieces<T>(bytes: Buffer, push: (chunk: Buffer) => readonly T[])
   }
   return values
 }
+
+describe('desktop Host plugin command protocol', () => {
+  it.each([
+    { type: 'list' },
+    { type: 'install', source: { type: 'npm', spec: '@scope/plugin@1.0.0' } },
+    { type: 'install', source: { type: 'github', spec: 'owner/repo#main' } },
+    { type: 'install', source: { type: 'release', release: { schemaVersion: 1, type: 'githubRelease' } } },
+    { type: 'remove', name: 'example-plugin' },
+    { type: 'update', name: 'example-plugin', version: '1.2.3' },
+    { type: 'enable', name: 'example-plugin' },
+    { type: 'disable', name: 'example-plugin' },
+    { type: 'disable-all' },
+  ])('accepts the closed JSON operation %j', (operation) => {
+    expect(isDesktopPluginCommandOperation(operation)).toBe(true)
+  })
+
+  it.each([
+    null,
+    { type: 'list', extra: true },
+    { type: 'install', source: { type: 'file', spec: './plugin' } },
+    { type: 'install', source: { type: 'release', release: [] } },
+    { type: 'toggle', name: 'plugin', enabled: true },
+    { type: 'remove', name: '' },
+  ])('rejects malformed or widened operation %j', (operation) => {
+    expect(isDesktopPluginCommandOperation(operation)).toBe(false)
+  })
+})
 
 describe('desktop Host pipe protocol', () => {
   it('keeps Electron request frames compatible with the installed Host decoder', () => {

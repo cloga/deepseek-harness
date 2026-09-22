@@ -1,7 +1,7 @@
 /** Versioned control messages and framed byte transport for the Desktop Host child. */
 
 /** Protocol version implemented by the Electron shell and installed dsh Host. */
-export const DESKTOP_HOST_PROTOCOL_VERSION = 3 as const
+export const DESKTOP_HOST_PROTOCOL_VERSION = 4 as const
 
 /** Child descriptor Electron writes request frames to. */
 export const DESKTOP_REQUEST_PIPE_FD = 3
@@ -39,9 +39,34 @@ export interface DesktopHostRequestStart {
   readonly hasBody: boolean
 }
 
+/** Closed plugin-management operations issued by the built-in Desktop Host command. */
+export type DesktopPluginCommandOperation =
+  | { readonly type: 'list' }
+  | { readonly type: 'install'; readonly source: { readonly type: 'npm'; readonly spec: string } }
+  | { readonly type: 'install'; readonly source: { readonly type: 'github'; readonly spec: string } }
+  | { readonly type: 'install'; readonly source: { readonly type: 'release'; readonly release: Record<string, unknown> } }
+  | { readonly type: 'remove'; readonly name: string }
+  | { readonly type: 'update'; readonly name: string; readonly version: string }
+  | { readonly type: 'enable' | 'disable'; readonly name: string }
+  | { readonly type: 'disable-all' }
+
+/** Minimal installed-plugin row returned to the slash command. */
+export interface DesktopPluginCommandListRow {
+  readonly name: string
+  readonly version: string
+  readonly enabled: boolean
+}
+
 /** Commands retained on Node IPC because they do not carry Fetch payload bytes. */
 export type DesktopHostCommand = {
   readonly type: 'shutdown'
+} | {
+  readonly type: 'plugin-command-response'
+  readonly requestId: number
+  readonly result:
+    | { readonly kind: 'list'; readonly plugins: readonly DesktopPluginCommandListRow[] }
+    | { readonly kind: 'prepared' }
+    | { readonly kind: 'error'; readonly code: 'busy' | 'failed' | 'invalid' | 'stale' | 'unavailable' }
 }
 
 /** Lifecycle events retained on Node IPC. */
@@ -52,6 +77,18 @@ export type DesktopHostEvent = {
 } | {
   readonly type: 'fatal'
   readonly message: string
+} | {
+  readonly type: 'plugin-command-request'
+  readonly requestId: number
+  readonly commandId: string
+  readonly operation: DesktopPluginCommandOperation
+} | {
+  readonly type: 'plugin-command-cancel'
+  readonly requestId: number
+} | {
+  readonly type: 'plugin-command-settled'
+  readonly requestId: number
+  readonly commandId: string
 }
 
 /** One decoded response-pipe frame. */
@@ -75,7 +112,48 @@ export type DesktopHostResponseFrame = {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).every(key => keys.includes(key))
+}
+
+function boundedString(value: unknown, maximum: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maximum
+}
+
+/** Validate one Host-originated plugin command before Electron interprets it. */
+export function isDesktopPluginCommandOperation(value: unknown): value is DesktopPluginCommandOperation {
+  if (!isRecord(value) || typeof value.type !== 'string') return false
+  switch (value.type) {
+    case 'list':
+    case 'disable-all':
+      return hasOnlyKeys(value, ['type'])
+    case 'install': {
+      if (!hasOnlyKeys(value, ['type', 'source']) || !isRecord(value.source) || typeof value.source.type !== 'string') return false
+      switch (value.source.type) {
+        case 'npm':
+          return hasOnlyKeys(value.source, ['type', 'spec']) && boundedString(value.source.spec, MAX_CONTROL_PAYLOAD_BYTES)
+        case 'github':
+          return hasOnlyKeys(value.source, ['type', 'spec']) && boundedString(value.source.spec, 4096)
+        case 'release':
+          return hasOnlyKeys(value.source, ['type', 'release']) && isRecord(value.source.release)
+        default:
+          return false
+      }
+    }
+    case 'remove':
+      return hasOnlyKeys(value, ['type', 'name']) && boundedString(value.name, 256)
+    case 'update':
+      return hasOnlyKeys(value, ['type', 'name', 'version'])
+        && boundedString(value.name, 256) && boundedString(value.version, 256)
+    case 'enable':
+    case 'disable':
+      return hasOnlyKeys(value, ['type', 'name']) && boundedString(value.name, 256)
+    default:
+      return false
+  }
 }
 
 function isHeaders(value: unknown): value is readonly [string, string][] {
