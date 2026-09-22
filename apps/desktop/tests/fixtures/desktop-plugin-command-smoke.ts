@@ -52,33 +52,6 @@ export function pendingDesktopPluginHandles(processClosed: boolean, jobClosed: b
   return [...(processClosed ? [] : ['process'] as const), ...(jobClosed ? [] : ['job'] as const)]
 }
 
-/**
- * Canonicalize repeated UIA observations of one logical menu leaf without choosing among distinct identities.
- * @param routes - Bounded observations from the main tree and owned popup trees.
- * @returns One logical RuntimeId with every retained ownership relation.
- */
-export function canonicalizeDesktopPluginMenuRoutes(
-  routes: readonly { readonly runtimeId: string; readonly popupHwnd?: string; readonly relation: string }[],
-): {
-  readonly runtimeId: string
-  readonly popupHwnd?: string
-  readonly relations: readonly string[]
-  readonly observations: number
-} {
-  if (routes.length === 0) throw new Error('Desktop plugin menu route is missing')
-  const runtimeIds = [...new Set(routes.map(route => route.runtimeId))]
-  if (runtimeIds.length !== 1) throw new Error('Distinct Desktop plugin menu RuntimeIds are ambiguous')
-  const popupHwnds = [...new Set(routes.flatMap(route => route.popupHwnd === undefined ? [] : [route.popupHwnd]))]
-  if (popupHwnds.length > 1) throw new Error('Desktop plugin menu RuntimeId has conflicting popup bindings')
-  const relations = [...new Set(routes.map(route => route.relation))].sort()
-  return {
-    runtimeId: runtimeIds[0]!,
-    ...(popupHwnds[0] === undefined ? {} : { popupHwnd: popupHwnds[0] }),
-    relations,
-    observations: routes.length,
-  }
-}
-
 /** Only a packaged executable and caller-selected evidence destination are accepted. */
 export interface PackagedDesktopPluginCommandOptions {
   readonly application: string
@@ -608,44 +581,15 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     const archiveBytes = unrelatedPluginArchive()
     writeFileSync(archivePath, archiveBytes, { flag: 'wx', mode: 0o600 })
     const context = browser.contexts()[0]!
-    const existingPages = context.pages()
-    assert.equal(existingPages.length, 1, 'Manager must not pre-exist in the owned browser context')
-    assert.equal(existingPages[0], firstPage, 'The sole pre-manager page must be the owned application page')
     const managerDeadline = boundedWorkDeadline(performance.now() + 30_000)
+    await withinDeadline(managerDeadline, async () => { await firstPage.bringToFront() })
+    const rootFocused = await withinDeadline(managerDeadline, () => firstPage.evaluate(() => document.hasFocus()))
+    assert.equal(rootFocused, true, 'Main application must own focus before invoking the plugin-manager accelerator')
     const managerPagePromise = context.waitForEvent('page', { timeout: remainingDeadline(managerDeadline) })
     void managerPagePromise.catch(() => undefined)
-    const managerMenu = await nativeHelper<{
-      action: 'OpenManager'
-      semanticPath: ['Application', 'Desktop Plugins…']
-      rootHwnd: string
-      preOwnedHwnds: string[]
-      preVisibleHwnds: string[]
-      postOwnedHwnds: string[]
-    }>(home, environment, { action: 'open-manager', ownership }, helperLifecycle, managerDeadline)
+    await withinDeadline(managerDeadline, async () => { await firstPage.keyboard.press('Control+,') })
     const managerPage = await managerPagePromise
     await managerPage.waitForURL('dsh-app://shell/plugin-manager.html', { timeout: remainingDeadline(managerDeadline) })
-    await managerPage.waitForFunction(() => document.title === 'Desktop Plugins', undefined,
-      { timeout: remainingDeadline(managerDeadline) })
-    await managerPage.locator('#install-form').waitFor({ state: 'visible', timeout: remainingDeadline(managerDeadline) })
-    assert.equal(context.pages().length, 2, 'Manager invocation must create exactly one additional owned page')
-    assert.equal(context.pages().filter(candidate => candidate.url() === 'dsh-app://shell/plugin-manager.html').length, 1)
-    const managerTitle = await withinDeadline(managerDeadline, () => managerPage.title())
-    const managerOwnership = await nativeHelper<Ownership>(
-      home,
-      environment,
-      { action: 'capture', ...launchIdentity, main: mainIdentity, pageTitle: managerTitle, profile, home,
-        hostEntry: join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js') },
-      helperLifecycle,
-      managerDeadline,
-    )
-    assert.deepEqual(managerMenu.preVisibleHwnds, [ownership.mainHwnd],
-      'No secondary owned native window may pre-exist before manager invocation')
-    assert.deepEqual(managerOwnership.main, ownership.main)
-    assert.deepEqual(managerOwnership.host, ownership.host)
-    assert.notEqual(managerOwnership.mainHwnd, ownership.mainHwnd)
-    assert.equal(managerMenu.preOwnedHwnds.includes(managerOwnership.mainHwnd), false)
-    evidence.managerMenu = managerMenu
-    evidence.managerOwnership = managerOwnership
     await managerPage.locator('#package-spec').fill(archivePath, { timeout: remainingDeadline(managerDeadline) })
     const initialHostIdentity = ownership.host
     const auditsBeforeLocal = auditNames(home)

@@ -1,4 +1,4 @@
-# Windows-only, fixture-owned process identity, menu, Apply, Cancel and close operations. Never searches by title alone.
+# Windows-only, fixture-owned process identity and native Cancel operations. Never searches by title alone.
 param([Parameter(Mandatory = $true)][string]$RequestFile)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -50,53 +50,6 @@ function Initialize-UiAutomation {
     $registration = [Windows.Automation.ClientSettings].GetMethod('RegisterClientSideProviderAssembly',
         [type[]]@([Reflection.AssemblyName]))
     $null = $registration.Invoke($null, [object[]]@($providerName))
-}
-
-function Read-RuntimeId($element) {
-    $values = @($element.GetRuntimeId())
-    if ($values.Count -eq 0 -or $values.Count -gt 64) { throw 'UIA RuntimeId is missing or exceeds bound' }
-    return ($values -join '.')
-}
-function Read-BoundedUiTree($root, [int]$MaximumDepth = 8, [int]$MaximumVisited = 512) {
-    $walker = [Windows.Automation.TreeWalker]::ControlViewWalker
-    $queue = [System.Collections.Generic.Queue[object]]::new()
-    $rootRuntimeId = Read-RuntimeId $root
-    $queue.Enqueue([pscustomobject]@{ element = $root; depth = 0; runtimeId = $rootRuntimeId })
-    $records = [System.Collections.Generic.List[object]]::new()
-    $visited = 0
-    while ($queue.Count -gt 0) {
-        $parent = $queue.Dequeue()
-        if ($parent.depth -ge $MaximumDepth) { continue }
-        $child = $walker.GetFirstChild($parent.element)
-        while ($null -ne $child) {
-            if (++$visited -gt $MaximumVisited) { throw 'UIA traversal exceeded visited-element bound' }
-            $name = [string]$child.Current.Name
-            if ($name.Length -gt 256) { throw 'UIA accessible name exceeded bound' }
-            $runtimeId = Read-RuntimeId $child
-            $record = [pscustomobject]@{ element = $child; depth = $parent.depth + 1;
-                runtimeId = $runtimeId; parentRuntimeId = $parent.runtimeId; name = $name }
-            $records.Add($record)
-            $queue.Enqueue($record)
-            $child = $walker.GetNextSibling($child)
-        }
-    }
-    return $records.ToArray()
-}
-function Test-UiDescendant($records, [string]$RuntimeId, [string]$AncestorRuntimeId) {
-    $parents = @{}
-    foreach ($record in $records) { $parents[$record.runtimeId] = $record.parentRuntimeId }
-    $current = $RuntimeId
-    for ($depth = 0; $depth -le 8; $depth++) {
-        if ($current -ceq $AncestorRuntimeId) { return $true }
-        if (!$parents.ContainsKey($current)) { return $false }
-        $current = $parents[$current]
-    }
-    throw 'UIA ancestry exceeded depth bound'
-}
-function Read-UiPattern($element, $pattern, [string]$label) {
-    $value = $element.GetCurrentPattern($pattern)
-    if ($null -eq $value) { throw "$label does not expose its required UIA pattern" }
-    return $value
 }
 
 function Assert-PageTitle($title) {
@@ -299,128 +252,6 @@ try {
         if ($currentHosts.Count -ne 1 -or $currentHosts[0].ProcessId -ne $ownership.host.pid) { throw 'The actual owned Host child changed' }
         @{ main = $ownership.main; host = $ownership.host; mainHwnd = $ownership.mainHwnd;
             mainWindow = $currentRoot.selected } | ConvertTo-Json -Depth 5 -Compress
-        exit 0
-    }
-    if ($request.action -eq 'open-manager') {
-        Initialize-UiAutomation
-        $mainHwnd = [IntPtr]([long]$ownership.mainHwnd)
-        $canonicalRoot = [Windows.Automation.AutomationElement]::FromHandle($mainHwnd)
-        if ($null -eq $canonicalRoot -or [IntPtr]$canonicalRoot.Current.NativeWindowHandle -ne $mainHwnd -or
-            $canonicalRoot.Current.ProcessId -ne $ownership.main.pid) { throw 'Cannot bind owned main HWND to canonical UIA root' }
-        $preWindows = Read-OwnedWindows $mainProcess
-        $preHandles = @($preWindows | ForEach-Object { $_.hwnd })
-        $preVisibleHandles = @($preWindows | Where-Object { $_.visible } | ForEach-Object { $_.hwnd })
-        $rootTree = Read-BoundedUiTree $canonicalRoot
-        $applications = @($rootTree | Where-Object {
-            $_.name -ceq 'Application' -and
-            $_.element.Current.ControlType -eq [Windows.Automation.ControlType]::MenuItem -and
-            $_.element.Current.ProcessId -eq $ownership.main.pid -and
-            $_.element.Current.IsEnabled -and !$_.element.Current.IsOffscreen
-        })
-        if ($applications.Count -ne 1) { throw 'Expected one exact owned Application menu item' }
-        $application = $applications[0]
-        $applicationRuntimeId = $application.runtimeId
-        $expand = Read-UiPattern $application.element ([Windows.Automation.ExpandCollapsePattern]::Pattern) 'Application menu item'
-        $expand.Expand()
-
-        function Merge-OwnedManagerRoutes($routes) {
-            $items = @($routes)
-            if ($items.Count -eq 0) { return @() }
-            $groups = @($items | Group-Object -Property runtimeId)
-            if ($groups.Count -ne 1) { throw 'Distinct Desktop Plugins… RuntimeIds are ambiguous' }
-            $bindings = @($groups[0].Group)
-            $popupBindings = @($bindings | Where-Object { $null -ne $_.popupHwnd })
-            $popupHwnds = @($popupBindings | ForEach-Object { $_.popupHwnd } | Sort-Object -Unique)
-            if ($popupHwnds.Count -gt 1) { throw 'Desktop Plugins… RuntimeId has conflicting popup bindings' }
-            $selected = $bindings[0]
-            if ($popupBindings.Count -gt 0) { $selected = $popupBindings[0] }
-            $relations = @($bindings | ForEach-Object { $_.relation } | Sort-Object -Unique)
-            $popupBinding = if ($popupHwnds.Count -eq 1) { $popupHwnds[0] } else { $null }
-            return [pscustomobject]@{ element = $selected.element; runtimeId = $groups[0].Name;
-                popupHwnd = $popupBinding; relations = $relations; observations = $bindings.Count }
-        }
-
-        function Find-OwnedManagerLeaf($root, $applicationId, $beforeVisibleHandles) {
-            $matches = @()
-            $tree = Read-BoundedUiTree $root
-            foreach ($record in @($tree | Where-Object {
-                $_.name -ceq 'Desktop Plugins…' -and
-                $_.element.Current.ControlType -eq [Windows.Automation.ControlType]::MenuItem -and
-                $_.element.Current.ProcessId -eq $ownership.main.pid -and
-                $_.element.Current.IsEnabled -and !$_.element.Current.IsOffscreen
-            })) {
-                if (Test-UiDescendant $tree $record.runtimeId $applicationId) {
-                    $matches += [pscustomobject]@{ element = $record.element; runtimeId = $record.runtimeId;
-                        popupHwnd = $null; relation = 'Application descendant' }
-                }
-            }
-            $ownedWindows = Read-OwnedWindows $mainProcess
-            $popups = @($ownedWindows | Where-Object {
-                $_.hwnd -cne $ownership.mainHwnd -and $_.pid -eq $ownership.main.pid -and $_.visible -and !$_.minimized -and
-                $beforeVisibleHandles -cnotcontains $_.hwnd -and
-                ($_.owner -ceq $ownership.mainHwnd -or $_.rootOwner -ceq $ownership.mainHwnd)
-            })
-            if ($popups.Count -gt 16) { throw 'Owned menu popup count exceeded bound' }
-            foreach ($popup in $popups) {
-                $popupHwnd = [IntPtr]([long]$popup.hwnd)
-                $popupRoot = [Windows.Automation.AutomationElement]::FromHandle($popupHwnd)
-                if ($null -eq $popupRoot -or $popupRoot.Current.ProcessId -ne $ownership.main.pid) {
-                    throw 'Owned menu popup UIA root identity changed'
-                }
-                $popupTree = Read-BoundedUiTree $popupRoot
-                foreach ($record in @($popupTree | Where-Object {
-                    $_.name -ceq 'Desktop Plugins…' -and
-                    $_.element.Current.ControlType -eq [Windows.Automation.ControlType]::MenuItem -and
-                    $_.element.Current.ProcessId -eq $ownership.main.pid -and
-                    $_.element.Current.IsEnabled -and !$_.element.Current.IsOffscreen
-                })) {
-                    $matches += [pscustomobject]@{ element = $record.element; runtimeId = $record.runtimeId;
-                        popupHwnd = $popup.hwnd; relation = 'new owned popup' }
-                }
-            }
-            return Merge-OwnedManagerRoutes $matches
-        }
-
-        $deadline = [DateTime]::UtcNow.AddSeconds(30)
-        $routes = @()
-        while ($routes.Count -eq 0 -and [DateTime]::UtcNow -lt $deadline) {
-            $null = Read-VerifiedRoot $mainProcess $ownership.mainWindow.title $ownership.mainHwnd
-            $routes = @(Find-OwnedManagerLeaf $canonicalRoot $applicationRuntimeId $preVisibleHandles)
-            if ($routes.Count -eq 0) { Start-Sleep -Milliseconds 100 }
-        }
-        if ($routes.Count -ne 1) { throw 'Expected one exact Desktop Plugins… menu route' }
-        $route = $routes[0]
-        $leafRuntimeId = $route.runtimeId
-
-        $currentRoot = Read-VerifiedRoot $mainProcess $ownership.mainWindow.title $ownership.mainHwnd
-        if (!$currentRoot.selected.visible -or $currentRoot.selected.minimized -or $mainProcess.HasExited -or $hostProcess.HasExited) {
-            throw 'Owned root or Host changed before manager-menu invocation'
-        }
-        $canonicalRoot = [Windows.Automation.AutomationElement]::FromHandle($mainHwnd)
-        $currentTree = Read-BoundedUiTree $canonicalRoot
-        $currentApplication = @($currentTree | Where-Object { $_.runtimeId -ceq $applicationRuntimeId })
-        if ($currentApplication.Count -ne 1 -or $currentApplication[0].name -cne 'Application' -or
-            $currentApplication[0].element.Current.ControlType -ne [Windows.Automation.ControlType]::MenuItem -or
-            $currentApplication[0].element.Current.ProcessId -ne $ownership.main.pid -or
-            !$currentApplication[0].element.Current.IsEnabled -or $currentApplication[0].element.Current.IsOffscreen) {
-            throw 'Application menu item changed before manager-menu invocation'
-        }
-        $null = Read-UiPattern $currentApplication[0].element ([Windows.Automation.ExpandCollapsePattern]::Pattern) 'Application menu item'
-        $currentRoutes = @(Find-OwnedManagerLeaf $canonicalRoot $applicationRuntimeId $preVisibleHandles)
-        $currentRoute = @($currentRoutes | Where-Object { $_.runtimeId -ceq $leafRuntimeId })
-        if ($currentRoutes.Count -ne 1 -or $currentRoute.Count -ne 1) {
-            throw 'Desktop Plugins… menu route changed before invocation'
-        }
-        $invoke = Read-UiPattern $currentRoute[0].element ([Windows.Automation.InvokePattern]::Pattern) 'Desktop Plugins menu item'
-        $invoke.Invoke()
-        $postHandles = @(Read-OwnedWindows $mainProcess | ForEach-Object { $_.hwnd })
-        [ordered]@{ action = 'OpenManager'; route = 'owned-uia'; semanticPath = @('Application', 'Desktop Plugins…');
-            rootHwnd = $ownership.mainHwnd; applicationRuntimeId = $applicationRuntimeId; leafRuntimeId = $leafRuntimeId;
-            relations = $currentRoute[0].relations; observations = $currentRoute[0].observations;
-            popupHwnd = $currentRoute[0].popupHwnd;
-            expandPattern = 'ExpandCollapsePattern'; invokePattern = 'InvokePattern';
-            preOwnedHwnds = $preHandles; preVisibleHwnds = $preVisibleHandles;
-            postOwnedHwnds = $postHandles } | ConvertTo-Json -Depth 6 -Compress
         exit 0
     }
     if ($request.action -ne 'cancel' -and $request.action -ne 'apply') { throw 'Unknown fixture helper action' }
