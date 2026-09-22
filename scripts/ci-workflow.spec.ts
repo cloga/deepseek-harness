@@ -27,7 +27,87 @@ function assertDevelopmentElectronPreparation(job: Record<string, unknown>, test
   expect(steps[prepare]).not.toHaveProperty('continue-on-error', true)
 }
 
+function desktopRehearsalPlanScript(workflow: Record<string, unknown>): string {
+  const job = workflowJob(workflow, 'desktop-rehearsal-plan')
+  if (!Array.isArray(job.steps)) throw new TypeError('Desktop rehearsal plan must define steps')
+  const step = job.steps.find(candidate => isRecord(candidate) && candidate.name === 'Select exact Desktop rehearsal source')
+  if (!isRecord(step) || typeof step.run !== 'string') throw new TypeError('Desktop rehearsal selector must define a script')
+  return step.run
+}
+
+function assertDesktopRehearsalPlanScript(script: string): void {
+  expect(script).toContain('git diff --name-only -z "$BASE_SHA" "$HEAD_SHA" -- > "$changed_paths"')
+  expect(script).toContain("while IFS= read -r -d '' path")
+  expect(script).not.toContain('< <(git diff')
+  expect(script).toContain('"$GITHUB_REPOSITORY" == cloga/deepseek-harness')
+  expect(script).toContain('apps/desktop/*|apps/desktop-host/*|native/system/*|packages/*|vendor/*')
+  expect(script).toContain('scripts/*|.github/actions/*')
+  expect(script).toContain('vitest*.config.*|tsconfig*.json|tsdown.config.ts')
+  expect(script).toContain('^[a-f0-9]{40}$')
+  expect(script).toContain('^[0-9A-Za-z][0-9A-Za-z.-]{0,79}$')
+  expect(script.indexOf('Desktop release plan version must be one bounded output-safe value'))
+    .toBeLessThan(script.indexOf('echo "version=$version" >> "$GITHUB_OUTPUT"'))
+}
+
 describe('CI workflow', () => {
+  it('requires the exact reusable Desktop rehearsal only for trusted relevant PR changes', () => {
+    const workflow = loadWorkflow('.github/workflows/ci.yml')
+    const plan = workflowJob(workflow, 'desktop-rehearsal-plan')
+    const rehearsal = workflowJob(workflow, 'desktop-rehearsal')
+    const verdict = workflowJob(workflow, 'desktop-rehearsal-verdict')
+    const aggregate = workflowJob(workflow, 'all-checks-passed')
+    expect(plan).toMatchObject({
+      if: "github.event_name == 'pull_request'",
+      outputs: {
+        required: '${{ steps.changes.outputs.required }}',
+        version: '${{ steps.changes.outputs.version }}',
+        source_sha: '${{ steps.changes.outputs.source_sha }}',
+      },
+    })
+    const planScript = desktopRehearsalPlanScript(workflow)
+    assertDesktopRehearsalPlanScript(planScript)
+    const repositoryGuard = planScript.indexOf('"$GITHUB_REPOSITORY" == cloga/deepseek-harness')
+    expect(planScript).toContain('version=not-applicable')
+    expect(repositoryGuard).toBeGreaterThanOrEqual(0)
+    expect(planScript.indexOf('git diff --name-only -z')).toBeGreaterThan(repositoryGuard)
+    expect(planScript.indexOf('git show "$HEAD_SHA:apps/desktop/release/cloga-windows-x64.json"'))
+      .toBeGreaterThan(repositoryGuard)
+    expect(rehearsal).toMatchObject({
+      needs: 'desktop-rehearsal-plan',
+      if: "needs.desktop-rehearsal-plan.outputs.required == 'true'",
+      permissions: { contents: 'read' },
+      uses: './.github/workflows/desktop-fork-release.yml',
+      with: {
+        confirm_version: '${{ needs.desktop-rehearsal-plan.outputs.version }}',
+        expected_source_sha: '${{ needs.desktop-rehearsal-plan.outputs.source_sha }}',
+        rehearsal: true,
+      },
+    })
+    expect(rehearsal).not.toHaveProperty('secrets')
+    expect(verdict.needs).toEqual(['desktop-rehearsal-plan', 'desktop-rehearsal'])
+    expect(verdict.if).toContain('always()')
+    expect(JSON.stringify(verdict.steps)).toContain('Required Desktop rehearsal did not succeed')
+    expect(JSON.stringify(verdict.steps)).toContain('Unexpected Desktop rehearsal result for unchanged PR')
+    if (!Array.isArray(aggregate.needs)) throw new TypeError('CI aggregate must define needs')
+    expect(aggregate.needs.filter((name: string) => name.startsWith('desktop-rehearsal')))
+      .toEqual(['desktop-rehearsal-verdict'])
+  })
+
+  it.each(['unchecked-diff', 'line-delimited', 'unsafe-version', 'unscoped-repository', 'missing-root-config'] as const)(
+    'rejects a Desktop rehearsal selector with %s', (damage) => {
+      const workflow = loadWorkflow('.github/workflows/ci.yml')
+      let script = desktopRehearsalPlanScript(workflow)
+      if (damage === 'unchecked-diff') script = script.replace(' -- > "$changed_paths"', ' --')
+      else if (damage === 'line-delimited') script = script.replace('--name-only -z', '--name-only')
+      else if (damage === 'unsafe-version') script = script.replace('^[0-9A-Za-z][0-9A-Za-z.-]{0,79}$', '.+')
+      else if (damage === 'unscoped-repository') {
+        script = script.replace('"$GITHUB_REPOSITORY" == cloga/deepseek-harness', '-n "$GITHUB_REPOSITORY"')
+      }
+      else script = script.replace('vitest*.config.*|', '')
+      expect(() => { assertDesktopRehearsalPlanScript(script) }).toThrow()
+    },
+  )
+
   it.each([
     ['ci.yml', 'windows-coverage', 'pnpm run check:ci:coverage'],
     ['ci-master.yml', 'serial-windows', 'pnpm run check:ci:windows-complete'],
@@ -166,15 +246,17 @@ describe('CI workflow', () => {
     expect(steps[helperSmoke]?.run).toContain('resources/managed-update/helper.mjs')
     expect(steps.find(step => step.name === 'Finalize release manifest and receipts')?.if).toBeUndefined()
 
-    const publishCondition = "${{ !inputs.rehearsal && github.ref == 'refs/heads/master' }}"
+    const publishCondition = "${{ github.event_name == 'workflow_dispatch' && !inputs.rehearsal && github.ref == 'refs/heads/master' }}"
     expect(release.if).toBe(publishCondition)
     expect(remoteCheck.if).toBe(publishCondition)
-    for (const rehearsal of [false, true]) {
-      for (const ref of ['refs/heads/master', 'refs/heads/cloga-desktop-0-1-5-recovery']) {
-        expect(runInNewContext(release.if.trim().slice(3, -2), {
-          inputs: { rehearsal },
-          github: { ref },
-        }, { timeout: 1000 })).toBe(!rehearsal && ref === 'refs/heads/master')
+    for (const eventName of ['workflow_dispatch', 'pull_request']) {
+      for (const rehearsal of [false, true]) {
+        for (const ref of ['refs/heads/master', 'refs/heads/cloga-desktop-0-1-5-recovery']) {
+          expect(runInNewContext(release.if.trim().slice(3, -2), {
+            inputs: { rehearsal },
+            github: { event_name: eventName, ref },
+          }, { timeout: 1000 })).toBe(eventName === 'workflow_dispatch' && !rehearsal && ref === 'refs/heads/master')
+        }
       }
     }
     expect(release.permissions).toEqual({ actions: 'read', contents: 'write' })

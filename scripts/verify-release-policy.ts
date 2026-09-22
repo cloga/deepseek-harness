@@ -155,7 +155,9 @@ export function verifyReleasePolicy(sources: ReadonlyMap<string, string>): numbe
         assert.equal(effective.contents, 'write', `${key}: retain Desktop publication`)
         assert.equal(job.environment, 'desktop-fork-release', `${key}: protected environment required`)
         assert.equal(job.needs, 'build', `${key}: verified build required`)
-        assert.equal(job.if, "${{ !inputs.rehearsal && github.ref == 'refs/heads/master' }}", `${key}: rehearsal cannot publish`)
+        assert.equal(job.if,
+          "${{ github.event_name == 'workflow_dispatch' && !inputs.rehearsal && github.ref == 'refs/heads/master' }}",
+          `${key}: rehearsal or non-dispatch event cannot publish`)
         verifyDesktopPublisher(steps, key)
       }
     }

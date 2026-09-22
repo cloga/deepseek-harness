@@ -247,7 +247,9 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
 
   it('validates targetless verified-install cancellation without weakening toggle audits', () => {
     const records = installCancellationAudit()
-    expect(() => validateDesktopPluginCancelAudit(records, '@example/a', ['@example/a'], 'plugin-install')).not.toThrow()
+    expect(() => {
+      validateDesktopPluginCancelAudit(records, '@example/a', ['@example/a'], 'plugin-install')
+    }).not.toThrow()
     const started = records[0]!, failed = records[1]!
     for (const values of [
       [{ ...started, target: '@example/a' }, failed],
@@ -255,8 +257,10 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
       [started, { ...failed, target: '@example/b' }],
       [started, { ...failed, after: { sha256: 'b'.repeat(64), names: ['@example/a'] } }],
       [started, failed, { ...failed, outcome: 'committed' }],
-    ]) expect(() => validateDesktopPluginCancelAudit(values, '@example/a', ['@example/a'], 'plugin-install')).toThrow()
-    expect(() => validateAudit(cancellationAudit())).not.toThrow()
+    ]) expect(() => {
+      validateDesktopPluginCancelAudit(values, '@example/a', ['@example/a'], 'plugin-install')
+    }).toThrow()
+    expect(() => { validateAudit(cancellationAudit()) }).not.toThrow()
   })
 
   it('requires a same-transaction started/failed pair retaining known nonempty inventory', () => {

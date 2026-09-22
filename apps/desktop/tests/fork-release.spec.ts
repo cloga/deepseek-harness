@@ -17,11 +17,17 @@ function planValue(): unknown {
   return JSON.parse(readFileSync(planPath, 'utf8'))
 }
 
+type WorkflowInput = { required: boolean; type: string; default?: unknown }
 type ReleaseWorkflow = {
-  on: { workflow_dispatch: { inputs: Record<string, { required: boolean; type: string; default?: unknown }> } }
+  on: {
+    workflow_call: { inputs: Record<string, WorkflowInput> }
+    workflow_dispatch: { inputs: Record<string, WorkflowInput> }
+  }
   permissions: Record<string, string>
+  concurrency: { group: string; 'cancel-in-progress': boolean }
   env?: Record<string, string>
   jobs: Record<string, {
+    if?: string
     permissions?: Record<string, string>
     env?: Record<string, string>
     steps: Array<{
@@ -89,9 +95,18 @@ function assertMetadataAuthScope(workflow: ReleaseWorkflow): void {
 }
 
 function assertReviewedSourcePin(workflow: ReleaseWorkflow): string {
-  expect(workflow.on.workflow_dispatch.inputs.expected_source_sha).toMatchObject({ required: true, type: 'string' })
-  expect(workflow.on.workflow_dispatch.inputs.expected_source_sha).not.toHaveProperty('default')
+  for (const trigger of [workflow.on.workflow_call, workflow.on.workflow_dispatch]) {
+    expect(trigger.inputs.expected_source_sha).toMatchObject({ required: true, type: 'string' })
+    expect(trigger.inputs.expected_source_sha).not.toHaveProperty('default')
+    expect(trigger.inputs.confirm_version).toMatchObject({ required: true, type: 'string' })
+  }
+  expect(workflow.on.workflow_call.inputs.rehearsal).toMatchObject({ required: true, type: 'boolean' })
   const steps = workflow.jobs.build!.steps
+  const checkout = steps.find(step => step.uses === 'actions/checkout@v6')
+  expect(checkout?.with).toMatchObject({
+    repository: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}",
+    ref: '${{ inputs.expected_source_sha }}', fetch-depth: 0, 'persist-credentials': false, clean: true,
+  })
   const guardIndex = steps.findIndex(step => step.name === 'Require current reviewed ref and version')
   expect(guardIndex).toBeGreaterThanOrEqual(0)
   expect(steps.findIndex(step => step.name === 'Install from frozen lockfile')).toBeGreaterThan(guardIndex)
@@ -108,12 +123,20 @@ function assertReviewedSourcePin(workflow: ReleaseWorkflow): string {
   const formatCheck = "if ($env:EXPECTED_SOURCE_SHA -cnotmatch '\\A[0-9a-f]{40}\\z')"
   const exactCheck = 'if ($head -cne $env:EXPECTED_SOURCE_SHA)'
   const headRead = script.indexOf('$head = git rev-parse HEAD')
-  const branchCheck = script.indexOf("if ($env:REHEARSAL -eq 'true')")
+  const branchCheck = script.indexOf("if ($env:EVENT_NAME -eq 'pull_request')")
   expect(script).toContain(`${formatCheck} {\n  throw 'Expected source SHA must be exactly 40 lowercase hexadecimal characters'\n}`)
   expect(script).toContain(`${exactCheck} {\n  throw "Checkout does not match reviewed source: HEAD=$head expected=$($env:EXPECTED_SOURCE_SHA)"\n}`)
   expect(headRead).toBeGreaterThan(script.indexOf(formatCheck))
   expect(script.indexOf(exactCheck)).toBeGreaterThan(headRead)
   expect(branchCheck).toBeGreaterThan(script.indexOf(exactCheck))
+  expect(guard.env).toMatchObject({
+    EVENT_NAME: '${{ github.event_name }}',
+    PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+    PR_HEAD_REF: '${{ github.event.pull_request.head.ref }}',
+    PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
+  })
+  expect(script).toContain("if ($env:REHEARSAL -ne 'true') { throw 'Pull-request Desktop qualification must be a rehearsal' }")
+  expect(script).toContain("refs/heads/$($env:PR_HEAD_REF):$selectedRef")
   expect(script).toContain('if ($head -ne $selected)')
   expect(script).toContain('if ($head -ne $master)')
   expect(script).toContain('if ($env:CONFIRM_VERSION -ne $plan.version)')
@@ -197,6 +220,28 @@ describe('Desktop fork release plan', () => {
     else Object.assign(steps[index]!, mode === 'optional' ? { 'continue-on-error': true } : { if: 'false' })
     expect(() => { assertPackagedPluginCommandAcceptance(workflow) }).toThrow()
   })
+  it('keeps reusable rehearsals read-only and preserves manual release-only publication', () => {
+    const workflow = readReleaseWorkflow()
+    expect(workflow.permissions).toEqual({ contents: 'read' })
+    expect(workflow.concurrency.group).toContain('github.event_name == \'workflow_dispatch\'')
+    expect(workflow.concurrency.group).toContain('&& \'desktop-fork-release\'')
+    expect(workflow.concurrency.group).toContain('format(\'desktop-fork-pr-{0}\', github.event.pull_request.number)')
+    expect(workflow.concurrency.group).not.toContain('github.ref_name')
+    expect(workflow.concurrency['cancel-in-progress']).toBe(false)
+    expect(workflow.on.workflow_call.inputs.rehearsal).toEqual({
+      description: 'Build and retain reviewed artifacts without publishing a release',
+      required: true,
+      type: 'boolean',
+    })
+    expect(workflow.on.workflow_dispatch.inputs.rehearsal).toMatchObject({
+      required: false, default: false, type: 'boolean',
+    })
+    expect(workflow.jobs.release?.permissions).toEqual({ actions: 'read', contents: 'write' })
+    const publishCondition = "${{ github.event_name == 'workflow_dispatch' && !inputs.rehearsal && github.ref == 'refs/heads/master' }}"
+    expect(workflow.jobs.release?.if).toBe(publishCondition)
+    expect(workflow.jobs['remote-check']?.if).toBe(publishCondition)
+  })
+
   it('publishes through the exact-source checked publisher after asset-set verification', () => {
     assertPublisherSelection(readReleaseWorkflow())
   })
@@ -245,7 +290,7 @@ describe('Desktop fork release plan', () => {
   })
 
   it.each([
-    'missing-input', 'optional-input', 'default-source', 'wrong-env', 'insensitive-format', 'insensitive-head',
+    'missing-input', 'missing-call-input', 'optional-input', 'default-source', 'wrong-env', 'insensitive-format', 'insensitive-head',
     'loose-length', 'late-guard', 'missing-rejection', 'workflow-env', 'job-env',
   ])('rejects a %s source pin guard', (damage) => {
     const workflow = readReleaseWorkflow()
@@ -253,6 +298,7 @@ describe('Desktop fork release plan', () => {
     const index = build.steps.findIndex(step => step.name === 'Require current reviewed ref and version')
     const guard = build.steps[index]!
     if (damage === 'missing-input') delete workflow.on.workflow_dispatch.inputs.expected_source_sha
+    else if (damage === 'missing-call-input') delete workflow.on.workflow_call.inputs.expected_source_sha
     else if (damage === 'optional-input') workflow.on.workflow_dispatch.inputs.expected_source_sha!.required = false
     else if (damage === 'default-source') workflow.on.workflow_dispatch.inputs.expected_source_sha!.default = '${{ github.sha }}'
     else if (damage === 'wrong-env') guard.env!.EXPECTED_SOURCE_SHA = '${{ inputs.confirm_version }}'
