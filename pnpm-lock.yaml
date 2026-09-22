@@ -7966,6 +7966,40 @@ importers:
         specifier: workspace:^
         version: link:../../core/tools
 
+  packages/llm/model-routing-learning:
+    dependencies:
+      '@deepseek-ai/dsh-atomic-write':
+        specifier: workspace:^
+        version: link:../../util/atomic-write
+      '@deepseek-ai/dsh-brand':
+        specifier: workspace:^
+        version: link:../../util/brand
+      '@deepseek-ai/dsh-util-values':
+        specifier: workspace:^
+        version: link:../../util/values
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-model-routing':
+        specifier: workspace:^
+        version: link:../model-routing
+      '@deepseek-ai/dsh-session':
+        specifier: workspace:^
+        version: link:../../core/session
+      '@deepseek-ai/dsh-storage':
+        specifier: workspace:^
+        version: link:../../storage/storage
+      '@deepseek-ai/dsh-storage-domain':
+        specifier: workspace:^
+        version: link:../../storage/storage-domain
+      '@deepseek-ai/dsh-storage-json':
+        specifier: workspace:^
+        version: link:../../storage/storage-json
+
   packages/llm/plugin-package-inventory-deepseek:
     dependencies:
       '@deepseek-ai/dsh-brand':
