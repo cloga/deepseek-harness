@@ -29,14 +29,14 @@ export const DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY = {
 
 /** A release entry either pins its source or permits a separately verified user source. */
 export type DesktopPluginSourcePolicy = 'strict-pin' | 'compatible-user-override'
-type AttestedSource = DesktopGithubReleasePluginSource & {
+export type DesktopAttestedPluginSource = DesktopGithubReleasePluginSource & {
   readonly checksumManifest: NonNullable<DesktopGithubReleasePluginSource['checksumManifest']>
 }
 
 /** One schema-1 plugin whose source is always a strict pin. */
 export interface DesktopPluginProvisioningEntryV1 {
   readonly required: boolean
-  readonly source: AttestedSource
+  readonly source: DesktopAttestedPluginSource
 }
 
 /** One schema-2 plugin with an explicit source policy. */
@@ -63,16 +63,16 @@ export type DesktopPluginProvisioningResult = {
   readonly name: string
   readonly required: boolean
   readonly status: 'active'
-  readonly requestedSource: AttestedSource
+  readonly requestedSource: DesktopAttestedPluginSource
   readonly sourcePolicy: DesktopPluginSourcePolicy
   readonly effective: 'plan' | 'user-override'
-  readonly effectiveSource: AttestedSource
+  readonly effectiveSource: DesktopAttestedPluginSource
   readonly receipt: DesktopPluginProvisionReceipt
 } | {
   readonly name: string
   readonly required: false
   readonly status: 'optional-failed'
-  readonly requestedSource: AttestedSource
+  readonly requestedSource: DesktopAttestedPluginSource
   readonly sourcePolicy: DesktopPluginSourcePolicy
   readonly message: string
   readonly phase: 'download' | 'validation' | 'install' | 'graph' | 'health'
@@ -96,6 +96,17 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Narrow a verified GitHub source to the checksum-attested source required by provisioning state.
+ * @param source - Parsed immutable GitHub release source.
+ * @returns Whether the source carries a parsed checksum manifest.
+ */
+export function isDesktopAttestedPluginSource(
+  source: DesktopGithubReleasePluginSource,
+): source is DesktopAttestedPluginSource {
+  return source.checksumManifest !== undefined
+}
+
+/**
  * Match immutable releases from one reviewed repository and dependency registry without comparing versions.
  * @param requested - Source selected by the packaged plan.
  * @param effective - Verified user source proposed for the same planned name.
@@ -113,10 +124,10 @@ export function sameDesktopPluginSourceFamily(
     && effective.checksumManifest?.format === 'sha256sums'
 }
 
-function attestedSource(value: unknown, message: string): AttestedSource {
+function attestedSource(value: unknown, message: string): DesktopAttestedPluginSource {
   const source = parseDesktopPluginSource(value)
-  if (source.type !== 'githubRelease' || source.checksumManifest === undefined) throw new Error(message)
-  return source as AttestedSource
+  if (source.type !== 'githubRelease' || !isDesktopAttestedPluginSource(source)) throw new Error(message)
+  return source
 }
 
 /** Parse one packaged exact-state provisioning plan and normalize schema-1 entries to strict pins. */

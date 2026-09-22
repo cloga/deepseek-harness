@@ -56,6 +56,7 @@ import {
   DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
   DESKTOP_PLUGIN_PROVISIONING_STATE_FILE,
   desktopPluginProvisioningPlanSha256,
+  isDesktopAttestedPluginSource,
   parseDesktopPluginProvisioningPlan,
   parseDesktopPluginProvisioningState,
   sameDesktopPluginSourceFamily,
@@ -394,13 +395,18 @@ function resolvedProvisioningState(
     if (decision === undefined) throw new Error('desktop plugin provisioning: missing resolved entry')
     const receipt = decision.receipt ?? store.receipts[entry.source.packageName]
     if (receipt === undefined || !enabled.has(entry.source.packageName)) {
-      const failed = previous.plugins.find(result => result.name === entry.source.packageName && result.status === 'optional-failed')
+      const failed = previous.plugins.find((result): result is Extract<DesktopPluginProvisioningResult, { status: 'optional-failed' }> => (
+        result.name === entry.source.packageName && result.status === 'optional-failed'
+      ))
       if (!entry.required && failed !== undefined) return {
         name: entry.source.packageName, required: false, status: 'optional-failed', requestedSource: entry.source,
         sourcePolicy: provisioningSourcePolicy(entry), message: failed.message, phase: failed.phase,
       }
       throw new DesktopProvisioningOverrideError(entry.source.packageName, entry.source.version,
         `desktop project: mutation would leave planned plugin ${entry.source.packageName} inactive`)
+    }
+    if (!isDesktopAttestedPluginSource(receipt.source)) {
+      throw new Error(`desktop plugin provisioning: effective source for ${entry.source.packageName} lacks checksum attestation`)
     }
     const effectiveSource = receipt.source
     if (decision.effective === 'plan' && JSON.stringify(effectiveSource) !== JSON.stringify(entry.source)) {
@@ -1208,19 +1214,23 @@ export class DesktopProjectManager {
       }
       if (mutation.type === 'plugin-install' && activePlan !== undefined) {
         const source = parseDesktopPluginSource(mutation.source)
-        const entry = source.type === 'githubRelease'
-          ? activePlan.plugins.find(item => item.source.packageName === source.packageName) : undefined
-        if (entry !== undefined && JSON.stringify(entry.source) !== JSON.stringify(source)
-          && (provisioningSourcePolicy(entry) === 'strict-pin' || !sameDesktopPluginSourceFamily(entry.source, source))) {
-          throw new DesktopProvisioningOverrideError(entry.source.packageName, entry.source.version)
+        if (source.type === 'githubRelease') {
+          const entry = activePlan.plugins.find(item => item.source.packageName === source.packageName)
+          if (entry !== undefined && JSON.stringify(entry.source) !== JSON.stringify(source)
+            && (provisioningSourcePolicy(entry) === 'strict-pin' || !sameDesktopPluginSourceFamily(entry.source, source))) {
+            throw new DesktopProvisioningOverrideError(entry.source.packageName, entry.source.version)
+          }
         }
       }
       const beforeInventory = profileInventoryEvidence(this.paths.profile)
       if (mutation.type === 'plugins-reconcile') resolveProvisioning(userInventory, mutation.plan)
-      if (mutation.type === 'plugin-restore-planned') {
-        const entry = mutation.plan.plugins.find(item => item.source.packageName === mutation.name)
-        if (entry === undefined) throw new Error(`desktop project: ${mutation.name} is not in the packaged provisioning plan`)
-        resolveProvisioning(userInventory, mutation.plan, new Set([mutation.name]))
+      const restoreMutation = mutation.type === 'plugin-restore-planned' ? mutation : undefined
+      if (restoreMutation !== undefined) {
+        const entry = restoreMutation.plan.plugins.find(item => item.source.packageName === restoreMutation.name)
+        if (entry === undefined) {
+          throw new Error(`desktop project: ${restoreMutation.name} is not in the packaged provisioning plan`)
+        }
+        resolveProvisioning(userInventory, restoreMutation.plan, new Set([restoreMutation.name]))
       }
       let targetName = 'name' in mutation ? mutation.name : undefined
       const parent = dirname(this.paths.profile)
@@ -1244,8 +1254,10 @@ export class DesktopProjectManager {
         copyProfileMetadata(this.paths.profile, staging)
         // Commit legacy ownership only with the staged profile, before source replacement changes its evidence.
         if (existsSync(join(staging, PLUGIN_RECEIPTS))) writePluginReceipts(staging, readPluginReceipts(staging))
-        const removingSnapshot = mutation.type === 'plugin-remove' && readDesktopPackageLocks(staging)[mutation.name] !== undefined
-        if (removingSnapshot) this.pruneSourcePackage(staging, mutation.name)
+        const removeMutation = mutation.type === 'plugin-remove' ? mutation : undefined
+        const removingSnapshot = removeMutation !== undefined
+          && readDesktopPackageLocks(staging)[removeMutation.name] !== undefined
+        if (removingSnapshot && removeMutation !== undefined) this.pruneSourcePackage(staging, removeMutation.name)
         if (mutation.type === 'plugins-reconcile' || mutation.type === 'plugin-restore-planned') {
           for (const entry of mutation.plan.plugins) this.pruneSourcePackage(staging, entry.source.packageName)
         }
@@ -1710,6 +1722,9 @@ export class DesktopProjectManager {
     ): DesktopPluginProvisioningResult => {
       const receipt: DesktopPluginProvisionReceipt = 'states' in provision ? provision : {
         ...provision, states: { staged: true, health: 'passed', activated: true, rolledBack: false, verified: true },
+      }
+      if (!isDesktopAttestedPluginSource(receipt.source)) {
+        throw new Error(`desktop plugin provisioning: active source for ${entry.source.packageName} lacks checksum attestation`)
       }
       return {
         name: entry.source.packageName, required: entry.required, status: 'active', requestedSource: entry.source,

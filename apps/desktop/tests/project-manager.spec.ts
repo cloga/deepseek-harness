@@ -8,7 +8,7 @@ import { gzipSync } from 'node:zlib'
 import { afterEach, beforeEach, describe, expect, it as registerTest, vi } from 'vitest'
 import { resolveDesktopPaths } from '../src/paths.ts'
 import { assertDesktopProvisioningInventory, DesktopProjectManager, packageNameFromSpec, type DesktopProjectHooks } from '../src/project-manager.ts'
-import type { DesktopGithubReleasePluginSource, DesktopPluginProvisionReceipt } from '../src/plugin-source.ts'
+import { parseDesktopPluginSource, type DesktopGithubReleasePluginSource, type DesktopPluginProvisionReceipt } from '../src/plugin-source.ts'
 import { parseDesktopPluginProvisioningPlan } from '../src/plugin-provisioning.ts'
 import { readDesktopProfileState } from '../src/profile-packages.ts'
 import { readDesktopPackageLocks } from '../src/plugin-package-lock.ts'
@@ -584,13 +584,13 @@ describe('desktop external plugin profile', () => {
       required: true, source: planned.source, sourcePolicy: 'compatible-user-override',
     }] }
     await manager.applyRelease(hooks(), plan)
-    const alien = {
+    const checksumManifest = planned.source.checksumManifest
+    if (checksumManifest === undefined) throw new Error('fixture requires checksum attestation')
+    const alien = parseDesktopPluginSource({
       ...planned.source, owner: 'other-owner',
-      checksumManifest: {
-        ...planned.source.checksumManifest,
-        url: planned.source.checksumManifest!.url.replace('/cloga/', '/other-owner/'),
-      },
-    }
+      checksumManifest: { ...checksumManifest, url: checksumManifest.url.replace('/cloga/', '/other-owner/') },
+    })
+    if (alien.type !== 'githubRelease') throw new Error('expected GitHub release source')
     const before = profileMetadata(manager.paths.profile), count = calls(root).length
     await expect(manager.mutate({ type: 'plugin-install', source: alien }, hooks()))
       .rejects.toThrow('restore the planned source')
@@ -1254,8 +1254,10 @@ describe('desktop external plugin profile', () => {
         { name: optional.packageName, status: 'optional-failed', phase },
         { name: validOptional.packageName, status: 'active' },
       ])
-      expect(state.plugins[1]?.message).toBeTypeOf('string')
-      expect(state.plugins[1]?.receipt).toBeUndefined()
+      const optionalFailure = state.plugins[1]
+      if (optionalFailure?.status !== 'optional-failed') throw new Error('expected optional failure result')
+      expect(optionalFailure.message).toBeTypeOf('string')
+      expect(optionalFailure).not.toHaveProperty('receipt')
       expect(manager.listPlugins().map(plugin => plugin.name)).toEqual([source.packageName, 'manual-plugin', validOptional.packageName])
     } finally { globalThis.fetch = original }
   })
@@ -2032,7 +2034,9 @@ describe('desktop external plugin profile', () => {
         message: 'optional client composition failed',
       }])
       expect(manager.listPlugins()).toEqual([])
-      expect(state.plugins[0]?.receipt).toBeUndefined()
+      const optionalFailure = state.plugins[0]
+      if (optionalFailure?.status !== 'optional-failed') throw new Error('expected optional failure result')
+      expect(optionalFailure).not.toHaveProperty('receipt')
       const callCount = calls(root).length
       await expect(manager.reconcileProvisioning(
         { schemaVersion: 1, mode: 'exact', plugins: [{ required: false, source }] },
