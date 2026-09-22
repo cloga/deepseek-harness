@@ -2,8 +2,8 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, writeFileSync } from 'node:fs'
-import { join, relative, resolve, sep } from 'node:path'
+import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -15,6 +15,9 @@ const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u
 const fixtureName = '@fixture/bundle'
 const fixtureFiles = ['package.json', 'index.js', 'cordis.patch.yml']
 const dialogUrl = 'dsh-app://shell/update-dialog.html'
+const plannedCopilot = 'dsh-github-copilot'
+const diagnosticFiles = ['package.json', 'desktop-plugin-provisioning-state.json', 'desktop-plugin-receipts.json',
+  'desktop-plugin-package-locks.json', 'desktop-plugin-user-intents.json']
 const readJson = path => JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/u, ''))
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const save = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + '\n', { flag: 'wx' })
@@ -32,6 +35,151 @@ export function preparePackageAcceptanceHome(root) {
   assert.equal(existsSync(desktop), false, 'Private Desktop must be newly created')
   mkdirSync(desktop)
   return home
+}
+
+function record(value) { return value !== null && typeof value === 'object' && !Array.isArray(value) }
+function boundedDiagnosticJson(profile, name) {
+  const path = join(profile, name)
+  const stat = lstatSync(path, { throwIfNoEntry: false })
+  if (stat === undefined) return { file: { exists: false }, value: undefined }
+  assert(stat.isFile() && !stat.isSymbolicLink() && stat.size <= 8 * 1024 * 1024, `Unsafe baseline diagnostic file: ${name}`)
+  const bytes = readFileSync(path)
+  assert.equal(bytes.length, stat.size, `Baseline diagnostic file changed while reading: ${name}`)
+  let value
+  try { value = JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/u, '')) }
+  catch { throw new Error(`Invalid baseline diagnostic JSON: ${name}`) }
+  return { file: { exists: true, bytes: bytes.length, sha256: hash(bytes) }, value }
+}
+function boundedStringHash(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128 && !/[\u0000-\u001f\u007f]/u.test(value)
+    ? hash(value) : undefined
+}
+function safeSource(value, packageName) {
+  if (!record(value) || value.packageName !== packageName) return undefined
+  const versionSha256 = boundedStringHash(value.version)
+  const tagSha256 = boundedStringHash(value.tag)
+  return { packageName, versionPresent: value.version !== undefined,
+    ...(versionSha256 === undefined ? {} : { versionSha256 }),
+    ...(typeof value.targetCommit === 'string' && /^[a-f0-9]{40}$/u.test(value.targetCommit) ? { targetCommit: value.targetCommit } : {}),
+    ...(tagSha256 === undefined ? {} : { tagSha256 }) }
+}
+
+/**
+ * Capture only bounded physical evidence explaining why a fresh required baseline is absent.
+ * Raw bytes are represented only by length/hash; credentials, URLs, error messages and whole records never leave the owned profile.
+ */
+export function packageBaselineDiagnostic(home, profile, packageName = plannedCopilot) {
+  assert.match(packageName, /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/u)
+  const homeStat = lstatSync(home, { throwIfNoEntry: false })
+  assert(homeStat?.isDirectory() && !homeStat.isSymbolicLink()
+    && realpathSync.native(home).toLowerCase() === resolve(home).toLowerCase(), 'Baseline diagnostic requires a physical home')
+  assert.equal(profile, ownedUpgradePath(home, join(home, 'profiles', 'desktop')), 'Unexpected baseline diagnostic profile')
+  const profileStat = lstatSync(profile, { throwIfNoEntry: false })
+  assert(profileStat?.isDirectory() && !profileStat.isSymbolicLink(), 'Baseline diagnostic requires a physical profile')
+  const documents = Object.fromEntries(diagnosticFiles.map((name) => [name, boundedDiagnosticJson(profile, name)]))
+  const manifest = documents['package.json'].value
+  assert(record(manifest) && record(manifest.dsh) && record(manifest.dsh.profile)
+    && Array.isArray(manifest.dsh.profile.bundles) && (manifest.dependencies === undefined || record(manifest.dependencies)),
+  'Malformed package baseline manifest')
+  const dependency = manifest.dependencies?.[packageName]
+  const state = documents['desktop-plugin-provisioning-state.json'].value
+  let provisioning
+  if (state !== undefined) {
+    assert(record(state) && state.schemaVersion === 1 && Array.isArray(state.plugins), 'Malformed package baseline provisioning state')
+    const item = state.plugins.find(entry => record(entry) && entry.name === packageName)
+    if (item !== undefined) {
+      assert(record(item) && typeof item.version === 'string' && item.version.length <= 128
+        && !/[\u0000-\u001f\u007f]/u.test(item.version) && typeof item.required === 'boolean'
+        && (item.status === 'active' || item.status === 'optional-failed'), 'Malformed planned provisioning result')
+      provisioning = { versionSha256: hash(item.version), required: item.required, status: item.status,
+        ...(typeof item.phase === 'string' && ['download', 'validation', 'install', 'graph', 'health'].includes(item.phase)
+          ? { phase: item.phase } : {}), source: safeSource(item.source, packageName) }
+    }
+  }
+  const receipts = documents['desktop-plugin-receipts.json'].value
+  let receipt
+  if (receipts !== undefined) {
+    assert(record(receipts) && receipts.schemaVersion === 1 && record(receipts.receipts)
+      && (receipts.owners === undefined || record(receipts.owners)), 'Malformed package baseline receipt store')
+    const value = receipts.receipts[packageName]
+    const owner = receipts.owners?.[packageName]
+    assert(owner === undefined || owner === 'user' || owner === 'release', 'Malformed planned receipt owner')
+    receipt = { present: value !== undefined, owner,
+      ...(record(value) && typeof value.artifactSha256 === 'string' && /^[a-f0-9]{64}$/u.test(value.artifactSha256)
+        ? { artifactSha256: value.artifactSha256, source: safeSource(value.source, packageName) } : {}) }
+  }
+  const locks = documents['desktop-plugin-package-locks.json'].value
+  let packageLock
+  if (locks !== undefined) {
+    assert(record(locks) && locks.schemaVersion === 1 && record(locks.packages), 'Malformed package baseline lock store')
+    const value = locks.packages[packageName]
+    packageLock = { present: value !== undefined,
+      ...(record(value) && typeof value.version === 'string' && value.version.length <= 128
+        && !/[\u0000-\u001f\u007f]/u.test(value.version) && typeof value.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(value.sha256)
+        ? { versionSha256: hash(value.version), sha256: value.sha256,
+          ...(typeof value.commit === 'string' && /^[a-f0-9]{40}$/u.test(value.commit) ? { commit: value.commit } : {}) } : {}) }
+  }
+  const intents = documents['desktop-plugin-user-intents.json'].value
+  let removalIntent
+  if (intents !== undefined) {
+    assert(record(intents) && intents.schemaVersion === 1 && record(intents.removed), 'Malformed package baseline user intents')
+    const value = intents.removed[packageName]
+    removalIntent = { present: value !== undefined,
+      ...(record(value) && typeof value.observedPlanSha256 === 'string' && /^[a-f0-9]{64}$/u.test(value.observedPlanSha256)
+        ? { observedPlanSha256: value.observedPlanSha256 } : {}) }
+  }
+  const pending = readdirSync(dirname(profile)).filter(name => name.startsWith('.desktop.package-stage-')).sort()
+  assert(pending.length <= 32, 'Too many pending package transactions for bounded diagnostics')
+  for (const name of pending) assert(uuid.test(name.slice('.desktop.package-stage-'.length)), 'Malformed pending transaction name')
+  return { schemaVersion: 1, scope: 'fresh-package-baseline-diagnostic', packageName,
+    profilePhysical: true, files: Object.fromEntries(diagnosticFiles.map(name => [name, documents[name].file])),
+    manifest: { dependencyPresent: dependency !== undefined,
+      dependencyKind: typeof dependency === 'string' && dependency.startsWith('file:.desktop-plugin-artifacts/') ? 'verified-artifact' : dependency === undefined ? 'absent' : 'other',
+      selected: manifest.dsh.profile.bundles.includes(packageName) },
+    provisioning, receipt, packageLock, removalIntent, pendingTransactions: pending }
+}
+
+/** Read the product's public baseline presentation without serializing a live API object. */
+export async function packageBaselinePresentation(page, milliseconds = 10_000) {
+  assert(Number.isSafeInteger(milliseconds) && milliseconds > 0 && milliseconds <= 10_000, 'Invalid baseline diagnostic deadline')
+  const operation = page.evaluate(async () => {
+    const api = globalThis.dshDesktop
+    if (api === undefined || api.protocolVersion !== 1 || typeof api.updates?.status !== 'function') {
+      throw new Error('Desktop update presentation API is unavailable')
+    }
+    const status = await api.updates.status()
+    if (status === null || typeof status !== 'object' || Array.isArray(status)
+      || !['idle', 'checking', 'available', 'downloading', 'verifying', 'installing', 'ready', 'error'].includes(status.phase)) {
+      throw new Error('Invalid Desktop update status')
+    }
+    const baseline = status.baseline
+    return { phase: status.phase,
+      baseline: baseline === undefined ? null : { status: baseline.status, packageName: baseline.packageName } }
+  })
+  let timer
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => { reject(new Error('Desktop baseline diagnostic deadline')) }, milliseconds) })
+  let value
+  try { value = await Promise.race([operation, timeout]) }
+  finally { clearTimeout(timer) }
+  assert(record(value) && Object.keys(value).sort().join(',') === 'baseline,phase'
+    && ['idle', 'checking', 'available', 'downloading', 'verifying', 'installing', 'ready', 'error'].includes(value.phase),
+  'Invalid Desktop baseline presentation')
+  if (value.baseline !== null) {
+    assert(record(value.baseline) && Object.keys(value.baseline).sort().join(',') === 'packageName,status'
+      && (value.baseline.status === 'pending' || value.baseline.status === 'preserved-user-choice')
+      && typeof value.baseline.packageName === 'string' && value.baseline.packageName.length <= 214
+      && /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/u.test(value.baseline.packageName),
+    'Invalid Desktop baseline presentation')
+  }
+  return value
+}
+
+/** Record only public counts from the initial Models view; absence remains an observation, never success. */
+export async function initialCopilotUiDiagnostic(settings) {
+  const root = settings.locator('[data-dsh-github-copilot-compact-account]')
+  return { schemaVersion: 1, baselineRequired: true, settingsDialogs: await settings.count(),
+    copilotAccountRoots: await root.count(),
+    copilotSignInButtons: await root.getByRole('button', { name: 'Sign in with GitHub', exact: true }).count() }
 }
 
 /** Own only the public first-run credential choice while initial keyless setup completes.
@@ -533,12 +681,26 @@ export async function runPackagedPackageAcceptance(runRoot) {
     const { mockServer } = await import('../../../../packages/llm/llm-pi-ai/tests/mock-server.ts')
     mock = await mockServer([])
     await launch('initial')
+    const baselinePresentation = await packageBaselinePresentation(page)
+    let baselineDiagnosticFailure
+    try {
+      save(join(evidence, 'package-initial-baseline.json'), baselinePresentation)
+      save(join(evidence, 'package-initial-profile-diagnostic.json'), packageBaselineDiagnostic(home, profile))
+    } catch (error) {
+      baselineDiagnosticFailure = error
+      secondaryErrors.push({ stage: 'initial-baseline-diagnostic', error: safeError(error) })
+    }
+    assert.equal(baselinePresentation.baseline, null,
+      `Required packaged baseline is not ready: ${baselinePresentation.baseline?.status ?? 'unknown'}`)
+    if (baselineDiagnosticFailure !== undefined) throw baselineDiagnosticFailure
     const settings = await withInitialKeylessOnboarding(page, async () => {
       await page.getByRole('button', { name: 'Settings', exact: true }).click()
       const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
       await settings.getByRole('button', { name: 'Models', exact: true }).click()
+      const copilotRoot = settings.locator('[data-dsh-github-copilot-compact-account]')
+      save(join(evidence, 'package-initial-models.json'), await initialCopilotUiDiagnostic(settings))
       // A deferred credential prompt is not a healthy packaged Copilot baseline.
-      await settings.locator('[data-dsh-github-copilot-compact-account]').getByRole('button', { name: 'Sign in with GitHub', exact: true }).waitFor()
+      await copilotRoot.getByRole('button', { name: 'Sign in with GitHub', exact: true }).waitFor()
       await settings.getByRole('button', { name: 'Add a custom provider', exact: true }).click()
       await settings.getByLabel('Provider ID', { exact: true }).fill('desktop-acceptance')
       await settings.getByLabel('Display name', { exact: true }).fill('Desktop acceptance (local test)')
@@ -727,6 +889,19 @@ export async function runPackagedPackageAcceptance(runRoot) {
     await closeNormally()
   } catch (error) {
     retainError(error, 'package-scenario')
+    try {
+      const baseline = page !== undefined && !page.isClosed() ? await packageBaselinePresentation(page) : { unavailable: true }
+      const dom = page !== undefined && !page.isClosed() ? {
+        settingsDialogs: await page.getByRole('dialog', { name: 'Settings', exact: true }).count(),
+        copilotAccountRoots: await page.locator('[data-dsh-github-copilot-compact-account]').count(),
+        copilotSignInButtons: await page.getByRole('button', { name: 'Sign in with GitHub', exact: true }).count(),
+      } : { unavailable: true }
+      save(join(evidence, 'package-baseline-failure-diagnostic.json'), {
+        schemaVersion: 1, scope: 'failed-fresh-baseline-observation', qualification: false,
+        baseline, dom, profile: packageBaselineDiagnostic(home, profile), pageErrors: observedPageErrors(),
+        hostStderr: { status: 'unavailable-through-current-launch-transport' },
+      })
+    } catch (captureError) { retainError(captureError, 'failure-baseline-diagnostic') }
     if (page !== undefined && !page.isClosed()) {
       try { await page.screenshot({ path: join(evidence, 'package-failure.png') }) }
       catch (captureError) { retainError(captureError, 'failure-screenshot') }

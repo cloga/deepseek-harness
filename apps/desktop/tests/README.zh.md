@@ -102,7 +102,7 @@ Chromium headless shell revision 1228 已安装在忽略目录 `.desktop-build/p
 
 独立的[命令／原生 Cancel fixture](fixtures/desktop-plugin-command-smoke.ts)仅在既有 ASAR 清单验证器接受运行时之后，通过规范化的物理 `app.asar` 文件加固定内部 `dsh` 组件校验预期运行时身份。普通 Node 不得对归档内部目录执行 `realpath`。物理可执行文件／resources／归档归属及原始归档哈希独立于日志自述进行检查；文件修改或别名均拒绝验收。观察到原生 Cancel 和失败清理，不能替代完成其后的身份、转录及正常关闭检查。
 
-独立的[包操作场景](fixtures/windows-packaged-package-acceptance.mjs)使用另一个私有 home，以及真实的 Plugin Manager 控件、标题栏菜单、shell 确认和替代 Host。它将现有的私有测试组合包原样归档。安装首先提升一个仍禁用该组合包的图；必须经过官方 Enable 开关和另一次正常重启，才能报告行状态为 Running。通过真实设置配置的自定义提供方使用回环测试端点；场景断言不发出模型请求。组合输入、仅附件和仅草稿输入都必须阻止激活，同时保留实时输入。Copilot 的禁用与移除选择在同版本重启后检查；确认移除后不存在时，还必须看到已正确加载的保留 fixture。
+独立的[包操作场景](fixtures/windows-packaged-package-acceptance.mjs)使用另一个私有 home，以及真实的 Plugin Manager 控件、标题栏菜单、shell 确认和替代 Host。在首次断言 Copilot 前，它要求公开 Desktop baseline 提示不存在，并且只记录新 profile 的有界哈希、状态叶字段和 UI 数量；pending 或 preserved baseline 会立即失败，不暴露凭据，也不放宽原定位器期限。它将现有的私有测试组合包原样归档。安装首先提升一个仍禁用该组合包的图；必须经过官方 Enable 开关和另一次正常重启，才能报告行状态为 Running。通过真实设置配置的自定义提供方使用回环测试端点；场景断言不发出模型请求。组合输入、仅附件和仅草稿输入都必须阻止激活，同时保留实时输入。Copilot 的禁用与移除选择在同版本重启后检查；确认移除后不存在时，还必须看到已正确加载的保留 fixture。
 
 [原生 UI 辅助程序](windows-desktop-ui.ps1)将操作绑定到自有进程的具体实例及窗口。启动归属不明或未确认进程退出时，不能认证清理完成。报告和截图独立于已定稿的发布产物，报告写入失败不会替换先前的验收错误。纯 VM、合成 helper 和解析检查不证明真实安装器升级或托管 UI 验收成功。经过评审的最终源码仍须使用实际安装器完成托管 rehearsal。应读取每次运行中明确限定范围的标志：本流程不证明跨安装器升级的选择保持、退出后未发送草稿的持久化、提升失败回滚、成功升级后的降级，或已发布渠道的 managed-update 交接。当前本地 Desktop 不是默认测试目标。
 

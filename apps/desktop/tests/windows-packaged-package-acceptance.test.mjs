@@ -10,12 +10,18 @@ import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import test from 'node:test'
 import { installedUpgradeApplication } from './fixtures/windows-installed-upgrade-contract.mjs'
-import { assertKeylessPackageProvider, initialPackageAcceptance, observePackagePageErrors, packageCleanupVerified, packageGraphSnapshot, preparePackageAcceptanceHome, preparedTransactionId, retainPrimaryFailure, sameProcess, selectPackageAcceptanceModel, validatePackageFixture, withInitialKeylessOnboarding } from './fixtures/windows-packaged-package-acceptance.mjs'
+import { assertKeylessPackageProvider, initialCopilotUiDiagnostic, initialPackageAcceptance, observePackagePageErrors, packageBaselineDiagnostic, packageBaselinePresentation, packageCleanupVerified, packageGraphSnapshot, preparePackageAcceptanceHome, preparedTransactionId, retainPrimaryFailure, sameProcess, selectPackageAcceptanceModel, validatePackageFixture, withInitialKeylessOnboarding } from './fixtures/windows-packaged-package-acceptance.mjs'
 
 const source = readFileSync(new URL('./fixtures/windows-packaged-package-acceptance.mjs', import.meta.url), 'utf8')
 const native = readFileSync(new URL('./windows-desktop-ui.ps1', import.meta.url), 'utf8')
 const id = '11111111-1111-4111-8111-111111111111'
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
+function caught(action) {
+  let error
+  try { action() } catch (value) { error = value }
+  assert(error instanceof Error)
+  return error
+}
 function directory(t, base = tmpdir()) {
   let root = mkdtempSync(join(base, 'package-acceptance-unit-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
@@ -98,6 +104,121 @@ test('private Desktop remains owned by home cleanup and preparation never adopts
   rmSync(home, { recursive: true })
   assert.equal(existsSync(join(home, 'Desktop')), false)
   assert.equal(readFileSync(join(root, 'retained.txt'), 'utf8'), 'root sentinel')
+})
+
+test('fresh baseline presentation is checked before Models and pending status withholds Copilot observation', async () => {
+  const previous = globalThis.dshDesktop
+  const page = { evaluate: callback => callback() }
+  try {
+    globalThis.dshDesktop = { protocolVersion: 1, updates: { status: async () => ({ phase: 'idle' }) } }
+    assert.deepEqual(await packageBaselinePresentation(page), { phase: 'idle', baseline: null })
+    globalThis.dshDesktop.updates.status = async () => ({ phase: 'idle', baseline: { status: 'pending', packageName: 'dsh-github-copilot' } })
+    const pending = await packageBaselinePresentation(page)
+    assert.deepEqual(pending, { phase: 'idle', baseline: { status: 'pending', packageName: 'dsh-github-copilot' } })
+    let modelsObserved = false
+    assert.throws(() => {
+      assert.equal(pending.baseline, null, `Required packaged baseline is not ready: ${pending.baseline?.status ?? 'unknown'}`)
+      modelsObserved = true
+    }, /baseline is not ready: pending/u)
+    assert.equal(modelsObserved, false)
+  } finally {
+    if (previous === undefined) delete globalThis.dshDesktop
+    else globalThis.dshDesktop = previous
+  }
+})
+
+test('baseline presentation rejects malformed identities and bounds an unresolved diagnostic call', async () => {
+  const previous = globalThis.dshDesktop
+  try {
+    const page = { evaluate: callback => callback() }
+    globalThis.dshDesktop = { protocolVersion: 1, updates: { status: async () => ({ phase: 'idle',
+      baseline: { status: 'pending', packageName: 'secret\nname' },
+    }) } }
+    await assert.rejects(packageBaselinePresentation(page), /Invalid Desktop baseline presentation/u)
+    for (const malformed of [undefined, null, 'idle', [], { phase: 'foreign' }]) {
+      globalThis.dshDesktop.updates.status = async () => malformed
+      await assert.rejects(packageBaselinePresentation(page), /Invalid Desktop update status/u)
+    }
+    const waiting = { evaluate: () => new Promise(() => {}) }
+    await assert.rejects(packageBaselinePresentation(waiting, 1), /baseline diagnostic deadline/u)
+  } finally {
+    if (previous === undefined) delete globalThis.dshDesktop
+    else globalThis.dshDesktop = previous
+  }
+})
+
+test('public Models diagnostic records only bounded counts', async () => {
+  const button = { count: async () => 1 }
+  const root = { count: async () => 1, getByRole: () => button }
+  const settings = { count: async () => 1, locator: () => root }
+  assert.deepEqual(await initialCopilotUiDiagnostic(settings), {
+    schemaVersion: 1, baselineRequired: true, settingsDialogs: 1, copilotAccountRoots: 1, copilotSignInButtons: 1,
+  })
+})
+
+test('physical baseline diagnostic projects safe leaves and never credential-shaped values', t => {
+  const root = directory(t), home = preparePackageAcceptanceHome(root), profile = join(home, 'profiles', 'desktop')
+  mkdirSync(profile, { recursive: true })
+  writeFileSync(join(profile, 'package.json'), JSON.stringify({ private: true,
+    dependencies: { 'dsh-github-copilot': 'https://user:secret@example.invalid/plugin.tgz' },
+    dsh: { profile: { bundles: [] } } }))
+  writeFileSync(join(profile, 'desktop-plugin-provisioning-state.json'), JSON.stringify({ schemaVersion: 1, plugins: [{
+    name: 'dsh-github-copilot', version: 'https://user:secret@example.invalid/version', required: true, status: 'optional-failed', phase: 'download',
+  }] }))
+  writeFileSync(join(profile, 'desktop-plugin-receipts.json'), JSON.stringify({ schemaVersion: 1,
+    receipts: { 'dsh-github-copilot': { artifactSha256: 'a'.repeat(64), source: {
+      packageName: 'dsh-github-copilot', version: 'https://user:secret@example.invalid/receipt', tag: 'secret-tag',
+    } } }, owners: { 'dsh-github-copilot': 'release' } }))
+  writeFileSync(join(profile, 'desktop-plugin-package-locks.json'), JSON.stringify({ schemaVersion: 1,
+    packages: { 'dsh-github-copilot': { version: 'https://user:secret@example.invalid/lock', sha256: 'b'.repeat(64) } } }))
+  writeFileSync(join(profile, 'desktop-plugin-user-intents.json'), JSON.stringify({ schemaVersion: 1, removed: {} }))
+  const diagnostic = packageBaselineDiagnostic(home, profile)
+  assert.deepEqual(diagnostic.manifest, { dependencyPresent: true, dependencyKind: 'other', selected: false })
+  assert.deepEqual(diagnostic.pendingTransactions, [])
+  assert.equal(JSON.stringify(diagnostic).includes('secret'), false)
+  for (const file of Object.values(diagnostic.files)) {
+    if (file.exists) { assert.match(file.sha256, /^[a-f0-9]{64}$/u); assert.ok(file.bytes > 0) }
+  }
+})
+
+test('baseline diagnostic refuses malformed, oversized and ambiguous physical evidence', t => {
+  const capture = (action, pattern) => {
+    let failure
+    try { action() } catch (error) { failure = error }
+    assert.ok(failure instanceof Error)
+    assert.match(failure.message, pattern)
+    return failure
+  }
+  const root = directory(t), home = preparePackageAcceptanceHome(root), profile = join(home, 'profiles', 'desktop')
+  mkdirSync(profile, { recursive: true })
+  writeFileSync(join(profile, 'package.json'), '{"secret":"credential-fragment"')
+  const invalid = capture(() => packageBaselineDiagnostic(home, profile), /Invalid baseline diagnostic JSON: package\.json/u)
+  assert.equal(invalid.message.includes('credential-fragment'), false)
+  writeFileSync(join(profile, 'package.json'), '{}')
+  assert.throws(() => packageBaselineDiagnostic(home, profile), /Malformed package baseline manifest/u)
+  writeFileSync(join(profile, 'package.json'), 'x'.repeat(8 * 1024 * 1024 + 1))
+  assert.throws(() => packageBaselineDiagnostic(home, profile), /Unsafe baseline diagnostic file/u)
+  writeFileSync(join(profile, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: [] } } }))
+  writeFileSync(join(profile, 'desktop-plugin-receipts.json'), JSON.stringify({ schemaVersion: 1,
+    receipts: { 'dsh-github-copilot': { artifactSha256: 'a'.repeat(64), source: { packageName: 'dsh-github-copilot', version: '1.0.0' } } },
+    owners: { 'dsh-github-copilot': 'credential-fragment' } }))
+  const owner = capture(() => packageBaselineDiagnostic(home, profile), /Malformed planned receipt owner/u)
+  assert.equal(owner.message.includes('credential-fragment'), false)
+  rmSync(join(profile, 'desktop-plugin-receipts.json'))
+  mkdirSync(join(home, 'profiles', '.desktop.package-stage-not-a-uuid'))
+  assert.throws(() => packageBaselineDiagnostic(home, profile), /Malformed pending transaction name/u)
+})
+
+test('initial launch binds public baseline and physical diagnostic before opening Settings', () => {
+  const run = source.slice(source.indexOf('export async function runPackagedPackageAcceptance'))
+  const launch = run.indexOf("await launch('initial')")
+  const baseline = run.indexOf('await packageBaselinePresentation(page)', launch)
+  const physical = run.indexOf("packageBaselineDiagnostic(home, profile)", baseline)
+  const refusal = run.indexOf('assert.equal(baselinePresentation.baseline, null', physical)
+  const settings = run.indexOf("getByRole('button', { name: 'Settings'", refusal)
+  assert.ok(launch >= 0 && launch < baseline && baseline < physical && physical < refusal && refusal < settings)
+  assert.ok(run.includes("save(join(evidence, 'package-baseline-failure-diagnostic.json')"))
+  assert.ok(run.includes("hostStderr: { status: 'unavailable-through-current-launch-transport' }"))
 })
 
 test('private picker home preparation follows ownership validation and precedes every launch', () => {
