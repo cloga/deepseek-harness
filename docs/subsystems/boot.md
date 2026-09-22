@@ -132,7 +132,7 @@ Manage profile files and apply their declared reload lifecycle.
  * @param transactionId - Identifier returned by a prepared result.
  * @returns Pending record, or undefined after cancellation or activation.
  */
-@Remote async pendingPackageChange(transactionId: string): Promise<ProfilePreparedPackageChange | undefined>
+@Remote async pendingPackageChange(transactionId: string): Promise<ProfilePendingPackageChange | undefined>
 
 /**
  * Cancel a prepared graph through its owner, never by deleting a caller-supplied path.
@@ -144,7 +144,7 @@ Manage profile files and apply their declared reload lifecycle.
  * List prepared changes without claiming activation or runtime health.
  * @returns Pending package changes, or an empty list when the profile does not require staging.
  */
-@Remote async listPendingPackageChanges(): Promise<readonly ProfilePreparedPackageChange[]>
+@Remote async listPendingPackageChanges(): Promise<readonly ProfilePendingPackageChange[]>
 ```
 
 Source: [`packages/boot/plugin-manager/src/index.ts`](../../packages/boot/plugin-manager/src/index.ts)
@@ -179,13 +179,13 @@ stage(requestId: string, request: ProfilePackageMutation, signal: AbortSignal): 
  * @param transactionId - Durable transaction identity returned by staging.
  * @returns Prepared record, or undefined when no pending stage remains.
  */
-status(transactionId: string): Promise<ProfilePreparedPackageChange | undefined>
+status(transactionId: string): Promise<ProfilePendingPackageChange | undefined>
 
 /**
  * List pending preparations owned by the launcher's fixed profile.
  * @returns Prepared records, without implying that any graph is active.
  */
-listPending(): Promise<readonly ProfilePreparedPackageChange[]>
+listPending(): Promise<readonly ProfilePendingPackageChange[]>
 
 /**
  * Cancel or discard a preparation through its owner without removing an active plugin.

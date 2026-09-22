@@ -37,7 +37,7 @@ async function main(): Promise<void> {
     prepare: async (ctx) => {
       control.updateTasks = installDesktopUpdateTaskControl(ctx, process.env.DSH_DESKTOP_ADMISSION_LOCKED === '1')
       control.commands = installDesktopPluginCommands(ctx, {
-        connected: () => process.connected === true && process.send !== undefined,
+        connected: () => process.connected && process.send !== undefined,
         send,
       })
       if (isStopping()) control.commands.bridge.dispose()

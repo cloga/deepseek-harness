@@ -141,7 +141,7 @@ export class DesktopPluginCommandCoordinator {
 
   private track(work: Promise<void>): void {
     this.work.add(work)
-    void work.catch((error) => { this.report(error) }).finally(() => { this.work.delete(work) })
+    void work.catch((error: unknown) => { this.report(error) }).finally(() => { this.work.delete(work) })
   }
 
   private async reply(host: DesktopPluginCommandHost, id: number, result: DesktopPluginCommandResponse): Promise<void> {
@@ -193,7 +193,9 @@ export class DesktopPluginCommandCoordinator {
         transactionId: state.transactionId, origin: state.origin, signal: state.abort.signal,
         authorize: (origin: DesktopPackageCommandOrigin, transactionId: string): void => {
           this.assertCurrent(state)
-          if (!state.acknowledged || transactionId !== state.transactionId || origin.kind !== state.origin.kind
+          // Persisted/untyped callers must still pass the runtime discriminator check.
+          const originKind: unknown = origin.kind
+          if (!state.acknowledged || transactionId !== state.transactionId || originKind !== state.origin.kind
             || origin.generation !== state.origin.generation || origin.commandId !== state.origin.commandId
             || origin.requestId !== state.origin.requestId) throw new Error('Desktop command activation authority does not match its prepared origin')
         },

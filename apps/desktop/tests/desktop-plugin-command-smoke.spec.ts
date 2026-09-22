@@ -148,7 +148,7 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
   it('requires positive cleanup before publication and preserves a failed exclusive success write', () => {
     const absent = createDesktopPluginCommandOutcome()
     const publish = vi.fn(), report = vi.fn()
-    expect(() => finalizeDesktopPluginCommandAcceptance(absent, false, publish, report)).toThrow('cleanup is unconfirmed')
+    expect(() => { finalizeDesktopPluginCommandAcceptance(absent, false, publish, report) }).toThrow('cleanup is unconfirmed')
     expect(publish).not.toHaveBeenCalled()
     const complete = createDesktopPluginCommandOutcome()
     finalizeDesktopPluginCommandAcceptance(complete, true, publish, report)

@@ -888,7 +888,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
     const mutation = command === undefined ? parseMutation(value.mutation) : parsePreparedMutation(value.mutation)
     const result = mutation.kind === 'selection' ? parseProfilePendingChange(value.result) : parseProfilePreparedChange(value.result)
     if (mutation.kind === 'selection') {
-      if (!('kind' in result) || result.kind !== 'selection' || stable(result.packageNames) !== stable(mutation.packageNames)) {
+      if (!('kind' in result) || stable(result.packageNames) !== stable(mutation.packageNames)) {
         fail('selection result differs from its mutation')
       }
     }
@@ -1530,7 +1530,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
       const selected = parseProfilePendingChange(await stageRequest(requestId, undefined, signal, false, {
         origin, request: { kind: 'selection', ...parseDesktopPackageSelectionRequest(request) },
       }))
-      if (!('kind' in selected) || selected.kind !== 'selection') fail('selection did not produce a selection outcome')
+      if (!('kind' in selected)) fail('selection did not produce a selection outcome')
       return selected
     },
     async stageProvisioning(requestId, signal) {

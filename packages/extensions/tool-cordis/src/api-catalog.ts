@@ -1559,7 +1559,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'Removal diagnostics and the remaining profile state.',
       },
       {
-        signature: '@Remote async pendingPackageChange(transactionId: string): Promise<ProfilePreparedPackageChange | undefined>',
+        signature: '@Remote async pendingPackageChange(transactionId: string): Promise<ProfilePendingPackageChange | undefined>',
         description: 'Read the launcher\'s authoritative pending record without claiming active package state.',
         parameters: [{ name: 'transactionId', description: 'Identifier returned by a prepared result.' }],
         returns: 'Pending record, or undefined after cancellation or activation.',
@@ -1570,7 +1570,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'transactionId', description: 'Identifier returned by a prepared result.' }],
       },
       {
-        signature: '@Remote async listPendingPackageChanges(): Promise<readonly ProfilePreparedPackageChange[]>',
+        signature: '@Remote async listPendingPackageChanges(): Promise<readonly ProfilePendingPackageChange[]>',
         description: 'List prepared changes without claiming activation or runtime health.',
         parameters: [],
         returns: 'Pending package changes, or an empty list when the profile does not require staging.',
@@ -1621,13 +1621,13 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'Prepared graph identity, not an active receipt or runtime health observation.',
       },
       {
-        signature: 'status(transactionId: string): Promise<ProfilePreparedPackageChange | undefined>',
+        signature: 'status(transactionId: string): Promise<ProfilePendingPackageChange | undefined>',
         description: 'Read a transaction\'s pending preparation state without inspecting active package health.',
         parameters: [{ name: 'transactionId', description: 'Durable transaction identity returned by staging.' }],
         returns: 'Prepared record, or undefined when no pending stage remains.',
       },
       {
-        signature: 'listPending(): Promise<readonly ProfilePreparedPackageChange[]>',
+        signature: 'listPending(): Promise<readonly ProfilePendingPackageChange[]>',
         description: 'List pending preparations owned by the launcher\'s fixed profile.',
         parameters: [],
         returns: 'Prepared records, without implying that any graph is active.',
@@ -5442,8 +5442,16 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type ProfilePackageSource = ProfileVerifiedReleaseSource | {\n    readonly schemaVersion: 1;\n    readonly type: \'npmRegistry\';\n    readonly spec: string;\n} | {\n    readonly schemaVersion: 1;\n    readonly type: \'packageSpec\';\n    readonly spec: string;\n};',
   },
   {
+    name: 'ProfilePendingPackageChange',
+    declaration: 'export type ProfilePendingPackageChange = ProfilePreparedPackageChange | ProfilePreparedBundleSelection;',
+  },
+  {
     name: 'ProfilePnpmInvocation',
     declaration: 'export interface ProfilePnpmInvocation {\n    readonly command: string;\n    readonly args: readonly string[];\n    readonly env: Readonly<Record<string, string>>;\n}',
+  },
+  {
+    name: 'ProfilePreparedBundleSelection',
+    declaration: 'export interface ProfilePreparedBundleSelection {\n    readonly schemaVersion: 2;\n    readonly kind: \'selection\';\n    readonly transactionId: string;\n    readonly state: \'prepared\';\n    readonly packageNames: readonly string[];\n    readonly baseFingerprint: string;\n    readonly health: \'pending\' | \'passed\';\n}',
   },
   {
     name: 'ProfilePreparedPackageChange',

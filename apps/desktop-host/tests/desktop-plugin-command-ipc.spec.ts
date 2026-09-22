@@ -82,6 +82,45 @@ describe('owned Host command IPC', () => {
     bridge.dispose()
   })
 
+  it.each([
+    { label: 'Error', reason: new Error('owned pre-abort') },
+    { label: 'null', reason: null },
+    { label: 'undefined (owned reason fault injection)', reason: undefined },
+  ])('preserves exact pre-abort $label without sending or consuming an id', async ({ reason }) => {
+    const { bridge, send } = fixture()
+    const abort = controller()
+    abort.abort(reason)
+    // Native abort(undefined) substitutes a DOMException. Shadow only this owned signal to exercise exact undefined propagation.
+    if (reason === undefined) Object.defineProperty(abort.signal, 'reason', { configurable: true, value: undefined })
+    const added = vi.spyOn(abort.signal, 'addEventListener')
+    const removed = vi.spyOn(abort.signal, 'removeEventListener')
+    try {
+      const result = bridge.request({ type: 'disable-all' }, 'pre-aborted', abort.signal)
+      expect(result).toBeInstanceOf(Promise)
+      expect(send).not.toHaveBeenCalled()
+      expect(added).not.toHaveBeenCalled()
+      expect(removed).not.toHaveBeenCalled()
+      const order: string[] = []
+      const observed = result.then(() => { throw new Error('pre-aborted request resolved') }, (error: unknown) => {
+        expect(error).toBe(reason)
+        order.push('rejected')
+      })
+      const checkpoint = Promise.resolve().then(() => { order.push('checkpoint') })
+      await Promise.all([observed, checkpoint])
+      expect(order).toEqual(['rejected', 'checkpoint'])
+      const next = bridge.request({ type: 'list' }, 'next', controller().signal)
+      expect(send).toHaveBeenCalledExactlyOnceWith({ type: 'plugin-command-request', requestId: 1,
+        commandId: 'next', operation: { type: 'list' } })
+      bridge.receive(response(1, { kind: 'list', plugins: [] }))
+      await expect(next).resolves.toEqual({ type: 'list', rows: [] })
+    } finally {
+      bridge.dispose()
+      added.mockRestore()
+      removed.mockRestore()
+      if (reason === undefined) Reflect.deleteProperty(abort.signal, 'reason')
+    }
+  })
+
   it.each(['before', 'pending', 'prepared'] as const)('cancels at %s response without late settlement', async (phase) => {
     const { bridge, send } = fixture()
     const abort = controller()

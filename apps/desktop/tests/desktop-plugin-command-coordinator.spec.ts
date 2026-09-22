@@ -94,7 +94,8 @@ describe('Desktop command coordinator ownership and settlement', () => {
     const [id, operation, origin, signal] = b.options.stage.mock.calls[0]!
     expect(id).toMatch(uuid)
     expect(operation).toEqual(mutation)
-    expect(origin).toEqual({ kind: 'desktop-command', generation: expect.stringMatching(uuid), requestId: 1, commandId: 'command-1' })
+    expect(origin.generation).toMatch(uuid)
+    expect(origin).toEqual({ kind: 'desktop-command', generation: origin.generation, requestId: 1, commandId: 'command-1' })
     expect(Object.isFrozen(origin)).toBe(true)
     expect(signal.aborted).toBe(false)
     b.ack() // Before a prepared response this cannot stand in for persisted command completion.

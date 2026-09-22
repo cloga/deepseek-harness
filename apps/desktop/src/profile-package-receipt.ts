@@ -163,8 +163,10 @@ export function desktopReceiptFileTransitions(proof: DesktopReceiptTransition): 
  */
 export function prepareDesktopPackageReceipt(input: DesktopPreparedPackageActivation): DesktopReceiptTransition | undefined {
   if (input.mutation.kind === 'selection') {
+    // Keep the discriminator check for direct untyped callers as well as validated staging inputs.
+    const preparedKind: unknown = 'kind' in input.prepared ? input.prepared.kind : undefined
     if (input.verifiedRelease !== undefined || input.provisioning !== undefined || input.registryTarget !== undefined
-      || !('kind' in input.prepared) || input.prepared.kind !== 'selection') fail()
+      || preparedKind !== 'selection') fail()
     return undefined
   }
   if (input.verifiedRelease === undefined || !targetEnabled(input)) {

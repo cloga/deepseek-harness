@@ -113,7 +113,11 @@ export class DesktopPluginCommandIpc {
       || [...this.pending.values()].some(pending => pending.commandId === commandId)) {
       return Promise.reject(new Error('desktop plugin command: invalid or duplicate request'))
     }
-    if (signal.aborted) return Promise.reject(signal.reason)
+    if (signal.aborted) {
+      const reason: unknown = signal.reason
+      // Reject immediately with the exact cancellation value, without normalizing it or changing other request timing.
+      return new Promise<DesktopPluginCommandResponse>(() => { throw reason })
+    }
     const requestId = ++this.nextRequestId
     return new Promise<DesktopPluginCommandResponse>((resolve, reject) => {
       const onAbort = (): void => {

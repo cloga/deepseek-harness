@@ -73,8 +73,8 @@ it('rejects malformed or foreign selection pending records rather than relabelin
     { ...selection, packageNames: [] }, { ...selection, packageNames: ['second', 'first'] },
     { ...selection, packageName: 'fake-target' }, { ...selection, generation: 'untrusted-authority' },
   ]) {
-    backend.status.mockResolvedValue(invalid as unknown as ProfilePreparedBundleSelection)
-    backend.listPending.mockResolvedValue([invalid as unknown as ProfilePreparedBundleSelection])
+    backend.status.mockResolvedValue(invalid)
+    backend.listPending.mockResolvedValue([invalid])
     expect(await ipc.handle(request('status', { transactionId }))).toMatchObject({ ok: false })
     expect(await ipc.handle(request('list'))).toMatchObject({ ok: false })
   }
