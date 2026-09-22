@@ -682,20 +682,29 @@ export class DesktopProvisioningOverrideHealthError extends DesktopProvisioningO
 }
 
 function assertPlannedMutationPreflight(
+  projectDir: string,
   plan: DesktopPluginProvisioningPlan,
+  state: DesktopPluginProvisioningState,
   mutation: DesktopProjectMutation,
 ): void {
   let name: string | undefined
   if (mutation.type === 'plugin-add') {
     const parsed = parseDesktopPluginInstallSpec(mutation.spec, process.cwd())
     if (parsed.kind === 'registry') name = parsed.name
+  } else if (mutation.type === 'plugin-install') {
+    const source = parseDesktopPluginSource(mutation.source)
+    if (source.type === 'npmRegistry') name = packageNameFromSpec(source.spec)
   } else if (mutation.type === 'plugin-update' || mutation.type === 'plugin-remove'
     || mutation.type === 'plugin-toggle' && !mutation.enabled) name = mutation.name
   if (name === undefined) return
-  const entry = plan.plugins.find(item => item.required && item.source.packageName === name)
-  if (entry !== undefined) {
+  const entry = plan.plugins.find(item => item.source.packageName === name)
+  if (entry === undefined) return
+  const active = state.plugins.some(result => result.name === name && result.status === 'active')
+    && Object.hasOwn(projectManifest(projectDir).dependencies, name)
+    && profilePluginNames(projectDir).includes(name)
+  if (entry.required || active) {
     throw new DesktopProvisioningOverrideError(entry.source.packageName, entry.source.version,
-      `desktop project: ${mutation.type} would leave required planned plugin ${name} invalid; restore the planned source explicitly`)
+      `desktop project: ${mutation.type} would leave active planned plugin ${name} invalid; restore the planned source explicitly`)
   }
 }
 
@@ -1194,7 +1203,9 @@ export class DesktopProjectManager {
         && desktopPluginProvisioningPlanSha256(activePlan) !== activeProvisioning.planSha256) {
         throw new Error('desktop plugin provisioning: active state plan evidence is inconsistent')
       }
-      if (activePlan !== undefined) assertPlannedMutationPreflight(activePlan, mutation)
+      if (activePlan !== undefined && activeProvisioning !== undefined) {
+        assertPlannedMutationPreflight(this.paths.profile, activePlan, activeProvisioning, mutation)
+      }
       if (mutation.type === 'plugin-install' && activePlan !== undefined) {
         const source = parseDesktopPluginSource(mutation.source)
         const entry = source.type === 'githubRelease'

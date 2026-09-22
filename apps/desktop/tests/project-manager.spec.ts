@@ -665,9 +665,12 @@ describe('desktop external plugin profile', () => {
     await manager.mutate({ type: 'plugin-install', source: override }, hooks())
     const before = profileMetadata(manager.paths.profile), callCount = calls(root).length
     await expect(manager.mutate({ type: 'plugin-add', spec: `${override.packageName}@3.0.0` }, hooks()))
-      .rejects.toThrow('leave required planned plugin')
+      .rejects.toThrow('leave active planned plugin')
+    await expect(manager.mutate({
+      type: 'plugin-install', source: { schemaVersion: 1, type: 'npmRegistry', spec: `${override.packageName}@3.0.0` },
+    }, hooks())).rejects.toThrow('leave active planned plugin')
     await expect(manager.mutate({ type: 'plugin-update', name: override.packageName, version: '3.0.0' }, hooks()))
-      .rejects.toThrow('leave required planned plugin')
+      .rejects.toThrow('leave active planned plugin')
     await expect(manager.mutate({ type: 'plugin-toggle', name: override.packageName, enabled: false }, hooks()))
       .rejects.toThrow('planned plugin')
     await expect(manager.mutate({ type: 'plugin-remove', name: override.packageName }, hooks()))
@@ -675,6 +678,36 @@ describe('desktop external plugin profile', () => {
     expect(profileMetadata(manager.paths.profile)).toEqual(before)
     expect(calls(root)).toHaveLength(callCount)
     await expect(manager.mutate({ type: 'plugin-toggle', name: override.packageName, enabled: true }, hooks())).resolves.toBeUndefined()
+  }, 30_000)
+
+  it('preflights active optional plan entries but permits normal handling for absent optional entries', async () => {
+    const activeSetup = setup(), active = pluginFixture('optional-provider')
+    mockVerifiedPlugins([active])
+    const plan = { schemaVersion: 2, mode: 'exact', plugins: [{
+      required: false, source: active.source, sourcePolicy: 'compatible-user-override',
+    }] }
+    await activeSetup.manager.applyRelease(hooks(), plan)
+    const before = profileMetadata(activeSetup.manager.paths.profile), count = calls(activeSetup.root).length
+    for (const mutation of [
+      { type: 'plugin-add' as const, spec: `${active.source.packageName}@2.0.0` },
+      { type: 'plugin-install' as const, source: { schemaVersion: 1 as const, type: 'npmRegistry' as const, spec: `${active.source.packageName}@2.0.0` } },
+      { type: 'plugin-update' as const, name: active.source.packageName, version: '2.0.0' },
+      { type: 'plugin-remove' as const, name: active.source.packageName },
+      { type: 'plugin-toggle' as const, name: active.source.packageName, enabled: false },
+    ]) await expect(activeSetup.manager.mutate(mutation, hooks())).rejects.toThrow('leave active planned plugin')
+    expect(profileMetadata(activeSetup.manager.paths.profile)).toEqual(before)
+    expect(calls(activeSetup.root)).toHaveLength(count)
+
+    const absentSetup = setup(), absent = pluginFixture('absent-optional')
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('optional unavailable'))
+    await absentSetup.manager.applyRelease(hooks(), {
+      schemaVersion: 2, mode: 'exact', plugins: [{
+        required: false, source: absent.source, sourcePolicy: 'compatible-user-override',
+      }],
+    })
+    await expect(absentSetup.manager.mutate({
+      type: 'plugin-toggle', name: absent.source.packageName, enabled: false,
+    }, hooks())).rejects.toThrow('is not installed')
   }, 30_000)
 
   it('restores only the planned source after target-runtime override health failure', async () => {

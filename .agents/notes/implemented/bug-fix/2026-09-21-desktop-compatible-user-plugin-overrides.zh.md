@@ -10,7 +10,7 @@ Status: implemented
 
 ## 决策
 
-Provisioning plan schema 2 为每个条目显式指定 `strict-pin` 或 `compatible-user-override` 来源策略。Schema 1 plan 保持严格语义及原有规范哈希。兼容覆盖必须已启用、显式归用户所有、具有校验和证明、制品一致，并使用计划中的包名。Registry 包、源码快照、旧版未知归属、禁用条目、损坏制品及矛盾 receipt 仍然属于冲突。
+Provisioning plan schema 2 为每个条目显式指定 `strict-pin` 或 `compatible-user-override` 来源策略。Schema 1 plan 保持严格语义及原有规范哈希。兼容覆盖必须已启用、显式归用户所有、具有校验和证明、制品一致，并与计划使用相同的 GitHub owner、repository、包名及规范化 dependency registry。Registry 包、源码快照、旧版未知归属、禁用条目、损坏制品及矛盾 receipt 仍然属于冲突。
 
 Provisioning state schema 2 分别记录 plan schema、请求来源和策略，以及有效来源与 `plan` 或 `user-override` 处置。Schema 1 state 使用其历史 capability 严格验证，仅在内存中规范化。成功事务写入 schema 2；读取不会改写保留证据。
 

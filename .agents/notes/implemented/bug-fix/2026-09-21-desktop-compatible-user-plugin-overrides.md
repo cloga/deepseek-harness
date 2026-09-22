@@ -10,7 +10,7 @@ A user-owned checksum-attested same-name plugin can pass the complete staged Hos
 
 ## Decision
 
-Provisioning plan schema 2 gives every entry an explicit `strict-pin` or `compatible-user-override` source policy. Schema-1 plans remain strict and retain their canonical hash. A compatible override must be enabled, explicitly user-owned, checksum-attested, artifact-consistent, and use the planned package name. Registry packages, source snapshots, legacy-unknown ownership, disabled entries, damaged artifacts and contradictory receipts remain conflicts.
+Provisioning plan schema 2 gives every entry an explicit `strict-pin` or `compatible-user-override` source policy. Schema-1 plans remain strict and retain their canonical hash. A compatible override must be enabled, explicitly user-owned, checksum-attested, artifact-consistent, and match the plan's GitHub owner, repository, package name, and normalized dependency registry. Registry packages, source snapshots, legacy-unknown ownership, disabled entries, damaged artifacts and contradictory receipts remain conflicts.
 
 Provisioning state schema 2 records the plan schema, requested source and policy separately from the effective source and `plan` or `user-override` disposition. Schema-1 state is validated with its historical capability and normalized only in memory. A successful transaction writes schema 2; reads never rewrite retained evidence.
 
