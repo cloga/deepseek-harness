@@ -106,10 +106,10 @@ describe('Session Auto model selection', () => {
     try {
       await h.detach()
       expect(h.ctx.agents.get(h.session.id)).toBeUndefined()
-      const config = configuration()
-      if (config.policy === undefined || config.classifier === undefined) throw new Error('fixture requires complete Auto settings')
+      const { policy, classifier } = configuration()
+      if (policy === undefined || classifier === undefined) throw new Error('fixture requires complete Auto settings')
       expect(() => h.session.append('model/auto-selection', {
-        mode: 'balanced', policy: config.policy, classifier: config.classifier,
+        mode: 'balanced', policy, classifier,
       })).not.toThrow()
       expect(h.routing()).toEqual({ mode: 'balanced', lastDecision: null })
       expect(h.events.map(event => event.type)).toEqual(['model/auto-selection'])
