@@ -11,6 +11,7 @@ import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk }
 import { parseRoutingClassifierConfig, parseRoutingPolicy } from '@deepseek-ai/dsh-model-routing'
 import type { Config } from '@deepseek-ai/dsh-model-routing'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type {} from '@deepseek-ai/dsh-session-projection'
 import { launchWebScaffold, webSnapshotMode, type WebScaffold } from './scaffold.ts'
 import { connectFreshWorkspace, newEnglishPage, writeComposerDraft } from './support.ts'
 
