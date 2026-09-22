@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import { brandString } from '@deepseek-ai/dsh-brand'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, { LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, ImageBlock, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { DelegationRoutingCapture, ResolveDelegationRoutingRequest, ResolvedDelegationRouting } from '@deepseek-ai/dsh-model-routing'
 import { ALL_ALLOWED, autoSelection, nativeModelInfo as info } from './native-model-selection-fixtures.ts'
 import SessionStore, { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
@@ -13,6 +14,8 @@ import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import SubagentRuntime, { recordSubagentModelSelection } from '../src/index.ts'
 import type { AllowedModelRoute, ResolvedSubagentStartRequest, SubagentProvider, SubagentResult } from '../src/index.ts'
 import { assertSubagentModelRules, captureSubagentModelRule } from '../src/model-rules.ts'
+import { appendNativeChildSelection } from '../src/native-model-selection.ts'
+import { continuationManager } from './continuation-internals.ts'
 import type { SubagentModelRule } from '../src/model-rules.ts'
 
 const contexts: Context[] = []
@@ -36,13 +39,15 @@ async function setup(options: {
   rules?: SubagentModelRule[]
   defaults?: { provider: string; model: string }
   auto?: boolean
+  llm?: boolean
+  projections?: boolean
 } = {}) {
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(SessionStore)
-  await ctx.plugin(SessionProjectionRegistry)
+  if (options.projections !== false) await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
-  await ctx.plugin(LlmRuntime)
+  if (options.llm !== false) await ctx.plugin(LlmRuntime)
   await ctx.plugin(MemorySettings)
   const service = ctx.plugin(SubagentRuntime, { modelRules: options.rules ?? [] })
   await service
@@ -53,13 +58,15 @@ async function setup(options: {
     }
     override async * stream(): AsyncIterable<StreamChunk> { yield { type: 'finish', reason: { kind: 'stop' } } }
   }
-  const offAdapter = ctx.llm.registerAdapter(['models', 'other'], new Adapter())
+  const offAdapter = ctx.get('llm')?.registerAdapter(['models', 'other'], new Adapter()) ?? (() => {})
   const parentOptions: AgentOptions = { provider: 'models', model: 'parent', reasoningEffort: ReasoningEffortId('high'), maxTokens: 128 }
   const session = ctx.sessions.create(SessionId('parent'))
   // The selection transaction only consumes these real registry/Session fields; the provider below records its creation input.
   const parent = { id: session.id, session, options: parentOptions, ctx } as Agent
   await ctx.agents.register(parent)
-  if (options.allowed !== false) recordSubagentModelSelection(ctx.sessionProjections, session, options.allowed ?? ALL_ALLOWED)
+  if (options.allowed !== false && options.projections !== false) {
+    recordSubagentModelSelection(ctx.sessionProjections, session, options.allowed ?? ALL_ALLOWED)
+  }
   let auto = options.auto !== false
   const captureDelegation = vi.fn((agent: Agent): DelegationRoutingCapture | undefined => auto ? {
     parentSessionId: agent.id, intentSeq: SessionSeq(0), selection: autoSelection(),
@@ -271,6 +278,133 @@ describe('native creation precedence and exact Auto authority', () => {
     expect(h.requests[0]?.descriptor.provider).toBe('native-alias')
     expect(h.requests[0]?.resolvedCreationSignal).not.toBe(forgedSignal)
     expect(h.requests[0]?.resolvedDelegatedPolicies?.sandboxMode).toBeUndefined()
+  })
+})
+
+describe('native optional capabilities and captured input', () => {
+  it('rejects a native provider lacking AgentOptions support without registering it', async () => {
+    const h = await setup()
+    expect(() => h.ctx.subagents.registerProvider({
+      ...h.provider, name: 'unsupported-native', capabilities: { ...h.provider.capabilities, agentOptions: false },
+    })).toThrow('requires the provider to support agentOptions')
+    expect(h.ctx.subagents.getProvider('unsupported-native')).toBeUndefined()
+  })
+
+  it('inherits without routing authority when session projections are absent', async () => {
+    const h = await setup({ projections: false })
+    await h.start()
+    expect(h.requests[0]?.resolvedAgentOptions).toEqual(h.parentOptions)
+    expect(h.requests[0]?.resolvedModelSelection).not.toHaveProperty('allowedModels')
+    expect(h.resolveDelegation).not.toHaveBeenCalled()
+    expect(() => {
+      appendNativeChildSelection(h.ctx, h.parent.session, { decision: { source: 'inheritance' }, allowedModels: ALL_ALLOWED })
+    }).toThrow('captured child model authority requires sessionProjections')
+    expect(h.parent.session.snapshotEvents().some(event => event.type === 'subagent/model-selection')).toBe(false)
+  })
+
+  it.each(['auto', 'explicit'] as const)('refuses %s selection without the LLM service before provider creation', async (mode) => {
+    const h = await setup({ llm: false })
+    await expect(h.start(mode === 'explicit' ? { model: 'cheap' } : undefined)).rejects.toThrow('requires the llm service')
+    expect(h.requests).toHaveLength(0)
+    expect(h.resolveDelegation).not.toHaveBeenCalled()
+  })
+
+  it('refuses an explicit partial route when no effective model is inherited', async () => {
+    const h = await setup()
+    delete h.parentOptions.model
+    await expect(h.start({ provider: 'models' })).rejects.toThrow('requires an effective provider and model')
+    expect(h.resolveModel).not.toHaveBeenCalled()
+    expect(h.requests).toHaveLength(0)
+  })
+
+  it('detaches text and image attachment data before classifier awaits and retains other block kinds', async () => {
+    const h = await setup()
+    const attachment = {
+      attachmentId: brandString<ImageBlock['attachment']['attachmentId']>('captured-image'),
+      mediaType: 'image/png' as const, bytes: 1, width: 1, height: 1,
+    }
+    const image: ImageBlock = { type: 'image', attachment }
+    const text = { type: 'text' as const, text: 'original task' }
+    const reasoning = { type: 'reasoning' as const, text: 'opaque caller block' }
+    const prompt: ContentBlock[] = [text, image, reasoning]
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    h.resolveDelegation.mockImplementation(async (request) => {
+      entered.resolve(undefined)
+      await release.promise
+      expect(request.prompt).toEqual([
+        { type: 'text', text: 'original task' },
+        { type: 'image', attachment: { attachmentId: 'captured-image', mediaType: 'image/png', bytes: 1, width: 1, height: 1 } },
+        reasoning,
+      ])
+      expect(request.prompt[0]).not.toBe(text)
+      expect(request.prompt[1]).not.toBe(image)
+      expect(request.prompt[2]).toBe(reasoning)
+      return { selection: { provider: 'models', model: 'cheap', reasoningEffort: ReasoningEffortId('low') }, candidateId: 'cheap', reason: 'quality-floor' }
+    })
+    const starting = h.ctx.subagents.start(h.provider.name, { parent: h.parent, prompt, signal: new AbortController().signal })
+    try {
+      await entered.promise
+      text.text = 'changed after admission'
+      attachment.bytes = 999
+      release.resolve(undefined)
+      await starting
+      expect(h.requests).toHaveLength(1)
+    } finally { release.resolve(undefined); await starting.catch(() => {}) }
+  })
+
+  it('settles a synchronous continuation admission fault and releases native startup ownership', async () => {
+    const h = await setup({ auto: false })
+    h.provider.prepareContinuable = () => Promise.resolve({})
+    const failure = new Error('continuation admission failed synchronously')
+    const start = vi.spyOn(continuationManager(h.ctx), 'startContinuable').mockImplementation(() => { throw failure })
+    try {
+      await expect(h.ctx.subagents.startContinuable({
+        provider: h.provider.name, label: 'failed admission', request: { parent: h.parent, prompt: [] }, signal: new AbortController().signal,
+      })).rejects.toBe(failure)
+      await h.service.dispose()
+      expect(h.requests).toHaveLength(0)
+    } finally { start.mockRestore() }
+  })
+
+  it('joins an unpublished provider run when cancellation wins its return race and consumes its rejected result', async () => {
+    const h = await setup({ auto: false })
+    const controller = new AbortController()
+    const entered = Promise.withResolvers<undefined>()
+    const releaseProvider = Promise.withResolvers<undefined>()
+    const disposing = Promise.withResolvers<undefined>()
+    const releaseDisposal = Promise.withResolvers<undefined>()
+    const lifecycle = vi.fn()
+    h.ctx.on('subagent/start', lifecycle)
+    h.ctx.on('subagent/end', lifecycle)
+    h.offProvider()
+    const dispose = vi.fn(async () => { disposing.resolve(undefined); await releaseDisposal.promise })
+    h.ctx.subagents.registerProvider({ ...h.provider, start: async () => {
+      entered.resolve(undefined)
+      await releaseProvider.promise
+      return { id: SessionId('unpublished-child'), localAgent: undefined,
+        result: Promise.reject(new Error('unpublished run failed')), dispose }
+    } })
+    const starting = h.start(undefined, { signal: controller.signal })
+    const rejected = expect(starting).rejects.toThrow('admission cancelled')
+    let settled = false
+    void starting.then(() => { settled = true }, () => { settled = true })
+    try {
+      await entered.promise
+      controller.abort(new Error('admission cancelled'))
+      releaseProvider.resolve(undefined)
+      await disposing.promise
+      expect(settled).toBe(false)
+      expect(lifecycle).not.toHaveBeenCalled()
+      releaseDisposal.resolve(undefined)
+      await rejected
+      expect(dispose).toHaveBeenCalledTimes(1)
+      expect(lifecycle).not.toHaveBeenCalled()
+    } finally {
+      releaseProvider.resolve(undefined)
+      releaseDisposal.resolve(undefined)
+      await starting.catch(() => {})
+    }
   })
 })
 

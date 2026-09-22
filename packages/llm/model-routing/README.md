@@ -89,6 +89,10 @@ The classifier reports task properties; the deterministic policy selects only ca
 | [Routing state](src/routing-state.ts) | Explicit intent and confirmed task binding. |
 | [Projection](src/projection.ts) | Validated restore state and cropped UI view. |
 
+### Dev Note
+
+`registerLearningWeights(provider)` installs one Fiber-owned synchronous local lookup. Only a confident new main task invokes it; returned weights must retain every candidate and hard rule and reduce exactly one eligible above-floor weight within the captured ceiling. The provider receives detached route/configuration facts, not task text or a live Session. Missing, malformed, throwing or asynchronous providers leave the normal base policy intact. The higher owner must independently authorize evidence and active versions; this seam does not certify task success or activate learning by itself.
+
 No invariant companion is published: committed routing state is a pure Session-log fold, and each actual decision copies the same immutable dispatched request. The Agent loop owns the independent request/header reconstruction invariant. The real Loader/AgentLoop test exercises prompt, model, effort, and decision agreement across task and manual boundaries.
 
 </details>

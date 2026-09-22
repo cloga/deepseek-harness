@@ -130,13 +130,26 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          node node_modules/vitest/vitest.mjs run packages/core/agent/tests/model-selection.spec.ts packages/llm/model-routing/tests packages/api/session-controller/tests/session-auto-models.host.spec.ts packages/client/ui-model-selection/tests packages/client/ui-settings-plugins/tests packages/llm/token-meter/tests/token-usage-projection.spec.ts packages/test-support/llm-replay/tests/routing-replay.spec.ts packages/subagent/subagent/tests/native-model-selection.spec.ts packages/subagent/subagent/tests/native-model-selection-lifecycle.spec.ts packages/subagent/tool-subagent/tests/native-selection-authority.spec.ts 2>&1 | Tee-Object -FilePath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'focused-tests.log')
+          node node_modules/vitest/vitest.mjs run packages/core/agent/tests/model-selection.spec.ts packages/llm/model-routing/tests packages/llm/model-routing-learning/tests packages/llm/llm/tests packages/subagent/subagent-in-process-driver/tests packages/api/session-controller/tests/session-auto-models.host.spec.ts packages/client/ui-model-selection/tests packages/client/ui-settings-plugins/tests packages/llm/token-meter/tests/token-usage-projection.spec.ts packages/test-support/llm-replay/tests/routing-replay.spec.ts packages/subagent/subagent/tests/native-model-selection.spec.ts packages/subagent/subagent/tests/native-model-selection-lifecycle.spec.ts packages/subagent/tool-subagent/tests/native-selection-authority.spec.ts 2>&1 | Tee-Object -FilePath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'focused-tests.log')
           $code = $LASTEXITCODE
           [ordered]@{
-            command = 'node node_modules/vitest/vitest.mjs run packages/core/agent/tests/model-selection.spec.ts packages/llm/model-routing/tests packages/api/session-controller/tests/session-auto-models.host.spec.ts packages/client/ui-model-selection/tests packages/client/ui-settings-plugins/tests packages/llm/token-meter/tests/token-usage-projection.spec.ts packages/test-support/llm-replay/tests/routing-replay.spec.ts packages/subagent/subagent/tests/native-model-selection.spec.ts packages/subagent/subagent/tests/native-model-selection-lifecycle.spec.ts packages/subagent/tool-subagent/tests/native-selection-authority.spec.ts'
+            command = 'node node_modules/vitest/vitest.mjs run packages/core/agent/tests/model-selection.spec.ts packages/llm/model-routing/tests packages/llm/model-routing-learning/tests packages/llm/llm/tests packages/subagent/subagent-in-process-driver/tests packages/api/session-controller/tests/session-auto-models.host.spec.ts packages/client/ui-model-selection/tests packages/client/ui-settings-plugins/tests packages/llm/token-meter/tests/token-usage-projection.spec.ts packages/test-support/llm-replay/tests/routing-replay.spec.ts packages/subagent/subagent/tests/native-model-selection.spec.ts packages/subagent/subagent/tests/native-model-selection-lifecycle.spec.ts packages/subagent/tool-subagent/tests/native-selection-authority.spec.ts'
             exitCode = $code
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'focused-tests.json') -Encoding utf8NoBOM
           exit $code
+
+      - name: Verify dependency-ready Host and Client contracts
+        id: contracts
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $log = Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'contracts.log'
+          node --max-old-space-size=4096 node_modules/typescript/bin/tsc -b tsconfig.host.json 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node node_modules/tsdown/dist/run.mjs --env.DSH_BUILD_FACE host 2>&1 | Tee-Object -FilePath $log -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node node_modules/typescript/bin/tsc -b tsconfig.client.json 2>&1 | Tee-Object -FilePath $log -Append
+          exit $LASTEXITCODE
 
       - name: Seal preparation receipt without changing earlier observations
         if: always() && steps.inputs.outcome == 'success'
@@ -145,6 +158,7 @@ jobs:
           INSTALL_OUTCOME: ${{ steps.install.outcome }}
           NOTICES_OUTCOME: ${{ steps.notices.outcome }}
           TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          CONTRACTS_OUTCOME: ${{ steps.contracts.outcome }}
         run: |
           $ErrorActionPreference = 'Stop'
           $inputsPath = Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'inputs.json'
@@ -173,7 +187,7 @@ jobs:
             $integrityErrors += 'Successful generation did not retain a generated-lock receipt.'
           }
           $evidenceHashes = [ordered]@{}
-          foreach ($name in @('inputs.json', 'generated-lock.json', 'generate.log', 'frozen-install.json', 'frozen-install.log', 'focused-tests.json', 'focused-tests.log', 'third-party-notices.log', 'THIRD_PARTY_NOTICES.md')) {
+          foreach ($name in @('inputs.json', 'generated-lock.json', 'generate.log', 'frozen-install.json', 'frozen-install.log', 'focused-tests.json', 'focused-tests.log', 'contracts.log', 'third-party-notices.log', 'THIRD_PARTY_NOTICES.md')) {
             $path = Join-Path $env:AUTO_ROUTING_PREPARE_DIR $name
             if (Test-Path -LiteralPath $path -PathType Leaf) {
               $evidenceHashes[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -197,6 +211,7 @@ jobs:
               frozenInstall = $env:INSTALL_OUTCOME
               notices = $env:NOTICES_OUTCOME
               focusedTests = $env:TESTS_OUTCOME
+              hostAndClientContracts = $env:CONTRACTS_OUTCOME
             }
             focusedTestsPassed = $env:TESTS_OUTCOME -eq 'success'
             inputIntegrityPassed = $integrityErrors.Count -eq 0

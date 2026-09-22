@@ -102,6 +102,19 @@ async function waitUnloaded(ctx: Context, id: SessionId): Promise<void> {
 }
 
 describe('native Auto creation and fixed resume', () => {
+  it('refuses a provider that withdraws continuation preparation during model preflight', async () => {
+    const h = await setup()
+    const provider = h.ctx.subagents.getProvider('native-spawn-alias')
+    if (provider === undefined) throw new Error('fixture native provider missing')
+    h.classifierHook.before = async () => {
+      Object.defineProperty(provider, 'prepareContinuable', { value: undefined, configurable: true })
+    }
+    await expect(h.startContinuable()).rejects.toThrow('does not support continuable children')
+    expect(h.created).toHaveLength(0)
+    expect(h.ctx.agents.list()).toEqual([h.parent])
+    expect(h.seen.every(request => request.purpose === 'model-routing')).toBe(true)
+  })
+
   it('writes child-local resolved evidence before its actual first request without changing the parent route', async () => {
     const h = await setup()
     const run = await h.start()

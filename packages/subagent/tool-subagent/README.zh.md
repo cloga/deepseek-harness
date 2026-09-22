@@ -133,19 +133,19 @@ kind: "package-reference"
 
 当提供方存在时，以当前实例配置的名称公开已生成的默认 [`subagent` schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-subagent)。启用的 Session 策略会添加 `provider`、`model` 与 `reasoning_effort`，以及继承和选择指引；提供方必须支持 `agentOptions`。提供方是否继承上下文会改变工具描述和提示词描述。启用后台模式会添加 `run_in_background`：可继续模式会记录其默认值为 `true`、运行时结算通知与显式前台覆盖；一次性模式会记录其默认值为 `false`，以及用 `job_output` 收集或用 `job_kill` 停止的 job id。当工具在本次组装的作用域中可见时，一个 `tool:<toolName>` 系统提示词 section 会指示模型同时启动相互独立的可继续委派、在它们运行时继续工作，并且仅当下一步动作依赖结果时选择前台；工具限制会同时移除其 schema 和这段指引。
 
-对启用模型选择的原生 spawn 实例，描述包含：
+##### 启用模型选择的原生 spawn 描述
 
 ```markdown
 Implicit child model choice uses configured tool/provider defaults, matching exact parent-model rules, authorized Auto when captured by the parent, then compatible parent defaults.
 ```
 
-不准入 Auto 的原生工具（包括 fork 工具）则包含：
+##### 不准入 Auto 的原生描述（包括 fork）
 
 ```markdown
 Child model choice uses configured tool/provider defaults or matching exact parent-model rules, then compatible parent defaults. Auto selection is disabled for this tool.
 ```
 
-原生面向模型的选择字段启用时，其指导包含：
+##### 启用的原生模型选择指导
 
 ```markdown
 Child LLM selection is optional. Supply `provider` and `model` together after using `list_subagent_models` to inspect advertised routes and efforts. Explicit provider, model, or reasoning effort suppresses parent rules and Auto; changing the route without naming an effort uses the selected model's default effort.

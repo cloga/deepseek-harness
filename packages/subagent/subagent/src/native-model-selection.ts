@@ -102,10 +102,15 @@ export function captureNativeChildSelection(
   const delegatedPolicies = captureDelegatedPolicyOverrides(parent)
   const projections = ctx.get('sessionProjections')
   const allowedModels = projections === undefined ? undefined : subagentModelSelectionPolicy(projections, parent.session)
+  if (request.analysisPolicy !== undefined && !allowedModels?.some(route =>
+    route.provider === requested?.provider && route.model === requested?.model)) {
+    throw new Error('analysis-only route is not authorized by the captured parent policy')
+  }
   const providerDefaults = provider.agentRouteDefaults
   const { reasoningEffort: _parentEffort, ...withoutParentEffort } = parentOptions
   const baseline = providerDefaults === undefined ? parentOptions : { ...withoutParentEffort, ...providerDefaults }
-  const inherited = mergeChildAgentOptions(baseline, requested)
+  // Analysis options are complete; omitted effort means provider default, never inherited effort.
+  const inherited = request.analysisPolicy === undefined ? mergeChildAgentOptions(baseline, requested) : { ...requested }
   const explicit = hasLlmSelection(requested) || providerDefaults !== undefined
   const ruleOptions = explicit ? undefined : captureSubagentModelRule(rules, parentOptions, requested)
   const modelRouting = ctx.get('modelRouting')

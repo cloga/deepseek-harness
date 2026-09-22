@@ -81,6 +81,7 @@ import { deliverSubagentPrompt } from './internal.ts'
 import { assertSubagentModelRules, SubagentModelRuleSchema } from './model-rules.ts'
 import type { SubagentModelRule } from './model-rules.ts'
 import { captureNativeChildSelection } from './native-model-selection.ts'
+import { captureNativeAnalysisPolicy } from './analysis-policy.ts'
 import { subagentModelSelectionProjectionDefinition } from './model-selection-state.ts'
 
 export * from './model-selection-policy.ts'
@@ -94,6 +95,8 @@ export * from './out-of-process.ts'
 export { AssistantOutputFold, finalAssistantOutput } from './assistant-output.ts'
 export { SubagentRunId } from './types.ts'
 export type {
+  NativeAnalysisPolicy,
+  NativeAnalysisUsage,
   ContinuableCreateRequest,
   ContinuableCreateSpec,
   ContinuableStart,
@@ -199,6 +202,7 @@ interface BrowserPromptSource {
 
 /** Host-owned deterministic parent route rules; omitted rules preserve inheritance. */
 export interface Config {
+  /** Exact parent-to-child routes for implicit native delegation; omission adds no parent-specific override. */
   readonly modelRules?: SubagentModelRule[]
 }
 
@@ -278,6 +282,9 @@ export class SubagentRuntime extends TypertRemoteService {
    * @throws when continuation services are unavailable or materialization fails.
    */
   async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart> {
+    if ('analysisPolicy' in spec.request && spec.request.analysisPolicy !== undefined) {
+      throw new Error('analysis-only children cannot be continuable or resumed')
+    }
     const manager = this.requireContinuations()
     const provider = this.expectProvider(spec.provider)
     if (provider.prepareContinuable === undefined) {
@@ -626,8 +633,10 @@ export class SubagentRuntime extends TypertRemoteService {
     // These provider-facing fields are produced only here, never accepted from a consumer's object spread.
     const {
       resolvedAgentOptions: _options, resolvedDelegatedPolicies: _policies,
-      resolvedModelSelection: _selection, resolvedCreationSignal: _signal, ...consumer
+      resolvedModelSelection: _selection, resolvedCreationSignal: _signal, ...input
     } = request as ResolvedSubagentStartRequest
+    const analysisPolicy = captureNativeAnalysisPolicy(provider, input)
+    const consumer = analysisPolicy === undefined ? input : { ...input, analysisPolicy }
     this.assertCapabilities(provider, consumer)
     if (provider.nativeModelSelection !== undefined && consumer.signal.aborted) {
       throw new Error('subagent request was aborted before child publication')

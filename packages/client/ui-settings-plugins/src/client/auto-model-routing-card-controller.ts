@@ -103,7 +103,10 @@ export class AutoModelRoutingCardController {
     this.unsubscribe()
   }
 
-  /** @returns Renderer-owned hook source and explicit staged edit callbacks. */
+  /**
+   * Expose the card snapshot source and callbacks without committing staged edits.
+   * @returns Renderer-owned hook source and explicit staged edit callbacks.
+   */
   inject(): AutoModelRoutingCardFace {
     return {
       hooks: { autoModelRoutingCard: this.store },
@@ -321,15 +324,15 @@ export class AutoModelRoutingCardController {
   private async save(): Promise<void> {
     if (!this.canEdit()) return
     const state = this.projection()
-    if (!state.dirty || state.invalid) return
+    if (!state.dirty || state.conflicted) return
+    const resolved = resolveAutoRoutingDraft(state.draft, state.models)
+    if (resolved.settings === undefined) return
     const snapshot = this.scope.getSnapshot()
     if (snapshot.revision === undefined || snapshot.revision !== this.draftRevision) {
       this.conflicted = true
       this.publish()
       return
     }
-    const resolved = resolveAutoRoutingDraft(state.draft, state.models)
-    if (resolved.settings === undefined) return
     const expected = JSON.stringify(resolved.settings)
     const ops: SettingsPathOpView[] = this.resetPending ? [{ op: 'unset', path: [] }] : [{
       op: 'set', path: [],

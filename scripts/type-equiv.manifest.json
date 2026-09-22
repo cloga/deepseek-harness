@@ -1363,6 +1363,16 @@
     },
     {
       "doc": "docs/subsystems/subagent.md",
+      "symbol": "NativeAnalysisPolicy",
+      "source": "packages/subagent/subagent/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/subagent.md",
+      "symbol": "NativeAnalysisUsage",
+      "source": "packages/subagent/subagent/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/subagent.md",
       "symbol": "SubagentStartRequest",
       "source": "packages/subagent/subagent/src/types.ts"
     },

@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-subagent-spawn-in-process` is an in-process subagent backend: it runs each delegated task in a fresh child agent that shares this process and its agent factory, LLM, and tool services. The child starts with an empty conversation, so a task prompt must stand alone; it inherits the parent's working directory and session lineage, while the shared native selection chain resolves its model, effort and output-token cap before creation. A delegation tool or API call reaches it under the `spawn` provider name. Choose it for the cheapest delegation transport; choose the fork backend when the child must build on the parent's completed conversation turns.
+`dsh-subagent-spawn-in-process` runs delegated tasks in fresh child agents sharing this process and its agent factory, LLM, and tool services. The child starts with an empty conversation, so its task prompt must stand alone. It inherits the parent's working directory and session lineage; native selection resolves its model, effort and output-token cap before creation. Delegation tools and API calls use the `spawn` provider name. Choose it for the cheapest delegation transport; choose fork when the child needs the parent's completed conversation turns.
 
 ## Table of Contents
 

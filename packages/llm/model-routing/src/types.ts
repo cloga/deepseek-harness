@@ -32,8 +32,11 @@ export interface TaskClassification {
 
 /** One curated route with an explicit quality rank and relative cost. */
 export interface RoutingCandidate {
+  /** Nonempty identity unique within the candidate policy, used by eligibility and conservative selection. */
   readonly id: string
+  /** Exact provider/model route and optional explicit reasoning effort; omission uses the provider default. */
   readonly selection: Readonly<ModelSelection>
+  /** Deployment-assigned ordinal quality rank used to enforce task floors; not inferred model capability. */
   readonly quality: ModelRoutingQuality
   /** Positive finite comparison weight, not a token price or savings estimate. */
   readonly relativeCost: number
@@ -43,7 +46,9 @@ export interface RoutingCandidate {
 export interface ModelRoutingPolicy {
   /** Configuration order breaks equal cost ties. One entry per provider/model/effort combination. */
   readonly candidates: readonly RoutingCandidate[]
+  /** Minimum candidate quality for every mode/task-complexity pair; each floor must be satisfiable. */
   readonly qualityFloors: Readonly<Record<ModelRoutingMode, Readonly<Record<TaskComplexity, ModelRoutingQuality>>>>
+  /** Confidence threshold between zero and one, inclusive; lower confidence uses the uncertainty policy. */
   readonly minConfidence: number
   /** Must name a highest-quality configured candidate that meets every floor. */
   readonly conservativeCandidateId: string

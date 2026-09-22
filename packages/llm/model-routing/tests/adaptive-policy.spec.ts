@@ -6,7 +6,7 @@ import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { parseRoutingPolicy, selectAutoModel } from '../src/policy.ts'
 import type { ModelRoutingMode, ModelRoutingPolicy, TaskComplexity } from '../src/types.ts'
 import {
-  applyAdaptivePolicyPatch, evaluateAdaptivePolicy, fingerprintAdaptiveBasePolicy, parseAdaptivePolicyConfig,
+  applyAdaptivePolicyPatch, evaluateAdaptivePolicy, fingerprintAdaptiveBasePolicy, parseAdaptiveEvaluationInput, parseAdaptivePolicyConfig,
 } from '../src/adaptive-policy.ts'
 import type { AdaptiveEvaluationResult, AdaptivePolicyConfig, AdaptivePolicyProposal } from '../src/adaptive-types.ts'
 
@@ -135,6 +135,17 @@ describe('adaptive configuration and evidence parsing', () => {
     expect(() => evaluateAdaptivePolicy(base, config, { ...input(), mode: 'manual' })).toThrow()
     expect(() => evaluateAdaptivePolicy(base, config, { ...input(), observations: null })).toThrow()
     expect(() => evaluateAdaptivePolicy(base, config, input({ observations: samples('base', 1001) }))).toThrow(/maxObservations/)
+  })
+
+  it('orders equal-time observations by codepoint identity independently of input ordering or locale', () => {
+    const observations = samples('base', 4).map((row, index) => ({
+      ...row, observationId: ['z', 'a', 'Z', 'A'][index]!, completedAt: NOW,
+    }))
+    const parsed = parseAdaptiveEvaluationInput(input({ observations }), configuration())
+    expect(parsed.observations.map(row => row.observationId)).toEqual(['A', 'Z', 'a', 'z'])
+    expect(parseAdaptiveEvaluationInput(input({ observations: [...observations].reverse() }), configuration())).toEqual(parsed)
+    expect(Object.isFrozen(parsed.observations)).toBe(true)
+    expect(observations.map(row => row.observationId)).toEqual(['z', 'a', 'Z', 'A'])
   })
 
   it('rejects duplicate observation ids and duplicate tasks even when the duplicate would be excluded', () => {
@@ -311,6 +322,14 @@ describe('guarded adaptive evaluation', () => {
       ...samples('alternative', 100, overflow === 'alternative' ? Number.MAX_VALUE : 50, overflow === 'alternative' ? 99 : 0),
     ] })
     expect(evaluateAdaptivePolicy(policy(), config, source)).toMatchObject({ kind: 'no-proposal', reasonCode: 'arithmetic-limit' })
+  })
+
+  it('fails closed if a structural caller bypasses validation with an overflowing confidence coefficient', () => {
+    const malformed: AdaptivePolicyConfig = { ...configuration(), confidenceZ: Number.MAX_VALUE }
+    expect(() => parseAdaptivePolicyConfig(malformed)).toThrow()
+    expect(evaluateAdaptivePolicy(policy(), malformed, input())).toMatchObject({
+      kind: 'no-proposal', reasonCode: 'arithmetic-limit',
+    })
   })
 
   it('avoids intermediate total overflow when work per success remains representable despite failures', () => {

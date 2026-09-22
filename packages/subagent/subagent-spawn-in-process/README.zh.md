@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-subagent-spawn-in-process` 是一个进程内 subagent 后端：它在当前进程中运行每个委派任务，子 agent（智能体）是一个全新子 `Agent`，复用宿主的 agent 工厂及 LLM（大语言模型）/工具服务。子 agent 以空对话开始，因此任务提示词必须自足；它继承父 agent 的工作目录与会话谱系，而共享原生选择链在创建前解析其模型、推理强度与输出 token 上限。委派工具或 API 调用以 `spawn` 提供方名称找到它。需要成本最低的委派传输时选择它；需要子 agent 建立在父级已完成对话轮次之上时，请选择 fork 后端。
+`dsh-subagent-spawn-in-process` 在全新的子 agent（智能体）中运行委派任务，子 agent 共享当前进程及其 agent 工厂、LLM（大语言模型）和工具服务。子 agent 以空对话开始，因此任务提示词必须自足。它继承父 agent 的工作目录与会话谱系；原生选择在创建前解析其模型、推理强度与输出 token 上限。委派工具和 API 调用使用 `spawn` 提供方名称。需要成本最低的委派传输时选择它；需要父级已完成对话轮次时选择 fork。
 
 ## 目录
 

@@ -120,7 +120,8 @@ export async function classifyRoutingTask(
   })
   const stream = new AssistantStreamAccumulator()
   const assembler = new BlockAssembler()
-  let outcome: RoutingClassificationOutcome = 'missing-finish'
+  let outcome: Exclude<RoutingClassificationOutcome, 'success'> = 'missing-finish'
+  let stoppedNormally = false
   let classification: TaskClassification | undefined
   let usage: TokenUsage | undefined
   let outputBytes = 0
@@ -149,14 +150,13 @@ export async function classifyRoutingTask(
         break
       }
       if (chunk.type === 'finish') {
-        outcome = chunk.reason.kind === 'stop'
-          ? 'success'
-          : chunk.reason.kind === 'max-tokens' ? 'max-tokens' : 'non-text'
+        stoppedNormally = chunk.reason.kind === 'stop'
+        if (!stoppedNormally) outcome = chunk.reason.kind === 'max-tokens' ? 'max-tokens' : 'non-text'
         break
       }
     }
     callDeadline.signal.throwIfAborted()
-    if (outcome === 'success') {
+    if (stoppedNormally) {
       try {
         const blocks = assembler.blocks()
         const text = blocks.map(block => block.type === 'text' ? block.text : '').join('')
@@ -173,14 +173,13 @@ export async function classifyRoutingTask(
   request.session.append('model/routing-result', {
     callId,
     stream: stream.snapshot(),
-    outcome,
+    outcome: classification === undefined ? outcome : 'success',
     ...classification === undefined ? {} : { classification },
     ...usage === undefined ? {} : { usage },
   })
   request.signal.throwIfAborted()
-  if (outcome === 'success' && classification !== undefined) {
-    return { callId, outcome, classification, ...usage === undefined ? {} : { usage } }
+  if (classification !== undefined) {
+    return { callId, outcome: 'success', classification, ...usage === undefined ? {} : { usage } }
   }
-  // Success assigns a parsed classification above; every other path has a closed failure outcome.
-  return { callId, outcome: outcome === 'success' ? 'invalid-output' : outcome, ...usage === undefined ? {} : { usage } }
+  return { callId, outcome, ...usage === undefined ? {} : { usage } }
 }

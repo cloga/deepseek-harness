@@ -1,6 +1,6 @@
 /** Configuration, audit events, and outcomes of the auxiliary task classifier. */
 
-import type { ModelSelection } from '@deepseek-ai/dsh-agent'
+import type { ModelSelection } from '@deepseek-ai/dsh-agent/types'
 import type { AssistantStreamRecord, LlmCallConfig, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { RoutingCallId, TaskClassification } from './types.ts'
@@ -8,12 +8,15 @@ export type { RoutingCallId } from './types.ts'
 
 /** Explicit deployment limits; no classifier route or budget is defaulted. */
 export interface RoutingClassifierConfig {
+  /** Explicit classifier provider/model route and optional reasoning effort, independent of conversation candidates. */
   readonly selection: Readonly<ModelSelection>
   /** Maximum UTF-8 bytes of the complete serialized request excluding its AbortSignal. */
   readonly maxInputBytes: number
+  /** Positive integer output-token cap sent with each classifier request. */
   readonly maxOutputTokens: number
   /** Maximum accumulated UTF-8 bytes of observed serialized chunks, including JSON wrappers. */
   readonly maxOutputBytes: number
+  /** Positive millisecond deadline, at most 2147483647, covering preparation and consumption; teardown is still joined. */
   readonly timeoutMs: number
 }
 

@@ -46,7 +46,7 @@ export interface ContinuableStartSpec {
    * The delegation request. The manager reserves the stable child id, resolves
    * the durable descriptor, and composes the child itself.
    */
-  readonly request: Omit<SubagentStartRequest, 'label' | 'signal' | 'outputSchema'>
+  readonly request: Omit<SubagentStartRequest, 'label' | 'signal' | 'outputSchema' | 'analysisPolicy'>
   /** Caller cancellation, owning the operation only until inbox acceptance. */
   readonly signal: AbortSignal
 }
@@ -137,6 +137,24 @@ export interface SubagentCapabilities {
   readonly persona: boolean
 }
 
+/** Fixed fresh one-shot analysis policy; this grants no model or filesystem authority. */
+export interface NativeAnalysisPolicy {
+  readonly kind: 'analysis-only'
+  /** Maximum downstream model-stream admissions, including failed attempts and retries. */
+  readonly maxModelCalls: number
+  /** Aggregate serialized received chunks retained across all admitted model attempts. */
+  readonly maxOutputBytes: number
+}
+
+/** Local counters, not provider charges, verified progress, or durable task-budget receipts. */
+export interface NativeAnalysisUsage {
+  readonly admittedModelCalls: number
+  readonly retainedOutputBytes: number
+  /** Size of the received chunk refused at the byte limit; its tokens/cost remain unknown. */
+  readonly rejectedChunkBytes?: number
+  readonly limitHit?: 'model-calls' | 'output-bytes'
+}
+
 /**
  * What a caller asks for when starting a ONE-SHOT subagent. The tool layer
  * builds this from the model's `{ description, prompt }` plus its own config;
@@ -173,6 +191,8 @@ export interface SubagentStartRequest {
   readonly agentOptions?: AgentOptions
   /** Deny-only consumer opt-out; omission never grants authority absent the captured parent allowlist. */
   readonly disableAutoModelSelection?: true
+  /** Closed no-tools mode; native fresh one-shot only, explicit route/maxTokens and parent permission required. */
+  readonly analysisPolicy?: NativeAnalysisPolicy
   /**
    * Object-rooted JSON Schema within `assertObjectJsonSchema`'s enforced subset. Start rejects
    * unsupported schemas or providers without the capability. Data must be plain host-realm JSON;
@@ -281,6 +301,8 @@ export type SubagentStopReason = SubagentStopReasonMap[keyof SubagentStopReasonM
  * The terminal outcome of a subagent run, resolved by {@link SubagentRun.result}.
  */
 export interface SubagentResult {
+  /** Present only for analysis-only native children; the higher owner must persist task budget receipts. */
+  readonly analysis?: NativeAnalysisUsage
   /**
    * The child's final assistant output is the content of its last non-empty
    * assistant message. Empty-content messages, including usage-only messages,

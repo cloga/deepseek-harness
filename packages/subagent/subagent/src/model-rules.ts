@@ -6,8 +6,20 @@ import { mergeChildAgentOptions } from './child-agent.ts'
 
 /** User-authored exact parent-to-child route mapping for implicit native delegation. */
 export interface SubagentModelRule {
-  readonly parent: { readonly provider: string; readonly model: string }
-  readonly child: { readonly provider: string; readonly model: string }
+  /** Exact direct-parent route that selects this rule when no child route or effort was requested. */
+  readonly parent: {
+    /** LLM provider name of the direct parent. */
+    readonly provider: string
+    /** Exact model id selected by the direct parent. */
+    readonly model: string
+  }
+  /** Child route applied when the parent matches; availability is checked at delegation time. */
+  readonly child: {
+    /** LLM provider name for the child. */
+    readonly provider: string
+    /** Exact model id for the child. */
+    readonly model: string
+  }
 }
 
 const routeSchema = z.object({

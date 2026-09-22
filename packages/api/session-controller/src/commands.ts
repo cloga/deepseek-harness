@@ -69,6 +69,11 @@ function hasPromptContent(content: readonly PromptContentCandidate[]): boolean {
   return content.some(part => part.type !== 'text' || part.text.trim().length > 0)
 }
 
+/** Re-read mutable cancellation at each asynchronous admission boundary. */
+function assertAutoSelectionLive(signal: AbortSignal): void {
+  if (signal.aborted) throw new RemoteError('gateway/cancelled', 'Auto model selection was cancelled', {})
+}
+
 /** Implements Session business commands delegated by the Session Controller Remote service. */
 export class SessionCommandController {
   /**
@@ -183,10 +188,10 @@ export class SessionCommandController {
     request: SessionSelectAutoModelRequest,
     signal: AbortSignal,
   ): Promise<SessionSelectAutoModelValue> {
-    if (signal.aborted) throw new RemoteError('gateway/cancelled', 'Auto model selection was cancelled', {})
+    assertAutoSelectionLive(signal)
     const agent = await this.resolveAgent(request.sessionId)
     return this.agents.serializeImageAdmission(agent, async () => {
-      if (signal.aborted) throw new RemoteError('gateway/cancelled', 'Auto model selection was cancelled', {})
+      assertAutoSelectionLive(signal)
       const routing = this.ctx.get('modelRouting')
       if (routing === undefined || !routing.isAvailable()) {
         throw new RemoteError(
@@ -198,7 +203,7 @@ export class SessionCommandController {
       try {
         await routing.enable(agent, request.mode, signal)
       } catch (error: unknown) {
-        if (signal.aborted) throw new RemoteError('gateway/cancelled', 'Auto model selection was cancelled', {})
+        assertAutoSelectionLive(signal)
         if (remoteErrorOf(error) !== undefined) throw error
         throw new RemoteError(
           'session/auto-model-unavailable',

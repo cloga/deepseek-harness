@@ -74,6 +74,10 @@ interface SubagentStartRequest {
    * before initializing the separate child runtime.
    */
   readonly agentOptions?: AgentOptions
+  /** Deny-only consumer opt-out; omission never grants authority absent the captured parent allowlist. */
+  readonly disableAutoModelSelection?: true
+  /** Closed no-tools mode; native fresh one-shot only, explicit route/maxTokens and parent permission required. */
+  readonly analysisPolicy?: NativeAnalysisPolicy
   /**
    * Object-rooted JSON Schema within `assertObjectJsonSchema`'s enforced subset. Start rejects
    * unsupported schemas or providers without the capability. Data must be plain host-realm JSON;
@@ -106,6 +110,19 @@ interface SubagentStartRequest {
 }
 ```
 
+`analysisPolicy` restricts a fresh native one-shot child to no tools and a fixed explicit route with an output-token cap. Admission requires parent route permission and rejects fork, continuable delegation, structured-output tools, and the Auto permission preset. Call and received-output limits are explicit positive safe integers; the policy grants no additional authority.
+
+```ts type-equiv
+/** Fixed fresh one-shot analysis policy; this grants no model or filesystem authority. */
+interface NativeAnalysisPolicy {
+  readonly kind: 'analysis-only'
+  /** Maximum downstream model-stream admissions, including failed attempts and retries. */
+  readonly maxModelCalls: number
+  /** Aggregate serialized received chunks retained across all admitted model attempts. */
+  readonly maxOutputBytes: number
+}
+```
+
 `signal` is the single cancellation channel before and after readiness. The [subagent composition-controls Agent Note](../../.agents/notes/implemented/feature/2026-07-12-subagent-persona-tool-filter-and-depth.md) owns the persona, live global-tool filter, absolute-depth, and visibility-not-authority rationale.
 
 The caller-facing request does not carry catalog format details or continuation state. `SubagentRuntime.start()` resolves the detached one-shot descriptor after capability checks, then passes this provider-facing request to the selected transport; a continuable child never reaches `SubagentProvider.start()`:
@@ -118,6 +135,14 @@ The caller-facing request does not carry catalog format details or continuation 
 interface ResolvedSubagentStartRequest extends SubagentStartRequest {
   /** Detached descriptor a session-backed provider persists in the child log. */
   readonly descriptor: SubagentDescriptorData
+  /** Registry-owned complete native options; an omitted effort must not inherit again. */
+  readonly resolvedAgentOptions?: AgentOptions
+  /** Registry-owned permission snapshot captured before asynchronous native selection. */
+  readonly resolvedDelegatedPolicies?: DelegatedPolicyOverrides
+  /** Registry-owned creation evidence and child delegation context. */
+  readonly resolvedModelSelection?: NativeChildModelSelection
+  /** Creation-only registry cancellation; a published run retains the original caller signal. */
+  readonly resolvedCreationSignal?: AbortSignal
 }
 ```
 
@@ -285,15 +310,32 @@ type SubagentDescendantListEntry = SubagentListEntry & {
 ```
 
 
+<a id="the-terminal-result-subagentresult"></a>
+
 ## The terminal result: `SubagentResult`
 
 The outcome of a one-shot run, resolved by `SubagentRun.result`. `structured` is present only after a requested `outputSchema` was successfully satisfied; requesting a schema does not guarantee it, and a provider may return `stopReason: 'error'` when the child fails or finishes without a valid capture. A provider may attach a safe, non-assistant `diagnostic` to a non-`completed` result; the provider removes tool inputs, file contents, environment values, credentials, and raw protocol payloads and limits the complete value to 4096 UTF-8 bytes before consumers present it separately from `output`. A non-`completed` `stopReason` means `output` may be partial — the consumer maps it to an `isError` tool result rather than reporting partial output as success.
+
+For analysis-only children, `analysis` reports local stream admissions and retained serialized chunk bytes, not provider charges or verified task outcomes. Failed attempts and retries consume call admissions. A refused chunk's bytes are reported separately; its tokens and cost remain unknown. The higher owner persists durable task-budget receipts.
+
+```ts type-equiv
+/** Local counters, not provider charges, verified progress, or durable task-budget receipts. */
+interface NativeAnalysisUsage {
+  readonly admittedModelCalls: number
+  readonly retainedOutputBytes: number
+  /** Size of the received chunk refused at the byte limit; its tokens/cost remain unknown. */
+  readonly rejectedChunkBytes?: number
+  readonly limitHit?: 'model-calls' | 'output-bytes'
+}
+```
 
 ```ts type-equiv
 /**
  * The terminal outcome of a subagent run, resolved by {@link SubagentRun.result}.
  */
 interface SubagentResult {
+  /** Present only for analysis-only native children; the higher owner must persist task budget receipts. */
+  readonly analysis?: NativeAnalysisUsage
   /**
    * The child's final assistant output is the content of its last non-empty
    * assistant message. Empty-content messages, including usage-only messages,
@@ -390,6 +432,8 @@ interface SubagentRun {
 
 A local one-shot run MUST publish an ordinary child agent/session before `start()` fulfills, return that child session id as `SubagentRun.id`, expose the exact child as `localAgent`, record `request.parent.session.id` in the child's `parentSession` header, and append the resolved descriptor inside the child's initial turn before its first request. Runtime ownership may place the child under the parent, provider, or root scope. A remote provider instead returns a parent-scoped lifecycle id and `localAgent: undefined`; without a local child Session, it is absent from durable enumeration.
 
+<a id="the-provider-contract-subagentprovider"></a>
+
 ## The provider contract: `SubagentProvider`
 
 Each provider is a named child-agent transport, and multiple providers may coexist. The service validates requested start-time capabilities before `start()`, and rejects a continuable start on a provider without `prepareContinuable`. `inheritsParentContext` describes only conversation seeding (`fork`: true; `spawn` and `acp`: false), allowing consumers to generate accurate model-facing wording without implying inherited tools, services, or authority. A provider whose one-shot route has static provider-owned defaults publishes optional immutable `agentRouteDefaults`, allowing a Consumer to merge model/tool overrides against the correct baseline before preflight.
@@ -421,6 +465,8 @@ interface SubagentProvider {
    * is detached immutable data and requires `agentOptions` support.
    */
   readonly agentRouteDefaults?: Readonly<{ provider: string; model: string }>
+  /** Trusted provider-side native creation ownership; external AgentOptions support alone does not enable Auto. */
+  readonly nativeModelSelection?: 'spawn' | 'fork'
   /**
    * Establish a ONE-SHOT child and return its handle after publication.
    * The service has already validated that every requested start-time

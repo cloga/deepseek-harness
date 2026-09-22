@@ -161,7 +161,7 @@ export function parseAdaptiveEvaluationInput(value: unknown, config: AdaptivePol
     tasks.add(observation.taskId)
   }
   observations.sort((left, right) => left.completedAt - right.completedAt
-    || (left.observationId < right.observationId ? -1 : left.observationId > right.observationId ? 1 : 0))
+    || Number(left.observationId > right.observationId) - Number(left.observationId < right.observationId))
   return deepFreeze({ ...input, observations })
 }
 
@@ -186,8 +186,8 @@ function candidateEvidence(
 ): AdaptiveCandidateEvidence | undefined {
   const samples = rows.length
   const failures = rows.filter(row => row.outcome === 'failure').length
+  // Both callers admitted at least one verified success before computing evidence.
   const successes = samples - failures
-  if (successes === 0) return undefined
   const maximum = rows.reduce((largest, row) => Math.max(largest, row.work), 0)
   // Every verified outcome's complete work is paid toward successful tasks, including failed work.
   // Normalize the sum before dividing to avoid overflow when the final ratio is representable.

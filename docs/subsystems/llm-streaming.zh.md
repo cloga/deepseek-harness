@@ -6,6 +6,14 @@
 
 源码：[`packages/llm/llm/src/types.ts`](../../packages/llm/llm/src/types.ts)
 
+<a id="auto-routing-and-attempt-observation"></a>
+
+## Auto 路由与调用观测
+
+[`model-routing`](../../packages/llm/model-routing/README.zh.md) 拥有 `ModelRoutingMode` 和 `ctx.modelRouting`：显式会话选择会捕获人工配置的候选策略，由有界分类器在提示组装前联合选择 provider、model 和 reasoning effort。`DelegationRoutingCapture`、`ResolveDelegationRoutingRequest` 与 `ResolvedDelegationRouting` 承载隔离的新建子代理路由提案；原生创建流程另行执行捕获的父代理模型许可列表。提案不代表实际调用。可选的 `LearningWeightProvider` 只能为高置信度的新主任务提供经过校验的有界权重下调，不能替换路由、权限或质量底线，修改它也不会重选已有任务的模型。证据批准、持久化和 UI 属于上层学习组件。
+
+[`adapter-attempt.ts`](../../packages/llm/llm/src/adapter-attempt.ts) 声明的 `LlmAdapterAttemptObserver` 观测已解析的适配器调用边界，而非逻辑上的 `llm/stream` 请求。不可变的起止事实不包含提示、工具内容或错误详情；结束记录分别表达结算方式、清理状态、终态种类以及最后报告的累计用量。回放和预检查不会伪造适配器调用。`return()` 成功不等于完全读尽，缺失用量不等于零，适配器调用也不证明精确计费或揭示 SDK 内部重试。完整任务核算还需要生产者拥有的归属关系以及已经汇合结束的辅助工作。移除注册会阻止新的起始回调，但已捕获的结束回调仍会结算。
+
 <a id="content-blocks-and-messages"></a>
 
 ## 内容块与消息
@@ -624,7 +632,7 @@ interface GenerateOptions {
    * map the purpose to model-hidden transport metadata or purpose-specific
    * generation policy. Ordinary conversation requests leave it unset.
    */
-  purpose?: 'compaction' | 'session-title'
+  purpose?: 'compaction' | 'session-title' | 'model-routing'
 }
 ```
 
@@ -903,6 +911,15 @@ The abstract `llm` service: an adapter registry plus a streaming model-call API,
 
 ```ts cordis-catalog
 /**
+ * Observe actual adapter dispatch after local preflight, not logical stream calls
+ * or replay. This does not attest network billing, SDK-internal retries, or task
+ * ownership. Observers receive only detached selection and usage facts.
+ * @param observer - Synchronous correlation capture, optionally returning a terminal callback.
+ * @returns Fiber-owned disposer; already captured terminal callbacks still settle after teardown.
+ */
+observeAdapterAttempts(observer: LlmAdapterAttemptObserver): () => void
+
+/**
  * Register an adapter for the given provider routes. Throws `LlmError` with code
  * `DUPLICATE_ADAPTER` if any provider already has an adapter (all-or-nothing).
  * Disposed with the fiber.
@@ -1052,6 +1069,57 @@ stream(options: GenerateOptions): AsyncIterable<StreamChunk>
 Types: [FileAttachmentRef](attachment.zh.md)
 
 Source: [`packages/llm/llm/src/index.ts`](../../packages/llm/llm/src/index.ts)
+
+<a id="ctxmodelrouting--modelroutingruntime"></a>
+
+### `ctx.modelRouting` — `ModelRoutingRuntime`
+
+Host service whose durable policies change only through an explicit Session choice.
+
+```ts cordis-catalog
+/**
+ * Register one optional local weight owner without changing the captured human policy.
+ * Registration belongs to the calling Fiber; existing task bindings are never revisited.
+ * @param provider - Synchronous evidence-authorized lookup and bounded change ceiling.
+ * @returns A disposer that prevents future new-task lookups.
+ */
+registerLearningWeights(provider: LearningWeightProvider): () => void
+
+/**
+ * Report configuration readiness without network access or predicting a model.
+ * @returns Whether future explicit Auto selections have the required configuration.
+ */
+isAvailable(): boolean
+
+/**
+ * Validate classifier/conservative routes, then capture the current policy for one Session.
+ * Subsequent settings edits do not replace this durable selection.
+ * @param agent - Exact live top-level Agent receiving the user's opt-in.
+ * @param mode - Selected policy tradeoff.
+ * @param signal - Optional cancellation before the intent commit.
+ * @returns Fulfillment after the Auto intent is appended; no model call is made.
+ */
+async enable(agent: Agent, mode: ModelRoutingMode, signal?: AbortSignal): Promise<void>
+
+/**
+ * Capture an ordinary parent's Auto intent or a child's creation-owned delegation preference.
+ * @param parent - Exact live direct parent of the proposed delegation.
+ * @returns Detached policy and parent-local identity, or undefined when Auto is inapplicable.
+ */
+captureDelegation(parent: Agent): DelegationRoutingCapture | undefined
+
+/**
+ * Resolve an isolated child proposal without changing the parent's conversation route.
+ * The native owner separately enforces authorization and child-creation admission.
+ * @param request - Captured parent policy, authorized IDs and isolated child input.
+ * @returns A materialized model/effort proposal with classifier-audit attribution.
+ */
+resolveDelegation(request: ResolveDelegationRoutingRequest): Promise<ResolvedDelegationRouting>
+```
+
+Types: [Agent](core.zh.md)
+
+Source: [`packages/llm/model-routing/src/runtime.ts`](../../packages/llm/model-routing/src/runtime.ts)
 
 <a id="llm-events"></a>
 

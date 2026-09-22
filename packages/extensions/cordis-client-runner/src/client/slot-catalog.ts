@@ -1893,6 +1893,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
       'client-ui-settings-plugins BashCard',
       'client-ui-settings-plugins AgentLoopCard',
       'client-ui-settings-plugins SubagentModelSelectionCard',
+      'client-ui-settings-plugins AutoModelRoutingCard',
       'client-ui-settings-plugins WebSearchCard',
     ],
     replaceRisk: 'none',

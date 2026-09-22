@@ -11,6 +11,9 @@ import type {} from '@deepseek-ai/dsh-settings'
 import { classifyRoutingTask } from './classifier.ts'
 import { Config, MODEL_ROUTING_SETTINGS_NAMESPACE, resolveRoutingConfig } from './config.ts'
 import { selectAutoModel } from './policy.ts'
+import { fingerprintAdaptiveBasePolicy } from './adaptive-policy.ts'
+import { acceptLearningOverlay } from './learning-overlay.ts'
+import type { LearningWeightProvider, LearningWeightRequest } from './learning-provider.ts'
 import { installModelRoutingProjection } from './projection.ts'
 import { resolveEligibleCombinations } from './eligibility.ts'
 import {
@@ -18,7 +21,7 @@ import {
 } from './delegation.ts'
 import type { DelegationRoutingCapture, ResolveDelegationRoutingRequest, ResolvedDelegationRouting } from './delegation-types.ts'
 import type { AutoSelection, ModelRoutingState, RoutingTaskDecision, RoutingTaskId } from './routing-state.ts'
-import type { ModelRoutingMode, RoutingCandidate } from './types.ts'
+import type { ModelRoutingMode, ModelRoutingPolicy, RoutingCandidate, TaskClassification } from './types.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -39,6 +42,12 @@ interface PendingDecision {
   readonly decision: RoutingTaskDecision
   readonly signal: AbortSignal
   readonly input: ClaimedInput | undefined
+}
+
+interface DispatchExpectation {
+  readonly intentSeq: SessionSeq
+  readonly selection: Readonly<ModelSelection>
+  readonly signal: AbortSignal
 }
 
 interface OwnedWork {
@@ -69,6 +78,8 @@ export class ModelRoutingRuntime extends Service {
   private readonly work = new Map<AbortController, OwnedWork>()
   private readonly claimed = new Map<Agent, ClaimedInput>()
   private readonly pending = new Map<Agent, PendingDecision>()
+  private readonly expectedDispatch = new Map<Agent, DispatchExpectation>()
+  private learning: LearningWeightProvider | undefined
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'modelRouting')
@@ -99,13 +110,45 @@ export class ModelRoutingRuntime extends Service {
     ctx.on('llm/stream', (options, next) => this.observeDispatch(options, next), { global: true, prepend: true })
     ctx.on('agent/turn-stopping', ({ agent }) => { this.clearAgent(agent) })
     ctx.on('agent/disposed', ({ agent }) => { this.clearAgent(agent, true) })
+    ctx.on('session/event', (session, event) => {
+      if (event.type !== 'model/selection' && event.type !== 'model/auto-selection' && event.type !== 'turn/end') return
+      const agent = ctx.agents.get(session.id)
+      if (agent === undefined || agent.session !== session) return
+      // A failed turn need not reach turn-stopping. User intent changes also retire old admissions immediately.
+      if (event.type === 'turn/end') this.clearAgent(agent)
+      else {
+        this.expectedDispatch.delete(agent)
+        this.pending.delete(agent)
+      }
+    })
     ctx.effect(() => async () => {
       this.lifetime.abort(new Error('model routing disposed'))
       this.claimed.clear()
       this.pending.clear()
+      this.expectedDispatch.clear()
       await Promise.allSettled([...this.work.values()].map(item => item.promise))
       this.work.clear()
     }, 'model-routing: cancel and join resolution')
+  }
+
+  /**
+   * Register one optional local weight owner without changing the captured human policy.
+   * Registration belongs to the calling Fiber; existing task bindings are never revisited.
+   * @param provider - Synchronous evidence-authorized lookup and bounded change ceiling.
+   * @returns A disposer that prevents future new-task lookups.
+   */
+  registerLearningWeights(provider: LearningWeightProvider): () => void {
+    const maximum = provider.maxRelativeWeightChange
+    if (!Number.isFinite(maximum) || maximum <= 0 || maximum >= 1 || typeof provider.resolve !== 'function') {
+      throw new Error('invalid learning weight provider')
+    }
+    const owned: LearningWeightProvider = { maxRelativeWeightChange: maximum, resolve: provider.resolve.bind(provider) }
+    const dispose = this.ctx.effect(() => {
+      if (this.learning !== undefined) throw new Error('a learning weight provider is already registered')
+      this.learning = owned
+      return () => { this.learning = undefined }
+    }, 'modelRouting.registerLearningWeights()')
+    return () => { void dispose() }
   }
 
   /**
@@ -114,7 +157,8 @@ export class ModelRoutingRuntime extends Service {
    */
   isAvailable(): boolean {
     const current = this.source()
-    return !this.lifetime.signal.aborted && current.enabled && current.policy !== undefined && current.classifier !== undefined
+    // Constructor and settings commits validate both required sections before enabled can be true.
+    return !this.lifetime.signal.aborted && current.enabled
   }
 
   /**
@@ -222,6 +266,7 @@ export class ModelRoutingRuntime extends Service {
   private clearAgent(agent: Agent, includeAgentLifetime = false): void {
     this.claimed.delete(agent)
     this.pending.delete(agent)
+    this.expectedDispatch.delete(agent)
     for (const [controller, item] of this.work) {
       if (item.agent === agent && (includeAgentLifetime || item.lifetime === 'turn')) {
         controller.abort(new Error('model routing Agent activity ended'))
@@ -250,6 +295,47 @@ export class ModelRoutingRuntime extends Service {
     })
   }
 
+  private learningPolicy(
+    agent: Agent,
+    taskId: RoutingTaskId,
+    intent: AutoSelection,
+    classification: TaskClassification | undefined,
+    available: ReadonlyMap<string, ModelSelection>,
+  ): ModelRoutingPolicy {
+    const provider = this.learning
+    const base = intent.policy
+    if (provider === undefined || classification === undefined || classification.continuity !== 'new-task'
+      || classification.reasonCode !== 'new-task' || classification.confidence < base.minConfidence) return base
+    const now = Date.now()
+    const basePolicyFingerprint = fingerprintAdaptiveBasePolicy(base)
+    const request: LearningWeightRequest = Object.freeze({
+      sessionId: agent.id, taskId, role: 'main', mode: intent.mode,
+      classification: Object.freeze({ ...classification }), basePolicy: base, basePolicyFingerprint,
+      classifier: Object.freeze({ ...intent.classifier, selection: Object.freeze({ ...intent.classifier.selection }) }),
+      eligibleCandidates: Object.freeze([...available].map(([candidateId, selection]) => Object.freeze({
+        candidateId, selection: Object.freeze({ ...selection }),
+      }))),
+      now,
+    })
+    try {
+      const result = provider.resolve(request)
+      if (result !== null && (typeof result === 'object' || typeof result === 'function')
+        && typeof (result as { then?: unknown }).then === 'function') {
+        // The optional contract is synchronous; contain accidental async rejection without waiting.
+        void Promise.resolve(result).catch(() => undefined)
+        return base
+      }
+      return acceptLearningOverlay(base, {
+        basePolicyFingerprint, mode: intent.mode, classification,
+        eligibleCandidateIds: [...available.keys()], now,
+        maxRelativeWeightChange: provider.maxRelativeWeightChange,
+      }, result)?.policy ?? base
+    } catch (_error: unknown) {
+      // Learning cannot suppress the configured base policy or expose provider diagnostics.
+      return base
+    }
+  }
+
   private async candidates(
     agent: Agent,
     intent: AutoSelection,
@@ -269,28 +355,36 @@ export class ModelRoutingRuntime extends Service {
   ): Promise<ModelSelection> {
     const agent = payload.agent
     this.pending.delete(agent)
+    this.expectedDispatch.delete(agent)
     const available = await this.candidates(agent, intent.selection, input, signal)
     signal.throwIfAborted()
     const priorCandidate = active === null ? undefined
       : intent.selection.policy.candidates.find(candidate => candidate.id === active.candidateId)
     const latest = agent.session.requestHeader()?.config
+    // Headers precede dispatch and can describe a refused effort. Preserve the dispatch-confirmed
+    // task's effort; retain only the existing different-provider/model sanity check here.
     let priorStillActual = false
     if (active !== null && priorCandidate !== undefined && available.has(active.candidateId)
       && active.selection.provider === priorCandidate.selection.provider && active.selection.model === priorCandidate.selection.model
       && (priorCandidate.selection.reasoningEffort === undefined
         || active.selection.reasoningEffort === priorCandidate.selection.reasoningEffort)
-      && (latest === undefined || sameSelection(active.selection, latest))) {
+      && (latest === undefined || (active.selection.provider === latest.provider && active.selection.model === latest.model))) {
       try {
         // A captured provider default may now differ; validate and pin the already-used actual effort.
         const pinned = await this.ctx.llm.resolveCallConfig({ ...active.selection }, signal)
         signal.throwIfAborted()
-        priorStillActual = sameSelection(active.selection, pinned)
+        // Absence is an exact task-owned effort too, not consent to a newly introduced default.
+        // The prepared-dispatch guard rejects when that absence can no longer be represented.
+        priorStillActual = active.selection.reasoningEffort === undefined || sameSelection(active.selection, pinned)
       } catch (_error: unknown) {
         signal.throwIfAborted()
       }
     }
     if (input === undefined && priorStillActual && active !== null) {
       // Tool/plugin continuations do not classify or create a new task boundary.
+      this.expectedDispatch.set(agent, {
+        intentSeq: intent.seq, selection: { ...active.selection }, signal: payload.signal as AbortSignal,
+      })
       return { ...active.selection }
     }
     const classified = input?.text !== undefined && input.text.length > 0
@@ -304,7 +398,12 @@ export class ModelRoutingRuntime extends Service {
       : undefined
     signal.throwIfAborted()
     const classification = classified?.outcome === 'success' ? classified.classification : undefined
-    const selected = selectAutoModel(intent.selection.policy, {
+    const sameTask = active !== null && classification !== undefined
+      && classification.confidence >= intent.selection.policy.minConfidence
+      && classification.reasonCode !== 'uncertain' && classification.continuity === 'same-task'
+    const taskId = sameTask ? active.taskId : brandString<RoutingTaskId>(randomUUID())
+    const policy = this.learningPolicy(agent, taskId, intent.selection, classification, available)
+    const selected = selectAutoModel(policy, {
       mode: intent.selection.mode,
       ...priorStillActual && priorCandidate !== undefined ? { current: priorCandidate.selection } : {},
       eligibleCandidateIds: [...available.keys()],
@@ -312,15 +411,12 @@ export class ModelRoutingRuntime extends Service {
     })
     const retainsBinding = active !== null && priorStillActual
       && (selected.reason === 'same-task' || selected.reason === 'uncertain-current')
-    const proposal = retainsBinding ? active.selection : selected.selection
-    const resolved = retainsBinding ? active.selection : available.get(selected.candidateId) as ModelSelection
-    const sameTask = active !== null && classification !== undefined
-      && classification.confidence >= intent.selection.policy.minConfidence
-      && classification.reasonCode !== 'uncertain' && classification.continuity === 'same-task'
+    // Capture the jointly resolved model/effort, not a configuration omission that could redefault later.
+    const proposal = retainsBinding ? active.selection : available.get(selected.candidateId) as ModelSelection
     const decision: RoutingTaskDecision = {
-      taskId: sameTask ? active.taskId : brandString<RoutingTaskId>(randomUUID()),
+      taskId,
       intentSeq: intent.seq,
-      selection: { ...resolved },
+      selection: { ...proposal },
       candidateId: selected.candidateId,
       reason: selected.reason,
       ...classified?.callId === undefined ? {} : { classifierCallId: classified.callId },
@@ -332,12 +428,27 @@ export class ModelRoutingRuntime extends Service {
     this.assertLive(agent)
     // signal was required by the event entry before resolution started.
     this.pending.set(agent, { proposal, decision, signal: payload.signal as AbortSignal, input })
+    this.expectedDispatch.set(agent, {
+      intentSeq: intent.seq, selection: { ...proposal }, signal: payload.signal as AbortSignal,
+    })
     return { ...proposal }
   }
 
   private async * observeDispatch(options: GenerateOptions, next: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk> {
     if (!this.lifetime.signal.aborted && isAgentLoopRequest(options) && options.sessionId !== undefined) {
       const agent = this.ctx.agents.get(options.sessionId)
+      const expected = agent === undefined ? undefined : this.expectedDispatch.get(agent)
+      if (agent !== undefined && expected !== undefined && options.signal === expected.signal) {
+        const intent = this.state(agent).intent
+        if (intent.kind !== 'auto' || intent.seq !== expected.intentSeq) {
+          this.expectedDispatch.delete(agent)
+          this.pending.delete(agent)
+        } else if (!sameSelection(expected.selection, selectionOf(options))) {
+          // Shipping AgentLoop calls are prepared before this stream boundary. Keep the expectation
+          // after the first decision is consumed, so retries cannot redefault an absent effort either.
+          throw new Error('Auto routing selection changed before prepared dispatch')
+        }
+      }
       const pending = agent === undefined ? undefined : this.pending.get(agent)
       if (agent !== undefined && pending !== undefined && options.signal === pending.signal) {
         this.pending.delete(agent)

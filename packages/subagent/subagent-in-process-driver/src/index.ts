@@ -37,6 +37,7 @@ import type {
   SubagentRun,
   SubagentStopReason,
 } from '@deepseek-ai/dsh-subagent'
+import { attachAnalysisOnly, type AnalysisAttachment } from './analysis-only.ts'
 import {
   attachStructuredRuntime,
   type StructuredAttachment,
@@ -107,6 +108,14 @@ export async function startInProcessRun(
   options: InProcessRunOptions,
 ): Promise<SubagentRun> {
   assertSubagentMaxDepth(request.maxDepth)
+  if (request.analysisPolicy !== undefined) {
+    if (options.seed !== undefined || request.outputSchema !== undefined || request.resolvedAgentOptions === undefined
+      || request.resolvedModelSelection?.decision.source !== 'request'
+      || !request.resolvedModelSelection.allowedModels?.some(route =>
+        route.provider === request.resolvedAgentOptions?.provider && route.model === request.resolvedAgentOptions?.model)) {
+      throw new Error('analysis-only requires an authorized fixed fresh native creation without outputSchema')
+    }
+  }
   const creationSignal = request.resolvedCreationSignal ?? request.signal
   if (creationSignal.aborted) throw prePublicationAbort()
   const parent = request.parent
@@ -120,6 +129,7 @@ export async function startInProcessRun(
   const inherited = request.resolvedDelegatedPolicies ?? captureDelegatedPolicyOverrides(parent)
 
   let structured: StructuredAttachment | undefined
+  let analysis: AnalysisAttachment | undefined
   const setup = (childCtx: Context, child: Agent): void => {
     appendDelegatedPolicyOverrides(child.session, inherited)
     if (request.resolvedModelSelection !== undefined) appendNativeChildSelection(childCtx, child.session, request.resolvedModelSelection)
@@ -129,6 +139,13 @@ export async function startInProcessRun(
     })
     if (request.outputSchema !== undefined) {
       structured = attachStructuredRuntime(childCtx, request.outputSchema)
+    }
+    if (request.analysisPolicy !== undefined) {
+      // Native admission above requires complete captured options before setup.
+      analysis = attachAnalysisOnly(
+        childCtx, child, request.analysisPolicy,
+        request.resolvedAgentOptions as NonNullable<typeof request.resolvedAgentOptions>,
+      )
     }
     attachDescriptorAppend(childCtx, request.descriptor)
   }
@@ -145,12 +162,14 @@ export async function startInProcessRun(
     signal: creationSignal,
     setup,
   })
-  try {
-    creationSignal.throwIfAborted()
-  } catch (_error: unknown) {
-    // Keep the pre-publication diagnostic while joining a factory handle that lost the cancellation race.
-    await handle.dispose()
-    throw prePublicationAbort()
+  if (request.resolvedCreationSignal !== undefined) {
+    try {
+      creationSignal.throwIfAborted()
+    } catch (_error: unknown) {
+      // The registry still owns admission; join a factory handle that lost its publication race.
+      await handle.dispose()
+      throw prePublicationAbort()
+    }
   }
   return drivePublishedRun(
     handle,
@@ -159,6 +178,7 @@ export async function startInProcessRun(
     childId,
     activationBoundary,
     structured,
+    analysis,
   )
 }
 
@@ -173,6 +193,7 @@ function drivePublishedRun(
   childId: SessionId,
   boundary: SessionLogOffsetType,
   structured: StructuredAttachment | undefined,
+  analysis: AnalysisAttachment | undefined,
 ): SubagentRun {
   const child = handle.agent
   const flags = { cancelled: false }
@@ -192,12 +213,13 @@ function drivePublishedRun(
         child.followup(createUserMessage({ content: prompt, source: { kind: 'user' } }))
         await child.whenIdle()
       }
-      return readResult(
+      const result = readResult(
         child,
         boundary,
         flags.cancelled,
         structured ? { captured: structured.captured() } : undefined,
       )
+      return analysis === undefined ? result : { ...result, analysis: analysis.snapshot() }
     } finally {
       signal.removeEventListener('abort', onAbort)
     }
