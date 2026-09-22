@@ -272,11 +272,14 @@ try {
         return $value
     }
     function Read-OwnedConfirmation([int]$ProcessId, [IntPtr]$MainHwnd) {
+        # UIA's desktop root can omit owned modal windows. Discover HWNDs natively,
+        # then use canonical UIA only inside the exact process/root-owner checks.
+        $windows = Read-OwnedWindows $mainProcess
         $trace = $diagnosticClock.ElapsedMilliseconds -ge $script:nextDiagnosticMs
         if ($trace) {
             $script:nextDiagnosticMs = $diagnosticClock.ElapsedMilliseconds + 10000
             try {
-                $nativeWindows = Read-OwnedWindows $mainProcess
+                $nativeWindows = $windows
                 $observed = @($nativeWindows | Select-Object -First 32 | ForEach-Object {
                     @{ hwnd = $_.hwnd; pid = $_.pid; owner = $_.owner; rootOwner = $_.rootOwner;
                         title = (Bounded-Name $_.title); width = $_.width; height = $_.height;
@@ -288,15 +291,10 @@ try {
         }
         [uint32]$windowPid = 0
         $matches = @()
-        # Some native TaskDialog providers do not expose the target ProcessId through UIA.
-        # Enumerate the bounded desktop root, then make native HWND PID checks authoritative.
-        $windows = [Windows.Automation.AutomationElement]::RootElement.FindAll(
-            [Windows.Automation.TreeScope]::Children, [Windows.Automation.Condition]::TrueCondition)
-        if ($windows.Count -gt 8192) { throw 'Desktop confirmation window enumeration exceeded bound' }
-        if ($trace) { Write-Observation @{ stage = 'uia-root'; total = $windows.Count } }
+        if ($trace) { Write-Observation @{ stage = 'native-confirmation-candidates'; total = $windows.Count } }
         $ownedCount = 0
         foreach ($candidate in $windows) {
-            $candidateHwnd = [IntPtr]$candidate.Current.NativeWindowHandle
+            $candidateHwnd = [IntPtr]([long]$candidate.hwnd)
             if ($candidateHwnd -eq [IntPtr]::Zero -or $candidateHwnd -eq $MainHwnd -or
                 ![OwnedDialogWin32]::IsWindow($candidateHwnd)) { continue }
             $null = [OwnedDialogWin32]::GetWindowThreadProcessId($candidateHwnd, [ref]$windowPid)
@@ -304,9 +302,9 @@ try {
             if (++$ownedCount -gt 256) { throw 'Owned confirmation window enumeration exceeded bound' }
             if ($trace -and $ownedCount -le 32) {
                 try {
-                    Write-Observation @{ stage = 'uia-owned-window'; hwnd = $candidateHwnd.ToInt64().ToString();
+                    Write-Observation @{ stage = 'owned-window-candidate'; hwnd = $candidateHwnd.ToInt64().ToString();
                         rootOwner = [OwnedDialogWin32]::GetAncestor($candidateHwnd, 3).ToInt64().ToString() }
-                } catch { Write-Observation @{ stage = 'uia-window-observation-unavailable' } }
+                } catch { Write-Observation @{ stage = 'window-observation-unavailable' } }
             }
             $null = [OwnedDialogWin32]::GetWindowThreadProcessId($candidateHwnd, [ref]$windowPid)
             if ($windowPid -ne $ProcessId -or [OwnedDialogWin32]::GetAncestor($candidateHwnd, 3) -ne $MainHwnd) { continue }
