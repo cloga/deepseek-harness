@@ -157,9 +157,14 @@ function pluginFixture(name: string) {
 }
 
 function mockVerifiedPlugins(fixtures: ReturnType<typeof pluginFixture>[]): void {
+  const selected = new Map<string, ReturnType<typeof pluginFixture>>()
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : input)
-    const fixture = fixtures.find(entry => url.pathname.includes(`/${entry.source.repo}/`))
+    const candidates = fixtures.filter(entry => url.pathname.includes(`/${entry.source.repo}/`))
+    const exact = candidates.find(entry => url.pathname.includes(`/tags/${entry.source.tag}`)
+      || url.pathname.includes(`/download/${entry.source.tag}/`))
+    if (exact !== undefined) selected.set(exact.source.repo, exact)
+    const fixture = exact ?? (candidates.length === 1 ? candidates[0] : selected.get(candidates[0]?.source.repo ?? ''))
     if (fixture === undefined) throw new Error(`unexpected fixture request ${url.href}`)
     return verifiedFetch(fixture.source, fixture.archive)(input, init)
   })
@@ -930,6 +935,25 @@ describe('desktop external plugin profile', () => {
     })
   })
 
+  it('lets explicit reconcile repair stale plan evidence while ordinary mutations remain fail-closed', async () => {
+    const { manager } = setup()
+    const fixture = pluginFixture('repair-provider')
+    mockVerifiedPlugins([fixture])
+    const plan = { schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source: fixture.source }] }
+    await manager.applyRelease(hooks(), plan)
+    const path = join(manager.paths.profile, 'desktop-plugin-provisioning-state.json')
+    const state = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+    writeFileSync(path, JSON.stringify({ ...state, plugins: [] }))
+    const before = profileMetadata(manager.paths.profile)
+    await expect(manager.mutate({
+      type: 'plugin-toggle', name: fixture.source.packageName, enabled: true,
+    }, hooks())).rejects.toThrow('active state plan evidence is inconsistent')
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    await expect(manager.reconcileProvisioning(plan, hooks())).resolves.toMatchObject({
+      plugins: [{ name: fixture.source.packageName, status: 'active' }],
+    })
+  })
+
   it('retains user verified plugins across exact reconciliation, runtime changes, empty plans and reuse', async () => {
     const { root, manager } = setup()
     const manual = pluginFixture('manual-verified')
@@ -1091,7 +1115,7 @@ describe('desktop external plugin profile', () => {
     expect(readFileSync(join(next.paths.profile, '.desktop-plugin-artifacts', `${first.source.sha256}.tgz`))).toEqual(first.archive)
   }, 30_000)
 
-  it.each(['download', 'health'] as const)('retains user inventory after optional replacement %s failure', async (phase) => {
+  it('preserves an identical enabled user-owned source for an optional strict plan without acquisition', async () => {
     const { root, manager } = setup()
     const target = pluginFixture('optional-target')
     const manual = pluginFixture('manual-verified')
@@ -1099,25 +1123,25 @@ describe('desktop external plugin profile', () => {
     await manager.applyRelease()
     await manager.mutate({ type: 'plugin-install', source: target.source }, hooks())
     await manager.mutate({ type: 'plugin-install', source: manual.source }, hooks())
-    if (phase === 'download') vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('optional download failure'))
     const plan = { schemaVersion: 1, mode: 'exact', plugins: [{ required: false, source: target.source }] }
-    const before = profileMetadata(manager.paths.profile)
-    await expect(manager.reconcileProvisioning(plan, hooks({
-      healthCheck: async (staging) => {
-        const manifest = JSON.parse(readFileSync(join(staging, 'package.json'), 'utf8')) as { dependencies: Record<string, string> }
-        if (phase === 'health' && Object.hasOwn(manifest.dependencies, target.source.packageName)) throw new Error('optional health failure')
-      },
-    }))).rejects.toThrow('user plugin inventory changed')
-    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    const artifact = readFileSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${target.source.sha256}.tgz`))
+    const acquisition = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('planned source must not be reacquired'))
+    let healthChecks = 0
+    const state = await manager.reconcileProvisioning(plan, hooks({
+      healthCheck: async () => { healthChecks++ },
+    }))
+    expect(acquisition).not.toHaveBeenCalled()
+    expect(healthChecks).toBeGreaterThan(0)
+    expect(state.plugins).toMatchObject([{
+      name: target.source.packageName, status: 'active', effective: 'plan',
+    }])
     expect(receiptStore(manager).owners).toEqual({ 'manual-verified': 'user', 'optional-target': 'user' })
-    expect(readFileSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${target.source.sha256}.tgz`))).toEqual(target.archive)
+    expect(readFileSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${target.source.sha256}.tgz`))).toEqual(artifact)
     expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(['manual-verified', 'optional-target'])
     const count = calls(root).length
-    mockVerifiedPlugins([target, manual])
     await manager.reconcileProvisioning(plan, hooks())
-    expect(calls(root).length).toBeGreaterThan(count)
+    expect(calls(root)).toHaveLength(count)
     expect(() => assertDesktopProvisioningInventory(manager.paths.profile, parseDesktopPluginProvisioningPlan(plan))).not.toThrow()
-    expect(receiptStore(manager).owners?.[target.source.packageName]).toBe('user')
   }, 30_000)
 
   it('rejects malformed legacy ownership evidence without changing the active profile', async () => {

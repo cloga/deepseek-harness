@@ -1201,11 +1201,13 @@ export class DesktopProjectManager {
       if (!existsSync(this.paths.profile)) throw new Error('desktop project: active profile is not installed')
       const ignoredArtifact = mutation.type === 'plugin-remove' ? mutation.name : undefined
       const userInventory = readUserInventory(this.paths.profile, ignoredArtifact)
+      const suppliedPlan = mutation.type === 'plugins-reconcile' || mutation.type === 'plugin-restore-planned'
+        ? mutation.plan : undefined
       const provisioningPath = join(this.paths.profile, DESKTOP_PLUGIN_PROVISIONING_STATE_FILE)
-      const activeProvisioning = existsSync(provisioningPath)
+      const activeProvisioning = suppliedPlan === undefined && existsSync(provisioningPath)
         ? parseDesktopPluginProvisioningState(readJson(provisioningPath)) : undefined
-      const activePlan = activeProvisioning === undefined ? undefined : planFromState(activeProvisioning)
-      if (activeProvisioning !== undefined && activePlan !== undefined
+      const activePlan = suppliedPlan ?? (activeProvisioning === undefined ? undefined : planFromState(activeProvisioning))
+      if (suppliedPlan === undefined && activeProvisioning !== undefined && activePlan !== undefined
         && desktopPluginProvisioningPlanSha256(activePlan) !== activeProvisioning.planSha256) {
         throw new Error('desktop plugin provisioning: active state plan evidence is inconsistent')
       }
