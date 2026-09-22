@@ -50,6 +50,8 @@ function workspaceFixture(options: {
 }
 
 const rendererUsageTest = 'packages/client/ui-renderer/tests/desktop-copilot-usage-positive.client.spec.ts'
+const nativeStatsTest = 'packages/client/ui-chat/tests/chat-stats.client.spec.tsx'
+const nativeBrowserFixture = 'apps/desktop/tests/fixtures/native-composer-dock-browser.ts'
 const sharedUsageFixtures = [
   'apps/desktop/tests/fixtures/copilot-usage-positive-browser.ts',
   'apps/desktop/tests/fixtures/copilot-usage-positive-smoke.ts',
@@ -82,6 +84,22 @@ function assertClientUsageRoots(files: readonly string[]): void {
 }
 
 describe('Project Reference compiler faces', () => {
+  it('lists the real native statistics test and its dependency-free browser measurement leaf', () => {
+    const files = clientUsageRoots()
+    expect(files).toContain(nativeStatsTest)
+    expect(files).toContain(nativeBrowserFixture)
+    expect(files).not.toContain('apps/desktop/tests/fixtures/native-composer-geometry.ts')
+    expect(files).not.toContain('apps/desktop/tests/fixtures/native-composer-errors.ts')
+  })
+
+  it('detects omission of the native browser leaf without losing the real component or positive fixtures', () => {
+    const files = clientUsageRoots(nativeBrowserFixture)
+    expect(files).toContain(nativeStatsTest)
+    expect(files).not.toContain(nativeBrowserFixture)
+    assertClientUsageRoots(files)
+    expect(() => { assert(files.includes(nativeBrowserFixture), 'Missing native browser root') }).toThrow('Missing native browser root')
+  })
+
   it('lists the real renderer test and both shared Desktop leaves in the actual composite Client aggregate', () => {
     assertClientUsageRoots(clientUsageRoots())
   })

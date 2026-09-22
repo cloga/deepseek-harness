@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, within } from '@testing-library/react'
 import type {
   AssistantMessageNode, ChatSnapshot, LegacyConversationSlice, ToolResultNode,
 } from '@deepseek-ai/dsh-client-ui-chat/client'
@@ -12,6 +12,7 @@ import { StatsPills, deriveStats, formatDuration, type StatsPillsProps } from '.
 import { formatTokens } from '../src/client/chat/token-format.ts'
 import { en, zh } from '../src/client/locale.ts'
 import { chatSnapshotFixture } from './chat-snapshot-fixture.client.ts'
+import { measureNativeComposerDock } from '../../../../apps/desktop/tests/fixtures/native-composer-dock-browser.ts'
 
 const t: StatsPillsProps['t'] = makeTranslate(zh, commonZh)
 const tEn: StatsPillsProps['t'] = makeTranslate(en, commonEn)
@@ -156,6 +157,49 @@ describe('StatsPills', () => {
   const timedStep = (): AssistantMessageNode => ({
     ...assistant(1, 1, { outputTokens: 60 }),
     timing: { stepStartTime: 1_000, firstTokenTime: 1_800, completedTime: 4_800 },
+  })
+
+  it.each([false, true])('native measurement uses real marker-free StatsPills and preserves untimed semantics (timed=%s)', (timed) => {
+    const { source } = makeSource({ nodes: [assistant(1, 1)] })
+    const view = render(
+      <div data-testid="native-dock-owner" style={{ display: 'flex' }}>
+        <div data-slot="conversation.composer.dock" style={{ display: 'contents' }}>
+          <StatsPills {...props(source, {
+            tokenUsage: USAGE, sessionStats: sessionStats({ turns: 1, steps: 1, llmMs: timed ? 500 : 0 }),
+          })} />
+          <button type="button" data-copilot-usage-trigger>Owned companion fixture</button>
+        </div>
+      </div>,
+    )
+    const owner = view.getByTestId('native-dock-owner')
+    const outlet = owner.querySelector<HTMLElement>('[data-slot="conversation.composer.dock"]')!
+    expect(outlet.querySelector('[data-composer-stats]')).toBeNull()
+    const time = within(outlet).queryByRole('button', { name: '1 turns 1 steps', exact: true })
+    const usage = within(outlet).getByRole('button', { name: '105 tok · Cache hit 90%', exact: true })
+    const companion = within(outlet).getByRole('button', { name: 'Owned companion fixture', exact: true })
+    // jsdom supplies no layout: stub only rectangles. The actual component owns markup, roles and dialog behavior.
+    for (const [element, x, width] of [[owner, 10, 700], [time, 30, 100], [usage, 142, 180], [companion, 334, 160]] as const) {
+      if (element !== null) vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(new DOMRect(x, 100, width, 22))
+    }
+    if (!timed) {
+      expect(time).toBeNull()
+      expect(within(outlet).getByText('1 turns 1 steps').closest('button')).toBeNull()
+      expect(measureNativeComposerDock(outlet)).toBeNull()
+      return
+    }
+    expect(time).not.toBeNull()
+    expect(measureNativeComposerDock(outlet)).toMatchObject({
+      time: { x: 30, y: 100, width: 100, height: 22 }, usage: { x: 142, y: 100, width: 180, height: 22 },
+      copilot: { x: 334, y: 100, width: 160, height: 22 },
+    })
+    fireEvent.click(time!)
+    expect(view.getByRole('dialog', { name: 'Session statistics', exact: true }).textContent).toContain('LLM time0.5s')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(view.queryByRole('dialog', { name: 'Session statistics', exact: true })).toBeNull()
+    fireEvent.click(usage)
+    const details = view.getByRole('dialog', { name: 'Token usage', exact: true })
+    expect(within(details).getByText('Cache hit', { exact: true })).toBeTruthy()
+    expect(details.textContent).toContain('90%')
   })
 
   it('renders the counts reading and usage pill and hides a brand-new empty session', () => {

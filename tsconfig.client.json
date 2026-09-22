@@ -21,6 +21,7 @@
     "packages/client/*/tests/**/*.tsx",
     "apps/desktop/tests/fixtures/copilot-usage-positive-browser.ts",
     "apps/desktop/tests/fixtures/copilot-usage-positive-smoke.ts",
+    "apps/desktop/tests/fixtures/native-composer-dock-browser.ts",
     "benchmarks/**/*.client.ts",
     "benchmarks/**/*.client.tsx",
     "benchmarks/support/**/*.ts",

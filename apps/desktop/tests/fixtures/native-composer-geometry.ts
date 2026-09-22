@@ -2,22 +2,10 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import type { Locator, Page } from 'playwright'
-import { measureNativeComposerDock } from './native-composer-dock-browser.ts'
+import { measureNativeComposerDock, type NativeComposerGeometry } from './native-composer-dock-browser.ts'
+export type { NativeComposerGeometry } from './native-composer-dock-browser.ts'
 
-interface Box { x: number; y: number; width: number; height: number }
-interface PillStyle { fontSize: string; lineHeight: string; color: string }
 interface DialogObservation { opened: boolean; closedOnEscape: boolean; focusReturned: boolean }
-
-/** One measured viewport of the actual native composer. */
-export interface NativeComposerGeometry {
-  readonly viewportWidth: number
-  readonly dock: Box
-  readonly time: Box
-  readonly usage: Box
-  readonly copilot: Box
-  readonly nativeStyle: PillStyle
-  readonly copilotStyle: PillStyle
-}
 
 /** Native geometry plus observed signed-out Copilot dialog behavior. */
 export interface NativeComposerInspection {
@@ -136,15 +124,17 @@ export async function openNativeComposerFixture(page: Page): Promise<void> {
  */
 export async function inspectNativeComposerGeometry(page: Page, output: string): Promise<NativeComposerInspection> {
   await openNativeComposerFixture(page)
-  const stats = page.locator('[data-composer-stats]')
-  const time = stats.getByRole('button', { name: '1 turns 1 steps', exact: true })
-  const usage = stats.getByRole('button', { name: '105 tok · Cache hit 90%', exact: true })
-  const copilot = page.locator('[data-copilot-usage-trigger]')
+  const outlet = page.locator('[data-slot="conversation.composer.dock"]')
+  const time = outlet.getByRole('button', { name: '1 turns 1 steps', exact: true })
+  const usage = outlet.getByRole('button', { name: '105 tok · Cache hit 90%', exact: true })
+  const copilot = outlet.locator('button[data-copilot-usage-trigger]')
   await time.waitFor({ state: 'visible' })
   await usage.waitFor({ state: 'visible' })
   await copilot.waitFor({ state: 'visible' })
-  const outlet = page.locator('[data-slot="conversation.composer.dock"]')
   assert.equal(await outlet.count(), 1, 'Native statistics must belong to one public composer dock outlet')
+  for (const control of [time, usage, copilot]) {
+    assert.equal(await control.count(), 1, 'Exactly one semantic statistics control must match inside the public dock')
+  }
   const result: NativeComposerGeometry[] = []
   for (const viewportWidth of [1280, 400]) {
     await page.setViewportSize({ width: viewportWidth, height: 900 })
