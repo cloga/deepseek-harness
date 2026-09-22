@@ -14,6 +14,22 @@ export interface CopilotSettingsEvidence {
   readonly realSearch: false
 }
 
+/** Validate current schema-3 settings receipts without reinterpreting historical role-loading observations. */
+export function assertCopilotSettingsEvidence(value: unknown): asserts value is CopilotSettingsEvidence {
+  assert(value !== null && typeof value === 'object' && !Array.isArray(value), 'Expected current Copilot settings evidence')
+  const evidence = value as Record<string, unknown>
+  assert.deepEqual(Object.keys(evidence).sort(), ['schemaVersion', 'accountViewLoaded', 'retiredModelRolesAbsent',
+    'searchProviderCatalogLoaded', 'providerOnlySearchRouting', 'fallbackProviderLabel', 'registeredSearchProviders', 'realSearch'].sort())
+  assert.equal(evidence.schemaVersion, 3)
+  for (const field of ['accountViewLoaded', 'retiredModelRolesAbsent', 'searchProviderCatalogLoaded',
+    'providerOnlySearchRouting', 'fallbackProviderLabel']) assert.equal(evidence[field], true)
+  assert.equal(evidence.realSearch, false)
+  const providers = evidence.registeredSearchProviders
+  assert(Array.isArray(providers) && providers.every(value => typeof value === 'string' && value.length > 0 && value.length <= 256))
+  assert.equal(new Set(providers).size, providers.length)
+  assert(providers.includes('github-copilot-hosted'))
+}
+
 /**
  * Require positive Host-view readiness in a fresh signed-out Models dialog, without changing its settings.
  * @param settings - Actual packaged Desktop Settings dialog, already displaying Models.

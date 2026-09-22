@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-19-desktop-user-inventory-guards.md
-2026-09-19-desktop-user-inventory-guards.md: d35afcc0ed84e7f3ba951bf89875c6dcfe8157ed
-2026-09-19-desktop-user-inventory-guards.zh.md: 2a5d63cb458c2376d4e4604717f48e93ea650412
+2026-09-19-desktop-user-inventory-guards.md: 13d87d3eaf5c0e69b3e95a640891ab3f1a8eab88
+2026-09-19-desktop-user-inventory-guards.zh.md: 6e74b22affcac93a3ea1c52ed19fb2cf9cd56966

@@ -114,6 +114,15 @@ async function inventoryRuntimeForVerification(root: string): Promise<DesktopRun
 }
 
 /**
+ * Render descriptor metadata without scanning or verifying the referenced files.
+ * @param descriptor - Caller-owned metadata; rendering does not establish artifact integrity.
+ * @returns Canonical JSON bytes as UTF-8 text with one trailing newline.
+ */
+export function renderDesktopRuntimeDescriptor(descriptor: DesktopRuntimeDescriptor): string {
+  return `${JSON.stringify(descriptor, undefined, 2)}\n`
+}
+
+/**
  * Seal the final runtime tree after materialization and native signing.
  * @param root - Runtime output directory.
  * @param release - Matching shell, dsh, Host, and executable versions.
@@ -138,7 +147,7 @@ export function writeDesktopRuntime(
     schemaVersion: 1, release, platform: target.platform, arch: target.arch,
     sharedPackages, files: inventoryDesktopRuntime(root),
   }
-  writeFileSync(join(root, DESKTOP_RUNTIME_FILE), `${JSON.stringify(descriptor, undefined, 2)}\n`)
+  writeFileSync(join(root, DESKTOP_RUNTIME_FILE), renderDesktopRuntimeDescriptor(descriptor))
   return descriptor
 }
 
@@ -253,13 +262,4 @@ export async function verifyDesktopRuntime(
     throw new Error(`desktop runtime: integrity verification failed: ${runtimeInventoryDiagnostic(descriptor.files, actual)}`)
   }
   return descriptor
-}
-
-/**
- * Identify exact runtime content independently of its installation path.
- * @param descriptor - Validated runtime metadata.
- * @returns SHA-256 runtime identity.
- */
-export function desktopRuntimeId(descriptor: DesktopRuntimeDescriptor): string {
-  return createHash('sha256').update(JSON.stringify(descriptor)).digest('hex')
 }

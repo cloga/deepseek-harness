@@ -42,6 +42,29 @@ Mount the service with a provider and the delegation tool. The provider register
 
 An agent that calls the tool gets the child's final answer as the tool result. Mounting the service alone changes nothing: nothing can delegate until a provider and a tool are composed.
 
+### Delegation settings
+
+The limits section on the **Plugins → Subagent** page edits the Host’s `subagent` settings section. User values override this plugin's composition; reset removes the user override. `maxDepth` defaults to `1` and supplies the delegation tools' depth when their own configuration omits it. An explicit tool depth, including `provider-managed`, takes precedence. Depth `0` disables delegation through tools inheriting this setting; depth `1` permits direct children only. Changes apply on the next delegation attempt. Direct service callers continue to supply their own optional request depth.
+
+<a id="creation-time-model-rules"></a>
+### Creation-time model rules
+
+`modelRules` in the Host `subagent` settings section defaults to `[]`. Each row has `parent: { provider, model }` and `child: { provider, model }`; all four values are nonempty exact ids, and each parent pair occurs at most once. Add or remove rows to change the policy. The Session model picker still owns the main agent's selection. Matching reads the direct parent's effective delegation options: its latest request header, or its creation options before the first request, never the global model default. A grandchild matches its own direct parent rather than the root.
+
+Rules apply only to new model-configurable children that otherwise inherit the parent's route: one-shot providers must support `agentOptions`, while continuable composition is manager-owned and independent of the provider's one-shot capability flags. Externally model-managed one-shot products are unchanged.
+
+New `start()` and `startContinuable()` calls with any caller-supplied child provider, model, or reasoning effort bypass rules. Any one of those explicit or configured fields takes precedence, as do provider-owned route defaults. A `maxTokens`-only override still permits matching. Changing routes clears inherited parent effort; the target model supplies its own default. The matched rule, effective child options, and delegated permission overrides are captured before asynchronous validation, so later settings, parent-model selection, or parent-permission changes affect only future delegations. Sending another message or cold-resuming a child does not apply rules again; a continuable child retains its recorded route and effort.
+
+A matched target must pass `llm.resolveCallConfig()` before child publication. A missing LLM service, unavailable or renamed target, cancellation, or provider replacement rejects creation without trying another model. Unmatched calls keep ordinary inheritance without an added LLM lookup. Explicit tool requests remain subject to the tool's model-selection permissions before this service is called.
+
+### Continuable capacity
+
+Set `maxActiveSubagents` on the host `dsh-subagent` plugin to limit live children sharing uninterrupted continuable parent links. It defaults to `8` and accepts positive safe integers. A non-continuable parent starts a separate pool and does not consume a slot; continuable descendants inherit that pool. Fresh creation and cold resume reserve before reconstructing the Agent, and cleanup returns the slot after handle disposal. A waiting parent, pending inbox work, and an Activation being stopped still occupy slots. Messages to a resident child reuse its slot. One-shot and external-provider runs are outside this limit. Pool inheritance does not cross a one-shot parent; its continuable children share a separate pool. Depth remains the delegation tool's separate policy.
+
+The current `maxActiveSubagents` value is sampled before every new or cold-resumed Activation. Raising it admits more children in existing trees; lowering it leaves resident children running and refuses further admissions until usage is below the limit.
+
+At capacity, creation or cold resume rejects with `ACTIVATION_LIMIT_REACHED` (browser prompts receive `subagent/delivery-unavailable`): wait for a child to finish or continue using the existing agents. Admission does not queue, because a parent waiting for descendants must not wait for its own occupied slot. Slots are process-local and do not constrain cumulative Session history or token usage.
+
 ### One-shot and continuable children
 
 One-shot children run once and settle with a single result, plus an optional structured output and a safe diagnostic on failure. A start request may override the child Agent's provider, model, reasoning effort, and output-token limit through `agentOptions`; every requested option requires the provider's matching capability. Continuable children keep a durable session and accept later messages in order: the caller receives a stable child id, sends adjacent-Agent messages, and can interrupt the current turn without destroying the child. The tool row's `backgroundMode` picks the shape (`one-shot` by default, or `continuable` on providers that support it).
@@ -84,13 +107,14 @@ This section explains how the service is built and where the observable behavior
 | [`src/types.ts`](src/types.ts) | Public request, result, and provider contracts |
 | [`src/descriptor.ts`](src/descriptor.ts) | Versioned `subagent/descriptor` session-event vocabulary |
 | [`src/child-agent.ts`](src/child-agent.ts) | Child composition, delegated policy, depth helpers |
+| [`src/model-rules.ts`](src/model-rules.ts) | Exact parent-route matching, captured child options, and live target validation |
 | [`src/list-children.ts`](src/list-children.ts) | Discovery over the live session store and optional persistence |
 | [`src/control.ts`](src/control.ts) | Browser control assembly: catalog activity sampling, browser-zone validation, failure codes |
 | [`src/control-types.ts`](src/control-types.ts) | Client-safe catalog row, control requests, receipts, and failures |
 
 ### One-shot flow
 
-A request is validated against the provider's advertised capabilities, a durable descriptor is snapshotted, and the provider builds the child. Both in-process providers advertise `agentOptions`: child creation merges requested fields over the provider, model, and reasoning effort in the parent's latest logged request, falls back to creation options before the first request, and retains the configured token limit. They also snapshot delegated permission state before the first await: an Auto or Full access parent gives the child the same `permission/preset` identity, while the existing sandbox override and approval-policy pin continue to apply. Recording both identities prevents an older same-bundle fork value from winning. Auto then reviews every supported child call independently: ordinary project-local work is low risk and allowed, medium-risk work requires explicit action, exact-target and scope authorization from the existing creation prompt or an authenticated human/direct-parent message, without conflicting human limits, while high-risk work is always denied. The reviewer derives that context from `parentSession` and existing messages; delegation adds no parent call metadata, delegation records, review receipt, or Session format. A route change without an explicit effort clears the inherited route-owned effort so the selected model resolves its default. DSH SDK also advertises `agentOptions` but runs a separate child runtime, so it does not inherit Auto; ACP, Codex, and Claude Code likewise retain their own permission systems after the parent delegation call passes review. On success the run is published and ownership transfers to the caller; on failure the provider rolls back every unpublished resource. The result carries the child's final output, an optional structured value, a stop reason, and an optional safe diagnostic.
+A request is validated against the provider's advertised capabilities, a durable descriptor is snapshotted, and the provider builds the child. Both in-process providers advertise `agentOptions`: unless the service supplies captured model-rule options, child creation merges requested fields over the provider, model, and reasoning effort in the parent's latest logged request, falls back to creation options before the first request, and retains the configured token limit. They also snapshot delegated permission state before the first await: an Auto or Full access parent gives the child the same `permission/preset` identity, while the existing sandbox override and approval-policy pin continue to apply. Recording both identities prevents an older same-bundle fork value from winning. Auto then reviews every supported child call independently: ordinary project-local work is low risk and allowed, medium-risk work requires explicit action, exact-target and scope authorization from the existing creation prompt or an authenticated human/direct-parent message, without conflicting human limits, while high-risk work is always denied. The reviewer derives that context from `parentSession` and existing messages; delegation adds no parent call metadata, delegation records, review receipt, or Session format. A route change without an explicit effort clears the inherited route-owned effort so the selected model resolves its default. DSH SDK also advertises `agentOptions` but runs a separate child runtime, so it does not inherit Auto; ACP, Codex, and Claude Code likewise retain their own permission systems after the parent delegation call passes review. On success the run is published and ownership transfers to the caller; on failure the provider rolls back every unpublished resource. The result carries the child's final output, an optional structured value, a stop reason, and an optional safe diagnostic.
 
 ### Continuable flow
 
@@ -117,6 +141,7 @@ Read these pages when the package-level contract is not enough. They move from t
 - [Subagent subsystem](../../../docs/subsystems/subagent.md) — the service contract, provider contract, and terminal result semantics.
 - [Subagent capability seam](../../../.agents/notes/implemented/feature/2026-06-21-subagent-capability-seam.md) — the design record for the delegation capability family.
 - [Continuable subagents](../../../.agents/notes/implemented/feature/2026-07-28-continuable-subagent-conversations.md) — durable children that accept follow-up turns.
+- [Creation-time model rules](../../../.agents/notes/implemented/feature/2026-09-19-subagent-model-rules.md) — user-owned defaults, option capture, and preserved model-selection authority.
 - [In-process spawn backend](../subagent-spawn-in-process/README.md) — the simplest provider to compose.
 - [Auto review](../../experimental/auto-review/README.md) — the current-session authorization mode inherited only by in-process DSH children.
 - [Out-of-process ACP backend](../subagent-acp/README.md) — children with their own runtime over the Agent Client Protocol.
@@ -126,6 +151,20 @@ Read these pages when the package-level contract is not enough. They move from t
 
 <a id="model-experience"></a>
 ## Model Experience
+
+### Creation-time model selection
+
+#### What the model sees
+
+Rules select a new child's route without adding the rule list to either agent's prompt. Failed validation rejects the delegation. Adapter or LLM-service replacement during validation reports `LLM catalog/provider changed during subagent model rule preflight; retry delegation`; replacing the subagent provider reports `subagent provider changed during model rule preflight; retry delegation`. Neither diagnostic triggers an automatic retry.
+
+#### Token effect
+
+Route preflight resolves model metadata without streaming a model request. It adds no prompt tokens on success; the selected child model accounts for its own requests normally.
+
+#### KV Cache effect
+
+The parent's route and existing request prefix remain unchanged. Each new child uses its selected route's independent request cache. A user-authored rule can change a fork child's route even when its tool disables model-authored selection. The fork still inherits completed parent history, but changing provider or model can forfeit prefix-cache reuse and require recomputing that inherited history on the target route.
 
 ### Settlement notice
 
@@ -168,6 +207,7 @@ Prefix-stable within a child: the statement never changes during the child's lif
 
 These limits define when the seam is a poor fit or needs special operational care. They are current package constraints, not a general delegation comparison or a task backlog.
 
+- **Model-rule preflight rejects concurrent adapter topology changes** — any adapter registration update during a matched rule's validation, including an unrelated provider, rejects that creation. Retry explicitly after the catalog stabilizes; accepted children are unaffected.
 - **ACP children remain one-shot and are not trace-enumerable** — an ACP run has no local child session in the parent's session corpus, and remote providers need an Activation ownership contract before they can support continuable children.
 - **Adjacent model messaging only** — `sendMessage()` requires an exact live sender; every sender may target a direct continuable child, while only a sender with a resident continuable Activation may target its direct parent. Browser prompts use a separate human Queue-or-Steer control path.
 - **A direct parent must remain live for child-to-parent delivery** — the service has no durable parent mailbox; a missing parent rejects the message instead of accepting work it cannot wake.

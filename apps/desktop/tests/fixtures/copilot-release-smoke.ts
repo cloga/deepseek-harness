@@ -6,6 +6,8 @@ import {
   closeSync,
   copyFileSync,
   existsSync,
+  fstatSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -20,7 +22,8 @@ import { fileURLToPath } from 'node:url'
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright'
 import { desktopSmokeEnvironment } from '../../scripts/smoke-environment.ts'
 import { parseDesktopForkReleasePlan } from '../../scripts/fork-release.ts'
-import { assertDesktopProvisioningInventory } from '../../src/project-manager.ts'
+import { assertReviewedCopilotUsageClient } from '../../scripts/copilot-usage-client-policy.ts'
+import { assertDesktopProvisioningInventory } from '../../src/plugin-receipts.ts'
 import { readDesktopPluginProvisioningPlan } from '../../src/plugin-provisioning.ts'
 import type { DesktopRuntimeDescriptor } from '../../src/runtime-tree.ts'
 import { removeOwnedDirectory } from '../../src/owned-directory.ts'
@@ -31,9 +34,11 @@ import {
   verifyPackagedDesktopRuntime,
 } from '../../scripts/packaged-runtime.mjs'
 import { inspectPackagedGraphResolution, packagedGraphCheckArguments } from './packaged-graph-check.ts'
-import { inspectPackagedCopilotSettings, type CopilotSettingsEvidence } from './copilot-settings-smoke.ts'
+import { inspectPackagedCopilotSettings, assertCopilotSettingsEvidence, type CopilotSettingsEvidence } from './copilot-settings-smoke.ts'
 import { inspectNativeComposerGeometry } from './native-composer-geometry.ts'
 import { observeNativeComposerErrors } from './native-composer-errors.ts'
+import { assertNativeComposerProof, assertNativeComposerSeed } from './native-composer-proof.ts'
+import { runPackagedCopilotObserverCanary, writePackagedProof, type PackagedProofIdentity } from './copilot-observer-smoke.ts'
 import {
   inspectCopilotUsageCapability,
   inspectSignedOutCopilotUsage,
@@ -56,88 +61,230 @@ export interface PackagedCopilotProfileInspection {
   readonly output: string
 }
 
+/** Independently verified Core lock facts; never the caller repository's GitHub identity. */
+export interface ExpectedCoreSource {
+  readonly commit: string
+  readonly tree: string
+  readonly version: string
+  readonly upstreamVersion: string
+  readonly executableSha256: string
+  readonly runtimeSha256: string
+  readonly planSha256: string
+}
+
+const coreSourceFields = ['commit', 'tree', 'version', 'upstreamVersion', 'executableSha256', 'runtimeSha256', 'planSha256'] as const
+
+function snapshotExpectedCoreSource(value: unknown): ExpectedCoreSource {
+  assert(value !== null && typeof value === 'object' && !Array.isArray(value), 'expectedCoreSource must contain exactly seven facts')
+  const prototype: unknown = Object.getPrototypeOf(value)
+  assert(prototype === null || prototype === Object.prototype, 'expectedCoreSource must not inherit facts or extra fields')
+  assert(Reflect.ownKeys(value).length === coreSourceFields.length && coreSourceFields.every(field => Object.hasOwn(value, field)),
+    'expectedCoreSource must contain exactly seven own facts')
+  const leaf = (field: typeof coreSourceFields[number]): string => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, field)
+    assert(descriptor?.enumerable === true && Object.hasOwn(descriptor, 'value'), 'expectedCoreSource requires enumerable data fields')
+    const entry: unknown = descriptor.value
+    assert(typeof entry === 'string', 'expectedCoreSource facts must be strings')
+    return entry
+  }
+  const snapshot = {
+    commit: leaf('commit'), tree: leaf('tree'), version: leaf('version'), upstreamVersion: leaf('upstreamVersion'),
+    executableSha256: leaf('executableSha256'), runtimeSha256: leaf('runtimeSha256'), planSha256: leaf('planSha256'),
+  }
+  for (const field of ['commit', 'tree'] as const) assert.match(snapshot[field], /^[a-f0-9]{40}$/u)
+  for (const field of ['executableSha256', 'runtimeSha256', 'planSha256'] as const) assert.match(snapshot[field], /^[a-f0-9]{64}$/u)
+  assert.match(snapshot.version, /^0\.1\.6(?:-[A-Za-z0-9.-]+)?$/u)
+  assert.equal(snapshot.upstreamVersion, '0.1.6-alpha.2')
+  return Object.freeze(snapshot)
+}
+
+/**
+ * Compare observed Core checkout and artifact facts without overriding the actual GitHub run identity.
+ * @param observed - Facts read from the actual Core checkout, reviewed plan and packaged bytes.
+ * @param expected - Required verified lock facts for a cross-repository import.
+ * @returns The observed facts, not a copy of the caller's expectations.
+ */
+export function verifyExpectedCoreSource(observed: ExpectedCoreSource, expected?: ExpectedCoreSource): ExpectedCoreSource {
+  for (const field of ['commit', 'tree'] as const) assert.match(observed[field], /^[a-f0-9]{40}$/u)
+  for (const field of ['executableSha256', 'runtimeSha256', 'planSha256'] as const) assert.match(observed[field], /^[a-f0-9]{64}$/u)
+  const crossRepository = process.env.GITHUB_REPOSITORY !== undefined && process.env.GITHUB_REPOSITORY !== 'cloga/deepseek-harness'
+  if (crossRepository) assert(expected !== undefined, 'Cross-repository acceptance requires expectedCoreSource')
+  else if (process.env.GITHUB_SHA !== undefined) assert.equal(observed.commit, process.env.GITHUB_SHA, 'Core checkout must equal GITHUB_SHA')
+  if (expected !== undefined) {
+    for (const field of ['commit', 'tree', 'version', 'upstreamVersion', 'executableSha256', 'runtimeSha256', 'planSha256'] as const) {
+      assert.equal(observed[field], expected[field], `Expected Core source differs: ${field}`)
+    }
+  }
+  return Object.freeze({ ...observed })
+}
+
 /** Actual packaged application, evidence destination, and an optional read-only profile observer. */
 export interface PackagedCopilotAcceptanceOptions {
   readonly application: string
   readonly output: string
-  /** Runs once after all owned Desktop processes close and acceptance passes, before owned cleanup. */
+  readonly expectedCoreSource?: ExpectedCoreSource
+  /** Runs once after all three owned Desktop phases close and their receipts match, before owned cleanup. */
   readonly inspectProfile?: (paths: PackagedCopilotProfileInspection) => void | Promise<void>
 }
 
 /**
- * Exercise actual packaged Copilot UI and restart acceptance with an isolated, temporary profile.
- * @param options - Application and evidence paths; the optional observer must finish all read-only work before returning.
- * @returns Resolves after acceptance, any observer, and owned cleanup; no installed application qualification is implied.
+ * Prepare private home settings and the ancestor SDK canary without claiming Desktop profile ownership.
+ * @param home - Newly allocated fixture home.
+ * @param legacySdk - Separately allocated fixture package directory.
  */
-export async function runPackagedCopilotAcceptance(options: PackagedCopilotAcceptanceOptions): Promise<void> {
-  const application = resolve(options.application)
-  const output = resolve(options.output)
-  const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
-  const resources = join(dirname(application), 'resources')
-  const runtimeRoot = packagedDesktopRuntimeRoot(resources)
-  const reviewed = parseDesktopForkReleasePlan(JSON.parse(readFileSync(
-    resolve('apps/desktop/release/cloga-windows-x64.json'), 'utf8',
-  )))
-  const plan = readDesktopPluginProvisioningPlan(join(resources, 'desktop-provisioning', 'plan.json'))
-  assert.deepEqual(plan, reviewed.desktopProvisioning)
-  const copilot = plan.plugins.find(entry => entry.source.packageName === 'dsh-github-copilot')
-  assert(copilot?.required, 'This acceptance requires a release-owned Copilot package')
-  await verifyPackagedDesktopRuntime(application, runtimeRoot, reviewed.upstreamVersion, { platform: 'win32', arch: 'x64' })
-  const runtimeBytes = readPackagedDesktopRuntimeDescriptor(application, runtimeRoot)
-  // The production verifier validates this immutable descriptor through Electron's ASAR filesystem.
-  const runtime = JSON.parse(runtimeBytes.toString('utf8')) as DesktopRuntimeDescriptor
-  const runtimeSha256 = createHash('sha256').update(runtimeBytes).digest('hex')
-  mkdirSync(output, { recursive: true })
-  writeFileSync(join(output, 'desktop-runtime.json'), runtimeBytes)
-  copyFileSync(join(resources, 'desktop-provisioning', 'plan.json'), join(output, 'provisioning-plan.json'))
-  copyFileSync(join(resources, 'managed-update', 'capability.json'), join(output, 'capability.json'))
-  const scratch = resolve('.desktop-smoke')
-  mkdirSync(scratch, { recursive: true })
-  const home = mkdtempSync(join(scratch, 'packaged-copilot-'))
+export function preparePackagedCopilotHome(home: string, legacySdk: string): void {
   const profile = join(home, 'profiles', 'desktop')
-  mkdirSync(profile, { recursive: true })
-  const legacySdk = mkdtempSync(join(scratch, 'legacy-mcp-sdk-'))
-  const legacySdkLoaded = join(legacySdk, 'loaded')
+  assert(!existsSync(profile), 'The shell must exclusively create the fresh Desktop profile')
   writeFileSync(join(legacySdk, 'package.json'), JSON.stringify({
-    name: '@modelcontextprotocol/sdk',
-    version: '1.0.0',
-    type: 'module',
-    exports: './index.js',
+    name: '@modelcontextprotocol/sdk', version: '1.0.0', type: 'module', exports: './index.js',
   }))
   writeFileSync(join(legacySdk, 'index.js'), [
     'import { writeFileSync } from "node:fs"',
-    `writeFileSync(${JSON.stringify(legacySdkLoaded)}, '')`,
+    `writeFileSync(${JSON.stringify(join(legacySdk, 'loaded'))}, '')`,
     'export const legacy = true',
     '',
   ].join('\n'))
   const ancestorSdk = join(home, 'profiles', 'node_modules', '@modelcontextprotocol', 'sdk')
   mkdirSync(dirname(ancestorSdk), { recursive: true })
   symlinkSync(legacySdk, ancestorSdk, process.platform === 'win32' ? 'junction' : 'dir')
-  assert(!realpathSync.native(ancestorSdk).startsWith(realpathSync.native(profile)),
+  assert(!realpathSync.native(ancestorSdk).startsWith(resolve(profile)),
     'Legacy SDK fixture must resolve outside the Desktop profile')
+  // The product permits an absent profile .env; the isolated home and scrubbed environment own startup values.
   writeFileSync(join(home, '.env'), '')
-  writeFileSync(join(profile, '.env'), '')
   writeFileSync(join(home, 'settings.yaml'), 'ui-onboarding:\n  welcomeNoticeVersion: "2026-08-13.1"\n')
-  const environment = desktopSmokeEnvironment(home)
-  const userData = join(home, 'electron-user-data')
+  assert(!existsSync(profile), 'Fixture preparation must leave Desktop initialization to the shell')
+}
+
+/** Browser-serialized readiness predicate for the official application URL or a visible startup failure. */
+export function packagedCopilotStartupReady(): boolean {
+  const error = document.querySelector<HTMLElement>('#error')
+  return location.href === 'dsh-app://app/'
+    || Boolean(error !== null && !error.hidden && error.textContent?.trim())
+}
+
+/**
+ * Exercise actual packaged Copilot UI and restart acceptance with an isolated, temporary profile.
+ * @param options - Application and evidence paths; the optional observer must finish all read-only work before returning.
+ * @returns Frozen observed Core facts for default and explicit calls, only after cleanup and acceptance publication;
+ * no installed application qualification is implied.
+ */
+export async function runPackagedCopilotAcceptance(options: PackagedCopilotAcceptanceOptions): Promise<ExpectedCoreSource> {
+  const application = resolve(options.application)
+  const output = resolve(options.output)
+  mkdirSync(output, { recursive: true })
+  for (const file of ['positive-usage.json', 'native-composer-seed.json', 'native-composer-geometry.json',
+    'functional-results.json', 'acceptance.json', 'failure.json', 'observer-cleanup.json', 'packaged-suite.json']) {
+    assert(!existsSync(join(output, file)), `Packaged acceptance requires fresh ${file} evidence`)
+  }
+  const coreCheckout = resolve(import.meta.dirname, '../../../..')
+  let observedCoreSource: ExpectedCoreSource | undefined
+  const ownedDirectories: string[] = []
+  let diagnosticProfile: string | undefined
+  let identity: Partial<PackagedProofIdentity> = {
+    evidenceId: randomUUID(), runId: process.env.GITHUB_RUN_ID ?? null, runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
+  }
+  let functional: Record<string, unknown> | undefined
   const inventories: string[] = []
   const versionMenus: DesktopVersionMenuEvidence[] = []
+  const settingsObservations: CopilotSettingsEvidence[] = []
   const usageCapabilities: CopilotUsageCapabilityEvidence[] = []
   const signedOutUsage: SignedOutCopilotUsageEvidence[] = []
   const positiveUsage: PositiveCopilotUsageEvidence[] = []
-  const settingsObservations: CopilotSettingsEvidence[] = []
   const started = performance.now()
   const timeline: { event: string; milliseconds: number }[] = []
   const record = (event: string): void => { timeline.push({ event, milliseconds: performance.now() - started }) }
   const safeDiagnostic = (text: string): string => text
     .replace(/(https?:\/\/[^?\s"'<>]+)\?[^\s"'<>]*/gu, '$1?[redacted]')
     .replace(/(authorization:\s*(?:bearer|token)\s+)\S+/giu, '$1[redacted]')
+  const describeError = (error: unknown): string => {
+    try { return safeDiagnostic(String(error)).slice(0, 8192) }
+    catch { return 'Unprintable acceptance failure' }
+  }
   let stderr = ''
   let stderrTruncated = false
   let page: Page | undefined
   let app: ElectronApplication | undefined
   let failure: unknown
+  let failed = false
+  let failureReceiptWritten = false
+  const cleanupErrors: string[] = []
+  const diagnosticErrors: string[] = []
+  let diagnostics: Record<string, unknown> = {}
+  const retain = (error: unknown): void => {
+    if (!failed) { failure = error; failed = true }
+  }
+  const writeFailure = (cleanupCompleted: boolean): void => {
+    try {
+      writePackagedProof(output, 'failure.json', {
+        ...diagnostics, ...identity, schemaVersion: 2, scope: 'packaged-acceptance-failure',
+        error: describeError(failure), cleanupCompleted,
+        cleanupVerified: cleanupCompleted && cleanupErrors.length === 0,
+        cleanupErrors, diagnosticErrors,
+      }, failureReceiptWritten)
+      failureReceiptWritten = true
+    } catch (error) {
+      diagnosticErrors.push(describeError(error))
+      retain(error)
+    }
+  }
   try {
+    const suppliedCoreSource: unknown = options.expectedCoreSource
+    const expected = suppliedCoreSource === undefined ? undefined : snapshotExpectedCoreSource(suppliedCoreSource)
+    const resources = join(dirname(application), 'resources')
+    const runtimeRoot = packagedDesktopRuntimeRoot(resources)
+    const planBytes = readFileSync(join(coreCheckout, 'apps/desktop/release/cloga-windows-x64.json'))
+    const reviewed = parseDesktopForkReleasePlan(JSON.parse(planBytes.toString('utf8')))
+    const plan = readDesktopPluginProvisioningPlan(join(resources, 'desktop-provisioning', 'plan.json'))
+    assert.deepEqual(plan, reviewed.desktopProvisioning)
+    const copilot = plan.plugins.find(entry => entry.source.packageName === 'dsh-github-copilot')
+    assert(copilot?.required, 'This acceptance requires a release-owned Copilot package')
+    const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: coreCheckout, encoding: 'utf8' }).trim()
+    const sourceTree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: coreCheckout, encoding: 'utf8' }).trim()
+    assert(/^[a-f0-9]{40}$/u.test(sourceCommit) && /^[a-f0-9]{40}$/u.test(sourceTree))
+    if (process.env.GITHUB_REPOSITORY !== undefined && process.env.GITHUB_REPOSITORY !== 'cloga/deepseek-harness') {
+      assert(expected !== undefined, 'Cross-repository acceptance requires expectedCoreSource')
+    } else if (process.env.GITHUB_SHA !== undefined) assert.equal(sourceCommit, process.env.GITHUB_SHA)
+    const digest = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex')
+    const observed = { commit: sourceCommit, tree: sourceTree, version: reviewed.version, upstreamVersion: reviewed.upstreamVersion,
+      planSha256: digest(planBytes), executableSha256: digest(readFileSync(application)) }
+    if (expected !== undefined) {
+      for (const field of ['commit', 'tree', 'version', 'upstreamVersion', 'planSha256', 'executableSha256'] as const) {
+        assert.equal(observed[field], expected[field], `Expected Core source differs: ${field}`)
+      }
+      assert.match(expected.runtimeSha256, /^[a-f0-9]{64}$/u)
+    }
+    await verifyPackagedDesktopRuntime(application, runtimeRoot, reviewed.upstreamVersion, { platform: 'win32', arch: 'x64' })
+    const runtimeBytes = readPackagedDesktopRuntimeDescriptor(application, runtimeRoot)
+    // The production verifier validates this immutable descriptor through Electron's ASAR filesystem.
+    const runtime = JSON.parse(runtimeBytes.toString('utf8')) as DesktopRuntimeDescriptor
+    assert.equal(runtime.release.version, reviewed.upstreamVersion, 'Observed Core runtime differs from the reviewed plan')
+    const runtimeSha256 = digest(runtimeBytes)
+    const executableSha256 = digest(readFileSync(application))
+    assert.equal(executableSha256, observed.executableSha256, 'Executable bytes changed during runtime verification')
+    observedCoreSource = verifyExpectedCoreSource({
+      ...observed, upstreamVersion: runtime.release.version, executableSha256, runtimeSha256,
+    }, expected)
+    identity = {
+      ...identity, sourceCommit, sourceTree, planSha256: observedCoreSource.planSha256, runtimeSha256,
+      executableSha256: observedCoreSource.executableSha256,
+      provisioningSha256: digest(readFileSync(join(resources, 'desktop-provisioning', 'plan.json'))),
+      capabilitySha256: digest(readFileSync(join(resources, 'managed-update', 'capability.json'))),
+    }
+    writeFileSync(join(output, 'desktop-runtime.json'), runtimeBytes)
+    copyFileSync(join(resources, 'desktop-provisioning', 'plan.json'), join(output, 'provisioning-plan.json'))
+    copyFileSync(join(resources, 'managed-update', 'capability.json'), join(output, 'capability.json'))
+    const scratch = resolve('.desktop-smoke')
+    mkdirSync(scratch, { recursive: true })
+    const home = mkdtempSync(join(scratch, 'packaged-copilot-'))
+    ownedDirectories.push(home)
+    const profile = join(home, 'profiles', 'desktop')
+    diagnosticProfile = profile
+    const legacySdk = mkdtempSync(join(scratch, 'legacy-mcp-sdk-'))
+    ownedDirectories.push(legacySdk)
+    const legacySdkLoaded = join(legacySdk, 'loaded')
+    preparePackagedCopilotHome(home, legacySdk)
+    const environment = desktopSmokeEnvironment(home)
+    const userData = join(home, 'electron-user-data')
     const metadata = execFileSync(
       join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
       ['-NoProfile', '-NonInteractive', '-Command', [
@@ -154,10 +301,18 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
         '  signature = (Get-AuthenticodeSignature -LiteralPath $file.FullName).Status.ToString()',
         '} | ConvertTo-Json',
       ].join('\n')],
-      { encoding: 'utf8', windowsHide: true, env: { ...environment, DSH_DESKTOP_SMOKE_EXECUTABLE: application } },
+      { encoding: 'utf8', windowsHide: true, timeout: 120_000, env: { ...environment, DSH_DESKTOP_SMOKE_EXECUTABLE: application } },
     )
+    const executableMetadata = JSON.parse(metadata) as Record<string, unknown>
+    assert.equal(executableMetadata.sha256, observedCoreSource.executableSha256)
+    assert.equal(executableMetadata.file, `${reviewed.identity.executableName}.exe`)
+    assert.equal(executableMetadata.productVersion, `${reviewed.version.split('-')[0]}.0`)
+    assert.equal(executableMetadata.productName, reviewed.identity.productName)
+    assert.equal(executableMetadata.fileDescription, reviewed.identity.productName)
     writeFileSync(join(output, 'executable.json'), metadata.trim() + '\n')
     record('package-identity')
+    let readReviewedClient: (() => string) | undefined
+    let installedClientSha256: string | undefined
     for (const phase of ['initial', 'restart'] as const) {
       record(`${phase}:launch`)
       app = await electron.launch({
@@ -173,20 +328,28 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       })
       assert.equal(resolve(await app.evaluate(({ app }) => app.getPath('userData'))), userData)
       page = await app.firstWindow()
-      const versionMenu = await app.evaluate(inspectDesktopVersionMenu, reviewed.version)
+      const versionMenu = await inspectDesktopVersionMenu(app, page, reviewed.version)
       versionMenus.push(versionMenu)
       writeFileSync(join(output, `${phase}-version-menu.json`), JSON.stringify(versionMenu, undefined, 2) + '\n')
       record(`${phase}:version-menu`)
       page.setDefaultTimeout(120_000)
-      await page.waitForFunction(() => {
-        const error = document.querySelector<HTMLElement>('#error')
-        return location.href === 'dsh-app://app/index.html'
-        || Boolean(error !== null && !error.hidden && error.textContent?.trim())
-      }, undefined, { timeout: 300_000 })
-      if (page.url() !== 'dsh-app://app/index.html') {
+      await page.waitForFunction(packagedCopilotStartupReady, undefined, { timeout: 300_000 })
+      if (page.url() !== 'dsh-app://app/') {
         throw new Error(`Packaged Desktop startup failed: ${safeDiagnostic(await page.locator('#error').innerText())}`)
       }
       record(`${phase}:application`)
+      const configureLater = page.getByRole('button', { name: 'Configure later', exact: true })
+      let providerPromptVisible = false
+      try {
+        await configureLater.waitFor({ state: 'visible', timeout: phase === 'initial' ? 30_000 : 5_000 })
+        providerPromptVisible = true
+      } catch (error: unknown) {
+        if (!(error instanceof Error) || error.name !== 'TimeoutError') throw error
+      }
+      if (providerPromptVisible) {
+        await configureLater.click()
+        record(`${phase}:provider-deferred`)
+      }
       await page.getByRole('button', { name: 'Settings', exact: true }).click()
       const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
       await settings.getByRole('button', { name: 'Models', exact: true }).click()
@@ -212,7 +375,7 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       const managementText = await management.innerText()
       assert(!managementText.includes('Compatibility and existing configurations'),
         'Manage must not restore the removed compatibility disclosure')
-      assert.equal(await management.locator('[data-dsh-github-copilot-compatibility]').count(), 0,
+      assert.equal(await account.locator('[data-dsh-github-copilot-compatibility]').count(), 0,
         'Manage must not restore the removed compatibility disclosure component')
       assert.equal(await account.locator('[data-dsh-github-copilot-auth-notice]').count(), 0,
         'Read-only acceptance must not initiate device authorization')
@@ -220,6 +383,7 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
         'Read-only acceptance must not create or open a verification URL')
       await page.screenshot({ path: join(output, `${phase}-account.png`) })
       const settingsEvidence = await inspectPackagedCopilotSettings(settings)
+      assertCopilotSettingsEvidence(settingsEvidence)
       settingsObservations.push(settingsEvidence)
       writeFileSync(join(output, `${phase}-settings-readonly.json`), JSON.stringify(settingsEvidence, undefined, 2) + '\n')
       await settings.locator('[data-dsh-web-search-routing]').screenshot({ path: join(output, `${phase}-search-catalog.png`) })
@@ -241,10 +405,18 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
           cwd: profile, env: packagedDesktopRuntimeEnvironment(environment),
           stdio: ['ignore', stdout, stderrFile], timeout: 120_000, windowsHide: true,
         })
+      } catch (error) {
+        retain(error)
+        throw error
       } finally {
-        closeSync(stdout)
-        if (stderrFile !== undefined) closeSync(stderrFile)
+        for (const descriptor of [stdout, stderrFile]) {
+          if (descriptor === undefined) continue
+          try { closeSync(descriptor) } catch (error) {
+            cleanupErrors.push(describeError(error)); retain(error)
+          }
+        }
       }
+      if (failed) throw failure
       const graphResult: unknown = JSON.parse(readFileSync(graphOutput, 'utf8'))
       assert(typeof graphResult === 'object' && graphResult !== null
       && 'valid' in graphResult && graphResult.valid === true
@@ -265,26 +437,53 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       assert(!existsSync(legacySdkLoaded), 'Packaged Host must not load the ancestor MCP SDK')
       record(`${phase}:packaged-graph`)
       if (phase === 'restart') {
-        await capturePackagedUsageModules(page)
-        for (const provider of ['github-copilot', 'github-copilot-preview']) {
-          positiveUsage.push(await inspectPositiveCopilotUsage(page, provider))
+        const clientPath = join(profile, 'node_modules', 'dsh-github-copilot', 'lib', 'client.js')
+        readReviewedClient = (): string => {
+          const original = lstatSync(clientPath)
+          assert(original.isFile() && !original.isSymbolicLink() && original.size > 0 && original.size <= 2 * 1024 * 1024,
+            'Positive usage Client must be a bounded regular file')
+          const descriptor = openSync(clientPath, 'r')
+          let bytes: Buffer | undefined
+          try {
+            const before = fstatSync(descriptor)
+            assert(before.isFile() && before.dev === original.dev && before.ino === original.ino && before.size === original.size)
+            bytes = readFileSync(descriptor)
+            const after = fstatSync(descriptor)
+            assert(bytes.length === before.size && after.size === before.size && after.mtimeMs === before.mtimeMs
+              && after.ctimeMs === before.ctimeMs, 'Positive usage Client changed during inspection')
+          } catch (error) { retain(error); throw error }
+          finally {
+            try { closeSync(descriptor) } catch (error) { cleanupErrors.push(describeError(error)); retain(error) }
+          }
+          if (failed) throw failure
+          assert(bytes !== undefined)
+          const sha256 = digest(bytes)
+          assertReviewedCopilotUsageClient(copilot.source, sha256)
+          return sha256
         }
+        installedClientSha256 = readReviewedClient()
+        let restoreCapture: (() => Promise<void>) | undefined
+        try {
+          restoreCapture = await capturePackagedUsageModules(page)
+          for (const provider of ['github-copilot', 'github-copilot-preview']) {
+            positiveUsage.push(await inspectPositiveCopilotUsage(page, provider))
+          }
+        } catch (error) { retain(error); throw error }
+        finally {
+          try { await restoreCapture?.() } catch (error) { cleanupErrors.push(describeError(error)); retain(error) }
+        }
+        if (failed) throw failure
         assert.equal(await page.locator('[data-desktop-usage-acceptance]').count(), 0)
         await page.getByRole('button', { name: 'Settings', exact: true }).click()
         const restoredSettings = page.getByRole('dialog', { name: 'Settings', exact: true })
         await restoredSettings.getByRole('button', { name: 'Models', exact: true }).click()
         assert.deepEqual(await inspectSignedOutCopilotUsage(page), usageEvidence)
         await page.screenshot({ path: join(output, 'positive-usage-cleanup.png') })
-        writeFileSync(join(output, 'positive-usage.json'), JSON.stringify({
-          runtimeSha256,
-          installedClientSha256: createHash('sha256').update(readFileSync(join(
-            profile, 'node_modules', 'dsh-github-copilot', 'lib', 'client.js',
-          ))).digest('hex'),
-          pluginSource: copilot.source,
-          cases: positiveUsage,
-          originalSignedOutApplicationRestored: true,
-          hostTransport: 'not-provided-to-isolated-fixture',
-        }, undefined, 2) + '\n')
+        assert.equal(readReviewedClient(), installedClientSha256, 'Positive usage Client bytes must remain unchanged')
+        writePackagedProof(output, 'positive-usage.json', {
+          runtimeSha256, installedClientSha256, pluginSource: copilot.source, cases: positiveUsage,
+          originalSignedOutApplicationRestored: true, hostTransport: 'not-provided-to-isolated-fixture',
+        })
         record(`${phase}:positive-usage`)
       }
       const receipts = readFileSync(join(profile, 'desktop-plugin-receipts.json'))
@@ -301,55 +500,75 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
     assert.deepEqual(usageCapabilities[0], usageCapabilities[1], 'Restart must preserve the required usage capability')
     assert.deepEqual(signedOutUsage[0], signedOutUsage[1], 'Restart must preserve the absent signed-out usage surface')
     assert.deepEqual(settingsObservations[0], settingsObservations[1], 'Restart must preserve schema-3 settings evidence')
+    assert(readReviewedClient !== undefined && installedClientSha256 !== undefined, 'Positive Client inspection must precede native composer')
+    const readNativeClient = readReviewedClient
+    assert.equal(readNativeClient(), installedClientSha256)
     const seeder = fileURLToPath(new URL('./seed-native-composer.mjs', import.meta.url))
     const seedOwnership = randomUUID()
     writeFileSync(join(home, 'native-composer-owner.json'), JSON.stringify({
       kind: 'desktop-native-composer-smoke', home, token: seedOwnership,
     }), { flag: 'wx' })
-    const seedOutput = openSync(join(output, 'native-composer-seed.json'), 'w')
+    const seedPath = join(output, 'native-composer-seed.json')
+    const seedOutput = openSync(seedPath, 'wx', 0o600)
     try {
       execFileSync(application, [seeder, runtimeRoot, home, seedOwnership], {
         cwd: profile, env: packagedDesktopRuntimeEnvironment(environment),
-        stdio: ['ignore', seedOutput, 'inherit'], timeout: 120_000, windowsHide: true,
+        stdio: ['ignore', seedOutput, 'ignore'], timeout: 120_000, windowsHide: true,
       })
-    } finally { closeSync(seedOutput) }
+    } catch (error) { retain(error); throw error }
+    finally {
+      try { closeSync(seedOutput) } catch (error) { cleanupErrors.push(describeError(error)); retain(error) }
+    }
+    if (failed) throw failure
+    const seedStat = lstatSync(seedPath)
+    assert(seedStat.isFile() && !seedStat.isSymbolicLink() && seedStat.size > 0 && seedStat.size <= 16384)
+    const seedBytes = readFileSync(seedPath)
+    assert.equal(seedBytes.length, seedStat.size)
+    const seed: unknown = JSON.parse(seedBytes.toString('utf8'))
+    assertNativeComposerSeed(seed)
+    const seedSha256 = digest(seedBytes)
     record('native-composer:seeded')
+    record('native-composer:launch')
     app = await electron.launch({ executablePath: application, args: [`--user-data-dir=${userData}`], env: environment, timeout: 120_000 })
+    assert.equal(resolve(await app.evaluate(({ app }) => app.getPath('userData'))), userData)
     page = await app.firstWindow()
     page.setDefaultTimeout(120_000)
-    await page.waitForURL('dsh-app://app/index.html', { timeout: 300_000 })
+    await page.waitForFunction(packagedCopilotStartupReady, undefined, { timeout: 300_000 })
+    assert.equal(page.url(), 'dsh-app://app/', 'Native composer must use the alpha2 application root')
     await page.getByRole('button', { name: 'Settings', exact: true }).waitFor({ state: 'visible' })
+    record('native-composer:application')
     const inspectedPage = page
-    const nativeObservation = await observeNativeComposerErrors(inspectedPage, async () => {
-      // Inspection ends with an awaited browser focus roundtrip. Seal after
-      // its final receipt check, before initiating the owned Host shutdown.
-      const inspection = await inspectNativeComposerGeometry(inspectedPage, output)
-      assert.equal(createHash('sha256').update(readFileSync(join(profile, 'desktop-plugin-receipts.json'))).digest('hex'), inventories[0])
-      return inspection
+    const { inspection, rendererErrors } = await observeNativeComposerErrors(inspectedPage, async () => {
+      const result = await inspectNativeComposerGeometry(inspectedPage, output)
+      assert.equal(digest(readFileSync(join(profile, 'desktop-plugin-receipts.json'))), inventories[0])
+      assert.equal(readNativeClient(), installedClientSha256, 'Native composer must preserve the original Client bytes')
+      return result
     })
-    const { inspection: nativeInspection, rendererErrors: nativeErrors } = nativeObservation
     const nativeComposerEvidence = {
-      schemaVersion: 1, scope: 'actual-packaged-native-composer-and-released-client', sourceCommit,
+      ...identity, schemaVersion: 2, scope: 'actual-packaged-native-composer-and-released-client', seedSha256,
       sessionHistory: 'synthetic-persisted-in-isolated-home', quota: 'signed-out-host-response-no-credentials',
-      runtimeSha256, pluginSource: copilot.source,
-      installedClientSha256: createHash('sha256').update(readFileSync(join(profile, 'node_modules', 'dsh-github-copilot', 'lib', 'client.js'))).digest('hex'),
-      geometry: nativeInspection.geometry, nativeDialogs: nativeInspection.nativeDialogs,
-      copilotDialog: nativeInspection.copilotDialog,
-      rendererErrors: nativeErrors, realModelRound: false, realOAuth: false,
+      pluginSource: copilot.source, installedClientSha256,
+      geometry: inspection.geometry, nativeDialogs: inspection.nativeDialogs, copilotDialog: inspection.copilotDialog,
+      rendererErrors, realModelRound: false, realOAuth: false,
     }
-    writeFileSync(join(output, 'native-composer-geometry.json'), JSON.stringify(nativeComposerEvidence, undefined, 2) + '\n')
+    assertNativeComposerProof(nativeComposerEvidence, identity as PackagedProofIdentity, copilot.source, seedSha256, installedClientSha256)
+    record('native-composer:observed')
     await app.close()
     app = undefined
     page = undefined
     record('native-composer:closed')
-    await options.inspectProfile?.(Object.freeze({ application, runtimeRoot, home, profile, output }))
-    writeFileSync(join(output, 'acceptance.json'), JSON.stringify({
-      sourceCommit,
+    assert.equal(digest(readFileSync(join(profile, 'desktop-plugin-receipts.json'))), inventories[0])
+    assert.equal(readNativeClient(), installedClientSha256, 'Closed native composer must retain the original Client bytes')
+    assert(!existsSync(legacySdkLoaded), 'Native composer must not load the ancestor MCP SDK')
+    writePackagedProof(output, 'native-composer-geometry.json', nativeComposerEvidence)
+    functional = {
+      ...identity, schemaVersion: 3, scope: 'packaged-functional-observations',
+      functionalAssertionsCompleted: true, normalAcceptanceCompleted: false, cleanupVerified: false,
       desktopVersion: reviewed.version,
       versionMenus,
       runtimeVersion: runtime.release.version,
       plugin: copilot.source,
-      transport: 'packaged Electron dsh-app byte pipes',
+      transport: 'official Web-backed Desktop Host with packaged Electron dsh-app origin bridge',
       isolatedHome: true,
       onboardingNoticeDismissed: true,
       restartReceiptSha256: inventories[0],
@@ -376,55 +595,73 @@ export async function runPackagedCopilotAcceptance(options: PackagedCopilotAccep
       realSearch: false,
       installerUpgradeVerified: false,
       timeline,
-    }, undefined, 2) + '\n')
+    }
+    writePackagedProof(output, 'functional-results.json', functional)
+    await options.inspectProfile?.(Object.freeze({ application, runtimeRoot, home, profile, output }))
   } catch (error) {
-    failure = error
+    retain(error)
     record('failure')
-    let visibleText: string | undefined
-    let captureError: string | undefined
-    if (page !== undefined && !page.isClosed()) {
-      try {
+    try {
+      let visibleText: string | undefined
+      let captureError: string | undefined
+      if (page !== undefined && !page.isClosed()) {
         const rawText = await page.locator('body').innerText({ timeout: 5000 })
-        visibleText = safeDiagnostic(rawText)
-        if (rawText === visibleText) {
-          await page.screenshot({ path: join(output, 'failure.png'), timeout: 5000 })
-        } else {
-          captureError = 'Screenshot omitted because visible diagnostics required redaction'
-        }
-      } catch (diagnosticError) {
-        captureError = safeDiagnostic(String(diagnosticError))
+        visibleText = safeDiagnostic(rawText).slice(0, 8192)
+        if (rawText === visibleText) await page.screenshot({ path: join(output, 'failure.png'), timeout: 5000 })
+        else captureError = 'Screenshot omitted because visible diagnostics required redaction or truncation'
+      }
+      diagnostics = {
+        visibleText, captureError, stderrTail: safeDiagnostic(stderr), stderrTruncated, timeline,
+        profileFilesPresentBeforeCleanup: Object.fromEntries([
+          'package.json', 'desktop-plugin-receipts.json', 'desktop-plugin-provisioning-state.json',
+        ].map(file => [file, diagnosticProfile !== undefined && existsSync(join(diagnosticProfile, file))])),
+        realOAuth: false, realModelRound: false, realSearch: false,
+        verificationNavigationExercised: false, manualVerificationAddressObserved: false,
+      }
+    } catch (diagnosticError) {
+      diagnosticErrors.push(describeError(diagnosticError))
+    }
+    writeFailure(false)
+  } finally {
+    try { await app?.close() } catch (error) {
+      cleanupErrors.push(describeError(error)); retain(error)
+    }
+    for (const path of ownedDirectories) {
+      try {
+        removeOwnedDirectory(path)
+        assert(!existsSync(path), 'Owned acceptance directory remains after cleanup')
+      } catch (error) {
+        cleanupErrors.push(describeError(error)); retain(error)
       }
     }
-    const diagnostic = {
-      error: safeDiagnostic(String(error)), visibleText, captureError,
-      stderrTail: safeDiagnostic(stderr), stderrTruncated, timeline,
-      profileFilesPresent: Object.fromEntries([
-        'package.json', 'desktop-plugin-receipts.json', 'desktop-plugin-provisioning-state.json',
-      ].map(file => [file, existsSync(join(profile, file))])),
-      realOAuth: false, realModelRound: false,
-    }
-    writeFileSync(join(output, 'failure.json'), JSON.stringify(diagnostic, undefined, 2) + '\n')
-    console.error(JSON.stringify(diagnostic))
-    throw error
-  } finally {
-    const cleanupErrors: unknown[] = []
-    try { await app?.close() } catch (error) { cleanupErrors.push(error) }
-    for (const path of [home, legacySdk]) {
-      try { removeOwnedDirectory(path) } catch (error) { cleanupErrors.push(error) }
-    }
-    if (cleanupErrors.length > 0) {
-      throw new AggregateError([
-        ...(failure === undefined ? [] : [failure]), ...cleanupErrors,
-      ], 'Packaged Copilot acceptance cleanup failed')
-    }
+  }
+  if (failed) {
+    writeFailure(true)
+    throw failure
+  }
+  try {
+    assert(functional !== undefined, 'Functional observations must precede ordinary acceptance')
+    assert(observedCoreSource !== undefined, 'Observed Core facts must precede ordinary acceptance')
+    writePackagedProof(output, 'acceptance.json', {
+      ...functional, scope: 'packaged-acceptance', normalAcceptanceCompleted: true, cleanupVerified: true,
+    })
+    return observedCoreSource
+  } catch (error) {
+    retain(error)
+    writeFailure(true)
+    throw failure
   }
 }
 
 if (import.meta.main) {
   const { values } = parseArgs({
-    options: { application: { type: 'string' }, output: { type: 'string' } },
+    options: {
+      application: { type: 'string' }, output: { type: 'string' }, 'observer-cleanup-canary': { type: 'boolean' },
+    },
     allowPositionals: false,
   })
   assert(values.application && values.output, 'Packaged application and evidence directory are required')
-  await runPackagedCopilotAcceptance({ application: values.application, output: values.output })
+  const options = { application: values.application, output: values.output }
+  if (values['observer-cleanup-canary']) await runPackagedCopilotObserverCanary(options, runPackagedCopilotAcceptance)
+  else await runPackagedCopilotAcceptance(options)
 }

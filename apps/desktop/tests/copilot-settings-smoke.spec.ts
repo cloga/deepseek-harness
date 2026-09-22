@@ -112,8 +112,9 @@ describe('read-only packaged Copilot settings acceptance', () => {
 
   it.each([
     'empty-dialog', 'missing-account', 'account-loading', 'account-error', 'sign-in-disabled', 'signed-in',
-    'missing-search', 'catalog-disabled', 'catalog-error', 'catalog-mismatch', 'duplicate', 'copilot-unavailable', 'legacy-fixed',
-    'legacy-fallback-label', 'model-prerequisite',
+    'missing-search', 'catalog-disabled', 'catalog-error', 'catalog-mismatch', 'duplicate', 'duplicate-fallback',
+    'copilot-unavailable', 'legacy-fixed', 'non-auto-primary',
+    'legacy-primary-label', 'legacy-fallback-label', 'model-input', 'model-prerequisite',
   ] as const)(
     'rejects %s instead of reporting successful Remote reads', async (damage) => {
       const { root, settings } = fixture()
@@ -138,16 +139,22 @@ describe('read-only packaged Copilot settings acceptance', () => {
         root.querySelector('[data-dsh-web-search-routing] [role="status"]')!.textContent = 'Search provider list is unavailable.'
       } else if (damage === 'catalog-mismatch') {
         fallback.insertAdjacentHTML('beforeend', '<option value="other">Other</option>')
-      } else if (damage === 'duplicate') {
-        primary.insertAdjacentHTML('beforeend', '<option value="github-copilot-hosted">Duplicate</option>')
+      } else if (damage === 'duplicate' || damage === 'duplicate-fallback') {
+        const select = damage === 'duplicate' ? primary : fallback
+        select.insertAdjacentHTML('beforeend', '<option value="github-copilot-hosted">Duplicate</option>')
       } else if (damage === 'copilot-unavailable') {
         for (const option of root.querySelectorAll<HTMLOptionElement>('option[value="github-copilot-hosted"]')) option.disabled = true
       } else if (damage === 'legacy-fixed') {
         primary.querySelector('option[value="auto"]')!.setAttribute('value', 'fixed')
-      } else if (damage === 'legacy-fallback-label') {
-        fallback.closest('label')!.querySelector('span')!.textContent = 'Default provider'
+      } else if (damage === 'non-auto-primary') {
+        primary.value = 'github-copilot-hosted'
+      } else if (damage === 'legacy-primary-label' || damage === 'legacy-fallback-label') {
+        const select = damage === 'legacy-primary-label' ? primary : fallback
+        select.closest('label')!.querySelector('span')!.textContent = 'Default provider'
+      } else if (damage === 'model-input') {
+        fallback.insertAdjacentHTML('afterend', '<input>')
       } else {
-        fallback.insertAdjacentHTML('afterend', '<input data-dsh-copilot-search-model>')
+        fallback.insertAdjacentHTML('afterend', '<select data-dsh-copilot-search-model><option>Model</option></select>')
       }
       await expect(inspectPackagedCopilotSettings(settings)).rejects.toThrow()
     },

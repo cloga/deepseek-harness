@@ -22,6 +22,10 @@ interface Receipt {
   preferences: { sandbox: boolean; contextIsolation: boolean; nodeIntegration: boolean }
   initialDocument: DocumentObservation
   ownedDocument: DocumentObservation
+  httpInitialDocument: DocumentObservation
+  httpOwnedDocument: DocumentObservation
+  httpNavigationEvents: { url: string; prevented: boolean }[]
+  httpServerClosed: boolean
   cases: {
     name: string
     externalUrls: string[]
@@ -33,7 +37,6 @@ interface Receipt {
   createdWindows: number
   blockedRequests: string[]
   openFailures: number
-  recoveries: string[]
   remainingWindows: number
   error?: string
 }
@@ -173,21 +176,34 @@ it.skipIf(process.platform !== 'win32')('dispatches real Electron navigation thr
       ['window-open-https', 'https://example.invalid/script'],
       ['window-open-http', 'http://example.invalid/script'],
     ]
+    const httpDocument = new URL(receipt.httpInitialDocument.url)
+    expect(httpDocument.protocol).toBe('http:')
+    expect(httpDocument.hostname).toBe('127.0.0.1')
+    expect(Number(httpDocument.port)).toBeGreaterThan(0)
+    expect(httpDocument.pathname).toBe('/index.html')
+    expect(receipt.httpInitialDocument).toEqual({ url: `${httpDocument.origin}/index.html`, documentId: '3', nodeAvailable: false })
+    const httpPopupCases = [
+      ['http-same-popup', `${httpDocument.origin}/next.html`],
+      ['http-same-window-open', `${httpDocument.origin}/next.html`],
+    ]
     expect(receipt.cases.map(result => result.name)).toEqual([
-      ...externalCases.map(([name]) => name), 'popup-about', 'popup-data', 'blocked-self',
+      ...externalCases.map(([name]) => name), 'popup-about', 'popup-data', 'blocked-self', 'blocked-recovery',
+      ...httpPopupCases.map(([name]) => name),
     ])
-    for (const [name, url] of externalCases) {
+    for (const [name, url] of [...externalCases, ...httpPopupCases]) {
       const result = receipt.cases.find(result => result.name === name)!
       expect(result.externalUrls, `${name}: exactly one OS-opener invocation`).toEqual([url])
       expect(result.navigationEvents).toEqual(name!.startsWith('oauth-') ? [{ url, prevented: true }] : [])
     }
     for (const result of receipt.cases) {
-      expect(result.document, `${result.name}: preserve the app document`).toEqual(receipt.initialDocument)
+      expect(result.document, `${result.name}: preserve the app document`).toEqual(
+        result.name.startsWith('http-same-') ? receipt.httpInitialDocument : receipt.initialDocument,
+      )
       expect(result.windowCount).toBe(1)
-      if (result.name.startsWith('window-open-') || result.name.startsWith('popup-')) {
+      if (result.name.startsWith('window-open-') || result.name.startsWith('popup-') || result.name === 'http-same-window-open') {
         expect(result.rendererResult, `${result.name}: Chromium must receive a denied popup`).toBe(true)
       }
-      if (result.name.startsWith('popup-') || result.name === 'blocked-self') expect(result.externalUrls).toEqual([])
+      if (result.name.startsWith('popup-') || result.name.startsWith('blocked-')) expect(result.externalUrls).toEqual([])
     }
     expect(receipt.cases.find(result => result.name === 'blocked-self')!.navigationEvents).toEqual([
       { url: 'navigation-forbidden://navigation-test/blocked', prevented: true },
@@ -198,7 +214,12 @@ it.skipIf(process.platform !== 'win32')('dispatches real Electron navigation thr
     expect(receipt.createdWindows).toBe(0)
     expect(receipt.blockedRequests, 'No network request should reach even the fixture safety net').toEqual([])
     expect(receipt.openFailures).toBe(0)
-    expect(receipt.recoveries).toEqual([])
+    expect(receipt.cases.find(result => result.name === 'blocked-recovery')!.navigationEvents).toEqual([
+      { url: 'dsh-recovery://restart/', prevented: true },
+    ])
+    expect(receipt.httpOwnedDocument).toEqual({ url: `${httpDocument.origin}/next.html`, documentId: '4', nodeAvailable: false })
+    expect(receipt.httpNavigationEvents).toEqual([{ url: `${httpDocument.origin}/next.html`, prevented: false }])
+    expect(receipt.httpServerClosed).toBe(true)
     expect(receipt.remainingWindows).toBe(0)
   } finally {
     await cleanup()

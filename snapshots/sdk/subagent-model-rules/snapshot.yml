@@ -1,0 +1,11 @@
+version: 1
+scenario: subagent-model-rules
+profile: sdk
+composition: sdk-subagent-model-rules
+recording: authored
+header:
+  class: sdk-subagent-model-rules
+  pin: true
+  systemPromptSource: sdk/text-turn
+  toolSchemasSource: sdk/text-turn
+  childSystemPrompts: [1]

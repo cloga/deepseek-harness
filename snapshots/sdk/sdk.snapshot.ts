@@ -113,6 +113,11 @@ interface SdkAssertions {
     /** Exact request configuration committed by the child runtime. */
     agentConfig: Readonly<Record<string, unknown>>
   }
+  /** Native delegation routes checked before normalization or golden refresh. */
+  nativeChildModelRoute?: {
+    parent: { provider: string; model: string }
+    child: { provider: string; model: string }
+  }
   /** Assembled model-facing tool names and required argument keys. */
   expectedTools?: Readonly<Record<string, readonly string[]>>
   /** Exact assembled system prompt for the root request. */
@@ -135,6 +140,13 @@ const SDK_ASSERTIONS: Readonly<Record<string, SdkAssertions>> = {
   },
   'subagent-continuable': {
     environment: { DSH_SNAPSHOT_HUMAN_STEER: '1' },
+  },
+  'subagent-model-rules': {
+    expectedFinalResponse: 'CHILD_OK',
+    nativeChildModelRoute: {
+      parent: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+      child: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+    },
   },
   'subagent-dsh-sdk-diagnostic': {
     environment: { DSH_TEST_CHILD_PATCH: dshSdkDiagnosticChildPatch },
@@ -419,6 +431,46 @@ function modelFromSession(log: string): { provider: string; model: string } {
     }
   }
   throw new Error('SDK snapshot session has no request model')
+}
+
+/** Assert native routing independently of authored replay streams and normalized goldens. */
+function verifyNativeChildModelRoute(
+  ordered: readonly PersistedLog[],
+  routes: NonNullable<SdkAssertions['nativeChildModelRoute']>,
+): void {
+  expect(ordered).toHaveLength(2)
+  const [parent, child] = ordered
+  if (parent === undefined || child === undefined) throw new Error('native route assertion requires a parent and child')
+  expect(child.header.parentSession).toBe(parent.header.id)
+  const parentEvents = records(parent.content)
+  const childEvents = records(child.content)
+  const calls = parentEvents.filter(event => event.type === 'tool/call')
+  expect(calls).toHaveLength(1)
+  expect(calls[0]).toMatchObject({ data: { name: 'subagent' } })
+  const call = calls[0]!.data as JsonObject
+  expect(JSON.parse(String(call.arguments))).toEqual({
+    description: 'Reply with CHILD_OK',
+    prompt: 'Reply with exactly the word CHILD_OK and nothing else.',
+  })
+  expect(parentEvents.filter(event => event.type === 'tool/result')).toMatchObject([
+    { data: { message: { content: [{ isError: false, content: [{ type: 'text', text: 'CHILD_OK' }] }] } } },
+  ])
+  expect(childEvents.filter(event => event.type === 'subagent/descriptor')).toMatchObject([
+    { data: { version: 3, mode: 'one-shot', provider: 'spawn', label: 'Reply with CHILD_OK' } },
+  ])
+  for (const [events, route] of [[parentEvents, routes.parent], [childEvents, routes.child]] as const) {
+    const headers = events.filter(event => event.type === 'request/header')
+    expect(headers.length).toBeGreaterThan(0)
+    for (const header of headers) expect(header).toMatchObject({ data: { header: { config: route } } })
+    const contexts = events.filter(event => event.type === 'request/context')
+    expect(contexts.length).toBeGreaterThan(0)
+    for (const context of contexts) expect(context).toMatchObject({ data: route })
+    const messages = events.filter(event => event.type === 'assistant/message')
+    expect(messages).toHaveLength(events === parentEvents ? 2 : 1)
+    for (const message of messages) expect(message).toMatchObject({ data: { message: { source: { kind: 'model', ...route } } } })
+    expect(events.filter(event => event.type === 'assistant/attempt')).toEqual([])
+    expect(events.filter(event => event.type === 'turn/end')).toMatchObject([{ data: { reason: { kind: 'completed' } } }])
+  }
 }
 
 function turnActions(log: string): TurnAction[] {
@@ -726,7 +778,7 @@ async function verifyHeaders(
   scenario: CorpusScenario,
   ordered: readonly PersistedLog[],
   ctx: NormalizeContext,
-  dshSdkChildConfig?: Readonly<Record<string, unknown>>,
+  childAgentConfig?: Readonly<Record<string, unknown>>,
 ): Promise<void> {
   const pin = headerPin(scenario)
   const [pinFixturePath] = await fixtureFiles(pin)
@@ -768,8 +820,8 @@ async function verifyHeaders(
     for (const [index, header] of headers.entries()) {
       const selectedSchemas = childSchemas.get(logIndex)?.[index]
       const base = reconstructed[index] ?? reconstructed[0]
-      const configured = logIndex === 1 && dshSdkChildConfig !== undefined
-        ? { ...base as JsonObject, config: dshSdkChildConfig }
+      const configured = logIndex === 1 && childAgentConfig !== undefined
+        ? { ...base as JsonObject, config: childAgentConfig }
         : base
       const expected = selectedSchemas === undefined
         ? configured
@@ -812,6 +864,17 @@ describe('TypeScript SDK snapshots over the jsonrpc runtime', () => {
         assertions.dshSdkChild !== undefined,
       )
       const actualContext = contextOf(ordered, cwd)
+      if (assertions.nativeChildModelRoute !== undefined) {
+        verifyNativeChildModelRoute(ordered, assertions.nativeChildModelRoute)
+      }
+      if (scenario.name === 'subagent-activation-limit') {
+        expect(ordered).toHaveLength(2)
+        const denied = records(ordered[0]!.content).find(record => record.type === 'tool/result'
+          && JSON.stringify(record).includes('call_over_capacity'))
+        expect(denied).toMatchObject({ data: {
+          message: { content: [{ isError: true, content: [{ type: 'text', text: expect.stringContaining('subagent limit reached (active child limit: 1)') }] }] },
+        } })
+      }
       if (scenario.name === 'tool-error-details') {
         const events = results.flatMap(result => result.events)
         const errors = events.filter(event => event.type === 'tool/result' || event.type === 'tool/ptc-dispatch')
@@ -894,7 +957,8 @@ describe('TypeScript SDK snapshots over the jsonrpc runtime', () => {
       const actualSnapshots = normalizeSessionSnapshots(ordered.map(log => log.content), actualContext)
       const expectedSnapshots = normalizeSessionSnapshots(expectedContents, expectedContext)
       expect(actualSnapshots.map(records), `${scenario.name}: sessions`).toEqual(expectedSnapshots.map(records))
-      await verifyHeaders(scenario, ordered, actualContext, assertions.dshSdkChild?.agentConfig)
+      await verifyHeaders(scenario, ordered, actualContext,
+        assertions.nativeChildModelRoute?.child ?? assertions.dshSdkChild?.agentConfig)
 
       // Genuine SDK protocol cases retain their secondary wire projections.
       const finalResult = results.at(-1)

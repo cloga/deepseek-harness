@@ -57,6 +57,15 @@ function policyWorkflow(commit: string): string {
 }
 
 describe('maintained repository reference policy', () => {
+  it('permits only the independent kit repository and its source URLs', () => {
+    for (const suffix of ['', '.git', '/tree/main/packages/entry']) {
+      expect(findRepositoryReferences('package.json', `${organizationUrl}/libreoffice-kit${suffix}`, new Set())).toEqual([])
+    }
+    for (const suffix of ['-other', '.example', 's']) {
+      expect(findRepositoryReferences('package.json', `${organizationUrl}/libreoffice-kit${suffix}`, new Set())).toHaveLength(1)
+    }
+  })
+
   it('admits only the fork policy checkout machine-pin token, including through the Git-backed scan', (test) => {
     const fixture = repository(test)
     const source = policyWorkflow(fixture.commit)

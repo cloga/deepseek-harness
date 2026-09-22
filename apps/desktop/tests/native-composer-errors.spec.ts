@@ -64,6 +64,27 @@ describe('native composer error observation lifetime', () => {
     expect(events.listenerCount('pageerror')).toBe(0)
   })
 
+  it.each(['primary', 'undefined', 'cleanup-only'] as const)('attempts both owned listener removals and retains %s failure', async (kind) => {
+    const { events, page } = fixture()
+    const primary = kind === 'undefined' ? undefined : new Error('original inspection')
+    const cleanup = new Error('first off failure')
+    const off = events.off.bind(events)
+    const removed: string[] = []
+    vi.spyOn(events, 'off').mockImplementation((name, listener) => {
+      off(name, listener)
+      removed.push(String(name))
+      if (name === 'pageerror') throw cleanup
+      return events
+    })
+    await expect(observeNativeComposerErrors(page, async () => {
+      if (kind !== 'cleanup-only') throw primary
+      return undefined
+    })).rejects.toBe(kind === 'cleanup-only' ? cleanup : primary)
+    expect(removed).toEqual(['pageerror', 'console'])
+    expect(events.listenerCount('console')).toBe(0)
+    expect(events.listenerCount('pageerror')).toBe(0)
+  })
+
   it('removes its callbacks and preserves an inspection failure without producing success evidence', async () => {
     const { events, page } = fixture()
     const failure = new Error('native dialog did not close')

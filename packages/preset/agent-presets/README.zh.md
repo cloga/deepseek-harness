@@ -29,7 +29,7 @@ kind: "package-reference"
 
 随附 Web 的 `standard`、`ptc` 与 `cordis` preset 包含[显式文件交付](../../client/ui-deliverables/README.zh.md#explicit-deliveries)。`minimal` preset 保留固定的双工具训练配置。
 
-`cordis` preset 将相邻的 `skills/` 目录注册为 `bundledSkillDir`，路径相对于 preset 文件解析。这些部署自带的 skill 即使打包在 Electron ASAR 中，也由宿主读取；项目、用户及自定义根目录仍使用已配置的文件系统服务。用户 skill 会覆盖同名的随附 skill。参见[随附 skill 决策](../../../.agents/notes/implemented/bug-fix/2026-09-18-cordis-bundled-skill-root.zh.md)。
+`cordis` preset 将相邻的 `skills/` 目录注册为 `bundledSkillDir`，路径相对于 preset 文件解析。这些部署自带的 skill 即使位于 Electron ASAR 中，也由宿主读取；项目、用户及自定义根目录仍使用已配置的文件系统服务。用户 skill 会覆盖同名的随附 skill。[Skill 文件系统](../../skill/skill-filesystem/README.zh.md)规定根目录排序与读取规则；[随附 skill 决策](../../../.agents/notes/implemented/bug-fix/2026-09-18-cordis-bundled-skill-root.zh.md)记录这项纠正。
 
 ### preset 给会话带来什么
 
@@ -181,6 +181,7 @@ agent-presets:
 - **健康问的是「装没装」，不是「能不能 import」**——发现过程证明组装能以加载器方言解析、由具名行组成，且对于每个能证明会启动的行，其引用的包存在于 harness 基址以上，或引用的文件确实存在；它从不 import 任何一个，因此入口文件缺失的包、在 apply 时抛错的插件、以及永远等待某个服务的插件，都仍在第一个会话处失败。`disabled` 是加载器唯一会插值的条目字段，因此该字段带表达式的行不予检查，而不是仅凭文件作出判断。
 - **副本是会漂移的快照**——升级部署不会更新随附 preset 的副本，本层也没有表达「standard 加一处改动」的 patch 语义；随附集合自己也接受同样的代价——`cordis` 与 `code` 都复制了 `standard` 的完整组装并在此基础上编辑——换来整份组装在一个文件里可读。
 - **根目录扫描不做监听**——每次读取都实际访问文件系统，这让名单保持新鲜，但每次 `list()` 会对每个根目录产生一次 `readdir`。
+- **官方 `0.1.6-alpha.2` 对随附 skill 的支持仍是部分支持**——读取器已经存在，但随附 Cordis preset 把部署自带目录归为自定义根。本 fork 只保留 preset 单行分类纠正，不引入通用文件系统适配层。当官方 preset 将该目录声明为 bundled，且打包后的发现检查与用户覆盖优先级检查通过时，移除这项纠正。
 
 <a id="dev-note"></a>
 ### 开发备注

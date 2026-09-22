@@ -24,18 +24,26 @@ export async function observeNativeComposerErrors<T>(
   const stop = (): void => {
     if (!active) return
     active = false
-    page.off('pageerror', onPageError)
-    page.off('console', onConsole)
+    let failed = false
+    let failure: unknown
+    try { page.off('pageerror', onPageError) } catch (error) { failed = true; failure = error }
+    try { page.off('console', onConsole) } catch (error) { if (!failed) { failed = true; failure = error } }
+    if (failed) throw failure
   }
+  let observed: { inspection: T } | undefined
+  let failed = false
+  let failure: unknown
   try {
     page.on('pageerror', onPageError)
     page.on('console', onConsole)
-    const inspection = await inspect()
-    stop()
-    const rendererErrors = Object.freeze([...errors])
-    assert.deepEqual(rendererErrors, [], 'Native composer acceptance must not produce renderer errors')
-    return { inspection, rendererErrors }
-  } finally {
-    stop()
+    observed = { inspection: await inspect() }
+  } catch (error) { failed = true; failure = error }
+  finally {
+    try { stop() } catch (error) { if (!failed) { failed = true; failure = error } }
   }
+  if (failed) throw failure
+  assert(observed !== undefined)
+  const rendererErrors = Object.freeze([...errors])
+  assert.deepEqual(rendererErrors, [], 'Native composer acceptance must not produce renderer errors')
+  return { inspection: observed.inspection, rendererErrors }
 }

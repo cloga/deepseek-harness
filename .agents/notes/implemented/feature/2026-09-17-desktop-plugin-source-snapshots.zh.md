@@ -10,9 +10,23 @@ Status: implemented
 
 ## 决策
 
-Desktop 在仅支持 registry 的 `npmRegistry` 与带证明的 `githubRelease` 来源之外，提供通用 `packageSpec` 来源。[Desktop README](../../../../apps/desktop/README.zh.md)负责支持的输入矩阵与用户恢复方式。本决策补充[验证 Release 事务决策](../architecture/2026-09-15-desktop-verified-release-plugin-transactions.zh.md)：来源快照复用其 profile 事务，但不宣称具备其不可变 Release 或发布者证据。[内置运行时决策](../architecture/2026-09-08-desktop-bundled-runtime-and-external-plugins.zh.md)继续负责应用包与共享模块身份。本决策不取代这两个决策。
+保留的 Desktop 获取后端在仅支持 registry 的 `npmRegistry` 与带证明的 `githubRelease` 来源之外，提供通用 `packageSpec` 来源。本决策负责其受限输入与恢复要求，不证明共享 Web PluginManager 已暴露这些能力。[官方优先迁移提案](../../proposed/architecture/2026-09-18-official-first-desktop-safety.zh.md)部分取代旧插件窗口集成；类型化 app-boot 准备和独立授权的壳激活仍在进行中，尚未验收。来源快照复用[验证 Release 事务](../architecture/2026-09-15-desktop-verified-release-plugin-transactions.zh.md)机制，但不宣称具备不可变 Release 或发布者证据。[内置运行时决策](../architecture/2026-09-08-desktop-bundled-runtime-and-external-plugins.zh.md)保留应用包与共享模块理由。
 
 [输入解析器](../../../../apps/desktop/src/plugin-install-spec.ts)接受刻意收窄的语法，而不是转发 pnpm 的完整传输语法。GitHub 获取通过无凭据的公开 API 请求把一个 ref 解析为完整 commit，再下载该 commit 的归档。它不调用 Git、不使用私有 GitHub 凭据，也不接受 SSH 与任意 Git 主机。省略 GitHub ref 时，仅在显式获取期间选择仓库默认 HEAD。
+
+### 受限来源输入
+
+保留的解析器区分 registry 选择器、公开 GitHub ref、显式本地路径与无凭据 HTTPS 归档。存在歧义的裸名称按 registry 包处理；仓库名不决定包身份。GitHub ref 可以指定分支、tag 或 commit，包括含斜杠的分支，但不支持 revision 表达式或 `semver:` 选择器。
+
+| 来源 | 接受的输入 | 保存的身份 |
+|---|---|---|
+| Registry | 包名，可含 scope，并可附带版本、tag 或 semver 范围 | 精确解析版本 |
+| 公开 GitHub | `github:owner/repo[#ref]`、`owner/repo[#ref]` 或 `https://github.com/owner/repo[.git][#ref]`，可添加 `git+` 前缀 | 完整 commit 和 profile 拥有的快照 |
+| 本地目录 | Windows/POSIX 绝对路径、显式 `./` 或 `../` 路径、`file:<path>` 或 `link:<path>` | 打包快照，绝不是实时链接 |
+| 本地归档 | 以 `.tgz` 或 `.tar.gz` 结尾的显式路径或 `file:<path>` | 复制快照 |
+| HTTPS 归档 | 以 `.tgz` 或 `.tar.gz` 结尾且不含 query、fragment 或自定义端口的无凭据 HTTPS URL | 下载快照 |
+
+来源重装是显式操作，可以在版本不变时选择新字节；再次选择本地来源需要显式路径。Registry 更新保留版本选择，经过验证的 Release 更新保留验证通道。这份解析器清单不暗示当前共享管理器 UI 已提供对应操作。
 
 ### 来源准备与输出
 
@@ -54,4 +68,4 @@ Desktop 在仅支持 registry 的 `npmRegistry` 与带证明的 `githubRelease` 
 
 [Lock 规范化测试](../../../../apps/desktop/tests/plugin-lock-normalization.spec.ts)保留无关解析数据与无需变更时的原始字节，拒绝不安全或损坏的输入，并要求写入前验证全部候选项。[真实 pnpm 规范化回归](../../../../apps/desktop/tests/plugin-lock-normalization-pnpm.spec.ts)在普通添加、切换启用状态与删除操作前植入现有 receipt 支持的分隔符差异；捕获到的首次冻结 pnpm 调用输入必须仅包含获准的 specifier 修正，manifest 与已选解析结果保持不变。
 
-[事务测试](../../../../apps/desktop/tests/project-manager.spec.ts)要求验证冻结迁移、保留来源重建、同版本字节替换、被替换的 source lock 与 receipt 清理、可选替换失败、损坏快照删除，以及保留快照损坏时在停止 Host 前失败。[插件窗口测试](../../../../apps/desktop/tests/plugin-manager.spec.ts)覆盖来源重装与验证通道保留。目标平台 Desktop 验收还要求验证实际插件窗口、最终位置 Host 启动与回滚行为；源码测试不构成特定外部插件运行时或认证后模型使用的验收。
+[事务测试](../../../../apps/desktop/tests/project-manager.spec.ts)要求验证冻结迁移、保留来源重建、同版本字节替换、被替换的 source lock 与 receipt 清理、可选替换失败、损坏快照删除，以及保留快照损坏时在停止 Host 前失败。此前插件窗口的覆盖不构成共享 Web PluginManager 的验收。来源重装、验证通道保留、独立授权的最终位置 Host 启动与回滚仍是集成验收要求；源码测试不构成特定外部插件运行时或认证后模型使用的验收。

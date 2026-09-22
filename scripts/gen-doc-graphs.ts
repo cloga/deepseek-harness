@@ -63,6 +63,7 @@ type EventReceiverKind = 'context' | 'agent-dispatch' | 'events-service'
 const GROUP_ORDER = [
   'util',
   'attachment',
+  'document',
   'llm',
   'core',
   'typert',
@@ -97,7 +98,48 @@ const GROUP_ORDER = [
   'ui',
 ]
 
-const SERVICE_ROLES: ServiceRole[] = [
+/** Curated ownership roles for every source-discovered Host service. */
+export const SERVICE_ROLES: readonly ServiceRole[] = [
+  {
+    key: 'hmr',
+    pkg: 'hmr',
+    title: 'Serialized module and configuration reloads',
+    mode: 'core',
+    consumers: ['app-boot'],
+    note: 'Owns module and exact configuration watchers; application mutations share its queue and automatic reloads await the application file lock.',
+  },
+  {
+    key: 'pluginManager',
+    pkg: 'plugin-manager',
+    title: 'Current-profile plugin and bundle management',
+    mode: 'core',
+    consumers: ['plugin-manager', 'ui-settings-plugin-inventory'],
+    note: 'Shares profile package operations with the CLI and reports persisted and running state to Web and agent callers.',
+  },
+  {
+    key: 'profileContext',
+    pkg: 'app-boot',
+    title: 'Launcher-owned profile data',
+    mode: 'core',
+    consumers: ['plugin-manager'],
+    note: 'The dsh launcher supplies data-only profile locations and composition inputs; reload scheduling belongs to dsh-hmr.',
+  },
+  {
+    key: 'profilePackageTransactions',
+    pkg: 'app-boot',
+    title: 'Launcher-owned package preparation',
+    mode: 'core',
+    consumers: ['plugin-manager'],
+    note: 'Desktop Host supplies fixed-profile preparation and cancellation; Electron owns acquisition and separate activation.',
+  },
+  {
+    key: 'connection',
+    pkg: 'client-connection',
+    title: 'Authenticated browser transport',
+    mode: 'core',
+    consumers: ['api-gateway', 'host-frontend-static'],
+    note: 'Owns browser authentication and shared HTTP request dispatch; API adapters register endpoints and streams.',
+  },
   {
     key: 'mcpResources',
     pkg: 'mcp-resources',
@@ -124,6 +166,11 @@ const SERVICE_ROLES: ServiceRole[] = [
     implementations: ['experimental-computer-use-cua-driver-mcp', 'experimental-computer-use-cua-driver-native'],
     consumers: ['experimental-computer-use-cua-driver-mcp', 'experimental-computer-use-cua-driver-native'],
     note: 'One provider-owned name per service instance. Each provider also owns its model tools; the service has no common action API, runtime selection, or Session workflow lock.',
+  },
+  {
+    key: 'officeToPdf', pkg: 'office-to-pdf', title: 'Office to PDF conversion',
+    mode: 'core', consumers: ['client-ui-sidebar-documentpreview'],
+    note: 'Authorized Office bytes are converted on the Host using the declared native target engine, or Node WASM when no native target is declared.',
   },
   {
     key: 'attachments',
@@ -225,6 +272,13 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Host workspace file Remote service',
     mode: 'core',
     note: 'Serves stat, paged text, byte windows, directory listings, and the change feed for files inside a Session\'s workspace root, confined by lstat, containment, and a stat re-check.',
+  },
+  {
+    key: 'workspaceChanges',
+    pkg: 'workspace-changes',
+    title: 'Host per-turn changed-file summaries',
+    mode: 'core',
+    note: 'Serves the summary each workspace/changes event announced and each listed file\'s turn-start and turn-end comparison, by Session and event sequence, until that Session is disposed; the log carries only the turn.',
   },
   {
     key: 'terminalController',
@@ -461,7 +515,7 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'skill',
     title: 'Skill provider registry',
     mode: 'seam',
-    implementations: ['skill-badge', 'skill-filesystem'],
+    implementations: ['skill-badge', 'skill-filesystem', 'skill-office'],
     consumers: ['tool-skill'],
     note: 'Merges provider skill catalogs; tool-skill renders the session-prefix catalog and loads complete skill bodies.',
   },

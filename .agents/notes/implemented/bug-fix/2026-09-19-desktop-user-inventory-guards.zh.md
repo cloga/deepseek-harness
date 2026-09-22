@@ -20,7 +20,7 @@ Profile 初始化在任何写入前拒绝已有包、运行时或保留的 Deskt
 
 Release plan 不得自动接管冲突的手动安装。只有已启用、user-owned 且验证来源与计划完全相同的包才能自动重建。不同的来源、版本、commit、产物、安装类型或用户禁用状态需要显式用户操作。Optional 重建失败且会移除受保护包时，整次事务失败。
 
-普通启动 IPC 和不依赖 preload 的应急重置入口都必须取得原生破坏性操作确认，默认选择取消，然后才停止 Host 或修改 profile 文件。取消会恢复恢复操作控件；退出应用或关闭所属窗口会使迟到的确认失效。在持有锁并停止 Host 后，重置会先验证配置和产物的私有副本，再执行首次破坏性写入。生成的 node_modules 不复制；配置链接会拒绝重置。复制失败会尝试重启原 Host，最终就绪或失败则写入独立的不可变结果。
+任何破坏性 profile 替换所保留的后端保护都要求持有锁、停止 Host，并在首次破坏性写入前验证配置和产物的私有副本。生成的 node_modules 不复制，配置链接会被拒绝；复制失败会尝试重启原 Host，最终就绪或失败则写入独立的不可变结果。官方 alpha2 使用原生恢复，不提供启动期 configuration-reset IPC 或不依赖 preload 的应急重置文档；这些后端要求不会重新引入已经退役的控件。
 
 本决策部分取代[归属决策](2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md)和[验证事务决策](../architecture/2026-09-15-desktop-verified-release-plugin-transactions.zh.md)中的 desired 同名优先级及 optional 失败排除规则。其来源验证、归属迁移、锁文件规范化与常规激活回滚仍然适用。公开 IPC、插件 receipt、来源和 Session schema 保持不变；私有激活 journal 版本 2 增加恢复证据。
 

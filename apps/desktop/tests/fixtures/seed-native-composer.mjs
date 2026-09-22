@@ -51,12 +51,18 @@ session.append('step/end', { turn: 1, step: 1 })
 session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
 const events = session.snapshotEvents().map((event, index) => ({ ...event, time: createdAt + index * 100 }))
 const ctx = new Context()
+let failed = false
+let failure
+let evidence
+const retain = error => { if (!failed) { failed = true; failure = error } }
 try {
   await ctx.plugin(JsonlSessionPersistence, { root: join(home, 'sessions') })
   const persistence = ctx.get('sessionPersistence')
   assert(persistence)
   const handle = await persistence.create(header)
-  try { await handle.append(events) } finally { await handle.close() }
+  try { await handle.append(events) } catch (error) { retain(error) }
+  finally { try { await handle.close() } catch (error) { retain(error) } }
+  if (failed) throw failure
   // The earlier empty-app phases already initialized the registry, so a new log
   // needs explicit public workspace membership rather than bootstrap discovery.
   await ctx.plugin(Storage)
@@ -68,8 +74,12 @@ try {
   const owner = await registry.create(workspace)
   await owner.attachSession(id)
   assert(owner.sessionIds.includes(id))
-  console.log(JSON.stringify({ sessionId: id, scope: 'test-owned-persisted-session-with-synthetic-history-and-token-counts',
-    workspaceRegistered: true, provider: 'github-copilot', seederModelCalls: 0, liveAccountQuota: false }))
-} finally {
-  await ctx.fiber.dispose()
+  evidence = { sessionId: id, scope: 'test-owned-persisted-session-with-synthetic-history-and-token-counts',
+    workspaceRegistered: true, provider: 'github-copilot', seederModelCalls: 0, liveAccountQuota: false }
+} catch (error) { retain(error) }
+finally {
+  try { await ctx.fiber.dispose() } catch (error) { retain(error) }
 }
+if (failed) throw failure
+assert(evidence)
+console.log(JSON.stringify(evidence))

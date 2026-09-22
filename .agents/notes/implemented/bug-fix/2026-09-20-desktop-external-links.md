@@ -6,24 +6,24 @@ English | [中文](2026-09-20-desktop-external-links.zh.md)
 
 ## Problem
 
-Denying every popup and cancelling every external navigation protects the owned application document but leaves ordinary web links without a destination. Changing one provider's anchor target cannot repair a shell that rejects both opening paths. The maintained shell also owns recovery actions that must remain separate from ordinary external navigation.
+The alpha1 maintenance shell rejected web links on both opening paths. Official alpha2 already dispatches HTTP(S) externally, denies popups, shares window creation, and permits same-origin HTTP navigation in the owned window. Its remaining gaps are unguarded URL parsing, original rather than canonical dispatch, uncontained OS-opening failure and missing redacted localized advice. This adaptation preserves that partial official parity rather than installing a second navigation policy or restoring alpha1 recovery plumbing.
 
 ## Decision
 
-[Window navigation](../../../../apps/desktop/src/window-navigation.ts) owns one policy for the product and plugin windows. It follows the official Desktop behavior of handing HTTP and HTTPS destinations to the system browser while rejecting Electron popup creation. Both popup requests and same-window navigation parse the destination first and dispatch its canonical URL. Malformed input and other external schemes remain blocked; no shell command or new renderer IPC is introduced.
+[Window navigation](../../../../apps/desktop/src/window-navigation.ts) is the single extraction of alpha2's existing two handlers plus the missing guarantees. Both paths parse destinations safely and dispatch canonical HTTP(S) URLs. Every popup is denied; HTTP(S) popup requests go to the OS even when same-origin. Same-window navigation retains exactly internal `dsh-app:` and the official destination-HTTP/same-parsed-origin predicate; HTTPS is not granted that exception. The helper reads only its owned WebContents current URL, not a configurable origin allowlist. Malformed destinations, malformed current URLs and failed current-URL reads fail closed without throwing or opening an external destination.
 
-Internal `dsh-app:` navigation stays in the application. `dsh-recovery:` navigation is prevented and delegated only to the existing recovery owner, which retains document identity, action, permission, and in-flight checks. Popup recovery requests do not invoke recovery. This policy does not alter the Web client's optional iframe preview or its file-link routing.
+Legacy `dsh-recovery:` URLs are blocked without an action on either path. The unused recovery callback is retired; alpha2's existing `DesktopFatalRecovery`, context menus, primary titlebar, sandbox settings and update ownership remain unchanged. No renderer IPC, arbitrary protocol opening, shell command or Host credential is introduced.
 
-Browser-opening rejection and synchronous failure share a redacted callback. The owning window displays existing-locale advice only while alive. Reporting failure is contained without logging either raw error or destination, because a requested URL can carry authorization data. An OS handoff is not proof that the page loaded or authorization succeeded.
+Synchronous and rejected OS-open failures share a redacted callback. The originating window displays `currentDesktopLocale()` advice only while alive, including the selected Windows document language. Reporter failure logs only a fixed message, never a destination or raw error. Retire this fork-specific helper when an exact official target supplies equivalent safe canonical parsing/dispatch, contained failures, localized redacted reporting and the same popup, same-origin and window-lifetime guarantees; migrate the tests rather than keep a parallel wrapper.
 
 ## Alternatives considered
 
-**Change individual anchors to `_self`.** That leaves other links and programmatic opens broken and couples provider UI to shell-specific behavior.
+**Change individual anchors to `_self`.** This couples provider UI to shell behavior and cannot cover programmatic opens or safely report OS failures.
 
-**Allow Electron popups or navigate the product window away.** Both broaden the renderer's capabilities and can replace or detach the owned application UI.
+**Allow Electron popups or arbitrary same-origin schemes.** That broadens the official navigation contract. Only the existing same-window HTTP predicate is retained; popups never use it.
 
-**Replace the maintained shell or upgrade Core.** External navigation is a shell-owned omission; fixing it does not require changing runtime, plugin, recovery, or update ownership.
+**Restore alpha1 recovery or replace the maintained shell.** Neither is needed to close the identified alpha2 gaps. Native fatal recovery remains its existing owner.
 
 ## Consequences
 
-The shared policy repairs both opening paths without changing the preload protocol or weakening sandbox settings. Unsupported URI schemes remain unavailable rather than launching arbitrary registered applications. Startup integration tests retain recovery behavior, and focused navigation tests cover rejection, malformed destinations, per-window operations, and redacted failure reporting. An isolated Electron renderer test establishes click dispatch with a substituted OS opener; it is not an installed-product or real default-browser acceptance claim.
+Pure and mocked-main tests retain the original alpha2 suites and check canonical dispatch, denied popups, same-origin HTTP versus HTTPS/cross-origin behavior, malformed/current-unavailable input, blocked legacy recovery, per-window operations and redacted localized failures. Approved CI alone prepares the lock-matched development Electron after frozen installation and runs the isolated renderer fixture. Its OS opener is a spy; an owned ephemeral loopback server exercises actual same-origin HTTP navigation and is closed during teardown. Other requests and permissions remain blocked, with the original fixture/process deadlines unchanged. This is not installed-product qualification, a real default-browser page-load claim or proof of OAuth success; the stronger separate hosted installer lane remains required.

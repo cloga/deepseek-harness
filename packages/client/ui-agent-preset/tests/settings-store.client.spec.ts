@@ -85,6 +85,31 @@ function fakeApi(
   })
 }
 
+describe.each(['chip', 'default-sync'] as const)('bound %s preset selection', (kind) => {
+  it('cannot stage a preset for a different fresh main Session while the old request is pending', async () => {
+    const shared = { id: undefined as string | undefined, introduce: false }
+    const pending = Promise.withResolvers<{ ok: true; value: string }>()
+    const calls: Array<{ id: SessionId; preset: string }> = []
+    const ctx = fakeRoster([{ id: 'standard', trust: 'system', isDefault: true }])
+    Object.assign(ctx.remote.agentPresets, { select: (id: SessionId, preset: string) => {
+      calls.push({ id, preset }); return pending.promise
+    } })
+    const old = { id: 'old' as SessionId, blank: true, projectionValues: { agentPreset: 'standard' } }
+    const fresh = { id: 'fresh' as SessionId, blank: true, projectionValues: { agentPreset: 'cordis' } }
+    let selected = old.id
+    const oldSeat = new AgentPresetSeatController(ctx, () => selected === old.id ? old : undefined, shared)
+    const freshSeat = new AgentPresetSeatController(ctx, () => selected === fresh.id ? fresh : undefined, shared)
+    const selecting = kind === 'chip' ? oldSeat.select('minimal') : oldSeat.syncBlankSession(old.id, 'minimal')
+    selected = fresh.id
+    await freshSeat.load()
+    expect(calls).toEqual([{ id: old.id, preset: 'minimal' }])
+    expect(shared.id).toBeUndefined()
+    expect(freshSeat.store.getSnapshot().current).toBe('cordis')
+    pending.resolve({ ok: true, value: 'minimal' }); await selecting
+    expect(freshSeat.store.getSnapshot().current).toBe('cordis')
+  })
+})
+
 describe('the agent-preset roster store', () => {
   it('derives the display options from one roster call', async () => {
     const controller = derivedController(fakeApi([

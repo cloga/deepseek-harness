@@ -3,7 +3,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { lstat, readdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import {
   parseDesktopManagedUpdateHandoff,
   parseDesktopManagedUpdateManifest,
@@ -18,13 +18,25 @@ import {
   desktopPluginProvisioningPlanSha256,
   parseDesktopPluginProvisioningPlan,
 } from './plugin-provisioning.ts'
-import { assertDesktopProvisioningInventory } from './project-manager.ts'
+import { assertDesktopProvisioningInventory } from './plugin-receipts.ts'
+import type { DesktopManagedUpdateHelperErrorType, DesktopManagedUpdateHelperPhase } from './managed-update-helper.ts'
+
+const HELPER_PHASES: Record<DesktopManagedUpdateHelperPhase, true> = {
+  'manifest-download': true, 'manifest-validation': true, acknowledgement: true, 'process-wait': true,
+  'receipt-download': true, 'receipt-validation': true, 'installer-download': true, 'stage-promotion': true,
+  'installer-verification': true, 'installer-launch': true, 'result-persistence': true,
+}
+const HELPER_ERROR_TYPES: Record<DesktopManagedUpdateHelperErrorType, true> = {
+  timeout: true, 'network-reset': true, http: true, redirect: true, integrity: true, cancelled: true,
+  'process-wait': true, 'installer-launch': true, 'installer-exit': true, io: true, unknown: true,
+}
 
 /** Startup result shown by Desktop instead of claiming an incomplete update succeeded. */
 export type DesktopManagedUpdateCompletion =
   | { readonly status: 'none' }
   | { readonly status: 'complete'; readonly sequence: number; readonly version: string }
   | { readonly status: 'recovery-required'; readonly message: string; readonly command: string }
+  | { readonly status: 'baseline-not-qualified'; readonly disposition: 'preserved-user-choice' | 'pending'; readonly sequence: number; readonly version: string }
 
 async function sha256File(path: string): Promise<string> {
   const digest = createHash('sha256')
@@ -156,11 +168,19 @@ function blockedResult(value: Record<string, unknown>, minimumSequence = 1): voi
   if (value.status !== 'blocked' || typeof value.reason !== 'string' || value.reason === ''
     || (value.installerExitCode !== undefined && (!Number.isSafeInteger(value.installerExitCode)
       || value.installerExitCode === 0))
-    || (diagnosticKeys.length > 0 && (typeof value.phase !== 'string' || value.phase === ''
-      || typeof value.errorType !== 'string' || value.errorType === ''
+    || (diagnosticKeys.length > 0 && (typeof value.phase !== 'string' || !Object.hasOwn(HELPER_PHASES, value.phase)
+      || typeof value.errorType !== 'string' || !Object.hasOwn(HELPER_ERROR_TYPES, value.errorType)
       || (value.asset !== undefined && (typeof value.asset !== 'string' || value.asset === ''))
-      || !['not-started', 'may-have-started'].includes(String(value.installationState))))) {
+      || (value.installationState !== 'not-started' && value.installationState !== 'may-have-started')))) {
     throw new Error('desktop managed update: invalid blocked helper result')
+  }
+  if (diagnosticKeys.length === 0) return
+  const launchPhase = value.phase === 'installer-launch' || value.phase === 'result-persistence'
+  if (launchPhase !== (value.installationState === 'may-have-started')
+    || (value.errorType === 'installer-launch' && value.phase !== 'installer-launch')
+    || (value.errorType === 'installer-exit' && value.phase !== 'installer-launch')
+    || (value.errorType === 'installer-exit') !== (value.installerExitCode !== undefined)) {
+    throw new Error('desktop managed update: helper phase contradicts installer evidence')
   }
 }
 
@@ -170,9 +190,14 @@ interface PendingFailure {
   readonly message: string
 }
 
+interface CompletionCandidate {
+  readonly manifest: DesktopManagedUpdateManifest
+  readonly evidenceRoot?: string
+}
+
 interface OperationClassification {
   readonly status: 'none' | 'pre-install-failed' | 'pending'
-  readonly candidate?: DesktopManagedUpdateManifest
+  readonly candidate?: CompletionCandidate
   readonly failure?: PendingFailure
 }
 
@@ -237,6 +262,10 @@ async function classifyOperation(
       throw new Error('desktop managed update: installer start marker does not match its final stage')
     }
   }
+  if (rootResult !== undefined) {
+    blockedResult(rootResult, acknowledgement === undefined ? 0 : 1)
+    bindIdentity(rootResult)
+  }
   if (cancellation !== undefined) {
     exactKeys(cancellation, ['schemaVersion', 'token'], 'cancellation marker')
     if (cancellation.schemaVersion !== 1 || cancellation.token !== token || hasStage || started !== undefined) {
@@ -248,8 +277,6 @@ async function classifyOperation(
     return { status: 'none' }
   }
   if (rootResult !== undefined) {
-    blockedResult(rootResult, acknowledgement === undefined ? 0 : 1)
-    bindIdentity(rootResult)
     if (acknowledgement === undefined) {
       if (!hasStage && handoff !== undefined && rootResult.installationState === 'not-started'
         && ['manifest-download', 'manifest-validation'].includes(String(rootResult.phase))
@@ -281,7 +308,7 @@ async function classifyOperation(
     return {
       status: 'pre-install-failed',
       ...(manifest.owner === 'cloga/deepseek-harness' && manifest.sequence > completedSequence
-        && manifest.sequence === capability.currentSequence ? { candidate: manifest } : {}),
+        && manifest.sequence === capability.currentSequence ? { candidate: { manifest, evidenceRoot: operationRoot } } : {}),
     }
   }
   const [result, pending] = await Promise.all([
@@ -322,7 +349,9 @@ async function classifyOperation(
     && helperRunning(Number(acknowledgement.helperPid))) {
     throw new Error('The acknowledged managed update helper is still running without a terminal result.')
   }
-  if (result?.status === 'installer-exited' && rootResult === undefined) return { status: 'pending', candidate: manifest }
+  if (result?.status === 'installer-exited' && rootResult === undefined) {
+    return { status: 'pending', candidate: { manifest, evidenceRoot: stage } }
+  }
   return {
     status: 'pending',
     failure: {
@@ -346,9 +375,10 @@ async function classifyOperation(
  * @param runtimeDescriptor - Installed Desktop runtime descriptor.
  * @param provisioningPlan - Installed release-owned Desktop plugin plan.
  * @param activeProfile - Final-location profile, after its Host has reached readiness.
+ * @param baselineDisposition - Trusted unqualified-baseline assessment; never bypasses installed artifact or plan checks.
  * @param helperRunning - Read-only liveness probe for acknowledged helpers without terminal results.
  * @param manualRecovery - Explicit current-install verification; absent during ordinary offline startup.
- * @returns Verified completion, no pending installation, or actionable recovery diagnostics.
+ * @returns Verified completion, no pending installation, unqualified baseline, or actionable recovery diagnostics.
  */
 export async function completeDesktopManagedUpdate(
   operationsRoot: string,
@@ -359,6 +389,7 @@ export async function completeDesktopManagedUpdate(
   runtimeDescriptor: string,
   provisioningPlan: string,
   activeProfile: string,
+  baselineDisposition?: 'preserved-user-choice' | 'pending',
   helperRunning: (pid: number) => boolean = helperProcessRunning,
   manualRecovery?: DesktopManualInstallRecovery,
 ): Promise<DesktopManagedUpdateCompletion> {
@@ -392,31 +423,42 @@ export async function completeDesktopManagedUpdate(
       operations = await classify(await readdir(operationsRoot))
     }
     const candidates = operations.flatMap(operation => operation.candidate === undefined ? [] : [operation.candidate])
-    if (independent !== undefined) candidates.push(independent)
+    if (independent !== undefined) candidates.push({ manifest: independent })
     const failures = operations.flatMap(operation => operation.failure === undefined ? [] : [operation.failure])
     if (candidates.length === 0) {
       throw new Error(failures[0]?.message ?? 'The managed update has no verified completion candidate.')
     }
     const [executableSha256, runtimeSha256] = await Promise.all([sha256File(executable), sha256File(runtimeDescriptor)])
-    const matching = candidates.filter(manifest => manifest.installedEvidence.executableSha256 === executableSha256
-      && manifest.installedEvidence.runtimeSha256 === runtimeSha256)
-    const selected = matching.sort((left, right) => right.sequence - left.sequence)[0]
+    const matching = candidates.filter(candidate => candidate.manifest.installedEvidence.executableSha256 === executableSha256
+      && candidate.manifest.installedEvidence.runtimeSha256 === runtimeSha256)
+    const selected = matching.sort((left, right) => right.manifest.sequence - left.manifest.sequence)[0]
     if (selected === undefined) throw new Error('desktop managed update: installed application evidence does not match the release')
-    if (selected.sequence !== capability.currentSequence) {
+    const manifest = selected.manifest
+    if (manifest.sequence !== capability.currentSequence) {
       throw new Error('desktop managed update: installed release sequence does not match the build capability')
     }
-    if (candidates.some(manifest => manifest.sequence === selected.sequence && manifest.manifestSha256 !== selected.manifestSha256)) {
+    if (candidates.some(candidate => candidate.manifest.sequence === manifest.sequence
+      && candidate.manifest.manifestSha256 !== manifest.manifestSha256)) {
       throw new Error('desktop managed update: installed evidence identifies conflicting release manifests')
     }
     // A different transaction may supersede an older failure, never a newer or conflicting release.
-    if (failures.some(failure => failure.sequence > selected.sequence
-      || (failure.sequence === selected.sequence && failure.manifestSha256 !== selected.manifestSha256))
-      || candidates.some(candidate => candidate.sequence > selected.sequence)) {
+    if (failures.some(failure => failure.sequence > manifest.sequence
+      || (failure.sequence === manifest.sequence && failure.manifestSha256 !== manifest.manifestSha256))
+      || candidates.some(candidate => candidate.manifest.sequence > manifest.sequence)) {
       throw new Error('A newer or conflicting managed update still requires recovery.')
     }
     const installedPlan = parseDesktopPluginProvisioningPlan(await readJson(provisioningPlan))
     if (desktopPluginProvisioningPlanSha256(installedPlan) !== capability.provisioning.planSha256) {
       throw new Error('desktop managed update: installed plugin provisioning plan does not match the release')
+    }
+    if (baselineDisposition !== undefined) {
+      const outcome = { status: 'baseline-not-qualified' as const, disposition: baselineDisposition,
+        sequence: manifest.sequence, version: manifest.version }
+      // Independent recovery has no helper operation; keep its baseline evidence outside retained history.
+      await writeJsonAtomic(join(selected.evidenceRoot ?? dirname(completionPath), 'baseline-outcome.json'), {
+        schemaVersion: 1, ...outcome, manifestSha256: manifest.manifestSha256,
+      })
+      return outcome
     }
     assertDesktopProvisioningInventory(activeProfile, installedPlan)
     if (await readDesktopManagedCompletedSequence(completionPath) > completedSequence) {
@@ -425,10 +467,10 @@ export async function completeDesktopManagedUpdate(
     await writeJsonAtomic(completionPath, {
       schemaVersion: 1,
       status: 'complete',
-      sequence: selected.sequence,
-      manifestSha256: selected.manifestSha256,
+      sequence: manifest.sequence,
+      manifestSha256: manifest.manifestSha256,
     })
-    return { status: 'complete', sequence: selected.sequence, version: selected.version }
+    return { status: 'complete', sequence: manifest.sequence, version: manifest.version }
   } catch (error) {
     return recovery(error)
   }

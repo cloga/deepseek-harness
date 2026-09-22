@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import type { InboxState } from '@deepseek-ai/dsh-agent/types'
 import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -19,7 +20,7 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { WorkspaceSnapshot } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import type { SessionPendingInteractionSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
+import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
 import type { KeyedSnapshotSelectorHook, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
 import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { createSnapshotStore, type ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
@@ -61,10 +62,13 @@ beforeEach(() => {
 const SID = 's1' as SessionId
 type RoutedChatNodeOwner = ChatNodeOwnerProps & { readonly node: ChatNode }
 
-function sessionSnapshot(overrides: Partial<SessionSnapshot> = {}): SessionSnapshot {
+interface TestSessionSnapshot extends SessionSnapshot {
+  readonly testInbox?: InboxState
+}
+
+function sessionSnapshot(overrides: Partial<TestSessionSnapshot> = {}): TestSessionSnapshot {
   return {
     sessionId: SID,
-    queue: [],
     pendingSubmissions: [],
     running: false,
     removed: false,
@@ -83,11 +87,11 @@ function sessionSnapshot(overrides: Partial<SessionSnapshot> = {}): SessionSnaps
 }
 
 /** Scripted Session source: set() swaps the top-level object like the real Controller binding. */
-function makeSessionSource(init: Partial<SessionSnapshot> = {}) {
+function makeSessionSource(init: Partial<TestSessionSnapshot> = {}) {
   let snap = sessionSnapshot(init)
   const subs = new Set<() => void>()
   return {
-    set: (next: Partial<SessionSnapshot>) => {
+    set: (next: Partial<TestSessionSnapshot>) => {
       snap = { ...snap, ...next }
       for (const fn of [...subs]) fn()
     },
@@ -104,7 +108,7 @@ function makeSessionSource(init: Partial<SessionSnapshot> = {}) {
 type ChatSlice = Partial<LegacyConversationSlice> & {
   readonly turnUsages?: NonNullable<Parameters<typeof chatSnapshotFixture>[0]>['turnUsages']
 }
-type HarnessUpdate = ChatSlice & Partial<SessionSnapshot> & { readonly chat?: ChatSnapshot }
+type HarnessUpdate = ChatSlice & Partial<TestSessionSnapshot> & { readonly chat?: ChatSnapshot }
 
 /** Scripted Chat target source, independent from Session lifecycle state. */
 function makeChatSource(init: ChatSlice = {}, snapshot?: ChatSnapshot) {
@@ -199,7 +203,7 @@ const compaction = (over: Partial<CompactionSummaryNode> = {}): CompactionSummar
 /** Empty sessions-list hook for the global standard-kit seat. */
 function emptySessions() {
   const store = createSnapshotStore<SessionListState>(
-    { ids: [], byId: {}, current: undefined, phase: 'ready', subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined })
+    { ids: [], byId: {}, phase: 'ready', subagentsByParent: {}, jobsBySession: {} })
   return bindSnapshotSelector(store)
 }
 
@@ -227,7 +231,7 @@ function bindKeyedSnapshotSelector<Value>(
 
 function makeHarness(
   init: HarnessUpdate = {},
-  sessionOverrides: Partial<SessionSnapshot> = {},
+  sessionOverrides: Partial<TestSessionSnapshot> = {},
   chatSnapshot?: ChatSnapshot,
 ) {
   const {
@@ -243,6 +247,7 @@ function makeHarness(
     ...(turnUsages === undefined ? {} : { turnUsages }),
   }
   const session = makeSessionSource({ ...sessionInit, ...sessionOverrides })
+  const useTestSession = bindSnapshotSelector(session.source)
   const chatSource = makeChatSource(chatSlice, initialChat ?? chatSnapshot)
   const useChatNode = bindKeyedSnapshotSelector(
     key => chatSource.source.getSnapshot().nodes.source(key),
@@ -277,8 +282,6 @@ function makeHarness(
   }> = []
   const renderCommandSlot = ((_key: string, _owner: object, opts?: { fallback?: React.ReactNode }) =>
     opts?.fallback ?? null) as unknown as React.ComponentProps<typeof CommandNodeView>['renderSlot']
-  const renderTurnTail = ((_key: string, _owner: object) => null) as unknown as
-    React.ComponentProps<typeof TurnTailNodeView>['renderSlotChain']
   const renderTurnTailSlot = (() => null) as unknown as
     React.ComponentProps<typeof TurnTailNodeView>['renderSlot']
   let nodeSlotOverride: React.ComponentProps<typeof ChatNodeSeat>['renderSlot'] | undefined
@@ -330,7 +333,6 @@ function makeHarness(
           <TurnTailNodeView
             {...nodeProps<'turn-tail'>()}
             renderSlot={renderTurnTailSlot}
-            renderSlotChain={renderTurnTail}
             SessionProvider={props.SessionProvider}
           />
         )
@@ -375,12 +377,16 @@ function makeHarness(
     useConversation: bindSnapshotSelector(createSnapshotStore(EMPTY_CONVERSATION_SNAPSHOT)),
     useTrajectory: (() => { throw new Error('unused') }),
     useSessions: emptySessions(),
+    useSessionRetainInfo: () => undefined,
     useResource,
-    useSessionPendingInteraction: bindSnapshotSelector(
-      createSnapshotStore<SessionPendingInteractionSnapshot>(new Map()),
+    useSessionStatus: bindSnapshotSelector(
+      createSnapshotStore<SessionStatusSnapshot>(new Map()),
     ),
     useWorkspaces: emptyWorkspaces(),
-    useProjection: () => outlineValue,
+    useProjection: (key: string) => {
+      const inbox = useTestSession(snapshot => snapshot.testInbox)
+      return key === 'inbox' ? inbox : outlineValue
+    },
     useInput: (() => { throw new Error('unused') }),
     inputActions: {
       setDraft: () => {},
@@ -399,6 +405,7 @@ function makeHarness(
     completeViewRequest: () => {},
     openFile,
     openSkill,
+    openExternalLink: vi.fn(),
     loadOlder,
     loadThrough,
     loadImage: vi.fn(() => Promise.reject(new Error('not used'))),
@@ -498,6 +505,16 @@ function installScrollMetrics(element: HTMLElement, initialHeight: number, clien
 }
 
 describe('Chat node rendering', () => {
+
+  it('opens Markdown references to unmodified files with line navigation', () => {
+    const h = makeHarness({
+      nodes: [user(1, 'explain'), assistant(2, '[source](src/index.ts#L24-L30)', 1)],
+      turnEnds: new Map([[1, 2]]),
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    fireEvent.click(view.getByRole('button', { name: 'source' }))
+    expect(h.openFile).toHaveBeenCalledWith('src/index.ts', { line: 24 })
+  })
 
   it('threads the injected file-mention vocabulary into the closing prose only', () => {
     const wrote = (seq: number, callId: string): ToolResultNode => ({
@@ -962,23 +979,23 @@ describe('ChatView', () => {
     })
     const pending = {
       id: 'steer-occurrence' as never,
-      messageId: 'steer-message' as never,
-      placement: 'steering' as const,
+      role: 'user' as const,
+      source: { kind: 'user' as const },
       content: [{ type: 'text' as const, text: 'interrupt now' }],
       preview: 'interrupt now',
       text: 'interrupt now',
     }
     const queued = {
       id: 'queued-occurrence' as never,
-      messageId: 'queued-message' as never,
-      placement: 'queued' as const,
+      role: 'user' as const,
+      source: { kind: 'user' as const },
       content: [{ type: 'text' as const, text: 'later' }],
       preview: 'later',
       text: 'later',
     }
     const h = makeHarness(
       { nodes: [assistant(1, 'working')] },
-      { queue: [queued, pending], running: true },
+      { testInbox: { 'next-turn': [queued], 'next-step': [pending] }, running: true },
     )
     const view = render(<h.ChatView {...h.props} />)
 
@@ -993,12 +1010,12 @@ describe('ChatView', () => {
       & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
 
     act(() => {
-      h.setSession({ queue: [queued] })
+      h.setSession({ testInbox: { 'next-turn': [queued], 'next-step': [] } })
       h.setChat({
         nodes: [
           assistant(1, 'working'),
           {
-            kind: 'steering', messageId: pending.messageId,
+            kind: 'steering', messageId: pending.id,
             seq: 2, time: 2_000,
             content: [{ type: 'text', text: 'interrupt now' }], source: null,
           },
@@ -1030,8 +1047,8 @@ describe('ChatView', () => {
   it('keeps a later pending occurrence visible when it reuses a durable MessageId', () => {
     const pending = {
       id: 'steer-occurrence-later' as never,
-      messageId: 'shared-steer-message' as never,
-      placement: 'steering' as const,
+      role: 'user' as const,
+      source: { kind: 'user' as const },
       content: [{ type: 'text' as const, text: 'same steering' }],
       preview: 'same steering',
       text: 'same steering',
@@ -1041,7 +1058,7 @@ describe('ChatView', () => {
         kind: 'user', seq: 2, time: 2_000,
         content: pending.content, source: null,
       }],
-    }, { queue: [pending], running: true })
+    }, { testInbox: { 'next-turn': [], 'next-step': [pending] }, running: true })
     const view = render(<h.ChatView {...h.props} />)
 
     expect(view.getAllByText('same steering')).toHaveLength(2)
@@ -1107,15 +1124,12 @@ describe('ChatView', () => {
 
     act(() => {
       h.setSession({
-        queue: [{
+        testInbox: { 'next-turn': [], 'next-step': [{
           id: 'steer-occurrence' as never,
-          messageId: 'steer-message' as never,
-          placement: 'steering',
-          rpcId: 'req-steer' as never,
           content: [{ type: 'text', text: '带图纠偏' }],
-          preview: '带图纠偏',
-          text: '带图纠偏',
-        }],
+
+          role: 'user', source: { kind: 'user', rpcId: 'req-steer' as never },
+        }] },
       })
     })
     expect(view.getAllByText('带图纠偏')).toHaveLength(1)
@@ -1140,15 +1154,12 @@ describe('ChatView', () => {
     expect(view.queryByText('排队中')).toBeNull()
     act(() => {
       h.setSession({
-        queue: [{
+        testInbox: { 'next-step': [], 'next-turn': [{
           id: 'q-occurrence' as never,
-          messageId: 'q-message' as never,
-          placement: 'queued' as const,
-          rpcId: 'req-q' as never,
           content: [{ type: 'text' as const, text: '排队中' }],
-          preview: '排队中',
-          text: '排队中',
-        }],
+
+          role: 'user', source: { kind: 'user', rpcId: 'req-q' as never },
+        }] },
       })
     })
     // The queued occurrence and its local predecessor both belong to the
@@ -2181,14 +2192,12 @@ describe('ChatView', () => {
     expect(status.textContent).toMatch(/^深度求索中\.\.\.2分0\d秒$/)
     expect(status.querySelector('[aria-hidden="true"]')).not.toBeNull()
     act(() => {
-      h.setSession({ queue: [{
+      h.setSession({ testInbox: { 'next-turn': [], 'next-step': [{
         id: 'steering-occurrence' as never,
-        messageId: 'steering-message' as never,
-        placement: 'steering',
         content: [{ type: 'text', text: 'also' }],
-        preview: 'also',
-        text: 'also',
-      }] })
+
+        role: 'user', source: { kind: 'user' },
+      }] } })
     })
     expect(status.textContent).toMatch(/^深度求索中\.\.\.2分0\d秒$/)
   })
@@ -2348,6 +2357,176 @@ describe('ChatView', () => {
       })
     })
     expect(scroller.scrollTop).toBe(1600)
+  })
+
+  it.each([false, true])('retains own-send following when echo settles before delayed scroll sampling (pending=%s)', (pending) => {
+    vi.useFakeTimers()
+    try {
+      const h = makeHarness({ nodes: [user(1, 'earlier question'), assistant(2, 'earlier answer')] })
+      const view = render(<h.ChatView {...h.props} />)
+      try {
+        const scroller = view.container.querySelector('[class*="scroll"]') as HTMLDivElement
+        const metrics = installScrollMetrics(scroller, 1_000, 300)
+        readerScroll(scroller, 700)
+        scroller.scrollTop = 650
+        fireEvent.scroll(scroller)
+        if (!pending) fireEvent(scroller, new Event('scrollend'))
+
+        metrics.setHeight(1_122)
+        act(() => {
+          h.setSession({
+            running: true,
+            pendingSubmissions: [{
+              requestId: 'own-send-race' as never, placement: 'transcript',
+              time: 5_000, text: 'own send while sampling', attachments: [],
+            }],
+          })
+        })
+        // The local echo has committed before the durable response; this is
+        // not a test that batches away the user-visible submission snapshot.
+        expect(view.getByText('own send while sampling').closest('[data-submission-echo]')).not.toBeNull()
+        act(() => {
+          h.setChat({ nodes: [
+            user(1, 'earlier question'), assistant(2, 'earlier answer'),
+            { ...user(3, 'own send while sampling'), source: { kind: 'user', rpcId: 'own-send-race' as never } },
+            assistant(4, 'new response', 2),
+          ] })
+          h.setSession({ pendingSubmissions: [] })
+        })
+        expect(view.container.querySelector('[data-submission-echo]')).toBeNull()
+        expect(view.getAllByText('own send while sampling')).toHaveLength(1)
+        fireEvent(scroller, new Event('scrollend'))
+        act(() => { vi.advanceTimersByTime(500) })
+
+        expect(scroller.scrollTop).toBe(822)
+        expect(view.queryByLabelText('回到底部')).toBeNull()
+        expect(h.chatScroll.read()).toBeNull()
+
+        // A later reader gesture still owns the position, and the sampler
+        // must be able to schedule again after the own-send delivery drains.
+        scroller.scrollTop = 812
+        fireEvent.scroll(scroller)
+        metrics.setHeight(1_142)
+        act(() => { h.setSession({ running: false }); vi.advanceTimersByTime(499) })
+        expect(scroller.scrollTop).toBe(812)
+        act(() => { vi.advanceTimersByTime(1) })
+        expect(scroller.scrollTop).toBe(812)
+        expect(view.getByLabelText('回到底部')).toBeTruthy()
+        expect(h.chatScroll.read()?.scrollTop).toBe(812)
+      } finally {
+        view.unmount()
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(['user', 'steering'] as const)('admits new %s words while a reader sample is pending', (kind) => {
+    vi.useFakeTimers()
+    try {
+      const initial = [user(1, 'earlier question'), assistant(2, 'earlier answer')]
+      const h = makeHarness({ nodes: initial }, { running: kind === 'steering' })
+      const view = render(<h.ChatView {...h.props} />)
+      try {
+        const scroller = view.container.querySelector('[class*="scroll"]') as HTMLDivElement
+        const metrics = installScrollMetrics(scroller, 1_000, 300)
+        readerScroll(scroller, 700)
+        scroller.scrollTop = 650
+        fireEvent.scroll(scroller)
+        metrics.setHeight(1_122)
+        act(() => {
+          if (kind === 'user') h.setChat({ nodes: [...initial, user(3, 'new own words')] })
+          else h.setSession({ testInbox: {
+            'next-turn': [],
+            'next-step': [{
+              id: 'new-steering' as never, role: 'user', source: { kind: 'user' },
+              content: [{ type: 'text', text: 'new own words' }],
+            }],
+          } })
+        })
+        expect(view.getByText('new own words')).toBeTruthy()
+        expect(scroller.scrollTop).toBe(822)
+        fireEvent(scroller, new Event('scrollend'))
+        act(() => { vi.advanceTimersByTime(500) })
+        expect(view.queryByLabelText('回到底部')).toBeNull()
+        expect(h.chatScroll.read()).toBeNull()
+      } finally {
+        view.unmount()
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps a pending reader sample ahead of own-word signals before the first open', () => {
+    vi.useFakeTimers()
+    try {
+      const h = makeHarness({ nodes: [user(1, 'history'), assistant(2, 'history answer')] }, { openState: 'loading' })
+      h.chatScroll.save({ anchorKey: 'fixture:user:1', anchorTop: 0, scrollTop: 650 })
+      const view = render(<h.ChatView {...h.props} />)
+      try {
+        const scroller = view.container.querySelector('[class*="scroll"]') as HTMLDivElement
+        installScrollMetrics(scroller, 1_000, 300)
+        scroller.scrollTop = 610
+        fireEvent.scroll(scroller)
+        act(() => {
+          h.setSession({
+            openState: 'open',
+            pendingSubmissions: [{
+              requestId: 'first-open-echo' as never, placement: 'transcript',
+              time: 5_000, text: 'own-word signal before first open', attachments: [],
+            }],
+          })
+        })
+        expect(scroller.scrollTop).toBe(610)
+        expect(h.chatScroll.read()?.scrollTop).toBe(650)
+        fireEvent(scroller, new Event('scrollend'))
+        expect(scroller.scrollTop).toBe(610)
+        expect(h.chatScroll.read()?.scrollTop).toBe(610)
+      } finally {
+        view.unmount()
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps anchored prepend pending even when new own words arrive with it', () => {
+    vi.useFakeTimers()
+    try {
+      const initial = [user(5, 'later question'), assistant(6, 'later answer')]
+      const h = makeHarness({ nodes: initial }, { hasMore: true })
+      const view = render(<h.ChatView {...h.props} />)
+      try {
+        const scroller = view.container.querySelector('[class*="scroll"]') as HTMLDivElement
+        const metrics = installScrollMetrics(scroller, 1_000, 300)
+        const anchored = view.container.querySelector('[data-chat-flow-key="fixture:user:5"]') as HTMLElement
+        let anchoredTop = 100
+        vi.spyOn(anchored, 'getBoundingClientRect').mockImplementation(
+          () => ({ top: anchoredTop, bottom: anchoredTop + 40 } as DOMRect),
+        )
+        readerScroll(scroller, 700)
+        fireEvent.click(view.getByText('加载更早'))
+        scroller.scrollTop = 650
+        fireEvent.scroll(scroller)
+        metrics.setHeight(1_600)
+        anchoredTop = 700
+        act(() => {
+          h.setChat({ nodes: [
+            user(1, 'older question'), assistant(2, 'older answer'), ...initial, user(9, 'own input during paging'),
+          ] })
+        })
+        expect(view.getByText('own input during paging')).toBeTruthy()
+        expect(scroller.scrollTop).toBe(650)
+        fireEvent(scroller, new Event('scrollend'))
+        act(() => { vi.advanceTimersByTime(500) })
+        expect(view.getByLabelText('回到底部')).toBeTruthy()
+      } finally {
+        view.unmount()
+      }
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('back-to-bottom cancels an in-flight paging anchor', () => {

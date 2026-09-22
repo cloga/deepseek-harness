@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-fork-release
+  group: ${{ inputs.rehearsal && format('desktop-fork-rehearsal-{0}', github.ref) || 'desktop-fork-release' }}
   cancel-in-progress: false
 
 env:
@@ -110,6 +110,13 @@ jobs:
         shell: pwsh
         run: node apps/desktop/node_modules/electron/install.js
 
+      # These guards consume source fixtures, not built application artifacts.
+      - name: Verify installer-upgrade guard tests
+        shell: pwsh
+        run: |
+          node --test apps/desktop/tests/windows-installed-upgrade.test.mjs apps/desktop/tests/windows-packaged-package-acceptance.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Prepare browser for isolated Desktop acceptance
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/desktop-playwright
@@ -117,6 +124,12 @@ jobs:
 
       - name: Verify Desktop test collection
         run: node apps/desktop/scripts/verify-release-test-collection.mjs
+
+      - name: Verify packaged skill canary guards
+        shell: pwsh
+        run: |
+          node --test apps/desktop/tests/packaged-skills-smoke.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify Desktop release code
         run: pnpm exec vitest run apps/desktop apps/desktop-host --config=vitest.desktop-release.config.ts --maxWorkers=1
@@ -166,7 +179,7 @@ jobs:
       - name: Verify copied helper bootstrap and acknowledgement
         run: >-
           pnpm exec tsx apps/desktop/scripts/smoke-helper.ts
-          --node apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/resources/runtime/node/node.exe
+          --node apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/resources/runtime/primary-runtime/dependencies/node/bin/node.exe
           --helper apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/resources/managed-update/helper.mjs
           --capability apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/resources/managed-update/capability.json
           --output dist/desktop-copilot-acceptance
@@ -181,7 +194,7 @@ jobs:
       - name: Verify real acceptance observer failure cleanup
         id: observer_cleanup
         run: >-
-          pnpm exec tsx apps/desktop/tests/fixtures/copilot-observer-smoke.ts
+          pnpm exec tsx apps/desktop/tests/fixtures/copilot-release-smoke.ts --observer-cleanup-canary
           --application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe
           --output dist/desktop-copilot-observer-canary
 
@@ -209,6 +222,127 @@ jobs:
           --provisioning ${{ env.PROVISIONING_PATH }}
           --artifacts apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts
           --out ${{ env.RELEASE_ASSETS }}
+
+      # Internal diagnostic bytes only: never consumed by the protected publisher.
+      # Retaining them avoids rebuilding an identical candidate merely to investigate fixture/native UI failures.
+      - name: Retain unqualified rehearsal candidate for targeted diagnosis
+        if: ${{ inputs.rehearsal }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-unqualified-candidate-${{ steps.plan.outputs.version }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ env.RELEASE_ASSETS }}/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Acquire the verified installer-upgrade baseline
+        id: upgrade_baseline
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
+            throw 'Installer acquisition is restricted to the disposable Windows runner'
+          }
+          $baseline = Get-Content -LiteralPath apps/desktop/tests/fixtures/windows-upgrade-baseline.json -Raw | ConvertFrom-Json
+          if ($baseline.repository -cne 'cloga/deepseek-harness') { throw 'Unexpected baseline repository' }
+          $raw = & gh api "repos/cloga/deepseek-harness/releases/$($baseline.releaseId)"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read baseline release metadata' }
+          $release = $raw | ConvertFrom-Json
+          if ($release.id -ne $baseline.releaseId -or $release.tag_name -cne $baseline.tag `
+              -or $release.target_commitish -isnot [string] -or $release.target_commitish -cnotmatch '^[a-f0-9]{40}$' `
+              -or $release.immutable -isnot [bool] -or $release.immutable -ne $true `
+              -or $release.draft -isnot [bool] -or $release.draft -ne $false) {
+            throw 'Baseline release does not match the reviewed immutable identity'
+          }
+          $tagSha = & gh api "repos/cloga/deepseek-harness/git/ref/tags/$($baseline.tag)" --jq .object.sha
+          if ($LASTEXITCODE -ne 0 -or $tagSha -cne $release.target_commitish) { throw 'Baseline tag target differs' }
+          foreach ($expected in @($baseline.manifest, $baseline.installer)) {
+            $assets = @($release.assets | Where-Object { $_.name -ceq $expected.file })
+            if ($assets.Count -ne 1 -or $assets[0].id -ne $expected.assetId `
+                -or $assets[0].state -cne 'uploaded' -or $assets[0].size -ne $expected.bytes `
+                -or $assets[0].digest -cne "sha256:$($expected.sha256)") {
+              throw 'Baseline asset metadata differs from the reviewed identity'
+            }
+          }
+          $destination = Join-Path $env:RUNNER_TEMP "desktop-upgrade-baseline-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if (Test-Path -LiteralPath $destination) { throw 'Baseline acquisition directory must be new' }
+          New-Item -ItemType Directory -Path $destination | Out-Null
+          & gh release download $baseline.tag --repo cloga/deepseek-harness `
+            --pattern $baseline.manifest.file --pattern $baseline.installer.file --pattern build-receipt.json --dir $destination
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline asset download failed' }
+          foreach ($expected in @($baseline.manifest, $baseline.installer)) {
+            $path = Join-Path $destination $expected.file
+            if ((Get-Item -LiteralPath $path).Length -ne $expected.bytes `
+                -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expected.sha256) {
+              throw 'Baseline downloaded bytes differ from the reviewed asset'
+            }
+          }
+          $manifestBytes = [IO.File]::ReadAllBytes((Join-Path $destination $baseline.manifest.file))
+          $manifestDigest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($manifestBytes)).ToLowerInvariant()
+          if ($manifestDigest -cne $baseline.manifest.sha256) { throw 'Pinned baseline manifest changed' }
+          $manifest = [Text.Encoding]::UTF8.GetString($manifestBytes) | ConvertFrom-Json
+          if ($manifest.source.repository -cne $baseline.repository -or $manifest.source.tag -cne $baseline.tag `
+              -or $manifest.source.commit -cne $release.target_commitish -or $manifest.source.commit -cne $tagSha) {
+            throw 'Baseline source identity differs from the independently pinned manifest'
+          }
+          if ($manifest.buildReceipt.file -cne 'build-receipt.json') { throw 'Unexpected baseline receipt filename' }
+          $receiptHash = (Get-FileHash -LiteralPath (Join-Path $destination 'build-receipt.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($receiptHash -cne $manifest.buildReceipt.sha256) { throw 'Baseline receipt bytes differ' }
+          [ordered]@{
+            schemaVersion = 1; releaseId = $release.id; immutable = $release.immutable
+            tag = $release.tag_name; sourceCommit = $release.target_commitish
+            manifestSha256 = $baseline.manifest.sha256; installerSha256 = $baseline.installer.sha256
+            receiptSha256 = $receiptHash; installerExecuted = $false
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $destination 'acquisition.json') -Encoding utf8NoBOM
+
+      - name: Verify real installed Desktop upgrade
+        id: installed_upgrade
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./apps/desktop/tests/windows-installer-upgrade.ps1 `
+            -BaselineDirectory (Join-Path $env:RUNNER_TEMP "desktop-upgrade-baseline-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT") `
+            -CandidateDirectory (Join-Path $env:GITHUB_WORKSPACE $env:RELEASE_ASSETS) `
+            -ExpectedSourceCommit $env:GITHUB_SHA `
+            -RunRoot (Join-Path $env:RUNNER_TEMP "cloga-installer-upgrade-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && (steps.installed_upgrade.outcome == 'success' || steps.installed_upgrade.outcome == 'failure') }}
+        with:
+          name: desktop-installer-upgrade-${{ steps.plan.outputs.version }}
+          path: |
+            ${{ runner.temp }}/cloga-installer-upgrade-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*
+            ${{ runner.temp }}/desktop-upgrade-baseline-${{ github.run_id }}-${{ github.run_attempt }}/acquisition.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Verify complete release qualification
+        id: qualification
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm exec tsx apps/desktop/scripts/verify-fork-qualification.ts `
+            --plan $env:RELEASE_PLAN `
+            --release-assets $env:RELEASE_ASSETS `
+            --ordinary-evidence dist/desktop-copilot-acceptance `
+            --packaged-evidence dist/desktop-copilot-observer-canary `
+            --upgrade-root (Join-Path $env:RUNNER_TEMP "cloga-installer-upgrade-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT") `
+            --baseline-directory (Join-Path $env:RUNNER_TEMP "desktop-upgrade-baseline-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT") `
+            --expected-source $env:GITHUB_SHA `
+            --run-id $env:GITHUB_RUN_ID `
+            --run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --output dist/desktop-fork-qualification/qualification.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Retain verified internal qualification summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-fork-qualification-${{ steps.plan.outputs.version }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: dist/desktop-fork-qualification/qualification.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Verify release asset checksums
         id: asset-set
@@ -296,7 +430,12 @@ jobs:
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
           SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
-        run: node apps/desktop/scripts/publish-fork-release.mjs release-assets
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:SOURCE_SHA) { throw 'Publisher checkout differs from the reviewed build source' }
+          node apps/desktop/scripts/publish-fork-release.mjs release-assets
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   remote-check:
     name: Verify remote managed Check

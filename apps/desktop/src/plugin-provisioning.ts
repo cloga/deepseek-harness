@@ -161,6 +161,33 @@ export function parseDesktopPluginProvisioningState(value: unknown): DesktopPlug
   }
 }
 
+/**
+ * Build existing-schema evidence for the required singleton baseline after actual Host health verification.
+ * This pure builder neither verifies runtime health nor changes receipt ownership or files.
+ * @param inputPlan - The fixed packaged plan, not a caller-selected ownership policy.
+ * @param inputReceipt - Already verified active receipt; user ownership may remain unchanged in its separate store.
+ * @returns Canonical schema-1 baseline state for exactly the matching required package.
+ */
+export function buildDesktopProvisioningState(
+  inputPlan: DesktopPluginProvisioningPlan,
+  inputReceipt: DesktopPluginProvisionReceipt,
+): DesktopPluginProvisioningState {
+  const plan = parseDesktopPluginProvisioningPlan(inputPlan)
+  const receipt = parseDesktopPluginProvisionReceipt(inputReceipt)
+  const entry = plan.plugins[0]
+  if (plan.plugins.length !== 1 || entry === undefined || !entry.required
+    || receipt.packageName !== entry.source.packageName || receipt.version !== entry.source.version
+    || receipt.artifactSha256 !== entry.source.sha256 || JSON.stringify(receipt.source) !== JSON.stringify(entry.source)) {
+    throw new Error('desktop plugin provisioning: qualified singleton receipt does not match the packaged plan')
+  }
+  return parseDesktopPluginProvisioningState({
+    schemaVersion: 1, capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+    planSha256: desktopPluginProvisioningPlanSha256(plan), composition: 'active',
+    plugins: [{ name: receipt.packageName, version: receipt.version, required: true, status: 'active', source: entry.source, receipt }],
+    removed: [], rolledBack: false, verified: true,
+  })
+}
+
 /** Read and validate a packaged provisioning plan. */
 export function readDesktopPluginProvisioningPlan(path: string): DesktopPluginProvisioningPlan {
   return parseDesktopPluginProvisioningPlan(JSON.parse(readFileSync(path, 'utf8')) as unknown)

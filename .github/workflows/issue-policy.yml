@@ -23,8 +23,10 @@ jobs:
           ref: ${{ github.repository == 'cloga/deepseek-harness' && '7b8ff3db29cf0b68963462ce8aded840fc3d8ffd' || github.event.repository.default_branch }}
           clean: true
           persist-credentials: false
+      # Only the canonical repository and reviewed fork may run the trusted preflight.
       - name: Determine policy eligibility
         id: preflight
+        if: (github.repository == 'deepseek-ai/deepseek-harness' || github.repository == 'cloga/deepseek-harness')
         env:
           GITHUB_TOKEN: ${{ github.token }}
         shell: bash

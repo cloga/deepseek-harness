@@ -1,0 +1,777 @@
+/** Keyless unit/guard checks only: never launches Desktop, native UI or an installer. */
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import test from 'node:test'
+import { runInNewContext } from 'node:vm'
+import { installedUpgradeApplication, ownedUpgradePath } from './fixtures/windows-installed-upgrade-contract.mjs'
+import { initialPackageAcceptance, packageCleanupVerified, packageGraphSnapshot, preparePackageHomeDesktop, preparedTransactionId, retainPrimaryFailure, sameProcess, validatePackageFixture } from './fixtures/windows-packaged-package-acceptance.mjs'
+
+const source = readFileSync(new URL('./fixtures/windows-packaged-package-acceptance.mjs', import.meta.url), 'utf8')
+const native = readFileSync(new URL('./windows-desktop-ui.ps1', import.meta.url), 'utf8')
+const id = '11111111-1111-4111-8111-111111111111'
+const digest = bytes => createHash('sha256').update(bytes).digest('hex')
+function directory(t, base = tmpdir()) {
+  let root = mkdtempSync(join(base, 'package-acceptance-unit-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  // Establish the physical identity of a newly owned fixture, not an untrusted application input.
+  root = realpathSync.native(root)
+  return root
+}
+
+test('private shell Desktop creation is empty and preserves the owned home and distinct workspace', t => {
+  const root = directory(t)
+  const home = join(root, 'package-home')
+  const workspace = join(root, 'package-workspace')
+  mkdirSync(home); mkdirSync(workspace)
+  writeFileSync(join(home, '.env'), 'inert private home sentinel')
+  const desktop = preparePackageHomeDesktop(root, home)
+  assert.equal(desktop, join(home, 'Desktop'))
+  assert.ok(lstatSync(desktop).isDirectory() && !lstatSync(desktop).isSymbolicLink())
+  assert.deepEqual(readdirSync(desktop), [])
+  assert.notEqual(desktop, workspace)
+  assert.equal(readFileSync(join(home, '.env'), 'utf8'), 'inert private home sentinel')
+  assert.equal(existsSync(join(home, 'profiles')), false, 'Desktop initialization must not preseed the application profile')
+})
+
+for (const kind of ['directory', 'file', 'link', 'dangling-link']) {
+  test(`private shell Desktop refuses an existing ${kind} without adopting or changing it`, t => {
+    const root = directory(t)
+    const home = join(root, 'package-home')
+    const desktop = join(home, 'Desktop')
+    const target = join(root, 'unrelated-target')
+    mkdirSync(home)
+    if (kind === 'directory') { mkdirSync(desktop); writeFileSync(join(desktop, 'sentinel'), 'retain existing Desktop') }
+    else if (kind === 'file') writeFileSync(desktop, 'retain existing file')
+    else {
+      if (kind === 'link') { mkdirSync(target); writeFileSync(join(target, 'sentinel'), 'retain link target') }
+      symlinkSync(target, desktop, process.platform === 'win32' ? 'junction' : 'dir')
+    }
+    const before = readdirSync(home)
+    assert.throws(() => preparePackageHomeDesktop(root, home), kind.includes('link') ? /must not traverse a link/ : { code: 'EEXIST' })
+    assert.deepEqual(readdirSync(home), before)
+    if (kind === 'directory') assert.equal(readFileSync(join(desktop, 'sentinel'), 'utf8'), 'retain existing Desktop')
+    else if (kind === 'file') assert.equal(readFileSync(desktop, 'utf8'), 'retain existing file')
+    else {
+      assert.ok(lstatSync(desktop).isSymbolicLink())
+      if (kind === 'link') assert.equal(readFileSync(join(target, 'sentinel'), 'utf8'), 'retain link target')
+      else assert.equal(existsSync(target), false)
+    }
+  })
+}
+
+for (const kind of ['missing', 'file', 'link']) {
+  test(`private shell Desktop refuses a ${kind} home without creating or following it`, t => {
+    const root = directory(t)
+    const home = join(root, 'package-home')
+    const target = join(root, 'unrelated-home')
+    if (kind === 'file') writeFileSync(home, 'retain non-directory home')
+    else if (kind === 'link') {
+      mkdirSync(target)
+      writeFileSync(join(target, 'sentinel'), 'retain unrelated home')
+      symlinkSync(target, home, process.platform === 'win32' ? 'junction' : 'dir')
+    }
+    const before = readdirSync(root)
+    assert.throws(() => preparePackageHomeDesktop(root, home))
+    assert.deepEqual(readdirSync(root), before)
+    if (kind === 'file') assert.equal(readFileSync(home, 'utf8'), 'retain non-directory home')
+    if (kind === 'link') {
+      assert.equal(existsSync(join(target, 'Desktop')), false)
+      assert.equal(readFileSync(join(target, 'sentinel'), 'utf8'), 'retain unrelated home')
+    }
+  })
+}
+
+test('private shell Desktop refuses a home outside the qualification root', t => {
+  const root = directory(t)
+  const foreign = directory(t)
+  assert.throws(() => preparePackageHomeDesktop(root, foreign), /strict owned descendant/)
+  assert.deepEqual(readdirSync(root), [])
+  assert.deepEqual(readdirSync(foreign), [])
+})
+
+test('actual setup block creates the private Desktop before any environment or launch consumer (no app)', t => {
+  const root = directory(t)
+  const start = source.indexOf('  const home = ownedUpgradePath(root,')
+  const end = source.indexOf('  const report = initialPackageAcceptance', start)
+  assert.ok(start > 0 && end > start)
+  const initialization = source.indexOf('  preparePackageHomeDesktop(root, home)', start)
+  assert.ok(initialization > start && initialization < end)
+  assert.ok(initialization < source.indexOf('desktopSmokeEnvironment(home)', start))
+  assert.ok(initialization < source.indexOf('._electron.launch(', start))
+  let observed = false
+  runInNewContext(`${source.slice(start, end)}\nobserveSetup({ home, workspace, profile });`, {
+    root, assert, ownedUpgradePath, preparePackageHomeDesktop, join, existsSync, mkdirSync, writeFileSync,
+    observeSetup({ home, workspace, profile }) {
+      const desktop = join(home, 'Desktop')
+      assert.ok(lstatSync(desktop).isDirectory() && !lstatSync(desktop).isSymbolicLink())
+      assert.deepEqual(readdirSync(desktop), [])
+      assert.equal(workspace, join(root, 'package-workspace'))
+      assert.notEqual(workspace, desktop)
+      assert.equal(existsSync(profile), false)
+      observed = true
+    },
+  }, { timeout: 1000 })
+  assert.equal(observed, true, 'Only an inert setup observer runs here, not Electron or the native picker')
+})
+
+test('fixture allocation resolves an aliased temporary base before ownership checks', t => {
+  const parent = directory(t)
+  const physical = join(parent, 'physical')
+  const alias = join(parent, 'temporary-alias')
+  mkdirSync(physical)
+  symlinkSync(physical, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  const root = directory(t, alias)
+  assert.equal(dirname(root), realpathSync.native(physical))
+  assert.equal(root, realpathSync.native(root))
+  assert.equal(installedUpgradeApplication(root), join(root, 'Installed App', 'cloga-deepseek-harness-desktop', 'cloga-deepseek-harness.exe'))
+})
+
+test('installed observers agree on the driver-owned nested application path', t => {
+  const root = directory(t)
+  assert.equal(installedUpgradeApplication(root), join(root, 'Installed App', 'cloga-deepseek-harness-desktop', 'cloga-deepseek-harness.exe'))
+  const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  assert.ok(driver.includes("$baselineAppFilename = 'cloga-deepseek-harness-desktop'"))
+  assert.ok(driver.includes("$installPath = Join-Path $root ('Installed App\\' + $baselineAppFilename)"))
+  for (const name of ['windows-installed-upgrade-smoke.mjs', 'windows-packaged-package-acceptance.mjs']) {
+    const consumer = readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8')
+    assert.ok(consumer.includes('const application = installedUpgradeApplication(root)'), name)
+    assert.equal(consumer.includes("join(root, 'Installed App', 'cloga-deepseek-harness.exe')"), false)
+  }
+  assert.ok(native.includes("$application = Join-Path $root 'Installed App\\cloga-deepseek-harness-desktop\\cloga-deepseek-harness.exe'"))
+  const helperLoad = native.indexOf(". (Join-Path $PSScriptRoot 'fixtures/windows-installer-registration.ps1')")
+  const ancestry = native.indexOf('Assert-InstallerOwnedPath $root $application')
+  assert.ok(helperLoad > native.indexOf("throw 'Foreign runner owner'"))
+  assert.ok(ancestry > helperLoad && ancestry < native.indexOf('$fixture = Read-Process $FixturePid'))
+})
+
+for (const location of ['container', 'application-parent']) {
+  test(`installed application path rejects a linked ${location}`, t => {
+    const root = directory(t)
+    const target = join(root, 'elsewhere')
+    mkdirSync(target)
+    const container = join(root, 'Installed App')
+    if (location === 'application-parent') mkdirSync(container)
+    const link = location === 'container' ? container : join(container, 'cloga-deepseek-harness-desktop')
+    symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir')
+    assert.throws(() => installedUpgradeApplication(root), /must not traverse a link/)
+  })
+}
+
+test('fresh evidence cannot claim any real acceptance path passed', () => {
+  const report = initialPackageAcceptance('a'.repeat(40))
+  assert.equal(report.scope, 'candidate-installed-desktop-same-version-isolated-home')
+  const claims = Object.entries(report).filter(([, value]) => typeof value === 'boolean')
+  assert.ok(claims.length >= 20)
+  assert.ok(claims.every(([, value]) => value === false))
+  for (const field of ['choicesAcrossInstallerUpgradeVerified', 'draftPersistedAcrossQuitVerified', 'promotionFailureRollbackVerified', 'managedHandoffVerified', 'verifiedGithubReleaseReceiptForFixture', 'newlyInstalledTargetHealthyAtFirstConsent']) {
+    assert.equal(report[field], false)
+    assert.equal(source.includes(`report.${field} = true`), false)
+  }
+})
+
+test('rejected or unbound launch attempts cannot vacuously qualify cleanup', () => {
+  const unclaimed = { launchReturned: false, pid: null, bound: false, exited: false }
+  const qualified = { launchReturned: true, launcherPid: 40, launcherExited: true, pid: 41, bound: true, exited: true }
+  assert.equal(packageCleanupVerified([], 0, []), false)
+  assert.equal(packageCleanupVerified([unclaimed], 0, []), false)
+  assert.equal(packageCleanupVerified([qualified, unclaimed], 0, []), false)
+  assert.equal(packageCleanupVerified([{ ...qualified, bound: false }], 0, []), false)
+  assert.equal(packageCleanupVerified([{ ...qualified, exited: false }], 0, []), false, 'CMD exit cannot certify Electron/Host exit')
+  assert.equal(packageCleanupVerified([{ ...qualified, launcherExited: false }], 0, []), false, 'Native family exit cannot certify launch transport exit')
+  assert.equal(packageCleanupVerified([{ ...qualified, launcherPid: null }], 0, []), false)
+  assert.equal(packageCleanupVerified([{ ...qualified, pid: 0 }], 0, []), false)
+  assert.equal(packageCleanupVerified([qualified], 1, []), false)
+  assert.equal(packageCleanupVerified([qualified], 0, ['exit unconfirmed']), false)
+  assert.equal(packageCleanupVerified([qualified], 0, []), true)
+  assert.ok(source.indexOf('shells.push(shellRecord)') < source.indexOf('._electron.launch('))
+  assert.ok(source.includes('packageCleanupVerified(shells, children.size, cleanupErrors)'))
+})
+
+test('close and real evidence-write failures retain the original failure object', async t => {
+  const root = directory(t)
+  const primary = new Error('first application failure')
+  const closeFailure = new Error('subsequent close failure')
+  const secondary = []
+  let current = primary
+  try { await Promise.reject(closeFailure) }
+  catch (error) { current = retainPrimaryFailure(current, error, 'owned-close', secondary) }
+  try { writeFileSync(root, 'cannot replace a directory with receipt bytes') }
+  catch (error) { current = retainPrimaryFailure(current, error, 'evidence-write', secondary) }
+  assert.equal(current, primary)
+  assert.deepEqual(secondary.map(item => item.stage), ['owned-close', 'evidence-write'])
+  assert.equal(retainPrimaryFailure(undefined, closeFailure, 'only-failure', []), closeFailure)
+  assert.ok(source.includes("retainPrimaryFailure(failure, error, 'package-acceptance-write'"))
+  const installed = readFileSync(new URL('./fixtures/windows-installed-upgrade-smoke.mjs', import.meta.url), 'utf8')
+  assert.ok(installed.includes("retainPrimaryFailure(roundFailure, error, 'round-owned-close'"))
+  assert.ok(installed.includes("retainPrimaryFailure(roundFailure, error, 'round-failure-evidence-write'"))
+  assert.ok(installed.includes('if (roundFailure !== undefined) throw roundFailure'))
+})
+
+function unitChildEvidence(result, elapsedMs, budgetMs) {
+  const stderr = result.stderr ?? ''
+  return {
+    elapsedMs: Math.round(elapsedMs), budgetMs, pid: result.pid ?? null,
+    errorCode: result.error?.code ?? null, errorMessage: result.error?.message?.slice(0, 512) ?? null,
+    signal: result.signal, status: result.status,
+    lastPhase: [...stderr.matchAll(/^\[fixture-phase:([a-z-]+)\]\r?$/gmu)].at(-1)?.[1] ?? 'no-script-marker-observed',
+    stdoutTail: (result.stdout ?? '').slice(-2048), stderrTail: stderr.slice(-2048),
+  }
+}
+
+function assertUnitChild(result, evidence) {
+  const diagnostic = JSON.stringify(evidence)
+  assert.equal(result.error, undefined, diagnostic)
+  assert.equal(result.signal, null, diagnostic)
+  assert.equal(result.status, 0, diagnostic)
+}
+
+test('unit child diagnostics cannot accept a timeout with zero status or hide assertion-phase failures', () => {
+  const result = { error: { code: 'ETIMEDOUT', message: 'deadline' }, signal: null, status: 0, stderr: '[fixture-phase:mock-setup-complete]\n' + 'x'.repeat(10_000) }
+  const evidence = unitChildEvidence(result, 30_001, 30_000)
+  assert.equal(evidence.lastPhase, 'mock-setup-complete')
+  assert.equal(evidence.errorCode, 'ETIMEDOUT')
+  assert.equal(evidence.status, 0)
+  assert.equal(evidence.stderrTail.length, 2048)
+  assert.throws(() => assertUnitChild(result, evidence), /ETIMEDOUT/u)
+  const failed = { signal: null, status: 1, stderr: '[fixture-phase:assertions-start]\nassertion failed' }
+  assert.throws(() => assertUnitChild(failed, unitChildEvidence(failed, 1, 10)), /assertions-start/u)
+  const signalled = { signal: 'SIGTERM', status: null }
+  assert.throws(() => assertUnitChild(signalled, unitChildEvidence(signalled, 1, 10)), /SIGTERM/u)
+  assert.equal(unitChildEvidence(signalled, 1, 10).lastPhase, 'no-script-marker-observed')
+  assert.equal(unitChildEvidence({ stderr: 'parser echo: [fixture-phase:assertions-start]' }, 1, 10).lastPhase, 'no-script-marker-observed')
+})
+
+/** Run only extracted pure error/reaper code with fake process handles; never load the native driver or application. */
+function powershellUnit(t, body, shell = 'pwsh', { timeout = 15_000, phases = false } = {}) {
+  const root = directory(t)
+  const script = join(root, 'pure-unit.ps1')
+  writeFileSync(script, "$ErrorActionPreference = 'Stop'\n"
+    + (phases ? "[Console]::Error.WriteLine('[fixture-phase:script-start]')\n" : '') + body
+    + (phases ? "\n[Console]::Error.WriteLine('[fixture-phase:script-complete]')\n" : ''))
+  const names = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'PSMODULEPATH', 'PROGRAMFILES'])
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => names.has(name.toUpperCase()))), POWERSHELL_TELEMETRY_OPTOUT: '1', POWERSHELL_UPDATECHECK: 'Off' }
+  const started = performance.now()
+  const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-File', script], { encoding: 'utf8', env, timeout })
+  const evidence = unitChildEvidence(result, performance.now() - started, timeout)
+  assertUnitChild(result, evidence)
+  if (phases) {
+    assert.equal(evidence.lastPhase, 'script-complete', JSON.stringify(evidence))
+    t.diagnostic(`Pure unit subprocess: ${JSON.stringify(evidence)}`)
+  }
+  return JSON.parse(result.stdout.trim())
+}
+
+test('first-party UIA initialization precedes every owned UI enumeration and readiness flag', () => {
+  const initialization = native.slice(native.indexOf('function Initialize-Native {'), native.indexOf('function Owned-Nodes('))
+  assert.ok(initialization.indexOf('Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing')
+    < initialization.indexOf('$script:providerInitialization = Register-DesktopClientProviders'))
+  assert.ok(initialization.includes('[System.Windows.Automation.AutomationElement].Assembly.GetName()'))
+  assert.ok(initialization.includes('[System.Windows.Automation.ClientSideProviderDescription]'))
+  assert.ok(initialization.includes('param([Reflection.AssemblyName]$Name)'))
+  assert.ok(initialization.includes('[Reflection.Assembly]::Load($Name)'))
+  assert.ok(initialization.indexOf('RegisterClientSideProviderAssembly($Name)') < initialization.indexOf('$script:nativeReady = $true'))
+  assert.doesNotMatch(initialization, /LoadFrom|LoadFile|GetProxyFactoryMappingTable|GetProxyDescriptionTable|RegisterClientSideProviders\(/u)
+  const action = native.slice(native.indexOf("if ($Action -in @('ReviewPackages','ChooseWorkspace','Exit'))"))
+  assert.ok(action.indexOf('Initialize-Native') < action.indexOf('Owned-Nodes -FolderDialog'))
+  assert.ok(action.indexOf('Initialize-Native') < action.indexOf('Wait-Control $label'))
+  const failure = native.slice(native.lastIndexOf('} catch {\n    $primaryFailure = $_'))
+  assert.ok(failure.indexOf('if ($nativeReady)') < failure.indexOf('$tree = @(Owned-Nodes'))
+  assert.ok(native.includes("$_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit"))
+  assert.ok(native.includes("$_.Current.AutomationId -in @('1148','1152')"))
+  assert.ok(native.includes('$timer.Elapsed.TotalSeconds -lt 25'))
+})
+
+test('matching first-party UIA identity and provider table fail closed before fake UI actions', { skip: process.platform !== 'win32' }, t => {
+  const helper = native.match(/function Register-DesktopClientProviders[^]*?\r?\n\}/u)?.[0]
+  assert.ok(helper)
+  const observed = powershellUnit(t, `
+${helper}
+# These are inert test-owned classes, not UIAutomation types or real provider assemblies.
+class UnitProviderDescription {
+    [string]$ClassName
+    [object]$ClientSideProviderFactoryCallback
+    UnitProviderDescription([string]$name, [object]$callback) { $this.ClassName = $name; $this.ClientSideProviderFactoryCallback = $callback }
+}
+class UnitProviderField {
+    [bool]$IsPublic = $true
+    [bool]$IsStatic = $true
+    [type]$FieldType = [UnitProviderDescription[]]
+    [object]$Value
+    [object] GetValue([object]$target) {
+        $script:events.Add('table-read')
+        if ($script:mode -eq 'initializer-error') { throw $script:original }
+        return $this.Value
+    }
+}
+class UnitProviderType {
+    [bool]$IsPublic = $true
+    [UnitProviderField]$Field
+    [object] GetField([string]$name, [Reflection.BindingFlags]$flags) {
+        $script:events.Add('field')
+        if ($name -cne 'ClientSideProviderDescriptionTable' -or $flags -ne ([Reflection.BindingFlags]::Public -bor [Reflection.BindingFlags]::Static)) { throw 'Wrong public field contract' }
+        return $this.Field
+    }
+}
+class UnitProviderAssembly {
+    [Reflection.AssemblyName]$Identity
+    [UnitProviderType]$ProviderType
+    [Reflection.AssemblyName] GetName() { $script:events.Add('identity'); return $this.Identity }
+    [object] GetType([string]$name, [bool]$throwOnError, [bool]$ignoreCase) {
+        $script:events.Add('type')
+        if ($name -cne 'UIAutomationClientsideProviders.UIAutomationClientSideProviders' -or -not $throwOnError -or $ignoreCase) { throw 'Wrong exact public provider type' }
+        return $this.ProviderType
+    }
+}
+$cases = @('positive', 'mixed-case', 'alternate-version', 'upper-bound', 'client-name', 'client-token', 'client-culture', 'client-version', 'load-null', 'load-error', 'loaded-name', 'loaded-version', 'loaded-culture', 'loaded-token', 'missing-type', 'private-type', 'missing-field', 'private-field', 'instance-field', 'field-type', 'null-table', 'empty-table', 'wrong-table', 'over-bound', 'missing-edit', 'missing-button', 'near-edit', 'null-edit-callback', 'null-button-callback', 'initializer-error', 'registration-error')
+$passed = @()
+foreach ($mode in $cases) {
+    $script:mode = $mode
+    $script:events = [Collections.Generic.List[string]]::new()
+    $script:original = [InvalidOperationException]::new('original-' + $mode)
+    $client = [Reflection.AssemblyName]::new('UIAutomationClient, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35')
+    if ($mode -eq 'alternate-version') { $client.Version = [version]'4.2.3.4' }
+    if ($mode -eq 'client-name') { $client.Name = 'OtherClient' }
+    if ($mode -eq 'client-token') { $client.SetPublicKeyToken([byte[]]@(1,2,3,4,5,6,7,8)) }
+    if ($mode -eq 'client-culture') { $client.CultureName = 'en-US' }
+    if ($mode -eq 'client-version') { $client.Version = $null }
+    $identity = [Reflection.AssemblyName]::new('UIAutomationClientsideProviders, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35')
+    if ($mode -eq 'alternate-version') { $identity.Version = $client.Version }
+    if ($mode -eq 'loaded-name') { $identity.Name = 'OtherProvider' }
+    if ($mode -eq 'loaded-version') { $identity.Version = [version]'9.0.0.0' }
+    if ($mode -eq 'loaded-culture') { $identity.CultureName = 'en-US' }
+    if ($mode -eq 'loaded-token') { $identity.SetPublicKeyToken([byte[]]@(1,2,3,4,5,6,7,8)) }
+    $table = [UnitProviderDescription[]]@([UnitProviderDescription]::new('Edit', {}), [UnitProviderDescription]::new('Button', {}))
+    if ($mode -eq 'mixed-case') { $table[0].ClassName = 'eDiT'; $table[1].ClassName = 'bUtToN' }
+    if ($mode -eq 'missing-edit') { $table[0].ClassName = 'Pane' }
+    if ($mode -eq 'near-edit') { $table[0].ClassName = 'EditLike' }
+    if ($mode -eq 'missing-button') { $table[1].ClassName = 'Pane' }
+    if ($mode -eq 'null-edit-callback') { $table[0].ClientSideProviderFactoryCallback = $null }
+    if ($mode -eq 'null-button-callback') { $table[1].ClientSideProviderFactoryCallback = $null }
+    if ($mode -in @('upper-bound', 'over-bound')) {
+        $count = if ($mode -eq 'upper-bound') { 256 } else { 257 }
+        $extra = @(for ($index = 2; $index -lt $count; $index++) { [UnitProviderDescription]::new('Other', {}) })
+        $table = [UnitProviderDescription[]](@($table) + $extra)
+    }
+    $field = [UnitProviderField]::new(); $field.Value = $table
+    if ($mode -eq 'private-field') { $field.IsPublic = $false }
+    if ($mode -eq 'instance-field') { $field.IsStatic = $false }
+    if ($mode -eq 'field-type') { $field.FieldType = [object[]] }
+    if ($mode -eq 'null-table') { $field.Value = $null }
+    if ($mode -eq 'empty-table') { $field.Value = [UnitProviderDescription[]]@() }
+    if ($mode -eq 'wrong-table') { $field.Value = [object[]]@($table) }
+    $providerType = [UnitProviderType]::new(); $providerType.Field = $field
+    if ($mode -eq 'missing-field') { $providerType.Field = $null }
+    if ($mode -eq 'private-type') { $providerType.IsPublic = $false }
+    $assembly = [UnitProviderAssembly]::new(); $assembly.Identity = $identity; $assembly.ProviderType = $providerType
+    if ($mode -eq 'missing-type') { $assembly.ProviderType = $null }
+    $ready = $false; $failure = $null; $result = $null
+    try {
+        $result = Register-DesktopClientProviders $client ([UnitProviderDescription]) {
+            param([Reflection.AssemblyName]$requested)
+            $script:events.Add('load')
+            if ($requested.Name -cne 'UIAutomationClientsideProviders' -or $requested.Version -ne $client.Version -or $requested.CultureName -cne $client.CultureName) { throw 'Identity derivation changed' }
+            if ([BitConverter]::ToString($requested.GetPublicKeyToken()) -cne [BitConverter]::ToString($client.GetPublicKeyToken())) { throw 'Token derivation changed' }
+            if ($mode -eq 'load-error') { throw $script:original }
+            if ($mode -eq 'load-null') { return $null }
+            return $assembly
+        } {
+            param([Reflection.AssemblyName]$requested)
+            $script:events.Add('register')
+            if ($requested.FullName -cne $identity.FullName) { throw 'Registration changed identity' }
+            if ($mode -eq 'registration-error') { throw $script:original }
+        }
+        $ready = $true
+        $script:events.Add('ready')
+        $script:events.Add('fake-owned-ui')
+    } catch { $failure = $_ }
+    $positive = $mode -in @('positive', 'mixed-case', 'alternate-version', 'upper-bound')
+    if ($positive) {
+        if ($null -ne $failure) { throw $failure }
+        if (-not $ready -or $result.scope -cne 'initialization-ready' -or -not $result.editDescriptionReady -or -not $result.buttonDescriptionReady -or -not $result.registrationReturned) { throw 'False initialization readiness' }
+        if (($script:events -join ',') -cne 'load,identity,type,field,table-read,register,ready,fake-owned-ui') { throw 'Initialization order changed' }
+        if ($result.requestedIdentity -cne $result.loadedIdentity -or $result.version -cne $client.Version.ToString()) { throw 'Incorrect bounded identity evidence' }
+        if ($result.Keys.Count -ne 8) { throw 'Unexpected initialization evidence fields' }
+    } else {
+        if ($null -eq $failure -or $ready -or $script:events.Contains('fake-owned-ui')) { throw ('Accepted invalid initialization: ' + $mode) }
+        if ($mode -ne 'registration-error' -and $script:events.Contains('register')) { throw ('Registered before validation: ' + $mode) }
+        if ($mode -like 'client-*' -and $script:events.Contains('load')) { throw 'Invalid client triggered provider loading' }
+        if ($mode -in @('load-error', 'registration-error') -and -not [object]::ReferenceEquals($failure.Exception, $script:original)) { throw 'Original callback failure was replaced' }
+        if ($mode -eq 'initializer-error' -and $failure.ToString() -notmatch 'original-initializer-error') { throw 'Initializer failure was hidden' }
+    }
+    $passed += $mode
+}
+@{ passed = $passed; providerInvocations = 0; actualUiCalls = 0 } | ConvertTo-Json -Compress
+`, join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
+  assert.equal(observed.passed.length, 31)
+  assert.equal(observed.providerInvocations, 0)
+  assert.equal(observed.actualUiCalls, 0)
+})
+
+test('native failure capture cannot enumerate UI before initialization readiness and preserves the original error', { skip: process.platform !== 'win32' }, t => {
+  const normalized = native.replaceAll('\r\n', '\n')
+  const marker = '} catch {\n    $primaryFailure = $_'
+  const start = normalized.lastIndexOf(marker)
+  assert.ok(start >= 0)
+  const body = normalized.slice(start + '} catch {\n'.length, normalized.lastIndexOf('\n}'))
+  const observed = powershellUnit(t, `
+# Fake capture class returns no windows; it never calls a native API.
+class DesktopAcceptanceWindows {
+    static [int[]] Owned([int]$processId) { return @() }
+}
+function Owned-Nodes { $script:enumerations++; return @() }
+$OwnerToken = 'unit-owner'; $RequestId = 'unit-request'; $Action = 'unit-only'; $ShellPid = 123
+$evidence = $PSScriptRoot
+$passed = @()
+foreach ($ready in @($false, $true)) {
+    $nativeReady = $ready
+    $providerInitialization = if ($ready) { @{ scope = 'initialization-ready'; registrationReturned = $true } } else { $null }
+    $script:enumerations = 0
+    $resultPath = Join-Path $PSScriptRoot ('capture-' + $ready + '.json')
+    $original = [InvalidOperationException]::new('original native initialization or action failure')
+    $caught = $null
+    try {
+        try { throw $original } catch {
+${body}
+        }
+    } catch { $caught = $_ }
+    if (-not [object]::ReferenceEquals($caught.Exception, $original)) { throw 'Native primary failure was replaced' }
+    if ($script:enumerations -ne [int]$ready) { throw 'Capture ignored initialization readiness' }
+    $record = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+    if ($record.succeeded -or $record.error -cne $original.Message) { throw 'Failure evidence claimed success or changed primary' }
+    if (-not $ready -and $null -ne $record.providerInitialization) { throw 'Uninitialized provider has readiness evidence' }
+    if ($ready -and $record.providerInitialization.scope -cne 'initialization-ready') { throw 'Initialization evidence lost its limited scope' }
+    $passed += [string]$ready
+}
+@{ passed = $passed; actualUiCalls = 0 } | ConvertTo-Json -Compress
+`, join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
+  assert.deepEqual(observed.passed, ['False', 'True'])
+  assert.equal(observed.actualUiCalls, 0)
+})
+
+test('package observer binds the observed Electron PID before native actions and retains transport ownership separately', () => {
+  const launch = source.slice(source.indexOf('  const launch = async label => {'), source.indexOf('  const openNativeMenu'))
+  assert.ok(launch.indexOf('app.evaluate(inspectInstalledDesktopIdentity)') < launch.indexOf("await native('Bind')"))
+  assert.ok(launch.indexOf('assert.equal(identity.version, expected.version)') < launch.indexOf("await native('Bind')"))
+  assert.ok(launch.includes('const processIds = installedDesktopProcessIds(launcher, identity, process.pid)'))
+  assert.ok(launch.includes('boundPid = processIds.pid'))
+  assert.doesNotMatch(source, /boundPid = app\.process\(\)\.pid/u)
+  assert.ok(source.includes("'-LauncherPid', String(launcherPid)"))
+  assert.ok(source.includes('const records = shells.filter(shell => shell.pid === pid)'))
+  assert.ok(source.includes('launchers.set(shellRecord.launchId, launcher)'))
+  assert.ok(source.includes('assert.equal(recorded.launcher.pid, shellRecord.launcherPid)'))
+  assert.ok(source.includes("await native('StopOwned', shell.pid)"))
+  assert.ok(source.includes("await native('VerifyExited', shell.pid)"))
+  assert.ok(source.includes('const launcher = launchers.get(shell.launchId)'))
+  assert.ok(source.includes('shell.launcherExited = installedLauncherExited(launcher)'))
+  assert.ok(native.includes('Assert-DesktopLaunchLineage $fixture $launcher $shell $application'))
+  assert.ok(native.includes("(Join-Path ([Environment]::SystemDirectory) 'cmd.exe')"))
+  assert.ok(native.includes('launcher = (Identity $launcher)'))
+  assert.ok(native.includes('$binding.launcher.pid -ne $LauncherPid'))
+  assert.ok(native.includes('Same-Identity $launcher $binding.launcher'))
+  assert.ok(native.includes('Same-Identity (Read-Process $LauncherPid) $binding.launcher'))
+  assert.ok(native.includes("throw 'Owned launch transport remains live; exit is not verified'"))
+})
+
+test('native launch lineage admits only the retained CMD chain or exact direct-child launch', { skip: process.platform !== 'win32' }, t => {
+  const helper = native.match(/function Assert-DesktopLaunchLineage[^]*?\r?\n\}/u)?.[0]
+  assert.ok(helper)
+  const observed = powershellUnit(t, `
+${helper}
+function Changed($Record, $Field, $Value) { $copy = $Record.PSObject.Copy(); $copy.$Field = $Value; return $copy }
+$application = 'C:/owned/cloga-deepseek-harness.exe'
+$command = 'C:/Windows/System32/cmd.exe'
+$time = [datetime]'2026-01-01T00:00:00Z'
+$fixture = [pscustomobject]@{ ProcessId = 101; ParentProcessId = 1; CreationDate = $time; SessionId = 7; ExecutablePath = 'C:/node.exe' }
+$launcher = [pscustomobject]@{ ProcessId = 202; ParentProcessId = 101; CreationDate = $time.AddSeconds(1); SessionId = 7; ExecutablePath = $command }
+$shell = [pscustomobject]@{ ProcessId = 303; ParentProcessId = 202; CreationDate = $time.AddSeconds(2); SessionId = 7; ExecutablePath = $application }
+$direct = Changed $shell 'ParentProcessId' 101
+Assert-DesktopLaunchLineage $fixture $launcher $shell $application $command
+Assert-DesktopLaunchLineage $fixture $direct $direct $application $command
+$cases = @(
+    @{ label = 'missing-launcher'; launcher = $null; shell = $shell },
+    @{ label = 'fixture-as-launcher'; launcher = $fixture; shell = $shell },
+    @{ label = 'wrong-launcher-parent'; launcher = (Changed $launcher 'ParentProcessId' 999); shell = $shell },
+    @{ label = 'wrong-main-parent'; launcher = $launcher; shell = (Changed $shell 'ParentProcessId' 999) },
+    @{ label = 'foreign-command-interpreter'; launcher = (Changed $launcher 'ExecutablePath' 'C:/foreign/cmd.exe'); shell = $shell },
+    @{ label = 'foreign-main-executable'; launcher = $launcher; shell = (Changed $shell 'ExecutablePath' ($application + '.other')) },
+    @{ label = 'launcher-predates-fixture'; launcher = (Changed $launcher 'CreationDate' $time.AddSeconds(-1)); shell = $shell },
+    @{ label = 'main-predates-launcher'; launcher = $launcher; shell = (Changed $shell 'CreationDate' $time) },
+    @{ label = 'launcher-foreign-session'; launcher = (Changed $launcher 'SessionId' 9); shell = $shell },
+    @{ label = 'main-foreign-session'; launcher = $launcher; shell = (Changed $shell 'SessionId' 9) },
+    @{ label = 'direct-incarnation-mismatch'; launcher = $direct; shell = (Changed $direct 'CreationDate' $time.AddSeconds(3)) },
+    @{ label = 'direct-parent-mismatch'; launcher = $direct; shell = $shell }
+)
+$rejected = @()
+foreach ($case in $cases) {
+    $failure = $null
+    try { Assert-DesktopLaunchLineage $fixture $case.launcher $case.shell $application $command } catch { $failure = $_ }
+    if ($null -eq $failure) { throw ('Accepted foreign lineage: ' + $case.label) }
+    $rejected += $case.label
+}
+[pscustomobject]@{ accepted = @('cmd-chain', 'direct-child'); rejected = $rejected } | ConvertTo-Json -Compress
+`)
+  assert.deepEqual(observed.accepted, ['cmd-chain', 'direct-child'])
+  assert.deepEqual(observed.rejected, [
+    'missing-launcher', 'fixture-as-launcher', 'wrong-launcher-parent', 'wrong-main-parent', 'foreign-command-interpreter',
+    'foreign-main-executable', 'launcher-predates-fixture', 'main-predates-launcher', 'launcher-foreign-session',
+    'main-foreign-session', 'direct-incarnation-mismatch', 'direct-parent-mismatch',
+  ])
+})
+
+test('native incarnation comparison rejects a reused launcher PID without touching any real process', { skip: process.platform !== 'win32' }, t => {
+  const helper = native.match(/function Same-Identity[^]*?\r?\n\}/u)?.[0]
+  assert.ok(helper)
+  const observed = powershellUnit(t, `
+${helper}
+$started = [datetime]'2026-01-01T00:00:01Z'
+$image = 'C:/Windows/System32/cmd.exe'
+$disposed = 0
+function Get-Process {
+    $handle = [pscustomobject]@{ Handle = 1; StartTime = $script:started; Path = $script:image }
+    $handle | Add-Member ScriptMethod Dispose { $script:disposed++ }
+    return $handle
+}
+$actual = [pscustomobject]@{ ProcessId = 202; ParentProcessId = 101; ExecutablePath = $image }
+$expected = [pscustomobject]@{ pid = 202; parentPid = 101; executable = $image; created = $started.ToUniversalTime().ToString('o') }
+$matched = Same-Identity $actual $expected
+$started = $started.AddSeconds(2)
+$reused = Same-Identity $actual $expected
+$started = [datetime]$expected.created
+$image = 'C:/foreign/cmd.exe'
+$foreign = Same-Identity $actual $expected
+[pscustomobject]@{ matched = $matched; reused = $reused; foreign = $foreign; disposed = $disposed } | ConvertTo-Json -Compress
+`)
+  assert.deepEqual(observed, { matched: true, reused: false, foreign: false, disposed: 3 })
+})
+
+test('native exit verification requires both transport and actual main exit without adopting reused PIDs', { skip: process.platform !== 'win32' }, t => {
+  const same = native.match(/function Same-Identity[^]*?\r?\n\}/u)?.[0]
+  const body = native.split("if ($Action -eq 'VerifyExited') {")[1].split("    } elseif ($Action -eq 'StopOwned')")[0]
+  assert.ok(same && body)
+  // Match the native driver's Windows PowerShell edition: Core auto-converts ISO JSON strings to DateTime.
+  // Preserve the original 15s total-process bound; phase diagnostics do not justify widening it.
+  const observed = powershellUnit(t, `
+${same}
+function Verify-Exit {
+${body}
+    return $result
+}
+function Read-Process($ProcessId) { return $script:processes[[int]$ProcessId] }
+function Get-CimInstance { return @($script:processes.Values) }
+function Get-Process($Id) {
+    $value = Read-Process $Id
+    if ($null -eq $value) { return $null }
+    $handle = [pscustomobject]@{ Handle = 1; StartTime = $value.Started; Path = $value.ExecutablePath }
+    $handle | Add-Member ScriptMethod Dispose {}
+    return $handle
+}
+$OwnerToken = 'unit-owner'
+$LauncherPid = 202
+$application = Join-Path $PSScriptRoot 'app.exe'
+$time = [datetime]'2026-01-01T00:00:01Z'
+$command = 'C:/Windows/System32/cmd.exe'
+$binding = [pscustomobject]@{ launcher = [pscustomobject]@{ pid = 202; parentPid = 101; executable = $command; created = $time.ToUniversalTime().ToString('o') } }
+$familyPath = Join-Path $PSScriptRoot 'family.json'
+@{ ownerToken = $OwnerToken; completeObservation = $true; processes = @(@{ pid = 303; parentPid = 202; executable = $application; created = $time.AddSeconds(1).ToUniversalTime().ToString('o') }) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $familyPath
+[Console]::Error.WriteLine('[fixture-phase:mock-setup-complete]')
+[Console]::Error.WriteLine('[fixture-phase:assertions-start]')
+$rejected = @()
+foreach ($case in @('transport-live', 'main-live')) {
+    $processes = if ($case -eq 'transport-live') { @{ 202 = [pscustomobject]@{ ProcessId = 202; ParentProcessId = 101; ExecutablePath = $command; Started = $time } } }
+        else { @{ 303 = [pscustomobject]@{ ProcessId = 303; ParentProcessId = 202; ExecutablePath = $application; Started = $time.AddSeconds(1) } } }
+    $failure = $null
+    try { [void](Verify-Exit) } catch { $failure = $_ }
+    if ($null -eq $failure -or $failure.Exception.Message -notmatch 'remains live') { throw ('Exit incorrectly admitted: ' + $case + ': ' + $failure) }
+    $rejected += $case
+}
+$processes = @{}
+$gone = Verify-Exit
+$processes = @{ 202 = [pscustomobject]@{ ProcessId = 202; ParentProcessId = 101; ExecutablePath = $command; Started = $time.AddSeconds(10); CreationDate = $time.AddSeconds(10) } }
+$reused = Verify-Exit
+[pscustomobject]@{ rejected = $rejected; gone = $gone.ownedFamilyExited; reused = $reused.ownedFamilyExited } | ConvertTo-Json -Compress
+`, join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), { timeout: 15_000, phases: true })
+  assert.deepEqual(observed, { rejected: ['transport-live', 'main-live'], gone: true, reused: true })
+})
+
+test('Windows pure reaper covers late cleanup handles and rejects WaitForExit false', { skip: process.platform !== 'win32' }, t => {
+  const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const helper = driver.match(/function Stop-OwnedProcesses \{[\s\S]*?\r?\n\}/u)?.[0]
+  assert.ok(helper)
+  const observed = powershellUnit(t, `${helper}\n
+$handles = [Collections.Generic.List[object]]::new()
+$messages = [Collections.Generic.List[string]]::new()
+if (-not (Stop-OwnedProcesses $handles $messages)) { throw 'Empty first pass failed' }
+$late = [pscustomobject]@{ HasExited = $false; KillCalls = 0; WaitCalls = 0 }
+$late | Add-Member ScriptMethod Kill { param($Tree); $this.KillCalls++ }
+$late | Add-Member ScriptMethod WaitForExit { param($Milliseconds); $this.WaitCalls++; return $false }
+$handles.Add($late)
+$stopped = Stop-OwnedProcesses $handles $messages
+@{ stopped = $stopped; kills = $late.KillCalls; waits = $late.WaitCalls; errors = @($messages) } | ConvertTo-Json -Compress
+`)
+  assert.equal(observed.stopped, false)
+  assert.equal(observed.kills, 1)
+  assert.equal(observed.waits, 1)
+  assert.match(observed.errors[0], /did not exit/)
+  assert.ok(driver.lastIndexOf('Stop-OwnedProcesses $processes $cleanupErrors') > driver.indexOf('Wait-Exit (Start-Fixture cleanup)'))
+  assert.ok(driver.lastIndexOf('Stop-OwnedProcesses $processes $cleanupErrors') < driver.indexOf('try { $process.Dispose() }'))
+})
+
+test('Windows native failure evidence write cannot replace its primary error', { skip: process.platform !== 'win32' }, t => {
+  const normalized = native.replaceAll('\r\n', '\n')
+  const marker = '} catch {\n    $primaryFailure = $_'
+  const start = normalized.lastIndexOf(marker)
+  assert.ok(start >= 0)
+  const body = normalized.slice(start + '} catch {\n'.length, normalized.lastIndexOf('\n}'))
+  const observed = powershellUnit(t, `
+$nativeReady = $false
+$resultPath = $PSScriptRoot
+$OwnerToken = 'unit-owner'
+$RequestId = 'unit-request'
+$Action = 'unit-only'
+try {
+    try { throw 'primary native action failure' } catch {
+${body}
+    }
+} catch {
+    @{ primary = $_.Exception.Message; secondary = @($secondaryErrors) } | ConvertTo-Json -Compress
+}
+`)
+  assert.equal(observed.primary, 'primary native action failure')
+  assert.equal(observed.secondary.length, 1)
+  assert.match(observed.secondary[0], /Native failure evidence write failed/)
+})
+
+test('Windows outer receipt failure preserves an existing error and promotes only when none exists', { skip: process.platform !== 'win32' }, t => {
+  const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8').replaceAll('\r\n', '\n')
+  const start = driver.lastIndexOf('    try {\n        [ordered]@{')
+  assert.ok(start >= 0)
+  const receipt = driver.slice(start, driver.lastIndexOf('\n}'))
+  const observed = powershellUnit(t, `
+$root = $PSScriptRoot
+$ExpectedSourceCommit = 'unit-source'
+$installPath = 'unit-only'
+$success = $false
+$packageAcceptanceSuccess = $false
+$cleanupErrors = [Collections.Generic.List[string]]::new()
+$secondaryErrors = [Collections.Generic.List[string]]::new()
+try { throw 'original installer failure' } catch { $original = $_ }
+$failure = $original
+${receipt}
+$preserved = [object]::ReferenceEquals($failure, $original)
+$firstSecondary = @($secondaryErrors)
+$failure = $null
+$secondaryErrors.Clear()
+${receipt}
+@{ preserved = $preserved; firstSecondary = $firstSecondary; promoted = ($null -ne $failure); secondSecondary = @($secondaryErrors) } | ConvertTo-Json -Compress
+`)
+  assert.equal(observed.preserved, true)
+  assert.equal(observed.promoted, true)
+  assert.equal(observed.firstSecondary.length, 1)
+  assert.equal(observed.secondSecondary.length, 1)
+  assert.match(observed.firstSecondary[0], /Installer acceptance evidence write failed/)
+})
+
+test('removed package absence waits for a retained running inventory witness', () => {
+  const removal = source.slice(source.indexOf("await launch('removed-copilot')"))
+  const absence = removal.indexOf('assert.equal(await copilot().count(), 0)')
+  assert.ok(absence > 0)
+  for (const witness of ["retainedFixture.waitFor({ state: 'visible' })", "getByText('Running'", "removedPanel.getByRole('alert')", "name: 'Back to plugins'"]) {
+    assert.ok(removal.indexOf(witness) >= 0 && removal.indexOf(witness) < absence, witness)
+  }
+})
+
+test('prepared notice requires one exact transaction identity', () => {
+  const notice = `@fixture/bundle: Transaction ${id} is staged privately. Active plugins are unchanged.`
+  assert.equal(preparedTransactionId(notice), id)
+  for (const text of ['', id, `Transaction ../${id} is staged privately.`, notice + notice, notice.replace(id, id.toUpperCase().replace('1', 'A'))]) {
+    assert.throws(() => preparedTransactionId(text))
+  }
+})
+
+test('graph reader hashes exact metadata, payload bytes and link spellings without following links', t => {
+  const root = directory(t)
+  const profile = join(root, 'profile')
+  const external = join(root, 'runtime')
+  mkdirSync(profile)
+  mkdirSync(external)
+  writeFileSync(join(profile, 'package.json'), '{"private":true}\n')
+  writeFileSync(join(external, 'external.js'), 'outside\n')
+  symlinkSync(external, join(profile, 'shared'), process.platform === 'win32' ? 'junction' : 'dir')
+  const first = packageGraphSnapshot(profile)
+  assert.equal(first.fingerprint, digest(JSON.stringify(first.entries)))
+  assert.equal(first.entries.length, 2)
+  assert.equal(first.entries[1].kind, 'link')
+  writeFileSync(join(external, 'external.js'), 'external changes do not mutate the link spelling\n')
+  assert.deepEqual(packageGraphSnapshot(profile), first)
+  writeFileSync(join(profile, 'package.json'), '{"private":false}\n')
+  assert.notEqual(packageGraphSnapshot(profile).fingerprint, first.fingerprint)
+  assert.throws(() => packageGraphSnapshot(join(profile, 'shared')))
+})
+
+test('a process generation needs creation time and executable as well as PID', () => {
+  const observed = { pid: 41, parentPid: 20, created: '2026-01-01T00:00:00.0000000Z', executable: 'C:\\owned\\desktop.exe' }
+  assert.equal(sameProcess(observed, { ...observed, executable: observed.executable.toUpperCase() }), true)
+  for (const change of [{ pid: 42 }, { created: '2026-01-01T00:00:01.0000000Z' }, { executable: 'C:\\other.exe' }]) {
+    assert.equal(sameProcess(observed, { ...observed, ...change }), false)
+  }
+  assert.equal(sameProcess(undefined, observed), false)
+})
+
+test('only the unchanged private fixture package with no lifecycle or dependency fields is admitted', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../../web/tests/fixtures/plugins/fixture-bundle/package.json', import.meta.url), 'utf8'))
+  assert.doesNotThrow(() => validatePackageFixture(manifest))
+  for (const field of ['scripts', 'dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+    assert.throws(() => validatePackageFixture({ ...manifest, [field]: {} }))
+  }
+  assert.throws(() => validatePackageFixture({ ...manifest, private: false }))
+  assert.throws(() => validatePackageFixture({ ...manifest, name: 'dsh-github-copilot' }))
+  assert.throws(() => validatePackageFixture({ ...manifest, version: '0.0.2' }))
+})
+
+test('standalone fixture refuses workstation execution before filesystem setup or browser imports', () => {
+  const entry = fileURLToPath(new URL('./fixtures/windows-packaged-package-acceptance.mjs', import.meta.url))
+  const result = spawnSync(process.execPath, [entry], { encoding: 'utf8', env: { ...process.env, GITHUB_ACTIONS: 'false' }, timeout: 10_000 })
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /Installer qualification (?:requires Windows|is GitHub-only)/)
+  const run = source.slice(source.indexOf('export async function runPackagedPackageAcceptance'))
+  assert.ok(run.indexOf('assertUpgradeRunner(process.env)') < run.indexOf('mkdirSync(directory)'))
+  assert.ok(run.indexOf('assertUpgradeRunner(process.env)') < run.indexOf("import('playwright')"))
+})
+
+test('native helper checks hosted ownership before accessibility loading and uses owned controls only', () => {
+  assert.ok(native.indexOf("$env:RUNNER_ENVIRONMENT -ne 'github-hosted'") < native.indexOf('Get-Content -LiteralPath'))
+  assert.ok(native.indexOf("$env:RUNNER_ENVIRONMENT -ne 'github-hosted'") < native.indexOf('Add-Type'))
+  for (const required of ['Same-Identity', '$handle.StartTime', '$handle.Handle', 'GetWindowThreadProcessId', '$node.Current.ProcessId -eq $ShellPid', 'InvokePattern', 'ValuePattern', "Wait-Control 'Select Folder'", 'skippedReusedPids', 'package-native-$RequestId', 'accessibility = $tree', '$fresh.CreationDate -ne $Process.CreationDate', 'Identity $item -AllowExited', 'completeObservation = $false', 'postExitProcessScanPassed = $true']) assert.ok(native.includes(required), required)
+  assert.doesNotMatch(native, /SendKeys|SendInput|SetForegroundWindow|Stop-Process\s+-Name|taskkill|ExecutionPolicy|dialog\.showOpenDialog\s*=/iu)
+  const actions = native.match(/ValidateSet\(([^)]+)\)/u)?.[1]
+  assert.equal(actions, "'Bind','Observe','ReviewPackages','ChooseWorkspace','Exit','VerifyExited','StopOwned'")
+})
+
+test('scenario keeps real native actions, real shell consent, provider-zero-call and two-step health observations', () => {
+  for (const required of ["native('ChooseWorkspace')", "openNativeMenu('ReviewPackages')", "openNativeMenu('Exit')", "name: 'Activate and restart Host'", "name: 'Update later'", "name: 'Create provider'", "mockServer([])", 'assert.equal(mock.requests.length, 0', 'firstPrepared.value.mutation.enabled, false', "getByText('Running'", 'candidateFingerprint', 'DISCARDED.json']) assert.ok(source.includes(required), required)
+  assert.doesNotMatch(source, /remote\.pluginManager|ipcRenderer\.(?:send|invoke)|\.reportImpact\(|showMessageBox\s*=|showOpenDialog\s*=|MenuItem|addInitScript|\.route\(/u)
+  assert.ok(source.indexOf('report.installedDisabledAfterConsentVerified = true') < source.indexOf('report.enabledFixtureRunningAfterSeparateRestartVerified = true'))
+  assert.ok(source.includes("assert.equal(children.size, 0, 'A previous native helper has not acknowledged exit')"))
+  assert.ok(source.includes('timed out and its exit was acknowledged'))
+  const cleanup = source.slice(source.indexOf('    const cleanupErrors = []'))
+  assert.ok(cleanup.indexOf("native('Observe')") < cleanup.indexOf('await app.close()'))
+  assert.ok(cleanup.includes('if (children.size === 0)'))
+})
+
+test('installed driver runs the separately scoped case before uninstall and retains unverified installer flags', () => {
+  const driver = readFileSync(new URL('./windows-installer-upgrade.ps1', import.meta.url), 'utf8')
+  const fixture = readFileSync(new URL('./fixtures/windows-installed-upgrade-smoke.mjs', import.meta.url), 'utf8')
+  assert.ok(driver.indexOf('Start-Fixture candidate') < driver.indexOf('Start-Fixture package'))
+  assert.ok(driver.indexOf('Start-Fixture package') < driver.indexOf('Start-Owned $uninstallerCopy.Path'))
+  assert.ok(driver.includes('separateSameVersionPackagedPluginAcceptanceVerified = $packageAcceptanceSuccess'))
+  assert.ok(driver.includes('Package process cleanup is unconfirmed; retain installation and profiles for VM teardown'))
+  assert.ok(driver.indexOf('$packageCleanup.cleanupVerified') < driver.indexOf('Start-Owned $uninstallerCopy.Path'))
+  for (const field of ['pluginUserChoicesVerified', 'draftAttachmentRefusalVerified', 'managedHandoffVerified']) assert.ok(driver.includes(`${field} = $false`))
+  for (const name of ['package-home', 'package-electron-user-data', 'package-workspace', 'package-fixture-data']) assert.ok(fixture.includes(`'${name}'`))
+})

@@ -2,6 +2,7 @@ import { runInNewContext } from 'node:vm'
 import type { Page } from 'playwright'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  capturePackagedUsageModules,
   inspectPositiveCopilotUsage,
   packagedUsageBrowserSource,
   type PositiveCopilotUsageEvidence,
@@ -9,10 +10,13 @@ import {
 
 const evidence: PositiveCopilotUsageEvidence = {
   scope: 'packaged-renderer-released-client-synthetic-session-and-quota',
-  provider: 'github-copilot', usageText: 'Copilot credits: 7 used', quotaReads: 2,
+  provider: 'github-copilot', usageText: 'Copilot credits: 7 used · 13 left', quotaReads: 4,
   sessionSubscribed: true, removedSessionHidesUsage: true, otherProviderHidesUsage: true,
   clientDisposalRemovesUsage: true, selectorErrors: 0, forbiddenRemoteCalls: 0,
   hostTransport: 'not-provided-to-isolated-fixture', applicationMountPreserved: true, syntheticSiblingPreserved: true,
+  inheritedSessionScopeVerified: true, explicitUndefinedSessionScopeAbsent: true, removedSessionRestoresUsage: true,
+  closedSessionHidesUsage: true, closedSessionRestoresUsage: true, restoredProviderShowsUsage: true,
+  subscriptionsReleased: true, syntheticContextDisposed: true,
 }
 
 function page(result: PositiveCopilotUsageEvidence): Page {
@@ -37,6 +41,11 @@ describe('positive packaged usage evidence validation', () => {
     expect(create.mock.contexts).toEqual([facade])
     expect(window.__desktopUsageModules).toBe(fail ? undefined : modules)
     expect(Object.getOwnPropertyDescriptor(window, '__ModuleLoader__')?.value).toBe(facade)
+    runInNewContext(`${script}\nrestoreUsageModulesInBrowser()`, { window })
+    expect(Object.hasOwn(window, '__desktopUsageModules')).toBe(false)
+    expect(Object.hasOwn(window, '__desktopUsageRestore')).toBe(false)
+    expect(window.__ModuleLoader__).toBe(facade)
+    expect(facade.create).toBe(create)
   })
 
   it('evaluates the emitted positive callback without source-loader helpers', async () => {
@@ -58,10 +67,15 @@ describe('positive packaged usage evidence validation', () => {
   })
 
   it.each([
-    { usageText: '' }, { quotaReads: 0 }, { quotaReads: 3 }, { sessionSubscribed: false },
+    { usageText: '' }, { usageText: '17 used · 13 left' }, { usageText: '7 used · 113 left' },
+    { usageText: '7 used · 13 left' + ' '.repeat(256) }, { quotaReads: 0 }, { quotaReads: 2 }, { quotaReads: 3 },
+    { sessionSubscribed: false },
     { removedSessionHidesUsage: false }, { otherProviderHidesUsage: false },
     { clientDisposalRemovesUsage: false }, { selectorErrors: 1 }, { forbiddenRemoteCalls: 1 },
     { applicationMountPreserved: false }, { syntheticSiblingPreserved: false }, { provider: 'other-provider' },
+    { inheritedSessionScopeVerified: false }, { explicitUndefinedSessionScopeAbsent: false }, { removedSessionRestoresUsage: false },
+    { closedSessionHidesUsage: false }, { closedSessionRestoresUsage: false }, { restoredProviderShowsUsage: false },
+    { subscriptionsReleased: false }, { syntheticContextDisposed: false },
   ])('rejects invalid evidence %j', async (damage) => {
     await expect(inspectPositiveCopilotUsage(page({ ...evidence, ...damage }), 'github-copilot')).rejects.toThrow()
   })
@@ -69,6 +83,32 @@ describe('positive packaged usage evidence validation', () => {
   it('rejects a Host-connected result rather than claiming isolated acceptance', async () => {
     const connected = { ...evidence, hostTransport: 'real-host' } as unknown as PositiveCopilotUsageEvidence
     await expect(inspectPositiveCopilotUsage(page(connected), 'github-copilot')).rejects.toThrow()
+  })
+
+  it('removes its init script and browser capture globals through an awaited disposer', async () => {
+    const dispose = vi.fn(async () => {})
+    const evaluate = vi.fn(async () => {})
+    const mocked = {
+      addInitScript: vi.fn(async () => ({ dispose })), reload: vi.fn(async () => {}),
+      waitForFunction: vi.fn(async () => {}), getByRole: () => ({ waitFor: vi.fn(async () => {}) }), evaluate,
+    }
+    const restore = await capturePackagedUsageModules(mocked as unknown as Page)
+    expect(dispose).not.toHaveBeenCalled()
+    await restore()
+    expect(dispose).toHaveBeenCalledTimes(1)
+    expect(evaluate).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('restoreUsageModulesInBrowser()'))
+  })
+
+  it('preserves capture failure when init-script cleanup also fails and still restores browser globals', async () => {
+    const primary = new Error('reload failed')
+    const dispose = vi.fn(async () => { throw new Error('init-script disposal failed') })
+    const evaluate = vi.fn(async () => {})
+    const mocked = {
+      addInitScript: vi.fn(async () => ({ dispose })), reload: vi.fn(async () => { throw primary }), evaluate,
+    }
+    await expect(capturePackagedUsageModules(mocked as unknown as Page)).rejects.toBe(primary)
+    expect(dispose).toHaveBeenCalledTimes(1)
+    expect(evaluate).toHaveBeenCalledTimes(1)
   })
 
   it('propagates browser failure instead of accepting absent controls', async () => {

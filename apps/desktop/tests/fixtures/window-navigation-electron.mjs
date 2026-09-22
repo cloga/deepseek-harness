@@ -1,6 +1,7 @@
 /** Isolated Chromium dispatch fixture: the OS opener is a receipt spy, never shell.openExternal. */
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
+import { createServer } from 'node:http'
 import { writeFileSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -22,6 +23,7 @@ app.commandLine.appendSwitch('no-proxy-server')
 protocol.registerSchemesAsPrivileged([
   { scheme: 'dsh-app', privileges: { standard: true, secure: true, supportFetchAPI: true } },
   { scheme: 'navigation-forbidden', privileges: { standard: true, secure: true } },
+  { scheme: 'dsh-recovery', privileges: { standard: true, secure: true } },
 ])
 
 const receipt = {
@@ -33,8 +35,9 @@ const receipt = {
   createdWindows: 0,
   blockedRequests: [],
   openFailures: 0,
-  recoveries: [],
+  httpServerClosed: false,
 }
+let httpServer
 let window
 let active
 let documentSequence = 0
@@ -53,12 +56,7 @@ async function run() {
   receipt.stage = 'window creation'
   const isolatedSession = session.fromPartition(`navigation-${process.pid}`)
   isolatedSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
-  isolatedSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
-    const owned = new URL(details.url).protocol === 'dsh-app:'
-    if (!owned) receipt.blockedRequests.push(details.url)
-    callback({ cancel: !owned })
-  })
-  await isolatedSession.protocol.handle('dsh-app', () => new Response(`<!doctype html>
+  const documentHtml = () => `<!doctype html>
     <html data-fixture-document="${++documentSequence}"><head><title>Navigation fixture</title></head><body>
     <a id="chat-https" href="https://example.invalid/chat" target="_blank" rel="noopener noreferrer">Chat HTTPS</a>
     <a id="chat-http" href="http://example.invalid/chat" target="_blank" rel="noopener noreferrer">Chat HTTP</a>
@@ -66,11 +64,34 @@ async function run() {
     <a id="oauth-http" href="http://example.invalid/device" target="_self">OAuth HTTP</a>
     <a id="blocked-self" href="navigation-forbidden://navigation-test/blocked" target="_self">Non-app document</a>
     <a id="owned" href="dsh-app://navigation-test/next.html" target="_self">Owned document</a>
-    </body></html>`, {
-    headers: { 'content-type': 'text/html', 'content-security-policy': "default-src 'none'" },
-  }))
+    <a id="blocked-recovery" href="dsh-recovery://restart/" target="_self">Obsolete recovery</a>
+    <a id="owned-http" href="/next.html" target="_self">Same-origin HTTP document</a>
+    <a id="http-same-popup" href="/next.html" target="_blank" rel="noopener noreferrer">Same-origin HTTP popup</a>
+    </body></html>`
+  const headers = { 'content-type': 'text/html', 'content-security-policy': "default-src 'none'" }
+  await isolatedSession.protocol.handle('dsh-app', () => new Response(documentHtml(), { headers }))
+  // Only this CI fixture's retained ephemeral loopback server is additionally admitted.
+  receipt.stage = 'owned HTTP server startup'
+  httpServer = createServer((request, response) => {
+    if (request.url !== '/index.html' && request.url !== '/next.html') { response.writeHead(404); response.end(); return }
+    response.writeHead(200, headers)
+    response.end(documentHtml())
+  })
+  httpServer.listen(0, '127.0.0.1')
+  await once(httpServer, 'listening')
+  const address = httpServer.address()
+  assert.ok(address && typeof address === 'object')
+  const httpOrigin = `http://127.0.0.1:${address.port}`
+  isolatedSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
+    const url = new URL(details.url)
+    const owned = url.protocol === 'dsh-app:' || url.origin === httpOrigin
+    if (!owned) receipt.blockedRequests.push(details.url)
+    callback({ cancel: !owned })
+  })
   // Keep a rejected custom scheme entirely in-process even if production cancellation regresses.
   isolatedSession.protocol.handle('navigation-forbidden', () => new Response('Not an application document'))
+  isolatedSession.protocol.handle('dsh-recovery', () => new Response('Obsolete recovery is not an action'))
+  receipt.stage = 'window creation'
   window = new BrowserWindow({
     show: false,
     webPreferences: { session: isolatedSession, sandbox: true, contextIsolation: true, nodeIntegration: false },
@@ -88,7 +109,6 @@ async function run() {
       active.opened()
     },
     openFailed() { receipt.openFailures++ },
-    recover(url) { receipt.recoveries.push(url.href) },
   })
   // Observe Electron's event after the production listener, without cancelling it ourselves.
   contents.on('will-navigate', (event, url) => {
@@ -142,6 +162,7 @@ async function run() {
   await attempt('popup-about', "window.open('about:blank', '_blank') === null", 'renderer')
   await attempt('popup-data', "window.open('data:text/html,<h1>not an app document</h1>', '_blank') === null", 'renderer')
   await attempt('blocked-self', "document.getElementById('blocked-self').click(); null", 'navigate')
+  await attempt('blocked-recovery', "document.getElementById('blocked-recovery').click(); null", 'navigate')
 
   active = undefined
   const loaded = once(contents, 'did-finish-load')
@@ -149,6 +170,21 @@ async function run() {
   await loaded
   receipt.ownedDocument = await observeDocument()
   active = undefined
+
+  receipt.stage = 'owned HTTP setup'
+  await window.loadURL(`${httpOrigin}/index.html`)
+  receipt.httpInitialDocument = await observeDocument()
+  await attempt('http-same-popup', "document.getElementById('http-same-popup').click(); null", 'open')
+  await attempt('http-same-window-open', "window.open('/next.html', '_blank') === null", 'open')
+  active = undefined
+  receipt.stage = 'owned same-origin HTTP navigation'
+  const httpLoaded = once(contents, 'did-finish-load')
+  const httpNavigation = once(contents, 'will-navigate')
+  await contents.executeJavaScript("document.getElementById('owned-http').click(); null", true)
+  const [event, url] = await httpNavigation
+  receipt.httpNavigationEvents = [{ url, prevented: event.defaultPrevented }]
+  await httpLoaded
+  receipt.httpOwnedDocument = await observeDocument()
 }
 
 async function main() {
@@ -157,10 +193,24 @@ async function main() {
   } catch (error) {
     receipt.error = error instanceof Error ? error.message : String(error)
   } finally {
-    if (window && !window.isDestroyed()) {
-      const closed = once(window, 'closed')
-      window.destroy()
-      await closed
+    try {
+      if (window && !window.isDestroyed()) {
+        const closed = once(window, 'closed')
+        window.destroy()
+        await closed
+      }
+    } catch (error) { receipt.error ??= error instanceof Error ? error.message : String(error) }
+    finally {
+      // Window cleanup failure must not skip teardown of the separately retained fixture server.
+      if (httpServer !== undefined) {
+        try {
+          httpServer.closeAllConnections()
+          if (httpServer.listening) {
+            await new Promise((resolve, reject) => { httpServer.close(error => error ? reject(error) : resolve()) })
+          }
+          receipt.httpServerClosed = !httpServer.listening
+        } catch (error) { receipt.error ??= error instanceof Error ? error.message : String(error) }
+      }
     }
     receipt.remainingWindows = BrowserWindow.getAllWindows().length
     await writeFile(join(root, 'receipt.json'), JSON.stringify(receipt), { flag: 'wx', mode: 0o600 })

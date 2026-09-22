@@ -1,13 +1,40 @@
 /** Publish one new fork release; ambiguous writes stop without retries or remote cleanup. */
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
-import { appendFile, lstat, readFile, readdir } from 'node:fs/promises'
+import { constants, createReadStream } from 'node:fs'
+import { appendFile, lstat, open, readFile, readdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const repository = 'cloga/deepseek-harness'
 const apiRoot = `https://api.github.com/repos/${repository}`
+
+/** Read the fixed source plan through one bounded regular-file handle, never an asset-directory copy. */
+async function readReviewedPlan() {
+  const path = new URL('../release/cloga-windows-x64.json', import.meta.url)
+  const maximum = 64 * 1024
+  const initial = await lstat(path)
+  assert(initial.isFile() && initial.size > 0 && initial.size <= maximum, 'Reviewed plan must be a bounded regular file, not a link')
+  const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
+  try {
+    const start = await file.stat()
+    assert(start.isFile() && start.dev === initial.dev && start.ino === initial.ino && start.size === initial.size, 'Reviewed plan identity changed')
+    const bytes = Buffer.alloc(maximum + 1)
+    let length = 0
+    while (length < bytes.length) {
+      const { bytesRead } = await file.read(bytes, length, bytes.length - length, length)
+      if (bytesRead === 0) break
+      length += bytesRead
+    }
+    const end = await file.stat()
+    const current = await lstat(path)
+    assert(length === start.size && length <= maximum && end.size === start.size
+      && end.mtimeMs === start.mtimeMs && end.ctimeMs === start.ctimeMs
+      && current.isFile() && current.dev === start.dev && current.ino === start.ino
+      && current.size === end.size && current.mtimeMs === end.mtimeMs && current.ctimeMs === end.ctimeMs, 'Reviewed plan bytes changed')
+    return bytes.subarray(0, length)
+  } finally { await file.close() }
+}
 
 /** @param {string} path - Local regular file. @returns {Promise<{size:number, sha256:string, sha512:string}>} Measured bytes. */
 async function measure(path) {
@@ -23,7 +50,8 @@ async function measure(path) {
 }
 
 /**
- * Publish only a newly owned draft after checking the exact local and remote asset sets.
+ * Publish only this checkout's reviewed plan through a newly owned draft with exact local and remote assets.
+ * Manifest and receipt must bind the reviewed plan bytes, channel, sequence and Core version.
  * Failed or uncertain writes leave remote state for human reconciliation, never retry or delete it.
  * @param {{repository:string, sourceSha:string, tag:string, version:string, assetsDirectory:string, token:string, fetchImpl?:typeof fetch}} options - Reviewed workflow inputs and optional offline transport.
  * @returns {Promise<{release_url:string, manifest_url:string}>} Verified immutable release URLs.
@@ -32,8 +60,20 @@ export async function publishForkRelease(options) {
   const { sourceSha, tag, version, assetsDirectory, token, fetchImpl = fetch } = options
   assert.equal(options.repository, repository, 'Unexpected release repository')
   assert.match(sourceSha, /^[0-9a-f]{40}$/, 'Expected exact reviewed source SHA')
-  assert.match(version, /^0\.1\.6-alpha\.1\.cloga\.[1-9]\d*$/, 'Unexpected maintained fork version')
-  assert.equal(tag, `dsh-desktop-v${version}`, 'Version and tag differ')
+  // This checkout's reviewed plan is the authority, never a caller-selected plan or version family.
+  const planBytes = await readReviewedPlan()
+  const plan = JSON.parse(planBytes.toString('utf8'))
+  assert(plan !== null && typeof plan === 'object' && !Array.isArray(plan), 'Expected reviewed plan object')
+  assert.deepEqual(Object.keys(plan).sort(), ['schemaVersion', 'channel', 'version', 'sequence', 'upstreamVersion', 'identity', 'desktopProvisioning', 'migration'].sort(), 'Unexpected reviewed plan fields')
+  assert.equal(plan.schemaVersion, 2, 'Unexpected reviewed plan schema')
+  assert.equal(plan.channel, 'cloga-windows-x64', 'Unexpected reviewed plan channel')
+  assert(typeof plan.version === 'string' && plan.version.length > 0, 'Reviewed plan version is required')
+  assert(typeof plan.upstreamVersion === 'string' && plan.upstreamVersion.length > 0, 'Reviewed plan Core version is required')
+  assert(Number.isSafeInteger(plan.sequence) && plan.sequence > 1, 'Reviewed plan sequence is required')
+  assert.equal(plan.identity?.executableName, 'cloga-deepseek-harness', 'Unexpected reviewed plan executable')
+  assert.equal(version, plan.version, 'Version differs from the reviewed source plan')
+  assert.equal(tag, `dsh-desktop-v${plan.version}`, 'Version and tag differ')
+  const planSha256 = createHash('sha256').update(planBytes).digest('hex')
   assert(typeof token === 'string' && token.length > 0, 'Workflow token is required')
   const installer = `cloga-deepseek-harness-${version}-win-x64.exe`
   const payloadNames = [installer, 'desktop-provisioning.json', 'build-receipt.json', 'release.json']
@@ -52,9 +92,15 @@ export async function publishForkRelease(options) {
     assert.equal(document.source?.commit, sourceSha, 'Local source commit differs')
     assert.equal(document.source?.tag, tag, 'Local source tag differs')
   }
-  assert.equal(manifest.version, version, 'Local manifest version differs')
-  assert.equal(manifest.upstreamVersion, '0.1.6-alpha.1', 'Local Core version differs')
-  assert.equal(receipt.source.version, version, 'Local receipt version differs')
+  assert.equal(manifest.version, plan.version, 'Local manifest version differs')
+  assert.equal(manifest.upstreamVersion, plan.upstreamVersion, 'Local Core version differs from reviewed plan')
+  assert.equal(manifest.channel, plan.channel, 'Local channel differs from reviewed plan')
+  assert.equal(manifest.sequence, plan.sequence, 'Local sequence differs from reviewed plan')
+  assert.equal(manifest.build?.planSha256, planSha256, 'Local manifest does not bind the reviewed plan bytes')
+  assert.equal(receipt.source.version, plan.version, 'Local receipt version differs')
+  assert.equal(receipt.identity?.upstreamVersion, plan.upstreamVersion, 'Local receipt Core version differs from reviewed plan')
+  assert.equal(receipt.identity?.sequence, plan.sequence, 'Local receipt sequence differs from reviewed plan')
+  assert.equal(receipt.buildInputs?.planSha256, planSha256, 'Local receipt does not bind the reviewed plan bytes')
   const installerBytes = assets.find(asset => asset.name === installer)
   for (const recorded of [manifest.installer, receipt.artifacts?.installer]) {
     assert.equal(recorded?.file, installer, 'Installer filename differs')

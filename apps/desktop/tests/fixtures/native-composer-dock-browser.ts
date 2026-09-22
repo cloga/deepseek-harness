@@ -12,6 +12,8 @@ export function measureNativeComposerDock(anchor: Element): NativeComposerGeomet
     || getComputedStyle(anchor).display !== 'contents') {
     throw new Error('Expected the renderer public display:contents composer dock outlet')
   }
+  const outlets = document.querySelectorAll('[data-slot="conversation.composer.dock"]')
+  if (outlets.length !== 1 || outlets[0] !== anchor) throw new Error('Native statistics require one unique public composer dock outlet')
   let owner = anchor.parentElement
   let skipped = 0
   while (owner !== null && getComputedStyle(owner).display === 'contents') {
@@ -26,15 +28,21 @@ export function measureNativeComposerDock(anchor: Element): NativeComposerGeomet
   if (ownerDisplay !== 'flex' && ownerDisplay !== 'inline-flex') {
     throw new Error('Composer dock physical owner must retain its shared flex layout')
   }
-  const stats = anchor.querySelectorAll('[data-composer-stats]')
+  // Labels belong to the actual seeded native buttons. Keep them inside this serialized browser function.
+  const time = anchor.querySelectorAll('button[aria-haspopup="dialog"][aria-label="1 turns 1 steps"]')
+  const usage = anchor.querySelectorAll('button[aria-haspopup="dialog"][aria-label="105 tok · Cache hit 90%"]')
   const copilot = anchor.querySelectorAll('[data-copilot-usage-trigger]')
-  if (stats.length > 1 || copilot.length > 1) throw new Error('Composer dock statistics controls are ambiguous')
-  if (stats.length === 0 || copilot.length === 0) return null
-  const native = stats[0]!.querySelectorAll('button')
-  if (native.length > 2) throw new Error('Composer dock has unexpected native statistics controls')
-  if (native.length !== 2) return null
+  if (time.length > 1 || usage.length > 1 || copilot.length > 1) throw new Error('Composer dock statistics controls are ambiguous')
+  if (time.length === 0 || usage.length === 0 || copilot.length === 0) return null
+  for (const control of [time[0]!, usage[0]!]) {
+    const role = control.getAttribute('role')
+    if ((role !== null && role !== 'button') || control.hasAttribute('aria-labelledby')) {
+      throw new Error('Native statistics must retain their exact button role and aria-label contract')
+    }
+  }
   const physicalOwner = owner
-  const controls = [native[0]!, native[1]!, copilot[0]!]
+  const controls = [time[0]!, usage[0]!, copilot[0]!]
+  if (new Set(controls).size !== 3) throw new Error('Composer dock statistics controls must be distinct')
   if (!controls.every(control => anchor.contains(control) && physicalOwner.contains(control))) {
     throw new Error('Composer dock owner must contain every actual statistics control')
   }
@@ -44,7 +52,7 @@ export function measureNativeComposerDock(anchor: Element): NativeComposerGeomet
     return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
   })
   if (boxes.some(box => box.width <= 0 || box.height <= 0)) return null
-  const nativeStyle = getComputedStyle(native[1]!)
+  const nativeStyle = getComputedStyle(usage[0]!)
   const copilotStyle = getComputedStyle(copilot[0]!)
   return {
     viewportWidth: window.innerWidth,

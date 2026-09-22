@@ -35,6 +35,17 @@ describe('actual native composer geometry validation', () => {
     expect(() => { assertNativeComposerGeometry({ ...wide, copilot }, true) }).toThrow()
   })
 
+  it.each([1280, 400].flatMap(viewportWidth => ['above', 'below'].map(position => ({ viewportWidth, position }))))(
+    'rejects controls wholly $position the dock at viewport $viewportWidth even when their rows agree', ({ viewportWidth, position }) => {
+      const dock = { x: 0, y: 600, width: viewportWidth, height: 80 }
+      const y = position === 'above' ? dock.y - 100 : dock.y + dock.height + 100
+      expect(() => { assertNativeComposerGeometry({ ...wide, viewportWidth, dock,
+        time: { x: 10, y, width: 60, height: 22 }, usage: { x: 82, y, width: 100, height: 22 },
+        copilot: { x: 194, y, width: 100, height: 22 },
+      }, viewportWidth === 1280) }).toThrow('vertically within the dock')
+    },
+  )
+
   it.each(['fontSize', 'lineHeight', 'color'] as const)('rejects matching geometry with mismatched %s', (field) => {
     const copilotStyle = { ...wide.copilotStyle, [field]: field === 'color' ? 'rgb(0, 0, 0)' : '11px' }
     expect(() => { assertNativeComposerGeometry({ ...wide, copilotStyle }, true) }).toThrow('native statistics typography')

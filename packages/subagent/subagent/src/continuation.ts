@@ -43,6 +43,7 @@ import { establishCatalogChild } from './catalog.ts'
 import { SubagentError } from './error.ts'
 import { isAdjacentAgentSendMessageTool } from './internal.ts'
 import type { ActivationObserver } from './lifecycle.ts'
+import type { CapturedSubagentModelRule } from './model-rules.ts'
 import type {
   ContinuableCreateRequest,
   ContinuableCreateSpec,
@@ -85,10 +86,12 @@ export class SubagentContinuationManager {
   constructor(
     private readonly ctx: Context,
     private readonly host: ContinuationHost,
+    maxActiveSubagents: () => number,
   ) {
     this.activations = new ContinuableActivationRegistry(
       ctx,
       (provider, childId, parent) => host.observeActivation(provider, childId, parent),
+      maxActiveSubagents,
     )
   }
 
@@ -97,9 +100,10 @@ export class SubagentContinuationManager {
    * Every earlier failure disposes any created handle and rolls back Activation
    * and parent ownership without returning either id.
    * @param spec - provider, delegation request, and caller cancellation.
+   * @param modelRule - Captured creation-only model options and target validation, when matched.
    * @returns the durable child id and accepted initial prompt message id.
    */
-  async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart> {
+  async startContinuable(spec: ContinuableStartSpec, modelRule?: CapturedSubagentModelRule): Promise<ContinuableStart> {
     const request = spec.request
     const parent = request.parent
     this.activations.assertAdmitting(parent)
@@ -110,7 +114,9 @@ export class SubagentContinuationManager {
     const childDepth = resolveChildDepth(parent, request.maxDepth)
     // Snapshot before any await: invalid descriptor JSON rejects the call
     // before a child exists, and the detached value is what reaches the log.
-    const agentOptions = resolveChildAgentOptions(parent, request.agentOptions, childDepth)
+    const agentOptions = modelRule === undefined
+      ? resolveChildAgentOptions(parent, request.agentOptions, childDepth)
+      : { ...modelRule.agentOptions, subagentDepth: childDepth }
     const agentProvider = agentOptions.provider
     const agentModel = agentOptions.model
     const agentReasoningEffort = agentOptions.reasoningEffort
@@ -133,6 +139,11 @@ export class SubagentContinuationManager {
     // but the service is also callable outside a turn.
     const releaseHold = this.activations.holdOwnership(parent, childId)
     try {
+      if (modelRule !== undefined) {
+        await modelRule.preflight(spec.signal)
+        spec.signal.throwIfAborted()
+        this.activations.assertAdmitting(parent)
+      }
       const prepared = await this.host.prepareContinuable(spec.provider, {
         sessionId: childId,
         parent,

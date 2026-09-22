@@ -8,6 +8,10 @@ These tests boot the real web composition in-process and drive it with a real Ch
 
 State-sensitive cases use Workspace, admission, attachment, and model-stream barriers to separate visible intermediate states from completed operations. Details close waits for frame transitions; archive verification assigns an explicit title to the seeded Session and follows that identity across reload. See the [CI fixture synchronization decision](../../../.agents/notes/implemented/testing/2026-09-08-ci-completion-observations.md).
 
+## Scroll startup failure evidence
+
+The live-tool case in [`chat-scroll-contract.e2e.ts`](chat-scroll-contract.e2e.ts) observes scalar geometry, fixed focus/state categories and input/scroll/resize ordering through its first post-Send bottom assertion. It retains the first 64 and latest 64 observations within the existing 128-record bound, so geometry polling cannot evict the entire early sequence. Failure emits `CHAT_SCROLL_INITIAL_BOTTOM` to test stderr within the existing 65,536-character limit; oversized or unavailable diagnostics report fixed categories, never raw errors. No conversation text, URLs, DOM writes, timers or readiness barriers are added. Observers are disposed before wheel input or failure cleanup; read, logging and disposal failures cannot replace the original assertion. Geometry reads can affect timing and omitted middle records limit attribution: this is evidence collection, not a cause correction or browser qualification. Inert callback tests verify retention and cleanup, not the cause of a historical failure.
+
 ## These are Host-face tests
 
 They type-check in the root `tsconfig.host.json`, not in the Client aggregate, because they read Host services directly: `ctx.connection`, the Host `SessionStore`, and `ctx.sessionProjectionCache`. Driving a browser at runtime does not make a file part of the Client program — the two faces merge Cordis `Context` under the same keys with different services, so one program cannot see both. Moving these files into the Client aggregate makes every Host-service access fail to compile.

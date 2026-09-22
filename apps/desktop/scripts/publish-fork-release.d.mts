@@ -1,5 +1,7 @@
 /**
- * Publish a newly owned fork release after verifying local bytes, draft identity, tag and every remote asset.
+ * Publish a newly owned fork release bound to this checkout's fixed reviewed release plan.
+ * Verify the exact version, channel, upstream, sequence and plan-byte digests before any remote request.
+ * Local bytes, owned draft, tag and every remote asset are verified before publication and again afterward.
  * Failed or uncertain writes stop without retrying, deleting remote objects or moving tags.
  * @param options - Reviewed workflow inputs, passed token and optional offline fetch implementation.
  * @returns Verified immutable release and manifest URLs; no output is returned on partial publication.

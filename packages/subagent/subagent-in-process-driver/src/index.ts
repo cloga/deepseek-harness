@@ -114,9 +114,9 @@ export async function startInProcessRun(
   const seed = options.seed
   const activationBoundary = SessionLogOffset(seed?.length ?? 0)
 
-  // Capture before the first await: a later parent switch belongs to the
-  // parent's future.
-  const inherited = captureDelegatedPolicyOverrides(parent)
+  // A matched rule captured policy before service preflight; ordinary starts
+  // capture here before the driver's first await.
+  const inherited = request.resolvedDelegatedPolicies ?? captureDelegatedPolicyOverrides(parent)
 
   let structured: StructuredAttachment | undefined
   const setup = (childCtx: Context, child: Agent): void => {
@@ -137,7 +137,9 @@ export async function startInProcessRun(
     meta: childSessionMeta(parent, childDepth, seed !== undefined),
     ...seed !== undefined ? { seed } : {},
     ...seed === undefined ? {} : { inheritedEventCount: activationBoundary },
-    agentOptions: resolveChildAgentOptions(parent, request.agentOptions, childDepth),
+    agentOptions: request.resolvedAgentOptions === undefined
+      ? resolveChildAgentOptions(parent, request.agentOptions, childDepth)
+      : { ...request.resolvedAgentOptions, subagentDepth: childDepth },
     signal: request.signal,
     setup,
   })

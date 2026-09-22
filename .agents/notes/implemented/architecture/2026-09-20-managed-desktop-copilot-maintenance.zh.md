@@ -10,6 +10,12 @@
 
 经过评审的 Desktop `0.1.6-alpha.1.cloga.18` / sequence 30 计划固定不可变的 [Copilot `0.4.0-alpha.35`](https://github.com/cloga/dsh-github-copilot/releases/tag/v0.4.0-alpha.35)，保留 Core `0.1.6-alpha.1`。完整的精确来源 lock 决定插件制品。插件发布与 alpha.1/alpha.2 兼容性不能代替 Desktop 验收，也不能验收由其他负责人维护的 Core alpha.2 适配。
 
+## 当前 alpha2 集成
+
+下文 alpha1 `.cloga.18`／sequence 30 维护工作保留为历史，不是当前候选身份。当前计划为 `0.1.6-alpha.2.cloga.1`、暂定 sequence 31，使用 Core alpha2 和同一完整 alpha35 source tuple；不代表预留版本或 sequence。保留官方 alpha2 ContextMeter／dock 位置、输入队列、焦点和 writer 错误语义。仅协调换行及空 outlet 呈现，不采用 alpha1 整文件回移。原始 alpha35 tar／checksum 与唯一普通 Client 成员摘要已经独立复现，未执行代码；兼容性声明不验收整合应用。
+
+当前双运行契约显式区分：功能／普通 schema 3、设置 schema 3、包含完整单次运行源码身份和原始 seed 哈希的 native-composer schema 2，以及具有恰好 51 个输入哈希的 qualification-summary schema 2。Failure2／observer3／suite1 保持各自范围及原有哈希关系。两个原始证据目录保持只读；native 几何与本次 receipt 比较，不要求跨运行像素相等。历史 alpha33 及旧证明族字节保持原义，不重新标记。整合源码仍须通过精确绑定的 CI 与托管原生验收；参见[当前测试契约](../../../../apps/desktop/tests/README.zh.md#verification-hosted)。
+
 ## 决策
 
 Copilot 维护版本保留已评审的 Core 版本和精确依赖 registry，并替换完整的 verified-release source lock。计划绑定 Release tag、asset 标识、字节大小、SHA-256、SHA-512 SRI、目标源码以及校验和清单。测试比较完整 provisioning 对象，而不是只比较部分字段。明确获准的 Core 变更仅限 Client 布局：回移官方 alpha.2 的公开 shared composer dock row 并支持换行，同时保留 alpha.1 的 ContextMeter 位置、Host 行为、token 统计与计费。本决策细化 provider Release 选择与官方优先评审；[verified release transaction](2026-09-15-desktop-verified-release-plugin-transactions.zh.md)继续作为 acquisition、staging、ownership、rollback 与 receipt 的权威。

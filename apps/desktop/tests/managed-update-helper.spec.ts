@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { completeDesktopManagedUpdate } from '../src/managed-update-completion.ts'
+import { ManagedUpdateTransferError } from '../src/managed-update-network.ts'
 import {
   managedUpdateChildEnvironment,
   runDesktopManagedUpdateHelper,
@@ -56,20 +57,82 @@ async function transferFixture() {
     },
     stageRoot: join(root, 'stage'), waitPids: [12], waitTimeoutMs: 1000, installedSequence: 1,
   }
+  const sleep = vi.fn(async () => {})
   const operations: DesktopManagedUpdateHelperOperations = {
     fetch: vi.fn(async (url: string) => response(url.endsWith('release.json') ? manifest
       : url.endsWith('build-receipt.json') ? receipt : installer)),
-    processRunning: () => false, sleep: vi.fn(async () => {}), now: () => 0,
+    processRunning: () => false, sleep, now: () => 0,
     verifyAndStartInstaller: vi.fn(async () => 0),
   }
-  return { root, installer, receipt, manifest, manifestValue, handoff, operations }
+  return { root, installer, receipt, manifest, manifestValue, handoff, operations, sleep }
 }
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map(path => rm(path, { recursive: true, force: true })))
 })
 
+describe.each(['manifest', 'receipt', 'installer', 'launch'] as const)('closed helper %s diagnostics', (at) => {
+  it.each(['name', 'code', 'cause', 'message', 'prototype', 'revoked', 'forged', 'owned'] as const)(
+    'persists a closed blocked result when the error has hostile %s access', async (kind) => {
+      const fixture = await transferFixture()
+      const secret = `private-error-${fixture.handoff.token}-https://user:password@example.test/?secret=value`
+      const readOwned = vi.fn(() => secret)
+      let failure: object = new Error('unclassified')
+      if (kind === 'prototype') failure = new Proxy({}, { getPrototypeOf() { throw new Error(secret) } })
+      else if (kind === 'revoked') {
+        const revocable = Proxy.revocable({}, {})
+        revocable.revoke()
+        failure = revocable.proxy
+      } else if (kind === 'forged') {
+        failure = { errorType: secret, retryable: false }
+        Object.setPrototypeOf(failure, ManagedUpdateTransferError.prototype)
+      } else if (kind === 'owned') {
+        failure = new ManagedUpdateTransferError('integrity')
+        Object.defineProperties(failure, { errorType: { get: readOwned }, retryable: { get: readOwned }, status: { get: readOwned } })
+      } else Object.defineProperty(failure, kind, { get() { throw new Error(secret) } })
+      const target = at === 'manifest' ? 'release.json' : at === 'receipt' ? 'build-receipt.json' : 'installer.exe'
+      if (at === 'launch') fixture.operations.verifyAndStartInstaller = vi.fn().mockRejectedValue(failure)
+      else fixture.operations.fetch = vi.fn(async (requested: string) => {
+        if (requested.endsWith(target)) throw failure
+        return response(requested.endsWith('release.json') ? fixture.manifest : fixture.receipt)
+      })
+      const phase = at === 'launch' ? 'installer-launch' : `${at}-download`
+      const errorType = kind === 'owned' ? 'integrity' : at === 'launch' ? 'installer-launch' : 'unknown'
+      const result = await runDesktopManagedUpdateHelper(fixture.handoff, fixture.operations)
+      expect(result).toMatchObject({ status: 'blocked', phase, asset: target, errorType,
+        reason: `desktop managed update: ${phase}: ${errorType}`,
+        installationState: at === 'launch' ? 'may-have-started' : 'not-started' })
+      const persisted = await readFile(join(fixture.root, 'helper-result.json'), 'utf8')
+      expect(JSON.parse(persisted)).toEqual(result)
+      for (const privateText of [secret, fixture.handoff.token, 'https://', 'password', 'private-error']) expect(persisted).not.toContain(privateText)
+      expect(readOwned).not.toHaveBeenCalled()
+      expect(fixture.operations.fetch).toHaveBeenCalledTimes({ manifest: 1, receipt: 2, installer: 3, launch: 3 }[at])
+      expect(fixture.sleep).not.toHaveBeenCalled()
+      if (at === 'launch') expect(fixture.operations.verifyAndStartInstaller).toHaveBeenCalledOnce()
+      else {
+        expect(fixture.operations.verifyAndStartInstaller).not.toHaveBeenCalled()
+        await expect(readFile(join(fixture.root, 'install-started.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      }
+    },
+  )
+})
+
 describe('Desktop managed update helper recovery diagnostics', () => {
+  it('classifies a cancellation message once for both persisted diagnostic fields', async () => {
+    const fixture = await transferFixture()
+    const message = vi.fn().mockReturnValueOnce('desktop managed update: operation was cancelled')
+      .mockImplementation(() => { throw new Error(`private second read ${fixture.handoff.token}`) })
+    const failure = Object.defineProperty(new Error('original'), 'message', { get: message })
+    fixture.operations.fetch = vi.fn().mockRejectedValue(failure)
+    const result = await runDesktopManagedUpdateHelper(fixture.handoff, fixture.operations)
+    expect(result).toMatchObject({ status: 'blocked', phase: 'manifest-download', errorType: 'cancelled',
+      reason: 'desktop managed update: manifest-download: cancelled', installationState: 'not-started' })
+    expect(message).toHaveBeenCalledOnce()
+    expect(JSON.parse(await readFile(join(fixture.root, 'helper-result.json'), 'utf8'))).toEqual(result)
+    expect(fixture.operations.fetch).toHaveBeenCalledOnce()
+    expect(fixture.operations.verifyAndStartInstaller).not.toHaveBeenCalled()
+  })
+
   it('replays a real helper download-timeout record on cold startup without a fake completion receipt', async () => {
     const fixture = await transferFixture()
     const operationsRoot = join(fixture.root, 'operations')

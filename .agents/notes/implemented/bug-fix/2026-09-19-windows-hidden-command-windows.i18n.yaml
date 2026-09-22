@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-19-windows-hidden-command-windows.md
-2026-09-19-windows-hidden-command-windows.md: ebce04d54a6caf60ecfeb8abd03a0670e37ec01d
-2026-09-19-windows-hidden-command-windows.zh.md: 6267b4a5a1a28867e5406bb2403671aa99ad3c91
+2026-09-19-windows-hidden-command-windows.md: 18676c77ce08751c3e13a6cd062643880fd34f11
+2026-09-19-windows-hidden-command-windows.zh.md: 3dfb90891f7ae60402decc963136e06c51a24888

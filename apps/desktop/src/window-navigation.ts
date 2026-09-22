@@ -1,14 +1,13 @@
 /** Desktop-owned navigation keeps application documents local and opens HTTP(S) through the OS. */
 import type { WebContents } from 'electron'
 
-interface DesktopNavigationContents extends Pick<WebContents, 'setWindowOpenHandler'> {
+interface DesktopNavigationContents extends Pick<WebContents, 'setWindowOpenHandler' | 'getURL'> {
   on(event: 'will-navigate', listener: (event: { preventDefault(): void }, url: string) => void): unknown
 }
 
 interface DesktopNavigationActions {
   readonly openExternal: (url: string) => Promise<void>
   readonly openFailed: () => void
-  readonly recover: (url: URL) => void
 }
 
 function parseNavigationUrl(input: string): URL | undefined {
@@ -18,9 +17,9 @@ function parseNavigationUrl(input: string): URL | undefined {
 
 /**
  * Install the navigation policy for one owned window. The window owns these listeners until destruction.
- * Recovery remains subject to the caller's document, permission, and in-flight checks.
+ * Retains alpha2's same-origin HTTP document navigation; legacy recovery URLs never grant an action.
  * @param contents - Web contents created by the Desktop shell, never a renderer-supplied object.
- * @param actions - OS opening, redacted failure reporting, and guarded recovery for this window.
+ * @param actions - OS opening and redacted failure reporting for this window.
  */
 export function installDesktopWindowNavigation(
   contents: DesktopNavigationContents,
@@ -45,9 +44,11 @@ export function installDesktopWindowNavigation(
   })
   contents.on('will-navigate', (event, input) => {
     const destination = parseNavigationUrl(input)
-    if (destination?.protocol === 'dsh-app:') return
+    let current: URL | undefined
+    try { current = parseNavigationUrl(contents.getURL()) } catch { /* An unavailable owned document fails closed. */ }
+    if (destination === undefined || current === undefined) { event.preventDefault(); return }
+    if (destination.protocol === 'dsh-app:' || (destination.protocol === 'http:' && destination.origin === current.origin)) return
     event.preventDefault()
-    if (destination === undefined || openExternal(destination)) return
-    if (destination.protocol === 'dsh-recovery:') actions.recover(destination)
+    openExternal(destination)
   })
 }

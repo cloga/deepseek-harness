@@ -118,6 +118,44 @@ The caller-facing request does not carry catalog format details or continuation 
 interface ResolvedSubagentStartRequest extends SubagentStartRequest {
   /** Detached descriptor a session-backed provider persists in the child log. */
   readonly descriptor: SubagentDescriptorData
+  /**
+   * Complete effective options captured for a matched creation-time model rule.
+   * In-process providers stamp depth but must not merge these with a later
+   * parent selection, including when reasoningEffort is absent. Without a
+   * matched rule, omission preserves the provider's ordinary inheritance.
+   */
+  readonly resolvedAgentOptions?: AgentOptions
+  /**
+   * Detached delegation policy captured alongside resolvedAgentOptions before
+   * a matched model rule's asynchronous preflight. In-process providers use
+   * this snapshot rather than a later parent permission selection. Omission
+   * preserves ordinary provider-owned capture for starts without a rule.
+   */
+  readonly resolvedDelegatedPolicies?: DelegatedPolicyOverrides
+}
+```
+
+## Creation-time model rules
+
+The Host's `subagent.modelRules` setting supplies exact direct-parent exceptions for new model-configurable children. Explicit or configured child route/effort and provider-owned defaults take precedence; externally managed models remain unchanged. The runtime captures matched options before validating the live target, and existing children do not reapply rules on resume. The [subagent package](../../packages/subagent/subagent/README.md#creation-time-model-rules) owns configuration, failure and fork-cache behavior; the [decision record](../../.agents/notes/implemented/feature/2026-09-19-subagent-model-rules.md) explains the ownership choice.
+
+```ts type-equiv
+/** One exact parent route and the child route used for new implicit delegations. */
+interface SubagentModelRule {
+  /** Effective direct-parent provider and model ids. */
+  readonly parent: {
+    /** Registered provider id used by the direct parent. */
+    readonly provider: string
+    /** Exact provider-owned model id used by the direct parent. */
+    readonly model: string
+  }
+  /** Exact child provider and model ids validated at creation. */
+  readonly child: {
+    /** Registered provider id selected for the new child. */
+    readonly provider: string
+    /** Exact provider-owned model id selected for the new child. */
+    readonly model: string
+  }
 }
 ```
 
@@ -495,10 +533,19 @@ Named provider registry with one-shot runs, durable discovery, and continuable-c
 
 ```ts cordis-catalog
 /**
+ * Resolve a delegation tool's depth policy against the current user setting.
+ * @param configured - Explicit tool limit, or provider-managed for external delegation.
+ * @returns The numeric limit, or undefined when the provider owns depth enforcement.
+ */
+resolveMaxDepth(configured?: number | 'provider-managed'): number | undefined
+
+/**
  * Establish one durable continuable child and deliver its initial prompt.
  * Resolves when the child's inbox accepts that prompt, without waiting for the
  * turn to start or for the message to reach the Session log; any earlier
- * failure rejects with no ids and rolls back the child entirely.
+ * failure rejects with no ids and rolls back the child entirely. An implicit
+ * child route may match a Host model rule; its options are captured and the
+ * target validated before creation, then persisted for unchanged cold resume.
  * @param spec - provider, delegation request, and caller cancellation.
  * @returns the durable child id and the accepted prompt's message id.
  * @throws when continuation services are unavailable or materialization fails.
@@ -622,6 +669,7 @@ listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<Subagen
  * nearest step and retains the Agent loop's best-effort fallback semantics.
  * Image parts are admitted and persisted through the attachment store
  * before delivery, and the child's model must accept image input.
+ * Cold resume at capacity rejects with `subagent/delivery-unavailable`.
  * @param request - durable address, delivery, minted identity, content, and optional browser zone.
  * @param signal - carrier cancellation, owning the call until inbox acceptance.
  * @returns the accepted message's inbox identity.
@@ -674,7 +722,11 @@ list(): string[]
  * Establish a published child on the named provider. Capability and semantic
  * checks run before delegation. Provider ownership lasts until its promise
  * fulfills; a rejection therefore has no run for the caller to dispose and
- * emits no run lifecycle events. Post-publication turn and infrastructure
+ * emits no run lifecycle events. Providers supporting agentOptions may match
+ * an implicit child route to a Host model rule; externally model-managed
+ * providers remain unchanged. Explicit provider, model, or reasoning-effort options and
+ * provider-owned route defaults take precedence. Matched targets are validated
+ * before dispatch with no fallback. Post-publication turn and infrastructure
  * failures settle through the returned run.
  * A catalog append failure disposes the run and handles its result rejection;
  * the caller receives the catalog error even if disposal also fails.

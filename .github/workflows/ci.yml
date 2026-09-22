@@ -20,6 +20,36 @@ concurrency:
 
 jobs:
 
+  source-guards:
+    name: PR source guards
+    runs-on: windows-2025
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          package-manager-cache: false
+      - name: Verify source guard regression tests
+        run: |
+          node --test scripts/check-vendor-manifest.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check actual PR vendor and whitespace changes
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          node scripts/check-vendor-manifest.mjs --base $env:PR_BASE_SHA --head $env:PR_HEAD_SHA
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --no-ext-diff --check $env:PR_BASE_SHA $env:PR_HEAD_SHA --
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   # Three enterprise jobs isolate coverage, static analysis, and the
   # build-backed consumer tail. The consumer job owns the only Linux build so
   # all three jobs enter runner allocation independently.
@@ -349,7 +379,10 @@ jobs:
 
       - name: Install Playwright Chromium and hosted dependencies
         if: vars.DSH_CI_FAILOVER_LINUX != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]'
-        run: pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install --with-deps chromium
+        # Ephemeral runner images can carry Ubuntu mirrors whose HTTP endpoints are unreachable.
+        run: |
+          sudo find /etc/apt -maxdepth 2 -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i -E 's@http://([a-z]{2}\.)?archive\.ubuntu\.com/ubuntu@https://archive.ubuntu.com/ubuntu@g; s@http://security\.ubuntu\.com/ubuntu@https://security.ubuntu.com/ubuntu@g' {} +
+          pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install --with-deps chromium
 
       # The persistent VM image owns Playwright's Linux system packages; do
       # not mutate the shared host with apt on every failover run.
@@ -468,6 +501,19 @@ jobs:
       - name: Install uv
         run: python -m pip install uv==0.11.23
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Test bounded Office fixture phase diagnostics
+        run: node --test scripts/python-sdk-office-diagnostics.test.mjs
+
+      - name: Test Office failure summaries without launching a runtime
+        run: python scripts/test_smoke_python_runtime_diagnostics.py
+
+      - name: Test production blame scoring
+        run: uv run --python 3.10 --with-requirements .github/review-ownership/requirements.txt python -m unittest discover -s .github/review-ownership -p 'test_*.py'
+
       - name: Run complete keyless Python suite
         run: uv run --python 3.10 --group test --project python/sdk pytest
 
@@ -583,6 +629,13 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          # Node 24.21 backports libuv/libuv#5152 (nodejs/node#65118).
+          check-latest: true
+      - name: Require patched stable Node 24 for Windows coverage
+        shell: pwsh
+        run: |
+          node -e 'const version = process.versions.node; const match = /^24\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(version); console.log("Windows coverage Node: " + version); if (match === null || match[0] !== version || Number(match[1]) < 21) { console.error("Windows coverage requires stable Node 24 >=24.21.0 (libuv fs-event fix)"); process.exit(1); }'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install (immutable)
         shell: pwsh
         # See 2026-08-30-windows-refs-store-block-clone-install for the
@@ -604,8 +657,13 @@ jobs:
       # suites (webworker-packer image-loadable, webworker-runtime
       # transform-corpus, client ui-trajectory client-bundle) self-skip on
       # unbuilt checkouts.
+      - name: Verify coverage notice diagnostics
+        shell: pwsh
+        run: node --test scripts/windows-coverage-notices.test.mjs
       - name: Run Windows coverage
         shell: pwsh
+        env:
+          DSH_WINDOWS_COVERAGE_NOTICES: '1'
         run: pnpm run check:ci:coverage
       - name: Save coverage duration history
         # Coverage flakes must not prevent the cache from building; the
@@ -739,7 +797,7 @@ jobs:
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
           || 'ubuntu-latest' }}
-    needs: [node-24, node-24-coverage, node-24-bench, node-24-consumers, node-compat, python-sdk, python-runtime, windows-build, windows-native-tests]
+    needs: [source-guards, node-24, node-24-coverage, node-24-bench, node-24-consumers, node-compat, python-sdk, python-runtime, windows-build, windows-native-tests]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     steps:
       - name: Fail if any needed job did not succeed

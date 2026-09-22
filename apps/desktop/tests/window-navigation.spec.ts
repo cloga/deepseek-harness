@@ -3,20 +3,20 @@ import type { WebContents } from 'electron'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { installDesktopWindowNavigation } from '../src/window-navigation.ts'
 
-function fixture() {
+function fixture(currentUrl = 'dsh-app://app/') {
   const events = new EventEmitter()
   const setWindowOpenHandler = vi.fn<WebContents['setWindowOpenHandler']>()
+  const getURL = vi.fn<() => string>(() => currentUrl)
   const actions = {
     openExternal: vi.fn<(url: string) => Promise<void>>(async () => {}),
     openFailed: vi.fn<() => void>(),
-    recover: vi.fn<(url: URL) => void>(),
   }
   installDesktopWindowNavigation({
-    setWindowOpenHandler,
+    setWindowOpenHandler, getURL,
     on: (event, listener) => events.on(event, listener),
   }, actions)
   return {
-    actions,
+    actions, getURL,
     popup(url: string) {
       const handler = setWindowOpenHandler.mock.calls.at(-1)![0]
       return handler({
@@ -45,7 +45,6 @@ describe('Desktop window navigation', () => {
     expect(view.popup(url)).toEqual({ action: 'deny' })
     await settledTurn()
     expect(view.actions.openExternal).toHaveBeenCalledExactlyOnceWith(url)
-    expect(view.actions.recover).not.toHaveBeenCalled()
     expect(view.actions.openFailed).not.toHaveBeenCalled()
   })
 
@@ -54,7 +53,6 @@ describe('Desktop window navigation', () => {
     expect(view.navigate(url).preventDefault).toHaveBeenCalledOnce()
     await settledTurn()
     expect(view.actions.openExternal).toHaveBeenCalledExactlyOnceWith(url)
-    expect(view.actions.recover).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -66,7 +64,6 @@ describe('Desktop window navigation', () => {
     expect(view.navigate(url).preventDefault).toHaveBeenCalledOnce()
     await settledTurn()
     expect(view.actions.openExternal).not.toHaveBeenCalled()
-    expect(view.actions.recover).not.toHaveBeenCalled()
     expect(view.actions.openFailed).not.toHaveBeenCalled()
   })
 
@@ -76,18 +73,60 @@ describe('Desktop window navigation', () => {
     expect(view.popup('dsh-app://app/session/one')).toEqual({ action: 'deny' })
     await settledTurn()
     expect(view.actions.openExternal).not.toHaveBeenCalled()
-    expect(view.actions.recover).not.toHaveBeenCalled()
   })
 
-  it('delegates only recovery navigation to the existing guarded owner, never to the OS', async () => {
+  it.each(['restart', 'plugins', 'reset'])('blocks legacy recovery %s without a recovery action or OS dispatch', async (action) => {
     const view = fixture()
-    const url = 'dsh-recovery://restart/?'
+    const url = `dsh-recovery://${action}/`
     expect(view.popup(url)).toEqual({ action: 'deny' })
-    expect(view.actions.recover).not.toHaveBeenCalled()
     expect(view.navigate(url).preventDefault).toHaveBeenCalledOnce()
-    expect(view.actions.recover).toHaveBeenCalledExactlyOnceWith(new URL(url))
     await settledTurn()
     expect(view.actions.openExternal).not.toHaveBeenCalled()
+    expect(view.actions.openFailed).not.toHaveBeenCalled()
+  })
+
+  it('retains same-origin HTTP navigation but dispatches the same popup through the OS', async () => {
+    const view = fixture('http://app.example:80/current')
+    const url = 'HTTP://APP.EXAMPLE/next?fixture=1'
+    expect(view.navigate(url).preventDefault).not.toHaveBeenCalled()
+    await settledTurn()
+    expect(view.actions.openExternal).not.toHaveBeenCalled()
+    view.getURL.mockClear()
+    expect(view.popup(url)).toEqual({ action: 'deny' })
+    expect(view.getURL).not.toHaveBeenCalled()
+    await settledTurn()
+    expect(view.actions.openExternal).toHaveBeenCalledExactlyOnceWith('http://app.example/next?fixture=1')
+  })
+
+  it.each([
+    ['http://app.example/', 'http://app.example.evil/next'],
+    ['http://app.example:1234/', 'http://app.example:1235/next'],
+    ['https://app.example/', 'https://app.example/next'],
+    ['https://app.example/', 'http://app.example/next'],
+    ['about:blank', 'http://app.example/next'],
+    ['http://127.0.0.1:19387/', 'http://localhost:19387/next'],
+  ])('does not widen the official HTTP exception from %s to %s', async (current, destination) => {
+    const view = fixture(current)
+    expect(view.navigate(destination).preventDefault).toHaveBeenCalledOnce()
+    await settledTurn()
+    expect(view.actions.openExternal).toHaveBeenCalledExactlyOnceWith(destination)
+  })
+
+  it.each(['empty', 'malformed', 'throws'])('fails closed when the owned current document is %s', async (damage) => {
+    const view = fixture(damage === 'empty' ? '' : 'not a valid URL')
+    if (damage === 'throws') view.getURL.mockImplementation(() => { throw new Error('private current URL failure') })
+    for (const destination of ['http://app.example/next', 'https://example.com/', 'dsh-app://app/next', 'dsh-recovery://restart']) {
+      expect(view.navigate(destination).preventDefault).toHaveBeenCalledOnce()
+    }
+    await settledTurn()
+    expect(view.actions.openExternal).not.toHaveBeenCalled()
+    expect(view.actions.openFailed).not.toHaveBeenCalled()
+    // Popup dispatch does not inherit the same-window origin exception or consult the document.
+    view.getURL.mockClear()
+    expect(view.popup('https://example.com/')).toEqual({ action: 'deny' })
+    expect(view.getURL).not.toHaveBeenCalled()
+    await settledTurn()
+    expect(view.actions.openExternal).toHaveBeenCalledExactlyOnceWith('https://example.com/')
   })
 
   it('dispatches the parsed canonical HTTP URL rather than a differently interpreted input', async () => {

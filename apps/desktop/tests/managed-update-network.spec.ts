@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ManagedUpdateTransferError,
   managedUpdateTransferPolicy,
+  managedUpdateTransferDiagnostic,
   readManagedUpdateMetadata,
   withManagedUpdateResponse,
   type ManagedUpdateNetworkOperations,
@@ -14,6 +15,88 @@ const consume = (response: Response, transfer: Parameters<typeof readManagedUpda
 afterEach(() => vi.useRealTimers())
 
 describe('managed update bounded transfers', () => {
+  it.each(['name', 'code', 'cause', 'prototype', 'revoked', 'forged', 'cycle'] as const)(
+    'preserves the original unclassified %s failure without retrying or leaking timers', async (kind) => {
+      vi.useFakeTimers()
+      const secret = new Error('private getter diagnostic')
+      let failure: object = {}
+      if (kind === 'prototype') failure = new Proxy({}, { getPrototypeOf() { throw secret } })
+      else if (kind === 'revoked') {
+        const revocable = Proxy.revocable({}, {})
+        revocable.revoke()
+        failure = revocable.proxy
+      } else if (kind === 'forged') {
+        failure = { errorType: 'private category', retryable: true }
+        Object.setPrototypeOf(failure, ManagedUpdateTransferError.prototype)
+      } else if (kind === 'cycle') Object.defineProperty(failure, 'cause', { value: failure })
+      else Object.defineProperty(failure, kind, { get() { throw secret } })
+      const operations = { fetch: vi.fn<ManagedUpdateNetworkOperations['fetch']>().mockRejectedValue(failure), sleep: vi.fn(async () => {}) }
+      const observed = await withManagedUpdateResponse(url, 'metadata', operations, consume)
+        .then(() => false, (error: unknown) => error === failure)
+      expect(observed).toBe(true)
+      expect(operations.fetch).toHaveBeenCalledOnce()
+      expect(operations.sleep).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+    },
+  )
+
+  it('reads each transport field once and never revisits a cyclic cause', async () => {
+    const name = vi.fn(() => 'Error')
+    const code = vi.fn().mockReturnValueOnce('ECONNRESET').mockImplementation(() => { throw new Error('second read secret') })
+    const cause = vi.fn(() => { throw new Error('unused cause secret') })
+    const failure = Object.defineProperties({}, { name: { get: name }, code: { get: code }, cause: { get: cause } })
+    const operations = {
+      fetch: vi.fn<ManagedUpdateNetworkOperations['fetch']>().mockRejectedValueOnce(failure).mockResolvedValue(new Response('ok')),
+      sleep: vi.fn(async () => {}),
+    }
+    expect(await withManagedUpdateResponse(url, 'metadata', operations, consume)).toEqual(Buffer.from('ok'))
+    expect(name).toHaveBeenCalledOnce()
+    expect(code).toHaveBeenCalledOnce()
+    expect(cause).not.toHaveBeenCalled()
+    expect(operations.fetch).toHaveBeenCalledTimes(2)
+    const cycle = {}
+    const cycleCause = vi.fn(() => cycle)
+    Object.defineProperty(cycle, 'cause', { get: cycleCause })
+    operations.fetch.mockRejectedValue(cycle)
+    expect(await withManagedUpdateResponse(url, 'metadata', operations, consume).then(() => false, (error: unknown) => error === cycle)).toBe(true)
+    expect(cycleCause).toHaveBeenCalledOnce()
+  })
+
+  it('classifies a safe timeout code even when another diagnostic field is unreadable', async () => {
+    const failure = Object.defineProperty({ code: 'ETIMEDOUT' }, 'name', { get() { throw new Error('private name') } })
+    const operations = { fetch: vi.fn<ManagedUpdateNetworkOperations['fetch']>().mockRejectedValue(failure), sleep: vi.fn(async () => {}) }
+    await expect(withManagedUpdateResponse(url, 'metadata', operations, consume)).rejects.toMatchObject({ errorType: 'timeout' })
+    expect(operations.fetch).toHaveBeenCalledTimes(3)
+    expect(operations.sleep.mock.calls).toEqual([[500], [1000]])
+  })
+
+  it('uses immutable constructor-owned retry facts instead of changed public error properties', async () => {
+    const failure = new ManagedUpdateTransferError('integrity')
+    const read = vi.fn(() => { throw new Error('private transfer property') })
+    Object.defineProperties(failure, { errorType: { get: read }, retryable: { get: read }, status: { get: read } })
+    failure.cause = { code: 'ECONNRESET' }
+    const diagnostic = managedUpdateTransferDiagnostic(failure)
+    expect(diagnostic).toEqual({ errorType: 'integrity', retryable: false })
+    expect(Object.isFrozen(diagnostic)).toBe(true)
+    const operations = { fetch: vi.fn<ManagedUpdateNetworkOperations['fetch']>().mockRejectedValue(failure), sleep: vi.fn(async () => {}) }
+    expect(await withManagedUpdateResponse(url, 'metadata', operations, consume).then(() => false, (error: unknown) => error === failure)).toBe(true)
+    expect(read).not.toHaveBeenCalled()
+    expect(operations.fetch).toHaveBeenCalledOnce()
+    expect(operations.sleep).not.toHaveBeenCalled()
+    expect(managedUpdateTransferDiagnostic(null)).toBeUndefined()
+    expect(managedUpdateTransferDiagnostic('private text')).toBeUndefined()
+  })
+
+  it('retains the owned transient retry budget and status after public fields are overwritten', async () => {
+    const failure = new ManagedUpdateTransferError('http', true, 503)
+    Object.defineProperties(failure, { errorType: { value: 'private category' }, retryable: { value: false }, status: { value: 200 } })
+    const operations = { fetch: vi.fn<ManagedUpdateNetworkOperations['fetch']>().mockRejectedValue(failure), sleep: vi.fn(async () => {}) }
+    expect(await withManagedUpdateResponse(url, 'metadata', operations, consume).then(() => false, (error: unknown) => error === failure)).toBe(true)
+    expect(managedUpdateTransferDiagnostic(failure)).toEqual({ errorType: 'http', retryable: true, status: 503 })
+    expect(operations.fetch).toHaveBeenCalledTimes(3)
+    expect(operations.sleep.mock.calls).toEqual([[500], [1000]])
+  })
+
   it.each([408, 429, 500, 502, 503, 504])('limits transient HTTP %s to three total attempts', async (status) => {
     const operations = { fetch: vi.fn(async () => new Response('', { status })), sleep: vi.fn(async () => {}) }
     await expect(withManagedUpdateResponse(url, 'metadata', operations, consume)).rejects.toMatchObject({ errorType: 'http', status })
