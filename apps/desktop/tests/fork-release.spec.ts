@@ -329,8 +329,8 @@ describe('Desktop fork release plan', () => {
     expect(plan).toMatchObject({
       schemaVersion: 2,
       channel: 'cloga-windows-x64',
-      version: '0.1.6-alpha.1.cloga.19',
-      sequence: 31,
+      version: '0.1.6-alpha.1.cloga.20',
+      sequence: 32,
       upstreamVersion: '0.1.6-alpha.1',
       migration: {
         owner: 'cloga/dsh-windows-ops',
