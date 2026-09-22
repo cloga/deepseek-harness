@@ -19,8 +19,8 @@ import sys
 import tempfile
 import time
 
-BASE = "1f429e3245fe516b429547698b9399d8934b01cb"
-BASE_TREE = "462497bc508bc23be34297d9ac587cde45932fbf"
+BASE = "781dda4f92b0c15fa8d0e58998933d76c3d1994c"
+BASE_TREE = "34b18526d3eabb00c5617c92441077476856c105"
 REF = "refs/heads/cloga-auto-minimal-expected-113"
 WORKFLOW = ".github/workflows/auto-expected-prepare.yml"
 DRIVER = "scripts/prepare-auto-expected-goldens.py"

@@ -701,8 +701,8 @@ class SourceBinding(unittest.TestCase):
         return mock.Mock(root=root, git=mock.Mock(side_effect=git))
 
     def test_exact_base_ref_and_six_infrastructure_paths(self):
-        self.assertEqual(d.BASE, "1f429e3245fe516b429547698b9399d8934b01cb")
-        self.assertEqual(d.BASE_TREE, "462497bc508bc23be34297d9ac587cde45932fbf")
+        self.assertEqual(d.BASE, "781dda4f92b0c15fa8d0e58998933d76c3d1994c")
+        self.assertEqual(d.BASE_TREE, "34b18526d3eabb00c5617c92441077476856c105")
         self.assertEqual(d.REF, "refs/heads/cloga-auto-minimal-expected-113")
         self.assertEqual(d.INFRASTRUCTURE, {".github/workflows/auto-expected-prepare.yml", "scripts/ci-workflow.spec.ts",
             "scripts/prepare-auto-expected-goldens.py", "scripts/test_prepare_auto_expected_goldens.py",

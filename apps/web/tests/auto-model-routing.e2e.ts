@@ -213,7 +213,8 @@ describe.skipIf(webSnapshotMode() === 'record')('web e2e: Auto model routing', (
     await sameModel.click()
     await page.getByRole('button', { name: 'Select model, current Auto Test Small, reasoning effort Low', exact: true }).waitFor()
     expect(world().ctx.sessionProjections.stateOf(session, 'modelRouting')?.intent.kind).toBe('manual')
-    expect(world().ctx.agentDefaultModel.currentSelection()).toEqual({ provider: PROVIDER, model: 'small', reasoningEffort: 'low' })
+    await expect.poll(() => world().ctx.agentDefaultModel.currentSelection(), { timeout: 10_000 })
+      .toEqual({ provider: PROVIDER, model: 'small', reasoningEffort: 'low' })
     expect(adapter.calls).toHaveLength(2)
 
     await writeComposerDraft(page, input, 'Answer once more on the selected manual model.')
