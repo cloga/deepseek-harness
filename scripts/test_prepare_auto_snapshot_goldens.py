@@ -295,7 +295,7 @@ class FilesystemTests(unittest.TestCase):
         self.assertFalse(result["successful"])
         self.assertIn("evidence_path=", self.output.read_text())
 
-    def pipeline(self, failure=None, mutation=None):
+    def pipeline(self, failure=None, mutation=None, first_exit=0, second_exit=0, timeout_stage=None):
         for name in (d.WORKFLOW, d.DRIVER, d.TEST, "pnpm-lock.yaml", "vitest.snapshot.config.ts"):
             self.write(name, b"input")
         self.write(d.VERSION_SOURCE, b"export const SESSION_FORMAT_VERSION = 3\n")
@@ -309,23 +309,33 @@ class FilesystemTests(unittest.TestCase):
             if args[0] == "show":
                 return b"input"
             if args[0] == "rev-parse":
-                return b"a" * 40
+                return (b"b" if stages and mutation == "head" else b"a") * 40
+            if args[:3] == ("diff", "--cached", "--name-only") and stages and mutation == "index":
+                return b"staged-file"
             return b""
-        def run(label, argv, timeout=60, env=None):
+        def run(label, argv, timeout=60, env=None, accepted=(0,)):
             if label.startswith("version-"):
                 return {"version-node": b"v24.1.0", "version-pnpm": b"11.7.0", "version-git": b"git version 2.49.0"}[label]
             stages.append(label)
             self.assertEqual(argv, d.SUITE)
-            self.assertEqual(env["DSH_SNAPSHOT"], label)
+            self.assertEqual(env["DSH_SNAPSHOT"], "refresh" if label.startswith("refresh-") else "replay")
+            self.assertEqual(timeout, d.STAGE_SECONDS if label.startswith("refresh-") else d.REPLAY_SECONDS)
+            self.assertEqual(accepted, (0, 1) if label == "refresh-pass1" else (0,))
             self.assertNotIn("DSH_EXAMPLE_MODE", env)
-            if label == "refresh":
-                output.write_bytes(b"proposal")
-                if mutation == "source":
+            if label.startswith("refresh-"):
+                output.write_bytes(b"proposal" if label == "refresh-pass1" else b"second-proposal")
+                if mutation == "source" or (mutation == "second-source" and label == "refresh-pass2"):
                     self.write(d.DRIVER, b"bad")
             elif mutation == "replay":
                 output.write_bytes(b"replay-write")
+            exit_code = first_exit if label == "refresh-pass1" else second_exit if label == "refresh-pass2" else 0
             if failure == label:
-                raise d.Refusal("stage-failed")
+                exit_code = 2
+            classification = "timeout" if timeout_stage == label else "exited"
+            d.write_json(evidence.path / (label + ".mock-receipt.json"),
+                         {"classification": classification, "exit_code": exit_code})
+            d.require(classification == "exited", "stage-timeout")
+            d.require(exit_code in accepted, "stage-failed")
             return b""
         source_binding = {"source_sha": "a" * 40, "source_tree": "b" * 40,
                       "base_sha": d.BASE, "base_tree": d.BASE_TREE}
@@ -337,10 +347,10 @@ class FilesystemTests(unittest.TestCase):
             status = d.execute(self.root, dict(self.env, DSH_EXAMPLE_MODE="lib"))
         return status, stages, evidence.path
 
-    def test_pipeline_exactly_one_refresh_and_replay_source_bound(self):
+    def test_pipeline_zero_first_exit_still_runs_two_refreshes_and_replay_source_bound(self):
         status, stages, path = self.pipeline()
         self.assertEqual(status, 0)
-        self.assertEqual(stages, ["refresh", "replay"])
+        self.assertEqual(stages, ["refresh-pass1", "refresh-pass2", "replay"])
         result = json.loads((path / "result.json").read_text())
         self.assertTrue(result["successful"])
         self.assertFalse(result["independently_qualified"])
@@ -351,33 +361,82 @@ class FilesystemTests(unittest.TestCase):
             self.assertEqual((path / "blobs" / d.digest(data)).read_bytes(), data)
 
     def test_failed_refresh_preserves_partial_outputs_and_never_retries(self):
-        status, stages, path = self.pipeline(failure="refresh")
+        status, stages, path = self.pipeline(failure="refresh-pass1")
         self.assertEqual(status, 1)
-        self.assertEqual(stages, ["refresh"])
-        self.assertTrue((path / "refresh.inventory.json").exists())
+        self.assertEqual(stages, ["refresh-pass1"])
+        self.assertTrue((path / "refresh-pass1.inventory.json").exists())
         self.assertEqual((path / "blobs" / d.digest(b"proposal")).read_bytes(), b"proposal")
         self.assertFalse(json.loads((path / "result.json").read_text())["successful"])
 
     def test_failed_replay_preserves_failure_without_retry(self):
         status, stages, path = self.pipeline(failure="replay")
         self.assertEqual(status, 1)
-        self.assertEqual(stages, ["refresh", "replay"])
+        self.assertEqual(stages, ["refresh-pass1", "refresh-pass2", "replay"])
         self.assertTrue((path / "replay.inventory.json").exists())
 
     def test_pipeline_source_mutation_blocks_replay(self):
         status, stages, path = self.pipeline(mutation="source")
         self.assertEqual(status, 1)
-        self.assertEqual(stages, ["refresh"])
+        self.assertEqual(stages, ["refresh-pass1"])
         self.assertEqual(json.loads((path / "result.json").read_text())["error_code"], "non-output-mutation")
 
     def test_pipeline_replay_write_rejected_and_bytes_retained(self):
         status, stages, path = self.pipeline(mutation="replay")
         self.assertEqual(status, 1)
-        self.assertEqual(stages, ["refresh", "replay"])
+        self.assertEqual(stages, ["refresh-pass1", "refresh-pass2", "replay"])
         self.assertEqual(json.loads((path / "result.json").read_text())["error_code"], "replay-wrote-source-or-output")
         self.assertEqual((path / "blobs" / d.digest(b"replay-write")).read_bytes(), b"replay-write")
 
-    def run_fake_process(self, waits, returncode, expected_error=None):
+    def test_first_exit_one_then_second_zero_and_replay_succeeds_with_raw_failure(self):
+        status, stages, path = self.pipeline(first_exit=1)
+        self.assertEqual(status, 0)
+        self.assertEqual(stages, ["refresh-pass1", "refresh-pass2", "replay"])
+        result = json.loads((path / "result.json").read_text())
+        self.assertTrue(result["successful"])
+        self.assertFalse(result["first_refresh_is_qualification"])
+        self.assertFalse(result["independently_qualified"])
+        self.assertEqual(json.loads((path / "refresh-pass1.mock-receipt.json").read_text())["exit_code"], 1)
+        self.assertEqual(json.loads((path / "refresh-pass2.mock-receipt.json").read_text())["exit_code"], 0)
+        for data in (b"original", b"proposal", b"second-proposal"):
+            self.assertEqual((path / "blobs" / d.digest(data)).read_bytes(), data)
+
+    def test_first_exit_one_source_mutation_blocks_second_pass(self):
+        status, stages, path = self.pipeline(first_exit=1, mutation="source")
+        self.assertEqual(status, 1)
+        self.assertEqual(stages, ["refresh-pass1"])
+        self.assertEqual(json.loads((path / "result.json").read_text())["error_code"], "non-output-mutation")
+
+    def test_second_exit_one_fails_and_does_not_run_replay(self):
+        status, stages, path = self.pipeline(first_exit=1, second_exit=1)
+        self.assertEqual(status, 1)
+        self.assertEqual(stages, ["refresh-pass1", "refresh-pass2"])
+        self.assertTrue((path / "refresh-pass2.inventory.json").exists())
+        self.assertEqual(json.loads((path / "result.json").read_text())["error_code"], "stage-failed")
+        self.assertEqual((path / "blobs" / d.digest(b"second-proposal")).read_bytes(), b"second-proposal")
+
+    def test_second_failure_still_runs_mutation_guards(self):
+        status, stages, path = self.pipeline(second_exit=1, mutation="second-source")
+        self.assertEqual(status, 1)
+        self.assertEqual(stages, ["refresh-pass1", "refresh-pass2"])
+        self.assertEqual(json.loads((path / "result.json").read_text())["error_code"], "non-output-mutation")
+        self.assertEqual(json.loads((path / "refresh-pass2.mock-receipt.json").read_text())["exit_code"], 1)
+
+    def test_first_pass_timeout_even_with_exit_one_stops_before_second_pass(self):
+        status, stages, path = self.pipeline(first_exit=1, timeout_stage="refresh-pass1")
+        self.assertEqual(status, 1)
+        self.assertEqual(stages, ["refresh-pass1"])
+        self.assertTrue((path / "refresh-pass1.inventory.json").exists())
+        self.assertEqual(json.loads((path / "result.json").read_text())["error_code"], "stage-timeout")
+
+    def test_first_pass_head_or_index_mutation_blocks_second_pass(self):
+        for mutation in ("head", "index"):
+            with self.subTest(mutation=mutation):
+                status, stages, path = self.pipeline(first_exit=1, mutation=mutation)
+                self.assertEqual(status, 1)
+                self.assertEqual(stages, ["refresh-pass1"])
+                self.assertEqual(json.loads((path / "result.json").read_text())["error_code"], mutation + "-mutated")
+
+    def run_fake_process(self, waits, returncode, expected_error=None, accepted=(0,)):
         evidence = self.evidence()
         proc = mock.Mock(pid=412345, returncode=returncode)
         proc.wait.side_effect = waits
@@ -385,9 +444,9 @@ class FilesystemTests(unittest.TestCase):
              mock.patch.object(d.os, "killpg", create=True) as kill:
             if expected_error:
                 with self.assertRaises(expected_error):
-                    evidence.run("fake", ["python", "offline-only"], timeout=7)
+                    evidence.run("fake", ["python", "offline-only"], timeout=7, accepted=accepted)
             else:
-                evidence.run("fake", ["python", "offline-only"], timeout=7)
+                evidence.run("fake", ["python", "offline-only"], timeout=7, accepted=accepted)
             kill.assert_called_once_with(proc.pid, signal.SIGKILL if hasattr(signal, "SIGKILL") else 9)
             self.assertTrue(popen.call_args.kwargs["start_new_session"])
             self.assertNotIn("shell", popen.call_args.kwargs)
@@ -404,6 +463,24 @@ class FilesystemTests(unittest.TestCase):
             receipt = self.run_fake_process([23, 23], 23, d.Refusal)
         self.assertEqual(receipt["exit_code"], 23)
         self.assertEqual(receipt["classification"], "exited")
+
+    def test_first_pass_acceptance_preserves_raw_exit_one(self):
+        with mock.patch.object(d.signal, "SIGKILL", 9, create=True):
+            receipt = self.run_fake_process([1, 1], 1, accepted=(0, 1))
+        self.assertEqual(receipt["exit_code"], 1)
+        self.assertEqual(receipt["classification"], "exited")
+
+    def test_first_pass_acceptance_rejects_other_exit(self):
+        with mock.patch.object(d.signal, "SIGKILL", 9, create=True):
+            receipt = self.run_fake_process([2, 2], 2, d.Refusal, accepted=(0, 1))
+        self.assertEqual(receipt["exit_code"], 2)
+
+    def test_first_pass_acceptance_never_accepts_timeout_exit_one(self):
+        with mock.patch.object(d.signal, "SIGKILL", 9, create=True):
+            receipt = self.run_fake_process([subprocess.TimeoutExpired("owned", 7), 1], 1,
+                                            d.Refusal, accepted=(0, 1))
+        self.assertEqual(receipt["classification"], "timeout")
+        self.assertEqual(receipt["exit_code"], 1)
 
     def test_timeout_kills_only_owned_group_and_is_not_success(self):
         with mock.patch.object(d.signal, "SIGKILL", 9, create=True):

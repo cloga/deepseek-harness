@@ -313,13 +313,20 @@ def execute(root, env):
         source_binding["tool_versions"] = versions
         write_json(evidence.path / "source-binding.json", source_binding)
         require(versions["node"].startswith("v24.") and versions["pnpm"] == "11.7.0", "toolchain-mismatch")
-        refreshed = None
-        try:
-            evidence.run("refresh", SUITE, STAGE_SECONDS, child_environment(env, "refresh"))
-        finally:
-            refreshed = evidence.capture("refresh", before)
-        check_changes(before, refreshed)
-        check_git_identity(evidence, source_binding)
+        # Fixed two-pass preparation: shared pins can be checked before their
+        # owners refresh them. Pass 1 is never qualification; retain its raw
+        # failure. Pass 2 is mandatory even if pass 1 exits zero, not a retry loop.
+        result["first_refresh_is_qualification"] = False
+        refreshed = before
+        for label, accepted in (("refresh-pass1", (0, 1)), ("refresh-pass2", (0,))):
+            previous = refreshed
+            try:
+                evidence.run(label, SUITE, STAGE_SECONDS, child_environment(env, "refresh"), accepted=accepted)
+            finally:
+                refreshed = evidence.capture(label, previous)
+                check_changes(previous, refreshed)
+                check_changes(before, refreshed)
+                check_git_identity(evidence, source_binding)
         try:
             evidence.run("replay", SUITE, REPLAY_SECONDS, child_environment(env, "replay"))
         finally:
