@@ -28,6 +28,56 @@ function assertDevelopmentElectronPreparation(job: Record<string, unknown>, test
 }
 
 describe('CI workflow', () => {
+  it('keeps temporary expected-output preparation branch-bound, frozen and read-only', () => {
+    const workflow = loadWorkflow('.github/workflows/auto-expected-prepare.yml')
+    expect(workflow.on).toEqual({ push: { branches: ['cloga-auto-minimal-expected-113'] } })
+    expect(workflow.permissions).toEqual({ contents: 'read' })
+    const prepare = workflowJob(workflow, 'prepare')
+    if (!Array.isArray(prepare.steps)) throw new TypeError('Preparation steps are required')
+    const steps = prepare.steps.filter(isRecord)
+    expect(steps.find(step => step.id === 'generate')?.run)
+      .toContain('pnpm install --lockfile-only --frozen-lockfile --ignore-scripts')
+    const seal = steps.find(step => step.name === 'Seal preparation receipt without changing earlier observations')
+    expect(seal?.run).toContain('hostAndClientContracts = $env:CONTRACTS_OUTCOME')
+    expect(seal?.run).toContain('Frozen preparation changed the committed lockfile.')
+    expect(seal?.run).toContain('finalQualification = $false')
+  })
+
+  it('uses the normal full producer before strict expected-output proposal and retains failures', () => {
+    const job = workflowJob(loadWorkflow('.github/workflows/auto-expected-prepare.yml'), 'linux-expected-review')
+    expect(job).toMatchObject({ 'runs-on': 'ubuntu-24.04', 'timeout-minutes': 45, permissions: { contents: 'read' } })
+    if (!Array.isArray(job.steps) || typeof job.if !== 'string') throw new TypeError('Expected proposal steps and condition are required')
+    const steps = job.steps.filter(isRecord)
+    expect(steps[0]).toMatchObject({ uses: 'actions/checkout@v6', with: {
+      ref: '${{ github.sha }}', 'persist-credentials': false, 'fetch-depth': 0,
+    } })
+    const units = steps.findIndex(step => typeof step.run === 'string' && step.run.includes('test_prepare_auto_expected_goldens.py'))
+    const install = steps.findIndex(step => typeof step.run === 'string' && step.run.includes('pnpm install --frozen-lockfile'))
+    const browser = steps.findIndex(step => typeof step.run === 'string'
+      && step.run.includes('pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install --with-deps chromium'))
+    const build = steps.findIndex(step => typeof step.run === 'string' && step.run.includes('pnpm run build 2>&1'))
+    const review = steps.findIndex(step => step.id === 'review')
+    expect(units).toBeGreaterThanOrEqual(0)
+    expect(install).toBeGreaterThan(units)
+    expect(browser).toBeGreaterThan(install)
+    expect(build).toBeGreaterThan(browser)
+    expect(review).toBeGreaterThan(build)
+    for (const index of [units, install, browser, build, review]) {
+      expect(steps[index]).not.toHaveProperty('if')
+      expect(steps[index]).not.toHaveProperty('continue-on-error')
+    }
+    expect(steps[review]?.run).toBe('set -euo pipefail\npython3 -B scripts/prepare-auto-expected-goldens.py\n')
+    expect(steps.find(step => step.uses === 'actions/upload-artifact@v4')).toMatchObject({
+      if: "always() && steps.setup-evidence.outcome == 'success'",
+      with: { name: 'auto-expected-golden-review-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}' },
+    })
+    const context = { github: { repository: 'cloga/deepseek-harness', ref: 'refs/heads/cloga-auto-minimal-expected-113', event_name: 'push', run_attempt: 1 } }
+    expect(runInNewContext(job.if, context, { timeout: 1000 })).toBe(true)
+    for (const [key, value] of [['repository', 'other/repo'], ['ref', 'refs/heads/master'], ['event_name', 'pull_request'], ['run_attempt', 2]] as const) {
+      expect(runInNewContext(job.if, { github: { ...context.github, [key]: value } }, { timeout: 1000 })).toBe(false)
+    }
+  })
+
   it.each([
     ['ci.yml', 'windows-coverage', 'pnpm run check:ci:coverage'],
     ['ci-master.yml', 'serial-windows', 'pnpm run check:ci:windows-complete'],
