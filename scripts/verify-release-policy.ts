@@ -96,7 +96,7 @@ export function readReleaseWorkflows(root: string): Map<string, string> {
  * @returns number of checked workflows; throws with the workflow/job and violated policy.
  */
 export function verifyReleasePolicy(sources: ReadonlyMap<string, string>): number {
-  const required = new Set([...rehearsals.keys(), 'desktop-fork-release.yml',
+  const required = new Set([...rehearsals.keys(), 'desktop-fork-build.yml', 'desktop-fork-release.yml',
     ...[...publishers.keys()].map(key => key.slice(0, key.indexOf('/')))])
   for (const file of required) assert(sources.has(file), `Missing release policy workflow: ${file}`)
   const seenPublishers = new Set<string>()

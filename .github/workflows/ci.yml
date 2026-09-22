@@ -50,7 +50,7 @@ jobs:
           git cat-file -e "$HEAD_SHA^{commit}"
           is_desktop_path() {
             case "$1" in
-              .github/workflows/ci.yml|.github/workflows/desktop-fork-release.yml) return 0 ;;
+              .github/workflows/ci.yml|.github/workflows/desktop-fork-build.yml|.github/workflows/desktop-fork-release.yml) return 0 ;;
               apps/desktop/*|apps/desktop-host/*|native/system/*|packages/*|vendor/*) return 0 ;;
               scripts/*|.github/actions/*) return 0 ;;
               package.json|pnpm-lock.yaml|pnpm-workspace.yaml|.npmrc) return 0 ;;
@@ -86,7 +86,7 @@ jobs:
     if: needs.desktop-rehearsal-plan.outputs.required == 'true'
     permissions:
       contents: read
-    uses: ./.github/workflows/desktop-fork-release.yml
+    uses: ./.github/workflows/desktop-fork-build.yml
     with:
       confirm_version: ${{ needs.desktop-rehearsal-plan.outputs.version }}
       expected_source_sha: ${{ needs.desktop-rehearsal-plan.outputs.source_sha }}

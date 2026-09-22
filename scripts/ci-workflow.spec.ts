@@ -40,6 +40,7 @@ function assertDesktopRehearsalPlanScript(script: string): void {
   expect(script).toContain("while IFS= read -r -d '' path")
   expect(script).not.toContain('< <(git diff')
   expect(script).toContain('"$GITHUB_REPOSITORY" == cloga/deepseek-harness')
+  expect(script).toContain('.github/workflows/desktop-fork-build.yml')
   expect(script).toContain('apps/desktop/*|apps/desktop-host/*|native/system/*|packages/*|vendor/*')
   expect(script).toContain('scripts/*|.github/actions/*')
   expect(script).toContain('vitest*.config.*|tsconfig*.json|tsdown.config.ts')
@@ -76,7 +77,7 @@ describe('CI workflow', () => {
       needs: 'desktop-rehearsal-plan',
       if: "needs.desktop-rehearsal-plan.outputs.required == 'true'",
       permissions: { contents: 'read' },
-      uses: './.github/workflows/desktop-fork-release.yml',
+      uses: './.github/workflows/desktop-fork-build.yml',
       with: {
         confirm_version: '${{ needs.desktop-rehearsal-plan.outputs.version }}',
         expected_source_sha: '${{ needs.desktop-rehearsal-plan.outputs.source_sha }}',
@@ -111,7 +112,11 @@ describe('CI workflow', () => {
   it.each([
     ['ci.yml', 'windows-coverage', 'pnpm run check:ci:coverage'],
     ['ci-master.yml', 'serial-windows', 'pnpm run check:ci:windows-complete'],
-    ['desktop-fork-release.yml', 'build', 'pnpm exec vitest run apps/desktop apps/desktop-host --config=vitest.desktop-release.config.ts --maxWorkers=1'],
+    [
+      'desktop-fork-build.yml',
+      'build',
+      'pnpm exec vitest run apps/desktop apps/desktop-host --config=vitest.desktop-release.config.ts --maxWorkers=1',
+    ],
   ])('prepares development Electron before the Windows tests in %s / %s', (file, name, command) => {
     assertDevelopmentElectronPreparation(workflowJob(loadWorkflow('.github/workflows/' + file), name), command)
   })
@@ -173,13 +178,15 @@ describe('CI workflow', () => {
 
   it('rehearses reviewed Desktop branch artifacts without making publication reachable', () => {
     const workflow = loadWorkflow('.github/workflows/desktop-fork-release.yml')
+    const shared = loadWorkflow('.github/workflows/desktop-fork-build.yml')
     const dispatch = workflowEvent(workflow, 'workflow_dispatch')
-    const build = workflowJob(workflow, 'build')
+    const call = workflowJob(workflow, 'build')
+    const build = workflowJob(shared, 'build')
     const release = workflowJob(workflow, 'release')
     const remoteCheck = workflowJob(workflow, 'remote-check')
     if (!isRecord(dispatch.inputs) || !Array.isArray(build.steps)
       || typeof release.if !== 'string' || typeof remoteCheck.if !== 'string') {
-      throw new TypeError('Desktop fork release workflow must define rehearsal input, build steps, and publication conditions')
+      throw new TypeError('Desktop workflows must define dispatch, shared build steps, and publication conditions')
     }
 
     expect(dispatch.inputs.rehearsal).toEqual({
@@ -189,6 +196,18 @@ describe('CI workflow', () => {
       type: 'boolean',
     })
     expect(workflow.permissions).toEqual({ contents: 'read' })
+    expect(shared.permissions).toEqual({ contents: 'read' })
+    expect(shared.concurrency).toBeUndefined()
+    expect(call).toMatchObject({
+      permissions: { contents: 'read' },
+      uses: './.github/workflows/desktop-fork-build.yml',
+      with: {
+        confirm_version: '${{ inputs.confirm_version }}',
+        expected_source_sha: '${{ inputs.expected_source_sha }}',
+        rehearsal: '${{ inputs.rehearsal }}',
+      },
+    })
+    expect(call).not.toHaveProperty('secrets')
     expect(build.permissions).toBeUndefined()
     expect(build.if).toBe("github.ref == 'refs/heads/master' || inputs.rehearsal")
     const steps = build.steps.filter(isRecord)

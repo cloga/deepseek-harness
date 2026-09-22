@@ -20,7 +20,7 @@ function planValue(): unknown {
 type WorkflowInput = { required: boolean; type: string; default?: unknown }
 type ReleaseWorkflow = {
   on: {
-    workflow_call: { inputs: Record<string, WorkflowInput> }
+    workflow_call: { inputs: Record<string, WorkflowInput>; outputs: Record<string, { value: string }> }
     workflow_dispatch: { inputs: Record<string, WorkflowInput> }
   }
   permissions: Record<string, string>
@@ -28,6 +28,9 @@ type ReleaseWorkflow = {
   env?: Record<string, string>
   jobs: Record<string, {
     if?: string
+    uses?: string
+    with?: Record<string, unknown>
+    needs?: string | string[]
     permissions?: Record<string, string>
     env?: Record<string, string>
     steps: Array<{
@@ -43,9 +46,11 @@ type ReleaseWorkflow = {
 
 const metadataTokenEnv = 'DSH_DESKTOP_RELEASE_GITHUB_TOKEN'
 
-function readReleaseWorkflow(): ReleaseWorkflow {
-  return load(readFileSync(resolve(repositoryRoot, '.github', 'workflows', 'desktop-fork-release.yml'), 'utf8')) as ReleaseWorkflow
+function readWorkflow(name: 'desktop-fork-build.yml' | 'desktop-fork-release.yml'): ReleaseWorkflow {
+  return load(readFileSync(resolve(repositoryRoot, '.github', 'workflows', name), 'utf8')) as ReleaseWorkflow
 }
+function readBuildWorkflow(): ReleaseWorkflow { return readWorkflow('desktop-fork-build.yml') }
+function readReleaseWorkflow(): ReleaseWorkflow { return readWorkflow('desktop-fork-release.yml') }
 
 function assertPackagedPluginCommandAcceptance(workflow: ReleaseWorkflow): void {
   const steps = workflow.jobs.build!.steps
@@ -69,12 +74,12 @@ function assertPackagedPluginCommandAcceptance(workflow: ReleaseWorkflow): void 
   })
 }
 
-function assertMetadataAuthScope(workflow: ReleaseWorkflow): void {
+function assertMetadataAuthScope(workflow: ReleaseWorkflow, expectedAuthenticatedSteps: readonly string[]): void {
   expect(workflow.env ?? {}).not.toHaveProperty(metadataTokenEnv)
   const authenticatedSteps: string[] = []
   for (const [jobName, job] of Object.entries(workflow.jobs)) {
     expect(job.env ?? {}).not.toHaveProperty(metadataTokenEnv)
-    for (const step of job.steps) {
+    for (const step of job.steps ?? []) {
       const metadataStep = (jobName === 'build' && step.name === 'Prepare reviewed managed capability')
         || (jobName === 'remote-check' && step.name === 'Run the shipped source discovery against GitHub')
       if (metadataStep) {
@@ -91,21 +96,20 @@ function assertMetadataAuthScope(workflow: ReleaseWorkflow): void {
       expect(step.run ?? '').not.toMatch(/DSH_DESKTOP_RELEASE_GITHUB_TOKEN|github\.token|GITHUB_ENV/u)
     }
   }
-  expect(authenticatedSteps).toEqual(['build', 'remote-check'])
+  expect(authenticatedSteps).toEqual(expectedAuthenticatedSteps)
 }
 
 function assertReviewedSourcePin(workflow: ReleaseWorkflow): string {
-  for (const trigger of [workflow.on.workflow_call, workflow.on.workflow_dispatch]) {
-    expect(trigger.inputs.expected_source_sha).toMatchObject({ required: true, type: 'string' })
-    expect(trigger.inputs.expected_source_sha).not.toHaveProperty('default')
-    expect(trigger.inputs.confirm_version).toMatchObject({ required: true, type: 'string' })
-  }
-  expect(workflow.on.workflow_call.inputs.rehearsal).toMatchObject({ required: true, type: 'boolean' })
+  const trigger = workflow.on.workflow_call
+  expect(trigger.inputs.expected_source_sha).toMatchObject({ required: true, type: 'string' })
+  expect(trigger.inputs.expected_source_sha).not.toHaveProperty('default')
+  expect(trigger.inputs.confirm_version).toMatchObject({ required: true, type: 'string' })
+  expect(trigger.inputs.rehearsal).toMatchObject({ required: true, type: 'boolean' })
   const steps = workflow.jobs.build!.steps
   const checkout = steps.find(step => step.uses === 'actions/checkout@v6')
   expect(checkout?.with).toMatchObject({
-    repository: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}",
-    ref: '${{ inputs.expected_source_sha }}', fetch-depth: 0, 'persist-credentials': false, clean: true,
+    repository: '${{ github.event_name == \'pull_request\' && github.event.pull_request.head.repo.full_name || github.repository }}',
+    ref: '${{ inputs.expected_source_sha }}', 'fetch-depth': 0, 'persist-credentials': false, clean: true,
   })
   const guardIndex = steps.findIndex(step => step.name === 'Require current reviewed ref and version')
   expect(guardIndex).toBeGreaterThanOrEqual(0)
@@ -209,37 +213,57 @@ function assertPublisherSelection(workflow: ReleaseWorkflow): void {
 
 describe('Desktop fork release plan', () => {
   it('requires independent packaged plugin command acceptance before release finalization', () => {
-    assertPackagedPluginCommandAcceptance(readReleaseWorkflow())
+    assertPackagedPluginCommandAcceptance(readBuildWorkflow())
   })
 
   it.each(['missing', 'optional', 'skipped'] as const)('rejects %s packaged command acceptance', (mode) => {
-    const workflow = readReleaseWorkflow()
+    const workflow = readBuildWorkflow()
     const steps = workflow.jobs.build!.steps
     const index = steps.findIndex(step => step.name === 'Verify packaged plugin override cold start and native cancellation')
     if (mode === 'missing') steps.splice(index, 1)
     else Object.assign(steps[index]!, mode === 'optional' ? { 'continue-on-error': true } : { if: 'false' })
     expect(() => { assertPackagedPluginCommandAcceptance(workflow) }).toThrow()
   })
-  it('keeps reusable rehearsals read-only and preserves manual release-only publication', () => {
-    const workflow = readReleaseWorkflow()
-    expect(workflow.permissions).toEqual({ contents: 'read' })
-    expect(workflow.concurrency.group).toContain('github.event_name == \'workflow_dispatch\'')
-    expect(workflow.concurrency.group).toContain('&& \'desktop-fork-release\'')
-    expect(workflow.concurrency.group).toContain('format(\'desktop-fork-pr-{0}\', github.event.pull_request.number)')
-    expect(workflow.concurrency.group).not.toContain('github.ref_name')
-    expect(workflow.concurrency['cancel-in-progress']).toBe(false)
-    expect(workflow.on.workflow_call.inputs.rehearsal).toEqual({
+  it('keeps the shared build read-only while preserving the manual release wrapper', () => {
+    const build = readBuildWorkflow()
+    const release = readReleaseWorkflow()
+    expect(build.permissions).toEqual({ contents: 'read' })
+    expect(build.on.workflow_call.inputs.rehearsal).toEqual({
       description: 'Build and retain reviewed artifacts without publishing a release',
       required: true,
       type: 'boolean',
     })
-    expect(workflow.on.workflow_dispatch.inputs.rehearsal).toMatchObject({
+    expect(build.jobs).not.toHaveProperty('release')
+    expect(build.jobs).not.toHaveProperty('remote-check')
+    expect(build.on.workflow_call.outputs).toMatchObject({
+      version: { value: '${{ jobs.build.outputs.version }}' },
+      source_sha: { value: '${{ jobs.build.outputs.source_sha }}' },
+      asset_set_sha256: { value: '${{ jobs.build.outputs.asset_set_sha256 }}' },
+    })
+    expect(release.permissions).toEqual({ contents: 'read' })
+    expect(release.concurrency).toEqual({ group: 'desktop-fork-release', 'cancel-in-progress': false })
+    expect(release.on.workflow_dispatch.inputs.rehearsal).toMatchObject({
       required: false, default: false, type: 'boolean',
     })
-    expect(workflow.jobs.release?.permissions).toEqual({ actions: 'read', contents: 'write' })
+    expect(release.jobs.build).toMatchObject({
+      permissions: { contents: 'read' },
+      uses: './.github/workflows/desktop-fork-build.yml',
+      with: {
+        confirm_version: '${{ inputs.confirm_version }}',
+        expected_source_sha: '${{ inputs.expected_source_sha }}',
+        rehearsal: '${{ inputs.rehearsal }}',
+      },
+    })
+    expect(release.jobs.build).not.toHaveProperty('secrets')
+    const buildUpload = build.jobs.build!.steps.find(step => step.uses === 'actions/upload-artifact@v4'
+      && step.with?.path === '${{ env.RELEASE_ASSETS }}/*')
+    const releaseDownload = release.jobs.release!.steps.find(step => step.uses === 'actions/download-artifact@v4')
+    expect(buildUpload?.with?.name).toBe('desktop-fork-release-${{ steps.plan.outputs.version }}')
+    expect(releaseDownload?.with?.name).toBe('desktop-fork-release-${{ needs.build.outputs.version }}')
+    expect(release.jobs.release?.permissions).toEqual({ actions: 'read', contents: 'write' })
     const publishCondition = "${{ github.event_name == 'workflow_dispatch' && !inputs.rehearsal && github.ref == 'refs/heads/master' }}"
-    expect(workflow.jobs.release?.if).toBe(publishCondition)
-    expect(workflow.jobs['remote-check']?.if).toBe(publishCondition)
+    expect(release.jobs.release?.if).toBe(publishCondition)
+    expect(release.jobs['remote-check']?.if).toBe(publishCondition)
   })
 
   it('publishes through the exact-source checked publisher after asset-set verification', () => {
@@ -263,11 +287,11 @@ describe('Desktop fork release plan', () => {
   )
 
   it('requires native and restricted hidden-window checks before packaging', () => {
-    assertHiddenWindowSelection(readReleaseWorkflow())
+    assertHiddenWindowSelection(readBuildWorkflow())
   })
 
   it.each(['omitted', 'control', 'native', 'sandbox', 'budget', 'late'] as const)('rejects a %s hidden-window validation selection', (damage) => {
-    const workflow = readReleaseWorkflow()
+    const workflow = readBuildWorkflow()
     const steps = workflow.jobs.build!.steps
     const index = steps.findIndex(step => step.name === 'Verify hidden Windows command paths')
     const step = steps[index]!
@@ -286,21 +310,20 @@ describe('Desktop fork release plan', () => {
   })
 
   it('requires a step-local exact reviewed source pin before dependencies and packaging in both modes', () => {
-    assertReviewedSourcePin(readReleaseWorkflow())
+    assertReviewedSourcePin(readBuildWorkflow())
   })
 
   it.each([
-    'missing-input', 'missing-call-input', 'optional-input', 'default-source', 'wrong-env', 'insensitive-format', 'insensitive-head',
+    'missing-input', 'optional-input', 'default-source', 'wrong-env', 'insensitive-format', 'insensitive-head',
     'loose-length', 'late-guard', 'missing-rejection', 'workflow-env', 'job-env',
   ])('rejects a %s source pin guard', (damage) => {
-    const workflow = readReleaseWorkflow()
+    const workflow = readBuildWorkflow()
     const build = workflow.jobs.build!
     const index = build.steps.findIndex(step => step.name === 'Require current reviewed ref and version')
     const guard = build.steps[index]!
-    if (damage === 'missing-input') delete workflow.on.workflow_dispatch.inputs.expected_source_sha
-    else if (damage === 'missing-call-input') delete workflow.on.workflow_call.inputs.expected_source_sha
-    else if (damage === 'optional-input') workflow.on.workflow_dispatch.inputs.expected_source_sha!.required = false
-    else if (damage === 'default-source') workflow.on.workflow_dispatch.inputs.expected_source_sha!.default = '${{ github.sha }}'
+    if (damage === 'missing-input') delete workflow.on.workflow_call.inputs.expected_source_sha
+    else if (damage === 'optional-input') workflow.on.workflow_call.inputs.expected_source_sha!.required = false
+    else if (damage === 'default-source') workflow.on.workflow_call.inputs.expected_source_sha!.default = '${{ github.sha }}'
     else if (damage === 'wrong-env') guard.env!.EXPECTED_SOURCE_SHA = '${{ inputs.confirm_version }}'
     else if (damage === 'insensitive-format') guard.run = guard.run!.replace('-cnotmatch', '-notmatch')
     else if (damage === 'insensitive-head') guard.run = guard.run!.replace('-cne', '-ne')
@@ -324,7 +347,7 @@ describe('Desktop fork release plan', () => {
     { label: 'non-hex source', expected: 'g'.repeat(40), head: reviewedSha, accepted: false },
     { label: 'trailing newline', expected: `${reviewedSha}\n`, head: reviewedSha, accepted: false },
   ])('executes the Windows source pin guard: $label', { timeout: 15_000 }, ({ expected, head, accepted }) => {
-    const guard = assertReviewedSourcePin(readReleaseWorkflow())
+    const guard = assertReviewedSourcePin(readBuildWorkflow())
     const gitStub = `function git {
   if (($args -join ' ') -cne 'rev-parse HEAD') { throw 'Unexpected Git operation in source-pin fixture' }
   $global:LASTEXITCODE = 0
@@ -357,11 +380,11 @@ describe('Desktop fork release plan', () => {
     expect(() => { assertReleaseTestCollection([ordinary, transaction, 'thread-safe:missing'], [ordinary], [transaction]) }).toThrow()
   })
   it('runs every Desktop suite once while assigning only project transactions the Windows process budget', () => {
-    assertProjectFixtureSelection(readReleaseWorkflow())
+    assertProjectFixtureSelection(readBuildWorkflow())
   })
 
   it.each(['duplicate', 'omitted', 'test-budget', 'hook-budget'])('rejects a %s transaction test selection', (damage) => {
-    const workflow = readReleaseWorkflow()
+    const workflow = readBuildWorkflow()
     const ordinary = workflow.jobs.build!.steps.find(step => step.name === 'Verify Desktop release code')!
     const transactions = workflow.jobs.build!.steps.find(step => step.name === 'Verify Desktop project transactions')!
     if (damage === 'duplicate') ordinary.run = ordinary.run!.replace(' --config=vitest.desktop-release.config.ts', '')
@@ -457,14 +480,15 @@ describe('Desktop fork release plan', () => {
   })
 
   it('opts into read-only metadata auth only in the two remote release-script steps', () => {
-    assertMetadataAuthScope(readReleaseWorkflow())
+    assertMetadataAuthScope(readBuildWorkflow(), ['build'])
+    assertMetadataAuthScope(readReleaseWorkflow(), ['remote-check'])
     const script = readFileSync(resolve(repositoryRoot, 'apps/desktop/scripts/fork-release.ts'), 'utf8')
     expect(script.match(/discoverDesktopReleaseForBuild\(capability, process\.env\.DSH_DESKTOP_RELEASE_GITHUB_TOKEN\)/gu)).toHaveLength(2)
     expect(script).not.toMatch(/process\.env\.(?:GH_TOKEN|GITHUB_TOKEN)/u)
   })
 
   it.each(['workflow', 'job', 'package', 'account', 'observer', 'helper'])('rejects metadata token propagation to %s scope', (scope) => {
-    const workflow = readReleaseWorkflow()
+    const workflow = readBuildWorkflow()
     const build = workflow.jobs.build!
     const env = { [metadataTokenEnv]: '${{ github.token }}' }
     if (scope === 'workflow') workflow.env = { ...workflow.env, ...env }
@@ -479,7 +503,7 @@ describe('Desktop fork release plan', () => {
       const step = build.steps.find(candidate => candidate.name === names[scope])!
       step.env = { ...step.env, ...env }
     }
-    expect(() => { assertMetadataAuthScope(workflow) }).toThrow()
+    expect(() => { assertMetadataAuthScope(workflow, ['build']) }).toThrow()
   })
 
   it('keeps write permission in the reviewed release job and pins build tools', () => {

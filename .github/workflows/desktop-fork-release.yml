@@ -1,20 +1,6 @@
 name: Desktop fork release (Windows x64)
 
 on:
-  workflow_call:
-    inputs:
-      confirm_version:
-        description: Exact reviewed version from apps/desktop/release/cloga-windows-x64.json
-        required: true
-        type: string
-      expected_source_sha:
-        description: Exact reviewed source commit (40 lowercase hexadecimal characters)
-        required: true
-        type: string
-      rehearsal:
-        description: Build and retain reviewed artifacts without publishing a release
-        required: true
-        type: boolean
   workflow_dispatch:
     inputs:
       confirm_version:
@@ -35,10 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: >-
-    ${{ github.event_name == 'workflow_dispatch'
-        && 'desktop-fork-release'
-        || format('desktop-fork-pr-{0}', github.event.pull_request.number) }}
+  group: desktop-fork-release
   cancel-in-progress: false
 
 env:
@@ -52,255 +35,14 @@ env:
 
 jobs:
   build:
-    name: Build unsigned fork installer
-    if: github.ref == 'refs/heads/master' || inputs.rehearsal
-    runs-on: windows-2025
-    outputs:
-      version: ${{ steps.plan.outputs.version }}
-      tag: ${{ steps.plan.outputs.tag }}
-      source_sha: ${{ steps.plan.outputs.source_sha }}
-      asset_set_sha256: ${{ steps.asset-set.outputs.sha256 }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ inputs.expected_source_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-          clean: true
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
-          dest: ${{ runner.temp }}/setup-pnpm
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          package-manager-cache: false
-
-      - name: Require current reviewed ref and version
-        id: plan
-        shell: pwsh
-        env:
-          CONFIRM_VERSION: ${{ inputs.confirm_version }}
-          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
-          REHEARSAL: ${{ inputs.rehearsal }}
-          EVENT_NAME: ${{ github.event_name }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:EXPECTED_SOURCE_SHA -cnotmatch '\A[0-9a-f]{40}\z') {
-            throw 'Expected source SHA must be exactly 40 lowercase hexadecimal characters'
-          }
-          $head = git rev-parse HEAD
-          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the checked-out source commit' }
-          if ($head -cne $env:EXPECTED_SOURCE_SHA) {
-            throw "Checkout does not match reviewed source: HEAD=$head expected=$($env:EXPECTED_SOURCE_SHA)"
-          }
-          if ($env:EVENT_NAME -eq 'pull_request') {
-            if ($env:REHEARSAL -ne 'true') { throw 'Pull-request Desktop qualification must be a rehearsal' }
-            if ($env:PR_HEAD_SHA -cnotmatch '\A[0-9a-f]{40}\z' -or $env:PR_HEAD_SHA -cne $env:EXPECTED_SOURCE_SHA) {
-              throw 'Pull-request head SHA does not match the reviewed source input'
-            }
-            if ([string]::IsNullOrWhiteSpace($env:PR_HEAD_REF) -or
-                [string]::IsNullOrWhiteSpace($env:PR_HEAD_REPOSITORY)) {
-              throw 'Pull-request head branch identity is required'
-            }
-            $selectedRef = 'refs/remotes/rehearsal/pull-request-head'
-            git fetch --no-tags origin "refs/heads/$($env:PR_HEAD_REF):$selectedRef"
-            if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the current pull-request head branch' }
-            $selected = git rev-parse $selectedRef
-            if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the current pull-request head branch' }
-            if ($head -ne $selected) {
-              throw "Pull-request rehearsal head is stale: HEAD=$head selected=$selected"
-            }
-          } elseif ($env:REHEARSAL -eq 'true') {
-            if ($env:GITHUB_REF_TYPE -ne 'branch') { throw 'Rehearsal must run from a branch' }
-            $selectedRef = 'refs/remotes/rehearsal/selected'
-            git fetch --no-tags origin "refs/heads/$($env:GITHUB_REF_NAME):$selectedRef"
-            if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the current rehearsal branch' }
-            $selected = git rev-parse $selectedRef
-            if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the current rehearsal branch' }
-            if ($head -ne $selected) {
-              throw "Rehearsal must run from the current selected branch: HEAD=$head origin/$($env:GITHUB_REF_NAME)=$selected"
-            }
-          } else {
-            if ($env:GITHUB_REF -ne 'refs/heads/master') { throw 'Release must run from master' }
-            git fetch --no-tags origin master
-            if ($LASTEXITCODE -ne 0) { throw 'Could not fetch current master' }
-            $master = git rev-parse origin/master
-            if ($LASTEXITCODE -ne 0) { throw 'Could not resolve current master' }
-            if ($head -ne $master) { throw "Release must run from current master: HEAD=$head origin/master=$master" }
-          }
-          $plan = Get-Content -LiteralPath $env:RELEASE_PLAN -Raw | ConvertFrom-Json
-          if ($env:CONFIRM_VERSION -ne $plan.version) {
-            throw "Confirmation version does not match reviewed plan version $($plan.version)"
-          }
-          "version=$($plan.version)" >> $env:GITHUB_OUTPUT
-          "tag=dsh-desktop-v$($plan.version)" >> $env:GITHUB_OUTPUT
-          "source_sha=$head" >> $env:GITHUB_OUTPUT
-
-      - name: Install from frozen lockfile
-        run: pnpm install --frozen-lockfile
-
-      - name: Prepare development Electron for navigation tests
-        shell: pwsh
-        run: node apps/desktop/node_modules/electron/install.js
-
-      - name: Prepare browser for isolated Desktop acceptance
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/desktop-playwright
-        run: node apps/desktop/node_modules/playwright/cli.js install chromium
-
-      - name: Verify Desktop test collection
-        run: node apps/desktop/scripts/verify-release-test-collection.mjs
-
-      - name: Verify Desktop release code
-        run: pnpm exec vitest run apps/desktop apps/desktop-host --config=vitest.desktop-release.config.ts --maxWorkers=1
-
-      # The transaction fixture launches real Node children; match its Windows coverage test/hook budget.
-      # Other Desktop tests retain their existing default budgets, and each file runs in exactly one step.
-      - name: Verify Desktop project transactions
-        run: >-
-          pnpm exec vitest run apps/desktop/tests/project-manager.spec.ts
-          --maxWorkers=1 --testTimeout=90000 --hookTimeout=90000
-
-      - name: Verify hidden Windows command paths
-        run: >-
-          pnpm exec vitest run
-          packages/subprocess/win32-process/tests
-          packages/subprocess/subprocess-local/tests/windows-job.spec.ts
-          packages/subprocess/subprocess-local/tests/native-windows.spec.ts
-          packages/sandbox/sandbox-windows-acl/tests/runner.spec.ts
-          packages/sandbox/sandbox-windows-acl/tests/provider-chain.spec.ts
-          packages/sandbox/sandbox-windows-acl/tests/control.spec.ts
-          --maxWorkers=2 --testTimeout=90000 --hookTimeout=90000
-
-      - name: Prepare reviewed managed capability
-        env:
-          DSH_DESKTOP_RELEASE_GITHUB_TOKEN: ${{ github.token }}
-        run: >-
-          pnpm exec tsx apps/desktop/scripts/fork-release.ts prepare
-          --plan ${{ env.RELEASE_PLAN }}
-          --out ${{ env.CAPABILITY_PATH }}
-          --provisioning ${{ env.PROVISIONING_PATH }}
-          --remote
-
-      - name: Build unsigned interactive NSIS installer
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/desktop-playwright
-          DSH_DESKTOP_APP_ID: io.github.cloga.deepseek-harness.desktop
-          DSH_DESKTOP_FORK_RELEASE_VERSION: ${{ steps.plan.outputs.version }}
-          DSH_DESKTOP_MANAGED_UPDATE_CAPABILITY: ${{ github.workspace }}\${{ env.CAPABILITY_PATH }}
-          DSH_DESKTOP_PLUGIN_PROVISIONING_PLAN: ${{ github.workspace }}\${{ env.PROVISIONING_PATH }}
-        run: pnpm run package:desktop:win:x64:unsigned
-
-      - name: Verify ASAR runtime inventory canaries with packaged Electron
-        run: >-
-          node apps/desktop/tests/fixtures/packaged-runtime-smoke.mjs
-          apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe
-
-      - name: Verify copied helper bootstrap and acknowledgement
-        run: >-
-          pnpm exec tsx apps/desktop/scripts/smoke-helper.ts
-          --node apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/resources/runtime/node/node.exe
-          --helper apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/resources/managed-update/helper.mjs
-          --capability apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/resources/managed-update/capability.json
-          --output dist/desktop-copilot-acceptance
-
-      - name: Verify packaged Copilot account and restart
-        id: copilot_acceptance
-        run: >-
-          pnpm exec tsx apps/desktop/tests/fixtures/copilot-release-smoke.ts
-          --application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe
-          --output dist/desktop-copilot-acceptance
-
-      - name: Verify packaged plugin override cold start and native cancellation
-        id: plugin_command_acceptance
-        timeout-minutes: 20
-        run: >-
-          pnpm exec tsx apps/desktop/tests/fixtures/desktop-plugin-command-smoke.ts
-          --application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe
-          --output dist/desktop-plugin-command-acceptance
-
-      - uses: actions/upload-artifact@v4
-        if: ${{ !cancelled() && (steps.plugin_command_acceptance.outcome == 'success' || steps.plugin_command_acceptance.outcome == 'failure') }}
-        with:
-          name: desktop-plugin-command-acceptance-${{ steps.plan.outputs.version }}
-          path: dist/desktop-plugin-command-acceptance/**
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Verify real acceptance observer failure cleanup
-        id: observer_cleanup
-        run: >-
-          pnpm exec tsx apps/desktop/tests/fixtures/copilot-observer-smoke.ts
-          --application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe
-          --output dist/desktop-copilot-observer-canary
-
-      - uses: actions/upload-artifact@v4
-        if: ${{ !cancelled() && (steps.observer_cleanup.outcome == 'success' || steps.observer_cleanup.outcome == 'failure') }}
-        with:
-          name: desktop-copilot-observer-canary-${{ steps.plan.outputs.version }}
-          path: dist/desktop-copilot-observer-canary/*
-          if-no-files-found: error
-          retention-days: 7
-
-      - uses: actions/upload-artifact@v4
-        if: ${{ !cancelled() && (steps.copilot_acceptance.outcome == 'success' || steps.copilot_acceptance.outcome == 'failure') }}
-        with:
-          name: desktop-copilot-acceptance-${{ steps.plan.outputs.version }}
-          path: dist/desktop-copilot-acceptance/*
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Finalize release manifest and receipts
-        run: >-
-          pnpm exec tsx apps/desktop/scripts/fork-release.ts finalize
-          --plan ${{ env.RELEASE_PLAN }}
-          --capability ${{ env.CAPABILITY_PATH }}
-          --provisioning ${{ env.PROVISIONING_PATH }}
-          --artifacts apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts
-          --out ${{ env.RELEASE_ASSETS }}
-
-      - name: Verify release asset checksums
-        id: asset-set
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Push-Location $env:RELEASE_ASSETS
-          try {
-            foreach ($line in Get-Content -LiteralPath SHA256SUMS) {
-              $hash, $name = $line -split '  ', 2
-              if ((Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) {
-                throw "SHA-256 mismatch for $name"
-              }
-            }
-            foreach ($line in Get-Content -LiteralPath SHA512SUMS) {
-              $hash, $name = $line -split '  ', 2
-              $actual = [Convert]::ToBase64String([Security.Cryptography.SHA512]::HashData(
-                [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $name))))
-              if ($actual -ne $hash) { throw "SHA-512 mismatch for $name" }
-            }
-            $inventory = Get-ChildItem -File | Sort-Object Name | ForEach-Object {
-              "$($_.Name):$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())"
-            }
-            $bytes = [Text.Encoding]::UTF8.GetBytes(($inventory -join "`n"))
-            $setHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
-            "sha256=$setHash" >> $env:GITHUB_OUTPUT
-          } finally {
-            Pop-Location
-          }
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: desktop-fork-release-${{ steps.plan.outputs.version }}
-          path: ${{ env.RELEASE_ASSETS }}/*
-          if-no-files-found: error
-          retention-days: 7
+    name: Build and qualify unsigned fork installer
+    permissions:
+      contents: read
+    uses: ./.github/workflows/desktop-fork-build.yml
+    with:
+      confirm_version: ${{ inputs.confirm_version }}
+      expected_source_sha: ${{ inputs.expected_source_sha }}
+      rehearsal: ${{ inputs.rehearsal }}
 
   release:
     name: Publish immutable GitHub Release
