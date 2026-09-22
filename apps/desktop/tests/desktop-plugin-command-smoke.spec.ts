@@ -21,6 +21,7 @@ vi.mock('node:child_process', () => ({
 
 import {
   canRemoveDesktopPluginHome,
+  canonicalizeDesktopPluginMenuRoutes,
   desktopPluginAcceptanceDeadlines,
   openDesktopPluginInput,
   pendingDesktopPluginHandles,
@@ -350,13 +351,66 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
     expect(() => validateDesktopPluginTranscript('session.v2.jsonl', transcript().replace('"version":2', '"version":2,"parentSession":{}'), sessionId, expected)).toThrow()
   })
 
-  it('pins manager accelerator, Apply ownership, alpha36 descriptor, and work/cleanup deadline partition', () => {
+  it('canonicalizes one manager leaf observed in both owned UIA routes and rejects ambiguity', () => {
+    expect(canonicalizeDesktopPluginMenuRoutes([
+      { runtimeId: 'leaf', relation: 'Application descendant' },
+    ])).toEqual({
+      runtimeId: 'leaf', relations: ['Application descendant'], observations: 1,
+    })
+    expect(canonicalizeDesktopPluginMenuRoutes([
+      { runtimeId: 'leaf', relation: 'Application descendant' },
+      { runtimeId: 'leaf', popupHwnd: '42', relation: 'new owned popup' },
+    ])).toEqual({
+      runtimeId: 'leaf', popupHwnd: '42',
+      relations: ['Application descendant', 'new owned popup'], observations: 2,
+    })
+    expect(() => canonicalizeDesktopPluginMenuRoutes([
+      { runtimeId: 'first', relation: 'Application descendant' },
+      { runtimeId: 'second', popupHwnd: '42', relation: 'new owned popup' },
+    ])).toThrow('RuntimeIds are ambiguous')
+    expect(() => canonicalizeDesktopPluginMenuRoutes([
+      { runtimeId: 'leaf', popupHwnd: '42', relation: 'new owned popup' },
+      { runtimeId: 'leaf', popupHwnd: '84', relation: 'new owned popup' },
+    ])).toThrow('conflicting popup bindings')
+  })
+
+  it('pins owned manager-menu UIA, Apply ownership, alpha36 descriptor, and deadline partition', () => {
     const fixture = readFileSync(new URL('./fixtures/desktop-plugin-command-smoke.ts', import.meta.url), 'utf8')
     const helper = readFileSync(new URL('./fixtures/desktop-plugin-native-cancel.ps1', import.meta.url), 'utf8')
     const workflow = readFileSync(new URL('../../../.github/workflows/desktop-fork-release.yml', import.meta.url), 'utf8')
     const alpha36 = JSON.parse(readFileSync(new URL('./fixtures/copilot-alpha36-source.json', import.meta.url), 'utf8')) as Record<string, unknown>
-    expect(fixture).toContain("keyboard.press('Control+,')")
-    expect(fixture).not.toContain("keyboard.press('Alt+a')")
+    expect(fixture).not.toContain('keyboard.press(')
+    expect(fixture).toContain('{ action: \'open-manager\', ownership }')
+    expect(helper).toContain('$request.action -eq \'open-manager\'')
+    expect(helper).toContain('$_.name -ceq \'Application\'')
+    expect(helper).toContain('$_.name -ceq \'Desktop Plugins…\'')
+    expect(helper).toContain('[int]$MaximumDepth = 8')
+    expect(helper).toContain('[int]$MaximumVisited = 512')
+    expect(helper).toContain('$name.Length -gt 256')
+    expect(helper).toContain('[Windows.Automation.ExpandCollapsePattern]::Pattern')
+    expect(helper).toContain('[Windows.Automation.InvokePattern]::Pattern')
+    expect(helper).toContain('Group-Object -Property runtimeId')
+    expect(helper).toContain('Distinct Desktop Plugins… RuntimeIds are ambiguous')
+    expect(helper).toContain('RuntimeId has conflicting popup bindings')
+    expect(helper).toContain('$selected = $bindings[0]')
+    expect(helper).toContain('if ($popupBindings.Count -gt 0) { $selected = $popupBindings[0] }')
+    expect(helper).toContain('AutomationElement]::FromHandle($mainHwnd)')
+    expect(helper).not.toContain('AutomationElement]::RootElement')
+    for (const refusal of [
+      'Expected one exact owned Application menu item',
+      'Owned menu popup count exceeded bound',
+      'Expected one exact Desktop Plugins… menu route',
+      'Application menu item changed before manager-menu invocation',
+      'Desktop Plugins… menu route changed before invocation',
+    ]) expect(helper).toContain(refusal)
+    expect(helper).toContain('$beforeVisibleHandles -cnotcontains $_.hwnd')
+    expect(helper).toContain('$_.owner -ceq $ownership.mainHwnd -or $_.rootOwner -ceq $ownership.mainHwnd')
+    const menuInvoke = fixture.indexOf('{ action: \'open-manager\', ownership }')
+    const managerPage = fixture.indexOf('const managerPage = await managerPagePromise')
+    const managerCapture = fixture.indexOf('const managerOwnership = await nativeHelper<Ownership>')
+    expect(menuInvoke).toBeGreaterThan(0)
+    expect(menuInvoke).toBeLessThan(managerPage)
+    expect(managerPage).toBeLessThan(managerCapture)
     expect(desktopPluginAcceptanceDeadlines(1000)).toEqual({ work: 961_000, cleanup: 1_141_000 })
     expect(fixture).toContain('started + 16 * 60_000')
     expect(fixture).toContain('Math.min(deadline, performance.now() + 90_000)')
@@ -365,7 +419,7 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
     expect(fixture.match(/Math\.min\(performance\.now\(\) \+ 60_000, fixtureCleanupDeadline\)/gu)).toHaveLength(2)
     for (const field of ['installedInstallerUpgradeVerified: false', 'differentRuntimeUpgradeVerified: false',
       'liveOAuthOrModelVerified: false']) expect(fixture).toContain(field)
-    expect(helper).toContain("$request.action -ne 'cancel' -and $request.action -ne 'apply'")
+    expect(helper).toContain('$request.action -ne \'cancel\' -and $request.action -ne \'apply\'')
     expect(helper).toContain('defaultFocusAsserted = $false')
     expect(fixture).toContain('receipt.releaseId, 393317125')
     expect(fixture).toContain('boundedFileTail(path)')
