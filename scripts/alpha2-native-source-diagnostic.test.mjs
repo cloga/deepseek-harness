@@ -5,7 +5,7 @@ import test from 'node:test'
 
 const workflowUrl = new URL('../.github/workflows/alpha2-native-source-diagnostic.yml', import.meta.url)
 const source = readFileSync(workflowUrl, 'utf8')
-const command = 'node --test apps/desktop/tests/windows-installed-upgrade.test.mjs apps/desktop/tests/windows-packaged-package-acceptance.test.mjs'
+const command = 'node --test --test-concurrency=1 apps/desktop/tests/windows-installed-upgrade.test.mjs apps/desktop/tests/windows-packaged-package-acceptance.test.mjs'
 
 /** Audit this deliberately closed workflow layout; this is not a GitHub schema validator. */
 function validateWorkflow(text) {
@@ -15,7 +15,7 @@ function validateWorkflow(text) {
   assert.match(text, /if: github\.repository == 'cloga\/deepseek-harness' && github\.ref == 'refs\/heads\/cloga-official-first-016a2'/u)
   assert.match(text, /runs-on: windows-2025\n    timeout-minutes: 15/u)
   assert.match(text, /EXPECTED_SOURCE: \$\{\{ github\.event_name == 'push' && github\.sha \|\| inputs\.expected_source \}\}/u)
-  assert.doesNotMatch(text, /inputs\.expected_source\s*\|\||secrets\.|continue-on-error:|concurrency:|--force|test-timeout|test-name-pattern|--test-only|DSH_.*(?:TIMEOUT|PHASE)/u)
+  assert.doesNotMatch(text, /inputs\.expected_source\s*\|\||secrets\.|continue-on-error:|concurrency:|--force|test-timeout|test-name-pattern|--test-only|--test-isolation|DSH_.*(?:TIMEOUT|PHASE)/u)
   assert.doesNotMatch(text, /^    env:[\s\S]*?\$\{\{ runner\.temp \}\}[\s\S]*?^    steps:/mu,
     'runner.temp must not appear in job-level env')
   assert.match(text, /ref: \$\{\{ github\.sha \}\}\n          persist-credentials: false\n          fetch-depth: 1\n          clean: true/u)
@@ -43,6 +43,9 @@ function validateWorkflow(text) {
   assert.doesNotMatch(text, /(?:pnpm|npm) (?:run|exec)|electron\/install|playwright install|prepare:|build:|package:|Start-Process|Start-Sleep|workflow_call:|git (?:push|fetch)|gh (?:release|workflow)/u)
   assert.match(text, /\$nodeVersion -cne 'v24\.13\.0'/u)
   assert.match(text, /\$pnpmVersion -cne '11\.7\.0'/u)
+  assert.ok(text.includes('$availableParallelism = node -p "require(\'node:os\').availableParallelism()"'))
+  assert.ok(text.includes("$LASTEXITCODE -ne 0 -or $availableParallelism -cnotmatch '\\A[1-9][0-9]{0,8}\\z'"))
+  assert.ok(text.includes("availableParallelism = [int]$availableParallelism; effectiveFileConcurrency = 1; testIsolation = 'process'"))
   for (const field of ['sourceCommit', 'sourceTree', 'repository', 'sourceRef', 'event', 'runId', 'runAttempt',
     'nodeVersion', 'pnpmVersion', 'powerShellVersion', 'runnerOS', 'runnerEnvironment', 'identitySha256']) {
     assert.match(text, new RegExp(`\\b${field} =`, 'u'))
@@ -94,6 +97,11 @@ for (const [name, before, after] of [
   ['nonfrozen install', 'pnpm install --frozen-lockfile', 'pnpm install'],
   ['wrong source assertion', '$env:GITHUB_SHA -cne $env:EXPECTED_SOURCE', '$env:GITHUB_SHA -eq $env:EXPECTED_SOURCE'],
   ['changed source ignored', "throw 'Source bytes changed during frozen installation'", "Write-Warning 'drift ignored'"],
+  ['missing file serialization', '--test-concurrency=1 ', ''],
+  ['parallel file scheduling', '--test-concurrency=1', '--test-concurrency=2'],
+  ['shared process isolation', command, command + ' --test-isolation=none'],
+  ['removed owner file', command, command.replace(' apps/desktop/tests/windows-packaged-package-acceptance.test.mjs', '')],
+  ['incorrect scheduling evidence', 'effectiveFileConcurrency = 1', 'effectiveFileConcurrency = 2'],
   ['test budget override', command, command + ' --test-timeout=60000'],
   ['test subset', command, command + ' --test-name-pattern=synthetic'],
   ['lost test exit', '$testExitCode = $LASTEXITCODE', '$testExitCode = 0'],

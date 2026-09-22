@@ -12,6 +12,11 @@ import {
 
 const repositoryRoot = resolve(import.meta.dirname, '..', '..', '..')
 const planPath = resolve(import.meta.dirname, '..', 'release', 'cloga-windows-x64.json')
+const sourceNativeGuardCommand = 'node --test --test-concurrency=1 apps/desktop/tests/windows-installed-upgrade.test.mjs apps/desktop/tests/windows-packaged-package-acceptance.test.mjs'
+
+function assertSourceNativeGuardRun(run: string | undefined): void {
+  deepStrictEqual(run?.trim().split(/\r?\n/u), [sourceNativeGuardCommand, 'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'])
+}
 
 function planValue(): unknown {
   return JSON.parse(readFileSync(planPath, 'utf8'))
@@ -564,9 +569,7 @@ describe('Desktop fork release plan', () => {
     expect(seal).toBeGreaterThan(upgrade)
     expect(steps[acquire]?.run).toContain('$release.immutable -isnot [bool]')
     expect(steps[acquire]?.run).toContain('$assets[0].digest -cne "sha256:$($expected.sha256)"')
-    expect(steps[guards]?.run).toContain(
-      'node --test apps/desktop/tests/windows-installed-upgrade.test.mjs apps/desktop/tests/windows-packaged-package-acceptance.test.mjs',
-    )
+    assertSourceNativeGuardRun(steps[guards]?.run)
     expect(steps[upgrade]?.id).toBe('installed_upgrade')
     expect(steps[upgrade]?.run).toContain('./apps/desktop/tests/windows-installer-upgrade.ps1')
     expect(steps[upgrade]?.run).toContain('-ExpectedSourceCommit $env:GITHUB_SHA')
@@ -581,6 +584,31 @@ describe('Desktop fork release plan', () => {
     expect(evidence?.with?.path).toContain('/evidence/*')
     expect(evidence?.with?.path).toContain('/acquisition.json')
     expect(evidence?.with?.path).not.toMatch(/home|userData|release-assets/u)
+  })
+
+  it('rejects native guard scheduling drift without changing isolation, file membership or child budgets', () => {
+    const run = readReleaseWorkflow().jobs.build!.steps.find(step => step.name === 'Verify installer-upgrade guard tests')?.run
+    if (run === undefined) throw new Error('Native source guard step is missing')
+    assertSourceNativeGuardRun(run)
+    for (const changed of [
+      run.replace(' --test-concurrency=1', ''),
+      run.replace('--test-concurrency=1', '--test-concurrency=2'),
+      run.replace('--test-concurrency=1', '--test-concurrency=1 --test-isolation=none'),
+      run.replace('--test-concurrency=1', '--test-concurrency=1 --test-timeout=60000'),
+      run.replace('--test-concurrency=1', '--test-concurrency=1 --test-name-pattern=synthetic'),
+      run.replace(' apps/desktop/tests/windows-packaged-package-acceptance.test.mjs', ''),
+      run.replace('exit $LASTEXITCODE', 'exit 0'),
+    ]) expect(() => { assertSourceNativeGuardRun(changed) }).toThrow()
+    const fixture = readFileSync(resolve(repositoryRoot, 'apps/desktop/tests/windows-packaged-package-acceptance.test.mjs'), 'utf8')
+    expect(fixture).toContain("function powershellUnit(t, body, shell = 'pwsh', { timeout = 15_000, phases = false } = {})")
+    const start = fixture.indexOf("\ntest('native helper initializes standard providers for owned classic Win32 controls',")
+    const end = fixture.indexOf('\ntest(', start + 5)
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(end).toBeGreaterThan(start)
+    const owner = fixture.slice(start, end)
+    expect(owner).toContain('powershellUnit(t, nativeProviderUnitScript(),')
+    expect(owner).toContain("'powershell.exe'), { phases: true })")
+    expect(owner).not.toMatch(/timeout:|concurrency:|skip: true/u)
   })
 
   it('binds baseline API and tag commits to independently pinned manifest bytes', () => {

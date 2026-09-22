@@ -77,6 +77,8 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $nodeVersion -cne 'v24.13.0') { throw 'Unexpected Node version' }
           $pnpmVersion = pnpm --version
           if ($LASTEXITCODE -ne 0 -or $pnpmVersion -cne '11.7.0') { throw 'Unexpected pnpm version' }
+          $availableParallelism = node -p "require('node:os').availableParallelism()"
+          if ($LASTEXITCODE -ne 0 -or $availableParallelism -cnotmatch '\A[1-9][0-9]{0,8}\z') { throw 'Invalid available parallelism' }
           $tree = git rev-parse 'HEAD^{tree}'
           if ($LASTEXITCODE -ne 0 -or $tree -cnotmatch '\A[a-f0-9]{40}\z') { throw 'Invalid source tree' }
           New-Item -ItemType Directory -Path $env:DIAGNOSTIC_ROOT -ErrorAction Stop | Out-Null
@@ -90,6 +92,7 @@ jobs:
             sourceRef = $env:GITHUB_REF; event = $env:GITHUB_EVENT_NAME; runId = $env:GITHUB_RUN_ID;
             runAttempt = $env:GITHUB_RUN_ATTEMPT; nodeVersion = $nodeVersion; pnpmVersion = $pnpmVersion;
             powerShellVersion = $PSVersionTable.PSVersion.ToString(); runnerOS = $env:RUNNER_OS;
+            availableParallelism = [int]$availableParallelism; effectiveFileConcurrency = 1; testIsolation = 'process';
             runnerEnvironment = $env:RUNNER_ENVIRONMENT; files = $hashes } |
             ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $env:DIAGNOSTIC_ROOT 'artifact/identity.json') -Encoding utf8
 
@@ -119,7 +122,7 @@ jobs:
           $phase = 'invocation-failed'
           $captureFailed = $false
           try {
-            node --test apps/desktop/tests/windows-installed-upgrade.test.mjs apps/desktop/tests/windows-packaged-package-acceptance.test.mjs *> $rawLog
+            node --test --test-concurrency=1 apps/desktop/tests/windows-installed-upgrade.test.mjs apps/desktop/tests/windows-packaged-package-acceptance.test.mjs *> $rawLog
             $testExitCode = $LASTEXITCODE
             $phase = if ($testExitCode -eq 0) { 'tests-passed' } else { 'tests-failed' }
           } finally {
