@@ -11,11 +11,12 @@
     "executableName": "cloga-deepseek-harness"
   },
   "desktopProvisioning": {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     "mode": "exact",
     "plugins": [
       {
         "required": true,
+        "sourcePolicy": "compatible-user-override",
         "source": {
           "schemaVersion": 1,
           "type": "githubRelease",

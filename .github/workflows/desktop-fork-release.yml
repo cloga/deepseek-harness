@@ -178,9 +178,9 @@ jobs:
           --application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe
           --output dist/desktop-copilot-acceptance
 
-      - name: Verify packaged plugin command and native cancellation
+      - name: Verify packaged plugin override cold start and native cancellation
         id: plugin_command_acceptance
-        timeout-minutes: 12
+        timeout-minutes: 20
         run: >-
           pnpm exec tsx apps/desktop/tests/fixtures/desktop-plugin-command-smoke.ts
           --application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe

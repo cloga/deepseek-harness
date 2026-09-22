@@ -14,14 +14,20 @@ vi.mock('playwright', () => { throw new Error('Import safety: Playwright must no
 vi.mock('@deepseek-ai/dsh-win32-process/src/index.ts', () => { throw new Error('Import safety: Win32/Koffi loader must remain lazy') })
 vi.mock('@deepseek-ai/dsh-win32-process/src/process.ts', () => { throw new Error('Import safety: native process module must remain lazy') })
 vi.mock('../scripts/packaged-runtime.mjs', () => { throw new Error('Import safety: packaged verifier must remain lazy') })
-vi.mock('node:child_process', () => ({ spawn: () => { throw new Error('Import safety: no subprocess may start') } }))
+vi.mock('node:child_process', () => ({
+  execFileSync: () => { throw new Error('Import safety: no subprocess may start') },
+  spawn: () => { throw new Error('Import safety: no subprocess may start') },
+}))
 
 import {
   canRemoveDesktopPluginHome,
+  desktopPluginAcceptanceDeadlines,
   openDesktopPluginInput,
+  pendingDesktopPluginHandles,
   readDesktopPluginNativeObservations,
   runPackagedDesktopPluginCommandAcceptance,
   snapshotDesktopPluginProfile,
+  validateCommittedAudit,
   validateDesktopPluginTranscript,
 } from './fixtures/desktop-plugin-command-smoke.ts'
 
@@ -194,6 +200,13 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
     }
   })
 
+  it('never retries a handle that already closed in a partial-close epoch', () => {
+    expect(pendingDesktopPluginHandles(false, false)).toEqual(['process', 'job'])
+    expect(pendingDesktopPluginHandles(true, false)).toEqual(['job'])
+    expect(pendingDesktopPluginHandles(false, true)).toEqual(['process'])
+    expect(pendingDesktopPluginHandles(true, true)).toEqual([])
+  })
+
   it('retains home after helper uncertainty even when root exited and app Job is empty', () => {
     expect(canRemoveDesktopPluginHome({ spawnAttempted: true, jobOwned: true,
       jobQuiescent: true, helperTreeUncertain: true })).toBe(false)
@@ -208,6 +221,19 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
       jobQuiescent: false, helperTreeUncertain: false })).toBe(true)
     expect(canRemoveDesktopPluginHome({ spawnAttempted: true, jobOwned: true,
       jobQuiescent: true, helperTreeUncertain: false })).toBe(true)
+  })
+
+  it('binds targetless started audits to exact committed targets and rejects failure or rollback', () => {
+    const started = { operation: 'plugin-add', outcome: 'started', phase: 'preparation', transaction: 'tx' }
+    const committed = { operation: 'plugin-add', outcome: 'committed', phase: 'activation', transaction: 'tx', target: 'plugin' }
+    expect(validateCommittedAudit([started, committed], 'plugin-add', 'plugin')).toEqual({
+      transaction: 'tx', records: [started, committed],
+    })
+    for (const extra of [
+      { operation: 'plugin-add', outcome: 'failed', phase: 'preparation', transaction: 'tx' },
+      { operation: 'plugin-add', outcome: 'started', phase: 'rollback', transaction: 'tx' },
+    ]) expect(() => validateCommittedAudit([started, committed, extra], 'plugin-add', 'plugin')).toThrow()
+    expect(() => validateCommittedAudit([started, { ...committed, target: 'other' }], 'plugin-add', 'plugin')).toThrow()
   })
 
   it('requires a same-transaction started/failed pair retaining known nonempty inventory', () => {
@@ -322,6 +348,74 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
     }
     expect(() => validateDesktopPluginTranscript('session.v2.jsonl', transcript(), 'wrong', expected)).toThrow()
     expect(() => validateDesktopPluginTranscript('session.v2.jsonl', transcript().replace('"version":2', '"version":2,"parentSession":{}'), sessionId, expected)).toThrow()
+  })
+
+  it('pins manager accelerator, Apply ownership, alpha36 descriptor, and work/cleanup deadline partition', () => {
+    const fixture = readFileSync(new URL('./fixtures/desktop-plugin-command-smoke.ts', import.meta.url), 'utf8')
+    const helper = readFileSync(new URL('./fixtures/desktop-plugin-native-cancel.ps1', import.meta.url), 'utf8')
+    const workflow = readFileSync(new URL('../../../.github/workflows/desktop-fork-release.yml', import.meta.url), 'utf8')
+    const alpha36 = JSON.parse(readFileSync(new URL('./fixtures/copilot-alpha36-source.json', import.meta.url), 'utf8')) as Record<string, unknown>
+    expect(fixture).toContain("keyboard.press('Control+,')")
+    expect(fixture).not.toContain("keyboard.press('Alt+a')")
+    expect(desktopPluginAcceptanceDeadlines(1000)).toEqual({ work: 961_000, cleanup: 1_141_000 })
+    expect(fixture).toContain('started + 16 * 60_000')
+    expect(fixture).toContain('Math.min(deadline, performance.now() + 90_000)')
+    expect(fixture).toContain('work + 3 * 60_000')
+    expect(workflow).toMatch(/plugin_command_acceptance[\s\S]*timeout-minutes: 20/u)
+    expect(fixture.match(/Math\.min\(performance\.now\(\) \+ 60_000, fixtureCleanupDeadline\)/gu)).toHaveLength(2)
+    for (const field of ['installedInstallerUpgradeVerified: false', 'differentRuntimeUpgradeVerified: false',
+      'liveOAuthOrModelVerified: false']) expect(fixture).toContain(field)
+    expect(helper).toContain("$request.action -ne 'cancel' -and $request.action -ne 'apply'")
+    expect(helper).toContain('defaultFocusAsserted = $false')
+    expect(fixture).toContain('receipt.releaseId, 393317125')
+    expect(fixture).toContain('boundedFileTail(path)')
+    expect(fixture.lastIndexOf('removeOwnedDirectory(home)'))
+      .toBeLessThan(fixture.lastIndexOf("save('acceptance.json', acceptedEvidence)"))
+    expect(alpha36).toMatchObject({
+      owner: 'cloga', repo: 'dsh-github-copilot', tag: 'v0.4.0-alpha.36', assetId: 579925063,
+      version: '0.4.0-alpha.36', size: 709235,
+      sha256: '47852848ba37ab370a8f7f1ef0697039961e4845c7e593ff14d99d1d2a941e5c',
+      integrity: 'sha512-JylJiBxMWslupAyRAgl2EXeq6xZdS3CjySyLRKuKEaJYZ1xIKyJpwgDzzf0R7f5Xd+4d4GMnpVfSVcPCJsU7XA==',
+      targetCommit: 'a91d55ba92fa065c23c40da7b75be7c6c04c1eb7',
+      checksumManifest: {
+        assetId: 579925081, size: 104, sha256: '879b7a13d19d7f54240658c8d48cd84b8914f05e9db17b01554c0f97240266bd',
+        integrity: 'sha512-bprih40B+WitJxb2CgFWQexz7nDlzNvGuW2XTHlpVsfD6e7C9hNSWRsf1PEvyVofTLyXf1IyFxtpUjf9mRQhlQ==',
+      },
+    })
+  })
+
+  it('separates Apply navigation from Cancel stability and flushes PREPARED before Apply', () => {
+    const fixture = readFileSync(new URL('./fixtures/desktop-plugin-command-smoke.ts', import.meta.url), 'utf8')
+    const helper = readFileSync(new URL('./fixtures/desktop-plugin-native-cancel.ps1', import.meta.url), 'utf8')
+    expect(helper).toContain("if ($request.action -eq 'cancel')")
+    expect(helper).toContain('Owned root identity changed after Apply')
+    expect(helper).toContain('Read-VerifiedRoot $mainProcess $ownership.mainWindow.title')
+    expect(fixture.indexOf('evidence.beforeOverrideApplyTranscript = await exportTranscript'))
+      .toBeLessThan(fixture.indexOf('evidence.nativeApplyOverride = await nativeHelper'))
+    const navigationObserver = fixture.indexOf("const onApplyNavigation = (): void => { applyNavigations++ }")
+    const documentIdentity = fixture.indexOf('const documentIdentity = await withinDeadline')
+    const nativeCancel = fixture.indexOf('evidence.nativeCancel = await nativeHelper')
+    expect(navigationObserver).toBeGreaterThanOrEqual(0)
+    expect(documentIdentity).toBeGreaterThanOrEqual(0)
+    expect(nativeCancel).toBeGreaterThanOrEqual(0)
+    expect(navigationObserver).toBeLessThan(documentIdentity)
+    expect(documentIdentity).toBeLessThan(nativeCancel)
+    expect(fixture).not.toContain('catch (_error) {\n        // Host replacement')
+  })
+
+  it('latches partial launch ownership before any post-spawn or post-connect failure', () => {
+    const fixture = readFileSync(new URL('./fixtures/desktop-plugin-command-smoke.ts', import.meta.url), 'utf8')
+    const spawn = fixture.indexOf('const launched = win32.spawnCurrentTokenJobProcess')
+    const latch = fixture.indexOf('owned = launched', spawn)
+    const firstCheck = fixture.indexOf('let devtools:', spawn)
+    const connect = fixture.indexOf('const connected = await chromium.connectOverCDP', spawn)
+    const browserLatch = fixture.indexOf('browser = connected', connect)
+    const pageLoop = fixture.indexOf('let launchedPage:', connect)
+    expect(spawn).toBeGreaterThan(0)
+    expect(latch).toBeGreaterThan(spawn)
+    expect(latch).toBeLessThan(firstCheck)
+    expect(browserLatch).toBeGreaterThan(connect)
+    expect(browserLatch).toBeLessThan(pageLoop)
   })
 
   it('hashes exact metadata/artifact bytes and absence, excluding legitimate Session/audit churn', () => {

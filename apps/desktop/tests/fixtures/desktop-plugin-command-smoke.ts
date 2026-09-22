@@ -3,12 +3,13 @@
  * No model prompt/sign-in/settings mutation; staging CAN use frozen pnpm and network.
  */
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
+import { gzipSync } from 'node:zlib'
 import type { Browser, Page } from 'playwright'
 import type { SpawnedJobProcess } from '@deepseek-ai/dsh-win32-process/src/index.ts'
 import {
@@ -30,6 +31,26 @@ const METADATA = [
   'desktop-runtime-state.json', 'desktop-plugin-receipts.json', 'desktop-plugin-package-locks.json',
   'desktop-plugin-provisioning-state.json', '.env', 'profile.env', 'desktop-packages-pending',
 ] as const
+
+/**
+ * Derive one monotonic work budget plus a cleanup-only reserve without resetting either deadline.
+ * @param started - Monotonic fixture start timestamp.
+ * @returns Absolute work and cleanup deadlines.
+ */
+export function desktopPluginAcceptanceDeadlines(started: number): { work: number; cleanup: number } {
+  const work = started + 16 * 60_000
+  return { work, cleanup: work + 3 * 60_000 }
+}
+
+/**
+ * Return only handle kinds that have not already closed in the current epoch.
+ * @param processClosed - Whether the process handle closed successfully.
+ * @param jobClosed - Whether the Job handle closed successfully.
+ * @returns Handle kinds still owned by cleanup.
+ */
+export function pendingDesktopPluginHandles(processClosed: boolean, jobClosed: boolean): readonly ('process' | 'job')[] {
+  return [...(processClosed ? [] : ['process'] as const), ...(jobClosed ? [] : ['job'] as const)]
+}
 
 /** Only a packaged executable and caller-selected evidence destination are accepted. */
 export interface PackagedDesktopPluginCommandOptions {
@@ -72,6 +93,35 @@ export function canRemoveDesktopPluginHome(state: {
   return !state.helperTreeUncertain && (state.jobOwned
     ? state.jobQuiescent
     : !state.spawnAttempted)
+}
+
+/** Build one deterministic prebuilt plugin archive without package-manager or lifecycle execution. */
+function unrelatedPluginArchive(): Buffer {
+  const files = new Map<string, Buffer>([
+    ['package/package.json', Buffer.from(JSON.stringify({
+      name: 'desktop-unrelated-fixture', version: '1.0.0',
+      dsh: { bundle: { patch: 'bundle.yml' } },
+    }))],
+    ['package/bundle.yml', Buffer.from('[]\n')],
+  ])
+  const blocks: Buffer[] = []
+  const octal = (value: number, width: number): Buffer => Buffer.from(`${value.toString(8).padStart(width - 1, '0')}\0`)
+  for (const [name, body] of files) {
+    const header = Buffer.alloc(512)
+    header.write(name, 0, 100, 'utf8')
+    octal(0o644, 8).copy(header, 100)
+    octal(0, 8).copy(header, 108)
+    octal(0, 8).copy(header, 116)
+    octal(body.byteLength, 12).copy(header, 124)
+    octal(0, 12).copy(header, 136)
+    header.fill(0x20, 148, 156)
+    header[156] = '0'.charCodeAt(0)
+    header.write('ustar\0', 257, 6, 'ascii')
+    header.write('00', 263, 2, 'ascii')
+    octal([...header].reduce((sum, byte) => sum + byte, 0), 8).copy(header, 148)
+    blocks.push(header, body, Buffer.alloc((512 - body.byteLength % 512) % 512))
+  }
+  return gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]))
 }
 
 /**
@@ -150,6 +200,18 @@ function safeDiagnostic(value: unknown): string {
     .replace(/((?:authorization|token|password|secret|api[_-]?key)\s*[:=]\s*)(?:bearer\s+|token\s+)?[^\s,"'<>]+/giu, '$1[redacted]')
 }
 
+function boundedFileTail(path: string, maximum = 16_384): string {
+  const stat = lstatSync(path, { throwIfNoEntry: false })
+  if (stat === undefined || !stat.isFile() || stat.isSymbolicLink()) return ''
+  const length = Math.min(stat.size, maximum)
+  const bytes = Buffer.alloc(length)
+  const descriptor = openSync(path, 'r')
+  try {
+    const read = readSync(descriptor, bytes, 0, length, Math.max(0, stat.size - length))
+    return bytes.subarray(0, read).toString('utf8')
+  } finally { closeSync(descriptor) }
+}
+
 /**
  * Read bounded fixture-only native scan evidence after the helper closes, including abnormal exits.
  * @param path - Observation file beside the exclusively created helper request.
@@ -172,7 +234,7 @@ async function nativeHelper<T>(
   home: string, environment: Record<string, string>, request: object, lifecycle: HelperLifecycle,
   deadline = performance.now() + 90_000,
 ): Promise<T> {
-  const timeout = remainingDeadline(deadline)
+  const timeout = remainingDeadline(Math.min(deadline, performance.now() + 90_000))
   const prefix = join(home, `native-${randomUUID()}`)
   const input = `${prefix}.request.json`
   writeFileSync(input, JSON.stringify(request), { flag: 'wx', mode: 0o600 })
@@ -245,8 +307,38 @@ function auditNames(home: string): string[] {
   return existsSync(directory) ? readdirSync(directory).filter(name => name.endsWith('.json')).sort() : []
 }
 
-async function exportTranscript(page: Page, home: string, sessionId: string, expected: readonly ExpectedCommand[]) {
-  const deadline = performance.now() + 30_000
+/**
+ * Bind a started mutation to its exact committed target without inventing an early target.
+ * @param records - Newly retained audit records for one fixture operation.
+ * @param operation - Expected mutation kind.
+ * @param target - Package name learned by the committed activation.
+ * @returns Transaction identity and retained records for evidence.
+ */
+export function validateCommittedAudit(
+  records: readonly Record<string, unknown>[],
+  operation: 'plugin-add' | 'plugin-install',
+  target: string,
+): { transaction: string; records: readonly Record<string, unknown>[] } {
+  const started = records.filter(record => record.operation === operation && record.outcome === 'started')
+  assert.equal(started.length, 1, `Expected one ${operation} started audit`)
+  const transaction = started[0]?.transaction
+  assert(typeof transaction === 'string' && transaction !== '', 'Started audit must identify its transaction')
+  const committed = records.filter(record => record.operation === operation && record.transaction === transaction
+    && record.target === target && record.phase === 'activation' && record.outcome === 'committed')
+  assert.equal(committed.length, 1, `Expected one committed ${operation} audit for ${target}`)
+  assert.equal(records.some(record => record.transaction === transaction
+    && (record.outcome === 'failed' || record.phase === 'rollback')), false,
+  `Committed ${operation} transaction must contain no failed or rollback audit`)
+  return { transaction, records }
+}
+
+async function exportTranscript(
+  page: Page,
+  home: string,
+  sessionId: string,
+  expected: readonly ExpectedCommand[],
+  deadline = performance.now() + 30_000,
+) {
   const bytes = await withinDeadline(deadline, remaining => page.evaluate(async ({ id, remaining }) => {
     const response = await fetch(`dsh-app://app/api/session.export?sessionId=${encodeURIComponent(id)}&includeDescendants=false`,
       { signal: AbortSignal.timeout(remaining) })
@@ -258,9 +350,11 @@ async function exportTranscript(page: Page, home: string, sessionId: string, exp
   const directory = mkdtempSync(join(home, 'command-export-'))
   const archive = join(directory, 'export.zip')
   writeFileSync(archive, new Uint8Array(bytes), { flag: 'wx', mode: 0o600 })
-  const extractZip = (await import('extract-zip')).default
   const extracted = join(directory, 'decoded')
-  await extractZip(archive, { dir: extracted })
+  await withinDeadline(deadline, async () => {
+    const extractZip = (await import('extract-zip')).default
+    await extractZip(archive, { dir: extracted })
+  })
   const files = readdirSync(extracted)
   assert.equal(files.length, 1, 'Command-only root export must contain only its generation JSONL')
   const filename = files[0]
@@ -280,13 +374,16 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
   const outputRoot = resolve(options.output)
   mkdirSync(outputRoot, { recursive: true })
   const output = mkdtempSync(join(outputRoot, 'desktop-plugin-command-'))
+  const fixtureStarted = performance.now()
+  const { work: fixtureWorkDeadline, cleanup: fixtureCleanupDeadline } = desktopPluginAcceptanceDeadlines(fixtureStarted)
   const { chromium } = await import('playwright')
   // Native Koffi and Win32 DLL loading is acceptance-only, never an import-time side effect.
   const win32 = await import('@deepseek-ai/dsh-win32-process/src/index.ts')
   const { buildCommandLine } = await import('@deepseek-ai/dsh-win32-process/src/process.ts')
   const api = win32.loadWin32ProcessBindings()
   const { parseDesktopForkReleasePlan } = await import('../../scripts/fork-release.ts')
-  const { readDesktopPluginProvisioningPlan } = await import('../../src/plugin-provisioning.ts')
+  const { DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY, desktopPluginProvisioningPlanSha256,
+    readDesktopPluginProvisioningPlan } = await import('../../src/plugin-provisioning.ts')
   const { assertDesktopProvisioningInventory } = await import('../../src/project-manager.ts')
   const { packagedDesktopRuntimeRoot, verifyPackagedDesktopRuntime, readPackagedDesktopRuntimeDescriptor } =
     await import('../../scripts/packaged-runtime.mjs')
@@ -296,19 +393,59 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
   const plan = readDesktopPluginProvisioningPlan(join(resources, 'desktop-provisioning', 'plan.json'))
   assert.deepEqual(plan, reviewed.desktopProvisioning)
   assert.equal(plan.mode, 'exact', 'Deterministic clean-profile inventory requires an exact plan')
+  assert.equal(plan.schemaVersion, 2)
+  assert.equal(plan.plugins.length, 1)
+  const initialEntry = plan.plugins[0]!
+  assert.equal(initialEntry.required, true)
+  assert.equal(initialEntry.sourcePolicy, 'compatible-user-override')
+  assert.equal(initialEntry.source.packageName, 'dsh-github-copilot')
+  assert.equal(initialEntry.source.version, '0.4.0-alpha.35')
   const executableSha256 = createHash('sha256').update(readFileSync(application)).digest('hex')
-  const provisioningPlanSha256 = createHash('sha256').update(readFileSync(join(resources, 'desktop-provisioning', 'plan.json'))).digest('hex')
+  const planPath = join(resources, 'desktop-provisioning', 'plan.json')
+  const provisioningPlanSha256 = createHash('sha256').update(readFileSync(planPath)).digest('hex')
+  const provisioningPlanCanonicalSha256 = desktopPluginProvisioningPlanSha256(plan)
+  const packagedCapability = JSON.parse(readFileSync(join(resources, 'managed-update', 'capability.json'), 'utf8')) as {
+    provisioning: { capability: unknown; planSha256: string }
+  }
+  assert.deepEqual(packagedCapability.provisioning.capability, DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY)
+  assert.equal(packagedCapability.provisioning.planSha256, provisioningPlanCanonicalSha256)
+  const candidateCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+    encoding: 'utf8', timeout: Math.min(10_000, remainingDeadline(fixtureWorkDeadline)),
+  }).trim()
+  const candidateTree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], {
+    encoding: 'utf8', timeout: Math.min(10_000, remainingDeadline(fixtureWorkDeadline)),
+  }).trim()
+  assert.match(candidateCommit, /^[a-f0-9]{40}$/u)
+  assert.match(candidateTree, /^[a-f0-9]{40}$/u)
+  if (process.env.GITHUB_SHA !== undefined) assert.equal(candidateCommit, process.env.GITHUB_SHA)
+  const alpha36DescriptorBytes = readFileSync(new URL('./copilot-alpha36-source.json', import.meta.url))
+  const workflowRunId = process.env.GITHUB_RUN_ID
+  const workflowRunAttempt = process.env.GITHUB_RUN_ATTEMPT
+  const workflowJob = process.env.GITHUB_JOB
+  assert(workflowRunId !== undefined && /^[1-9][0-9]*$/u.test(workflowRunId), 'Hosted run id is required')
+  assert(workflowRunAttempt !== undefined && /^[1-9][0-9]*$/u.test(workflowRunAttempt), 'Hosted run attempt is required')
+  assert(workflowJob !== undefined && workflowJob !== '', 'Hosted job identity is required')
+  const sourceBinding = {
+    candidateCommit, candidateTree, workflowRunId, workflowRunAttempt, workflowJob,
+    lockfileSha256: createHash('sha256').update(readFileSync(resolve('pnpm-lock.yaml'))).digest('hex'),
+    alpha36DescriptorSha256: createHash('sha256').update(alpha36DescriptorBytes).digest('hex'),
+  }
   const scratch = resolve('.desktop-smoke')
   mkdirSync(scratch, { recursive: true })
   const home = mkdtempSync(join(scratch, 'packaged-plugin-command-'))
   let browser: Browser | undefined
   let owned: SpawnedJobProcess | undefined
   let spawnAttempted = false
+  let processHandleClosed = false
+  let jobHandleClosed = false
   const helperLifecycle: HelperLifecycle = { helperTreeUncertain: false, nativeObservations: [] }
   let ownership: Ownership | undefined
+  let launchIdentity: { mainPid: number; application: string; launchedAfter: string; commandLine: string; port: number } | undefined
+  let mainIdentity: ProcessIdentity | undefined
   let failure: unknown
+  let acceptedEvidence: Record<string, unknown> | undefined
   const descriptors: number[] = []
-  const stderrPath = join(home, 'electron.stderr')
+  const stderrPaths: string[] = []
   let page: Page | undefined
   let quiescent = false
   const expected: ExpectedCommand[] = []
@@ -317,11 +454,104 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
   const workspace = join(home, 'workspace')
   const userData = join(home, 'electron-user-data')
   const evidence: Record<string, unknown> = { desktopVersion: reviewed.version, sequence: reviewed.sequence,
-    executableSha256, provisioningPlanSha256,
+    executableSha256, provisioningPlanSha256, provisioningPlanCanonicalSha256,
+    provisioningCapability: packagedCapability.provisioning.capability, sourceBinding,
     isolatedHome: true, modelPromptSubmitted: false, realOAuth: false, networkFreeClaimed: false,
+    installedInstallerUpgradeVerified: false, differentRuntimeUpgradeVerified: false, liveOAuthOrModelVerified: false,
+    deadline: { monotonicWorkMs: 16 * 60_000, cleanupReserveMs: 3 * 60_000 },
     nativeObservations: helperLifecycle.nativeObservations }
   const save = (name: string, value: unknown): void => {
     writeFileSync(join(output, name), `${JSON.stringify(value, undefined, 2)}\n`, { flag: 'wx', mode: 0o600 })
+  }
+  const boundedWorkDeadline = (deadline: number): number => Math.min(deadline, fixtureWorkDeadline)
+  let launchGeneration = 0
+  let firstMainIdentity: ProcessIdentity | undefined
+  const launchOwnedRoot = async (): Promise<{
+    browser: Browser
+    owned: SpawnedJobProcess
+    page: Page
+    ownership: Ownership
+    pageTitle: string
+    launchIdentity: { mainPid: number; application: string; launchedAfter: string; commandLine: string; port: number }
+    main: ProcessIdentity
+  }> => {
+    assert(owned === undefined && browser === undefined, 'Previous launch must be drained before another epoch')
+    spawnAttempted = false
+    processHandleClosed = false
+    jobHandleClosed = false
+    quiescent = false
+    page = undefined
+    ownership = undefined
+    launchIdentity = undefined
+    mainIdentity = undefined
+    const generation = ++launchGeneration
+    const launchHome = join(home, `launch-${generation}`)
+    mkdirSync(launchHome)
+    const descriptor = (path: string, flags: string): number => {
+      const fd = openSync(path, flags, 0o600)
+      descriptors.push(fd)
+      return fd
+    }
+    const stdin = openDesktopPluginInput(launchHome)
+    descriptors.push(stdin)
+    const stderrPath = join(home, `electron-${generation}.stderr`)
+    stderrPaths.push(stderrPath)
+    const stdio = { stdin, stdout: descriptor(join(home, `electron-${generation}.stdout`), 'wx'), stderr: descriptor(stderrPath, 'wx') }
+    const args = [`--user-data-dir=${userData}`, '--lang=en-US', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0']
+    const commandLine = buildCommandLine(application, args)
+    const launchedAfter = new Date().toISOString()
+    const startupDeadline = boundedWorkDeadline(performance.now() + 300_000)
+    const portFile = join(userData, 'DevToolsActivePort')
+    if (existsSync(portFile)) unlinkSync(portFile)
+    spawnAttempted = true
+    const launched = win32.spawnCurrentTokenJobProcess(api, { applicationName: application, command: application, args,
+      cwd: home, env: environment, stdio })
+    owned = launched
+    let devtools: ReturnType<typeof parseDesktopDevToolsPort> | undefined
+    while (devtools === undefined) {
+      remainingDeadline(startupDeadline)
+      assert.equal(win32.pollProcessExit(api, launched.process), undefined, 'Owned root exited before CDP attach')
+      const stat = lstatSync(portFile, { throwIfNoEntry: false })
+      if (stat !== undefined) {
+        assert(stat.isFile() && !stat.isSymbolicLink() && stat.size <= 1024, 'Unsafe private DevToolsActivePort')
+        devtools = parseDesktopDevToolsPort(readFileSync(portFile, 'utf8'))
+      } else await new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(100, remainingDeadline(startupDeadline))))
+    }
+    const epochIdentity = { mainPid: launched.pid, application, launchedAfter, commandLine, port: devtools.port }
+    launchIdentity = epochIdentity
+    const listener = await nativeHelper<{ main: ProcessIdentity }>(home, environment,
+      { action: 'listener', ...epochIdentity }, helperLifecycle, startupDeadline)
+    mainIdentity = listener.main
+    assert.equal(listener.main.pid, launched.pid)
+    assert.equal(win32.pollProcessExit(api, launched.process), undefined)
+    const connected = await chromium.connectOverCDP(devtools.endpoint, { timeout: remainingDeadline(startupDeadline) })
+    browser = connected
+    let launchedPage: Page | undefined
+    while (launchedPage === undefined) {
+      remainingDeadline(startupDeadline)
+      const contexts = connected.contexts()
+      assert.equal(contexts.length, 1, 'Expected exactly one owned browser context')
+      const pages = contexts[0]!.pages()
+      assert(pages.length <= 1, 'Unexpected extra root browser pages')
+      launchedPage = pages[0]
+      if (launchedPage === undefined) await new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(100, remainingDeadline(startupDeadline))))
+    }
+    page = launchedPage
+    await launchedPage.waitForFunction(() => {
+      const error = document.querySelector<HTMLElement>('#error')
+      return location.href === 'dsh-app://app/index.html' || Boolean(error && !error.hidden && error.textContent?.trim())
+    }, undefined, { timeout: remainingDeadline(startupDeadline) })
+    assert.equal(launchedPage.url(), APPLICATION_URL, 'Packaged application did not reach app-ready')
+    const pageTitle = await withinDeadline(startupDeadline, () => launchedPage!.title())
+    validateDesktopPageTitle(pageTitle)
+    const captured = await nativeHelper<Ownership>(home, environment, { action: 'capture', ...epochIdentity,
+      main: listener.main, pageTitle, profile, home,
+      hostEntry: join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js') }, helperLifecycle, startupDeadline)
+    ownership = captured
+    assert.deepEqual(captured.main, listener.main)
+    validateDesktopWindowCapture(captured.mainWindow, launched.pid, pageTitle, captured.mainHwnd)
+    return { browser: connected, owned: launched, page: launchedPage, ownership: captured, pageTitle,
+      launchIdentity: epochIdentity, main: listener.main }
   }
   try {
     mkdirSync(profile, { recursive: true })
@@ -332,90 +562,94 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     const runtimeBytes = readPackagedDesktopRuntimeDescriptor(application, runtimeRoot, environment)
     evidence.runtimeSha256 = createHash('sha256').update(runtimeBytes).digest('hex')
     mkdirSync(userData)
-    const descriptor = (path: string, flags: string): number => {
-      const fd = openSync(path, flags, 0o600)
-      descriptors.push(fd)
-      return fd
-    }
-    const stdin = openDesktopPluginInput(home)
-    descriptors.push(stdin)
-    const stdio = { stdin, stdout: descriptor(join(home, 'electron.stdout'), 'wx'),
-      stderr: descriptor(stderrPath, 'wx') }
-    const args = [`--user-data-dir=${userData}`, '--lang=en-US', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0']
-    const commandLine = buildCommandLine(application, args)
-    const launchedAfter = new Date().toISOString()
-    const startupDeadline = performance.now() + 300_000
-    // Assignment to the nonbreakaway kill-on-close Job precedes resume; retain BOTH handles even if CDP fails.
-    spawnAttempted = true
-    owned = win32.spawnCurrentTokenJobProcess(api, { applicationName: application, command: application, args,
-      cwd: home, env: environment, stdio })
-    const portFile = join(userData, 'DevToolsActivePort')
-    let devtools: ReturnType<typeof parseDesktopDevToolsPort> | undefined
-    while (devtools === undefined) {
-      remainingDeadline(startupDeadline)
-      assert.equal(win32.pollProcessExit(api, owned.process), undefined, 'Owned root exited before CDP attach')
-      const stat = lstatSync(portFile, { throwIfNoEntry: false })
-      if (stat !== undefined) {
-        assert(stat.isFile() && !stat.isSymbolicLink() && stat.size <= 1024, 'Unsafe private DevToolsActivePort')
-        devtools = parseDesktopDevToolsPort(readFileSync(portFile, 'utf8'))
-      } else await new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(100, remainingDeadline(startupDeadline))))
-    }
-    const launchIdentity = { mainPid: owned.pid, application, launchedAfter, commandLine, port: devtools.port }
-    const listener = await nativeHelper<{ main: ProcessIdentity }>(home, environment,
-      { action: 'listener', ...launchIdentity }, helperLifecycle, startupDeadline)
-    assert.equal(listener.main.pid, owned.pid)
-    assert.equal(win32.pollProcessExit(api, owned.process), undefined)
-    browser = await chromium.connectOverCDP(devtools.endpoint, { timeout: remainingDeadline(startupDeadline) })
-    remainingDeadline(startupDeadline)
-    while (page === undefined) {
-      remainingDeadline(startupDeadline)
-      const contexts = browser.contexts()
-      assert.equal(contexts.length, 1, 'Expected exactly one owned browser context')
-      const pages = contexts[0]!.pages()
-      assert(pages.length <= 1, 'Unexpected extra root browser pages')
-      page = pages[0]
-      if (page === undefined) await new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(100, remainingDeadline(startupDeadline))))
-    }
-    await page.waitForFunction(() => {
-      const error = document.querySelector<HTMLElement>('#error')
-      return location.href === 'dsh-app://app/index.html' || Boolean(error && !error.hidden && error.textContent?.trim())
-    }, undefined, { timeout: remainingDeadline(startupDeadline) })
-    remainingDeadline(startupDeadline)
-    assert.equal(page.url(), APPLICATION_URL, 'Packaged application did not reach app-ready')
-    const pageTitle = await withinDeadline(startupDeadline, () => page!.title())
-    validateDesktopPageTitle(pageTitle)
-    evidence.pageTitle = pageTitle
-    ownership = await nativeHelper<Ownership>(home, environment, { action: 'capture', ...launchIdentity,
-      main: listener.main, pageTitle, profile, home,
-      hostEntry: join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js') }, helperLifecycle, startupDeadline)
-    assert.deepEqual(ownership.main, listener.main)
-    validateDesktopWindowCapture(ownership.mainWindow, owned.pid, pageTitle, ownership.mainHwnd)
-    assert.equal(win32.pollProcessExit(api, owned.process), undefined, 'Owned root must remain alive at capture')
-    evidence.userDataIdentity = { userData, argv: args, listenerPid: owned.pid, endpoint: devtools.endpoint,
+    const firstLaunch = await launchOwnedRoot()
+    browser = firstLaunch.browser; owned = firstLaunch.owned; page = firstLaunch.page; ownership = firstLaunch.ownership
+    launchIdentity = firstLaunch.launchIdentity; mainIdentity = firstLaunch.main
+    evidence.pageTitle = firstLaunch.pageTitle
+    firstMainIdentity = ownership.main
+    evidence.userDataIdentity = { userData, firstMainIdentity,
       basis: 'exact owned launch command line, private DevToolsActivePort and verified root listener' }
+    evidence.firstEpoch = { launch: launchIdentity, listener: mainIdentity, host: ownership.host }
     evidence.ownership = ownership
     assertDesktopProvisioningInventory(profile, plan)
-    const baseline = snapshotDesktopPluginProfile(profile)
-    const manifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')) as { dependencies?: unknown }
-    assert(manifest.dependencies !== null && typeof manifest.dependencies === 'object' && !Array.isArray(manifest.dependencies))
-    const manifestNames = Object.keys(manifest.dependencies).sort()
-    const expectedRows = plan.plugins.map(entry => ({ name: entry.source.packageName, version: entry.source.version }))
-      .sort((a, b) => a.name.localeCompare(b.name))
-    assert(expectedRows.length > 0, 'Release plan must provide an installed plugin to disable')
-    const target = expectedRows[0]!
+    const archivePath = join(home, 'desktop-unrelated-fixture.tgz')
+    const archiveBytes = unrelatedPluginArchive()
+    writeFileSync(archivePath, archiveBytes, { flag: 'wx', mode: 0o600 })
+    const context = browser.contexts()[0]!
+    const managerDeadline = boundedWorkDeadline(performance.now() + 30_000)
+    const managerPagePromise = context.waitForEvent('page', { timeout: remainingDeadline(managerDeadline) })
+    void managerPagePromise.catch(() => undefined)
+    await withinDeadline(managerDeadline, async () => { await page!.keyboard.press('Control+,') })
+    const managerPage = await managerPagePromise
+    await managerPage.waitForURL('dsh-app://shell/plugin-manager.html', { timeout: remainingDeadline(managerDeadline) })
+    await managerPage.locator('#package-spec').fill(archivePath, { timeout: remainingDeadline(managerDeadline) })
+    const initialHostIdentity = ownership.host
+    const auditsBeforeLocal = auditNames(home)
+    const localApplyDeadline = boundedWorkDeadline(performance.now() + 300_000)
+    await withinDeadline(localApplyDeadline, async () => { await managerPage.bringToFront() })
+    const managerFocused = await withinDeadline(localApplyDeadline, () => managerPage.evaluate(() => document.hasFocus()))
+    assert.equal(managerFocused, true, 'Plugin manager must own focus before preparation')
+    await managerPage.locator('#install').click({ timeout: remainingDeadline(localApplyDeadline) })
+    await managerPage.waitForFunction(() => !document.hasFocus(), undefined, { timeout: remainingDeadline(localApplyDeadline) })
+    evidence.nativeApplyLocal = await nativeHelper(home, environment, { action: 'apply', ownership }, helperLifecycle,
+      localApplyDeadline)
+    await managerPage.locator('#status').filter({ hasText: 'Done. The Desktop backend has restarted.' })
+      .waitFor({ timeout: remainingDeadline(localApplyDeadline) })
+    await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), async () => { await managerPage.close() })
+    const localPageTitle = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), () => page!.title())
+    ownership = await nativeHelper<Ownership>(home, environment, { action: 'capture', ...launchIdentity!,
+      main: mainIdentity!, pageTitle: localPageTitle, profile, home,
+      hostEntry: join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js') }, helperLifecycle,
+      boundedWorkDeadline(performance.now() + 90_000))
+    assert.notDeepEqual(ownership.host, initialHostIdentity, 'Local plugin Apply must replace the actual Host process')
+    const localAudit = auditNames(home).filter(name => !auditsBeforeLocal.includes(name))
+      .map(name => JSON.parse(readFileSync(join(home, 'desktop', 'profile-operations', name), 'utf8')) as Record<string, unknown>)
+    evidence.localActivationAudit = validateCommittedAudit(localAudit, 'plugin-add', 'desktop-unrelated-fixture')
+    const assertUnrelatedEvidence = (): Record<string, unknown> => {
+      const locks = JSON.parse(readFileSync(join(profile, 'desktop-plugin-package-locks.json'), 'utf8')) as {
+        packages: Record<string, { sha256: string; integrity: string; version: string }>
+      }
+      const lock = locks.packages['desktop-unrelated-fixture']
+      assert(lock !== undefined, 'Unrelated local plugin lock must remain present')
+      const artifact = readFileSync(join(profile, '.desktop-plugin-artifacts', `${lock.sha256}.tgz`))
+      const inputSha256 = createHash('sha256').update(archiveBytes).digest('hex')
+      const inputIntegrity = `sha512-${createHash('sha512').update(archiveBytes).digest('base64')}`
+      assert.equal(lock.sha256, inputSha256)
+      assert.equal(lock.integrity, inputIntegrity)
+      assert.deepEqual(artifact, archiveBytes)
+      const manifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')) as {
+        dependencies: Record<string, string>
+        dsh: { profile: { bundles: string[] } }
+      }
+      assert.equal(manifest.dependencies['desktop-unrelated-fixture'], `file:.desktop-plugin-artifacts/${lock.sha256}.tgz`)
+      assert(manifest.dsh.profile.bundles.includes('desktop-unrelated-fixture'), 'Unrelated local plugin must remain enabled')
+      const installedRoot = join(profile, 'node_modules', 'desktop-unrelated-fixture')
+      const packageBytes = readFileSync(join(installedRoot, 'package.json'))
+      const installed = JSON.parse(packageBytes.toString('utf8')) as { version: string }
+      assert.equal(installed.version, '1.0.0')
+      const bundleBytes = readFileSync(join(installedRoot, 'bundle.yml'))
+      return { lock, inputSha256, inputIntegrity, artifactBytes: artifact.byteLength,
+        packageJsonSha256: createHash('sha256').update(packageBytes).digest('hex'),
+        bundleSha256: createHash('sha256').update(bundleBytes).digest('hex'),
+        dependency: manifest.dependencies['desktop-unrelated-fixture'], enabled: true }
+    }
+    const unrelatedBaseline = assertUnrelatedEvidence()
+    evidence.unrelatedPluginBeforeOverride = unrelatedBaseline
+    const target = plan.plugins.find(entry => entry.source.packageName === 'dsh-github-copilot')?.source
+    assert(target !== undefined, 'Release plan must contain the Copilot source')
+    evidence.target = { name: target.packageName, version: target.version }
+    const expectedRows = [{ name: target.packageName, version: target.version },
+      { name: 'desktop-unrelated-fixture', version: '1.0.0' }].sort((a, b) => a.name.localeCompare(b.name))
     const listText = expectedRows.map(row => `${row.name}@${row.version} — enabled`).join('\n')
-    evidence.target = target
     const sessionId = `desktop-plugin-command-${randomUUID()}`
-    const created = await remote<{ sessionId: string }>(page, 'session/create', { request: { cwd: workspace, sessionId } })
+    const created = await remote<{ sessionId: string }>(page, 'session/create', { request: { cwd: workspace, sessionId } },
+      boundedWorkDeadline(performance.now() + 300_000))
     assert.equal(created.sessionId, sessionId)
-    const registry = await remote<readonly CommandDescriptor[]>(page, 'commands/list', { agentId: sessionId })
+    const registry = await remote<readonly CommandDescriptor[]>(page, 'commands/list', { agentId: sessionId },
+      boundedWorkDeadline(performance.now() + 300_000))
     assert.equal(Array.isArray(registry), true, 'Expected command registry array')
     assert(registry.some(command => command.name === 'desktop-plugin'), 'Actual Host registry must contain desktop-plugin before execution')
-    let navigations = 0
-    const onNavigation = (): void => { navigations++ }
-    page.on('domcontentloaded', onNavigation)
-    const documentIdentity = await page.evaluate(() => performance.timeOrigin)
-    const execute = async (line: string, deadline = performance.now() + 300_000): Promise<CommandExecution> => {
+    const execute = async (line: string, deadline = boundedWorkDeadline(performance.now() + 300_000)): Promise<CommandExecution> => {
       const execution = await remote<CommandExecution>(page!, 'commands/execute', { agentId: sessionId, line, submittedAttachments: [] }, deadline)
       assert(execution && typeof execution.commandId === 'string' && execution.result, 'RPC must return CommandExecution, not prompt fallback')
       expected.push({ line, execution })
@@ -423,58 +657,227 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     }
     assert.deepEqual((await execute('/desktop-plugin list')).result, { kind: 'success', text: listText })
     const auditsBeforeInvalid = auditNames(home)
+    const preInvalidProfile = snapshotDesktopPluginProfile(profile)
     const profilesBeforeInvalid = readdirSync(dirname(profile)).sort()
     assert.deepEqual((await execute('/desktop-plugin install release {}')).result, { kind: 'error', text: SAFE_FAILURE })
     assert.deepEqual(auditNames(home), auditsBeforeInvalid, 'Invalid release descriptor must fail before transaction/acquisition')
     assert.deepEqual(readdirSync(dirname(profile)).sort(), profilesBeforeInvalid, 'Invalid release must create no staged profile')
-    assert.deepEqual(snapshotDesktopPluginProfile(profile), baseline)
+    assert.deepEqual(snapshotDesktopPluginProfile(profile), preInvalidProfile,
+      'Invalid release descriptor must preserve profile metadata and artifact bytes')
+
+    const { parseDesktopPluginSource } = await import('../../src/plugin-source.ts')
+    const alpha36 = parseDesktopPluginSource(JSON.parse(alpha36DescriptorBytes.toString('utf8')) as unknown)
+    assert(alpha36.type === 'githubRelease' && alpha36.checksumManifest !== undefined,
+      'Alpha36 acceptance source must remain checksum-attested')
+    const preOverrideHostIdentity = ownership.host
+    const auditsBeforeOverride = auditNames(home)
+    assert.deepEqual((await execute(`/desktop-plugin install release ${JSON.stringify(alpha36)}`,
+      boundedWorkDeadline(performance.now() + 300_000))).result, { kind: 'success', text: PREPARED })
+    evidence.beforeOverrideApplyTranscript = await exportTranscript(page, home, sessionId, expected,
+      boundedWorkDeadline(performance.now() + 30_000))
+    const applyDeadline = boundedWorkDeadline(performance.now() + 300_000)
+    let applyNavigations = 0
+    const onApplyNavigation = (): void => { applyNavigations++ }
+    page.on('domcontentloaded', onApplyNavigation)
+    const firstApplyNavigation = page.waitForEvent('domcontentloaded', { timeout: remainingDeadline(applyDeadline) })
+    void firstApplyNavigation.catch(() => undefined)
+    try {
+      evidence.nativeApplyOverride = await nativeHelper(home, environment, { action: 'apply', ownership }, helperLifecycle,
+        applyDeadline)
+      await firstApplyNavigation
+      await page.waitForURL(APPLICATION_URL, { timeout: remainingDeadline(applyDeadline) })
+      await page.getByRole('button', { name: 'Settings', exact: true }).waitFor({
+        state: 'visible', timeout: remainingDeadline(applyDeadline),
+      })
+    } finally { page.off('domcontentloaded', onApplyNavigation) }
+    assert(applyNavigations > 0, 'Apply must navigate through the owned startup/application lifecycle')
+    evidence.applyNavigations = applyNavigations
+    const overrideListText = [
+      `desktop-unrelated-fixture@1.0.0 — enabled`,
+      `dsh-github-copilot@0.4.0-alpha.36 — enabled`,
+    ].join('\n')
+    assert.deepEqual((await execute('/desktop-plugin list', applyDeadline)).result,
+      { kind: 'success', text: overrideListText })
+    const overridePageTitle = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), () => page!.title())
+    ownership = await nativeHelper<Ownership>(home, environment, { action: 'capture', ...launchIdentity!,
+      main: mainIdentity!, pageTitle: overridePageTitle, profile, home,
+      hostEntry: join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js') }, helperLifecycle,
+      boundedWorkDeadline(performance.now() + 90_000))
+    assert.notDeepEqual(ownership.host, preOverrideHostIdentity, 'Verified override Apply must replace the actual Host process')
+    const overrideAudit = auditNames(home).filter(name => !auditsBeforeOverride.includes(name))
+      .map(name => JSON.parse(readFileSync(join(home, 'desktop', 'profile-operations', name), 'utf8')) as Record<string, unknown>)
+    evidence.overrideActivationAudit = validateCommittedAudit(overrideAudit, 'plugin-install', 'dsh-github-copilot')
+    const assertOverrideEvidence = (): Record<string, unknown> => {
+      const state = JSON.parse(readFileSync(join(profile, 'desktop-plugin-provisioning-state.json'), 'utf8')) as {
+        schemaVersion: number
+        plugins: Array<{ name: string; sourcePolicy: string; effective: string; requestedSource: unknown; effectiveSource: unknown; receipt: unknown }>
+      }
+      const result = state.plugins.find(item => item.name === 'dsh-github-copilot')
+      assert(result !== undefined, 'Provisioning state must include Copilot')
+      const store = JSON.parse(readFileSync(join(profile, 'desktop-plugin-receipts.json'), 'utf8')) as {
+        owners: Record<string, string>
+        receipts: Record<string, { source: unknown; releaseId: number; assetId: number; artifactSha256: string; version: string; states: unknown }>
+      }
+      const receipt = store.receipts['dsh-github-copilot']
+      assert(receipt !== undefined, 'Receipt store must include Copilot')
+      assert.equal(state.schemaVersion, 2)
+      assert.equal(result.sourcePolicy, 'compatible-user-override')
+      assert.equal(result.effective, 'user-override')
+      assert.deepEqual(result.requestedSource, target)
+      assert.deepEqual(result.effectiveSource, alpha36)
+      assert.deepEqual(result.receipt, receipt)
+      assert.deepEqual(receipt.source, alpha36)
+      assert.equal(store.owners['dsh-github-copilot'], 'user')
+      assert.equal(receipt.releaseId, 393317125)
+      assert.equal(receipt.assetId, alpha36.assetId)
+      assert.equal(receipt.artifactSha256, alpha36.sha256)
+      assert.equal(receipt.version, alpha36.version)
+      assert.deepEqual(receipt.states, { staged: true, health: 'passed', activated: true, rolledBack: false, verified: true })
+      const artifact = readFileSync(join(profile, '.desktop-plugin-artifacts', `${alpha36.sha256}.tgz`))
+      assert.equal(artifact.byteLength, alpha36.size)
+      assert.equal(createHash('sha256').update(artifact).digest('hex'), alpha36.sha256)
+      assert.equal(`sha512-${createHash('sha512').update(artifact).digest('base64')}`, alpha36.integrity)
+      const profileManifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')) as { dependencies: Record<string, string> }
+      assert.equal(profileManifest.dependencies['dsh-github-copilot'], `file:.desktop-plugin-artifacts/${alpha36.sha256}.tgz`)
+      const installedRoot = join(profile, 'node_modules', 'dsh-github-copilot')
+      const installedBytes = readFileSync(join(installedRoot, 'package.json'))
+      const installed = JSON.parse(installedBytes.toString('utf8')) as { version: string; dsh?: { bundle?: { patch?: string } } }
+      assert.equal(installed.version, alpha36.version)
+      const patch = installed.dsh?.bundle?.patch
+      assert(typeof patch === 'string' && patch !== '', 'Installed Copilot must declare its bundle patch')
+      const patchSha256 = createHash('sha256').update(readFileSync(join(installedRoot, patch))).digest('hex')
+      const clientSha256 = createHash('sha256').update(readFileSync(join(installedRoot, 'lib', 'client.js'))).digest('hex')
+      return { requestedSource: result.requestedSource, effectiveSource: result.effectiveSource,
+        receiptSha256: createHash('sha256').update(JSON.stringify(receipt)).digest('hex'),
+        artifactSha256: alpha36.sha256, artifactBytes: artifact.byteLength,
+        installedPackageSha256: createHash('sha256').update(installedBytes).digest('hex'), patchSha256, clientSha256,
+        materializedComparedToArchiveEntries: false }
+    }
+    const overrideBaseline = assertOverrideEvidence()
+    evidence.overrideActivation = overrideBaseline
+    assert.deepEqual(assertUnrelatedEvidence(), unrelatedBaseline,
+      'Alpha36 override must preserve unrelated local input, lock, artifact and materialized bytes')
+    evidence.unrelatedPluginAfterOverride = unrelatedBaseline
+    const installedBaseline = snapshotDesktopPluginProfile(profile)
+    const manifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')) as { dependencies: Record<string, string> }
+    const manifestNames = Object.keys(manifest.dependencies).sort()
+    const auditsBeforeStrict = auditNames(home)
+    const profilesBeforeStrict = readdirSync(dirname(profile)).sort()
+    const ownershipBeforeStrict = ownership
+    assert.deepEqual((await execute(`/desktop-plugin disable ${target.packageName}`)).result, { kind: 'error', text: SAFE_FAILURE })
+    assert.deepEqual(auditNames(home), auditsBeforeStrict, 'Strict planned disable must fail before transaction audit')
+    assert.deepEqual(readdirSync(dirname(profile)).sort(), profilesBeforeStrict, 'Strict planned disable must create no staging directory')
+    assert.deepEqual(snapshotDesktopPluginProfile(profile), installedBaseline, 'Strict planned disable must not change profile bytes')
+    const strictIdentity = await nativeHelper<Ownership>(home, environment, { action: 'verify', ownership }, helperLifecycle,
+      boundedWorkDeadline(performance.now() + 90_000))
+    assert.deepEqual({ main: strictIdentity.main, host: strictIdentity.host },
+      { main: ownershipBeforeStrict.main, host: ownershipBeforeStrict.host },
+      'Strict planned disable must retain the same main and Host identities')
+
+    const documentIdentity = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000),
+      () => page!.evaluate(() => performance.timeOrigin))
+    let navigations = 0
+    const onNavigation = (): void => { navigations++ }
+    page.on('domcontentloaded', onNavigation)
     const auditsBeforeToggle = auditNames(home)
-    // Stage preparation may reconstruct dependencies with bundled frozen pnpm. This is NOT a zero-network smoke.
-    assert.deepEqual((await execute(`/desktop-plugin disable ${target.name}`)).result, { kind: 'success', text: PREPARED })
-    evidence.beforeCancelTranscript = await exportTranscript(page, home, sessionId, expected)
-    // Export flush proves prepared command/done durability before Cancel invocation, NOT independent native-dialog ordering.
-    evidence.nativeCancel = await nativeHelper(home, environment, { action: 'cancel', ownership }, helperLifecycle)
-    const deadline = performance.now() + 60_000
+    assert.deepEqual((await execute('/desktop-plugin disable desktop-unrelated-fixture')).result, { kind: 'success', text: PREPARED })
+    evidence.beforeCancelTranscript = await exportTranscript(page, home, sessionId, expected,
+      boundedWorkDeadline(performance.now() + 30_000))
+    evidence.nativeCancel = await nativeHelper(home, environment, { action: 'cancel', ownership }, helperLifecycle,
+      boundedWorkDeadline(performance.now() + 90_000))
+    const deadline = boundedWorkDeadline(performance.now() + 60_000)
     for (;;) {
       const listed = await execute('/desktop-plugin list', deadline)
-      remainingDeadline(deadline) // Late success must not silently bypass the 60-second settlement bound.
-      if (listed.result.kind === 'success') { assert.equal(listed.result.text, listText); break }
+      remainingDeadline(deadline)
+      if (listed.result.kind === 'success') { assert.equal(listed.result.text, overrideListText); break }
       assert.equal(listed.result.text, BUSY, 'Only busy is transient while cancellation settles')
       await new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(100, remainingDeadline(deadline))))
     }
     const after = snapshotDesktopPluginProfile(profile)
-    assert.deepEqual(after, baseline, 'Cancel must retain actual profile metadata and artifact bytes')
+    assert.deepEqual(after, installedBaseline, 'Cancel must retain actual profile metadata and artifact bytes')
     const newAudits = auditNames(home).filter(name => !auditsBeforeToggle.includes(name))
     const records = newAudits.map(name => JSON.parse(readFileSync(join(home, 'desktop', 'profile-operations', name), 'utf8')) as unknown)
-    validateDesktopPluginCancelAudit(records, target.name, manifestNames)
-    evidence.afterCancelIdentity = await nativeHelper(home, environment, { action: 'verify', ownership }, helperLifecycle)
+    validateDesktopPluginCancelAudit(records, 'desktop-unrelated-fixture', manifestNames)
+    evidence.afterCancelIdentity = await nativeHelper(home, environment, { action: 'verify', ownership }, helperLifecycle,
+      boundedWorkDeadline(performance.now() + 90_000))
     assert.equal(win32.pollProcessExit(api, owned.process), undefined, 'Cancel must retain the exact Job-created root')
     assert.equal(page.url(), APPLICATION_URL)
-    assert.equal(await page.evaluate(() => performance.timeOrigin), documentIdentity, 'Cancel must not reload the app document')
+    const afterCancelDocumentIdentity = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000),
+      () => page!.evaluate(() => performance.timeOrigin))
+    assert.equal(afterCancelDocumentIdentity, documentIdentity, 'Cancel must not reload the app document')
     assert.equal(navigations, 0, 'Cancel must not navigate to startup/error or reload')
-    assert.equal(await page.locator('#error:visible').count(), 0)
+    const visibleErrors = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000),
+      () => page!.locator('#error:visible').count())
+    assert.equal(visibleErrors, 0)
     page.off('domcontentloaded', onNavigation)
-    evidence.transcript = await exportTranscript(page, home, sessionId, expected)
-    evidence.transcriptInferenceAbsent = true // Only after actual exported durable transcript validation.
+    evidence.transcript = await exportTranscript(page, home, sessionId, expected,
+      boundedWorkDeadline(performance.now() + 30_000))
+    evidence.transcriptInferenceAbsent = true
     evidence.commands = expected
-    evidence.profileUnchanged = true
-    save('profile-hashes.json', { before: baseline, after })
+    save('profile-hashes.json', { beforeColdStart: installedBaseline, afterCancel: after })
     save('cancel-audit.json', records)
-    const closeDeadline = performance.now() + 60_000
-    evidence.normalClose = await nativeHelper(home, environment, { action: 'close', ownership }, helperLifecycle, closeDeadline)
-    const exitCode = await waitForOwnedJobExit(closeDeadline,
+
+    const preColdAudits = auditNames(home)
+    const closeDeadline = boundedWorkDeadline(performance.now() + 60_000)
+    evidence.firstNormalClose = await nativeHelper(home, environment, { action: 'close', ownership }, helperLifecycle, closeDeadline)
+    const firstExitCode = await waitForOwnedJobExit(closeDeadline,
+      () => win32.pollProcessExit(api, owned!.process), () => win32.isJobEmpty(api, owned!.job))
+    assert.equal(firstExitCode, 0, 'First application teardown must exit successfully')
+    quiescent = true
+    await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), async () => { await browser!.close() })
+    win32.closeHandleChecked(api, owned.process, 'first fixture root process')
+    processHandleClosed = true
+    win32.closeHandleChecked(api, owned.job, 'first fixture Job')
+    jobHandleClosed = true
+    owned = undefined; browser = undefined; page = undefined; ownership = undefined
+
+    const coldLaunch = await launchOwnedRoot()
+    browser = coldLaunch.browser; owned = coldLaunch.owned; page = coldLaunch.page; ownership = coldLaunch.ownership
+    launchIdentity = coldLaunch.launchIdentity; mainIdentity = coldLaunch.main
+    assert.notDeepEqual(ownership.main, firstMainIdentity,
+      'Cold start must have a distinct process generation after epoch-A Job quiescence')
+    assertDesktopProvisioningInventory(profile, plan)
+    assert.deepEqual(snapshotDesktopPluginProfile(profile), installedBaseline,
+      'Cold startup must reuse alpha36 and unrelated fixture without profile rewrite or downgrade')
+    assert.deepEqual(auditNames(home), preColdAudits, 'Cold startup fast reuse must create no profile transaction audit')
+    const coldDeadline = boundedWorkDeadline(performance.now() + 120_000)
+    const coldSessionId = `desktop-plugin-cold-${randomUUID()}`
+    const coldCreated = await remote<{ sessionId: string }>(page, 'session/create',
+      { request: { cwd: workspace, sessionId: coldSessionId } }, coldDeadline)
+    assert.equal(coldCreated.sessionId, coldSessionId)
+    const coldRegistry = await remote<readonly CommandDescriptor[]>(page, 'commands/list', { agentId: coldSessionId }, coldDeadline)
+    assert(coldRegistry.some(command => command.name === 'desktop-plugin'))
+    const coldExecution = await remote<CommandExecution>(page, 'commands/execute', {
+      agentId: coldSessionId, line: '/desktop-plugin list', submittedAttachments: [],
+    }, coldDeadline)
+    assert.deepEqual(coldExecution.result, { kind: 'success', text: overrideListText })
+    evidence.coldTranscript = await exportTranscript(page, home, coldSessionId,
+      [{ line: '/desktop-plugin list', execution: coldExecution }],
+      Math.min(coldDeadline, boundedWorkDeadline(performance.now() + 30_000)))
+    const coldOverride = assertOverrideEvidence()
+    assert.deepEqual(coldOverride, overrideBaseline,
+      'Cold startup must preserve exact effective receipt, artifact and selected materialized Copilot bytes')
+    assert.deepEqual(assertUnrelatedEvidence(), unrelatedBaseline,
+      'Cold startup must preserve unrelated local plugin lock, artifact, dependency and enabled bundle')
+    evidence.coldStart = { secondMainIdentity: ownership.main,
+      secondEpoch: { launch: launchIdentity, listener: mainIdentity, host: ownership.host }, override: coldOverride,
+      unrelated: unrelatedBaseline, profileHashes: snapshotDesktopPluginProfile(profile),
+      installedInstallerUpgradeVerified: false, differentRuntimeUpgradeVerified: false, liveOAuthOrModelVerified: false }
+    const secondCloseDeadline = Math.min(performance.now() + 60_000, fixtureCleanupDeadline)
+    evidence.secondNormalClose = await nativeHelper(home, environment, { action: 'close', ownership }, helperLifecycle, secondCloseDeadline)
+    const secondExitCode = await waitForOwnedJobExit(secondCloseDeadline,
       () => win32.pollProcessExit(api, owned!.process), () => win32.isJobEmpty(api, owned!.job))
     quiescent = true
-    assert.equal(exitCode, 0, 'Normal application teardown must exit successfully without forced Job termination')
-    assert(canRemoveDesktopPluginHome({ spawnAttempted, jobOwned: true, jobQuiescent: quiescent,
-      helperTreeUncertain: helperLifecycle.helperTreeUncertain }), 'Independent helper tree is uncertain')
-    evidence.quiescent = { rootExitCode: exitCode, jobEmpty: true, normalClose: true, helperTreeUncertain: false }
-    save('acceptance.json', evidence)
+    assert.equal(secondExitCode, 0, 'Cold-start application teardown must exit successfully')
+    evidence.quiescent = { firstExitCode, secondExitCode, jobEmpty: true, normalClose: true, helperTreeUncertain: false }
+    evidence.timing = { workElapsedMs: performance.now() - fixtureStarted,
+      workBudgetMs: fixtureWorkDeadline - fixtureStarted, cleanupReserveMs: fixtureCleanupDeadline - fixtureWorkDeadline }
+    acceptedEvidence = { ...evidence }
   } catch (error) {
     failure = error
     save('failure.json', { ...evidence, quiescent: false, spawnAttempted,
       helperTreeUncertain: helperLifecycle.helperTreeUncertain, error: safeDiagnostic(error),
-      stderrTail: existsSync(stderrPath) ? safeDiagnostic(readFileSync(stderrPath, 'utf8').slice(-32_768)) : '',
+      stderrTail: safeDiagnostic(stderrPaths.map(path => boundedFileTail(path)).join('\n').slice(-32_768)),
       commands: expected, pageUrl: page?.url(), retainedHomeOnCleanupFailure: home })
     throw error
   } finally {
@@ -483,7 +886,8 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
       // Covers every post-spawn failure, including absent CDP, app-ready or native identity capture.
       try {
         win32.terminateJob(api, owned.job, 1)
-        await waitForOwnedJobExit(performance.now() + 60_000,
+        const cleanupDeadline = Math.min(performance.now() + 60_000, fixtureCleanupDeadline)
+        await waitForOwnedJobExit(cleanupDeadline,
           () => win32.pollProcessExit(api, owned!.process), () => win32.isJobEmpty(api, owned!.job))
         quiescent = true
       } catch (error) { errors.push(error) }
@@ -497,10 +901,15 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     // Never use a Playwright launcher or its PID-kill tree logic. A CDP connection is disconnected only
     // AFTER the retained Job proves quiescence (browser.close on connectOverCDP disconnects the client).
     if (quiescent) {
-      try { await withinDeadline(performance.now() + 10_000, async () => { await browser?.close() }) } catch (error) { errors.push(error) }
+      try { await withinDeadline(Math.min(performance.now() + 10_000, fixtureCleanupDeadline), async () => { await browser?.close() }) } catch (error) { errors.push(error) }
       if (owned !== undefined) {
-        try { win32.closeHandleChecked(api, owned.process, 'fixture root process') } catch (error) { errors.push(error) }
-        try { win32.closeHandleChecked(api, owned.job, 'fixture Job') } catch (error) { errors.push(error) }
+        const pendingHandles = new Set(pendingDesktopPluginHandles(processHandleClosed, jobHandleClosed))
+        if (pendingHandles.has('process')) {
+          try { win32.closeHandleChecked(api, owned.process, 'fixture root process'); processHandleClosed = true } catch (error) { errors.push(error) }
+        }
+        if (pendingHandles.has('job')) {
+          try { win32.closeHandleChecked(api, owned.job, 'fixture Job'); jobHandleClosed = true } catch (error) { errors.push(error) }
+        }
       }
     } else errors.push(new Error(`Cannot prove process exit AND empty Job; retained handles and private home: ${home}`))
     for (const fd of descriptors) {
@@ -515,6 +924,7 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
         appJobQuiescent: quiescent, spawnAttempted, helperTreeUncertain: helperLifecycle.helperTreeUncertain })
       throw new AggregateError([...(failure === undefined ? [] : [failure]), ...errors], 'Packaged command acceptance cleanup failed')
     }
+    if (acceptedEvidence !== undefined) save('acceptance.json', acceptedEvidence)
   }
 }
 

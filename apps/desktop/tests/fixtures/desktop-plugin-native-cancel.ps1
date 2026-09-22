@@ -254,7 +254,7 @@ try {
             mainWindow = $currentRoot.selected } | ConvertTo-Json -Depth 5 -Compress
         exit 0
     }
-    if ($request.action -ne 'cancel') { throw 'Unknown fixture helper action' }
+    if ($request.action -ne 'cancel' -and $request.action -ne 'apply') { throw 'Unknown fixture helper action' }
     Initialize-UiAutomation
     $mainHwnd = [IntPtr]([long]$ownership.mainHwnd)
     # Private fixture evidence only; flushed records survive helper failure or timeout.
@@ -370,38 +370,59 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds(45)
     $confirmation = $null
     while ($null -eq $confirmation -and [DateTime]::UtcNow -lt $deadline) {
-        if ($mainProcess.HasExited -or $hostProcess.HasExited) { throw 'Owned application exited before native Cancel' }
+        if ($mainProcess.HasExited -or $hostProcess.HasExited) { throw 'Owned application exited before native confirmation' }
         $confirmation = Read-OwnedConfirmation ([int]$ownership.main.pid) $mainHwnd
         if ($null -eq $confirmation) { Start-Sleep -Milliseconds 100 }
     }
     if ($null -eq $confirmation) { throw 'Verified owned native confirmation did not appear' }
     $hwnd = $confirmation.hwnd
-    $cancel = $confirmation.cancel
-    if (!$cancel.Current.IsEnabled -or $cancel.Current.IsOffscreen -or $cancel.Current.ProcessId -ne $ownership.main.pid) {
-        throw 'Cancel is not an enabled owned visible control'
+    $controlName = if ($request.action -eq 'apply') { 'Apply' } else { 'Cancel' }
+    $control = if ($request.action -eq 'apply') { $confirmation.apply } else { $confirmation.cancel }
+    if (!$control.Current.IsEnabled -or $control.Current.IsOffscreen -or $control.Current.ProcessId -ne $ownership.main.pid) {
+        throw "$controlName is not an enabled owned visible control"
     }
-    $focused = $cancel.Current.HasKeyboardFocus
-    $invoke = $cancel.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
-    if ($null -eq $invoke) { throw 'Cancel has no native InvokePattern' }
-    # Recheck the retained process handles, exact root and structurally matched dialog before Cancel.
+    $focused = $control.Current.HasKeyboardFocus
+    $invoke = $control.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
+    if ($null -eq $invoke) { throw "$controlName has no native InvokePattern" }
+    # Recheck the retained process handles, exact root and structurally matched dialog before invocation.
     $currentRoot = Read-VerifiedRoot $mainProcess $ownership.mainWindow.title $ownership.mainHwnd
-    if (!$currentRoot.selected.visible -or $currentRoot.selected.minimized) { throw 'Owned root visibility changed before Cancel' }
+    if (!$currentRoot.selected.visible -or $currentRoot.selected.minimized) { throw "Owned root visibility changed before $controlName" }
     if ($mainProcess.HasExited -or $hostProcess.HasExited) { throw 'Dialog ownership expired before invocation' }
     $currentConfirmation = Read-OwnedConfirmation ([int]$ownership.main.pid) $mainHwnd
-    if ($null -eq $currentConfirmation -or $currentConfirmation.hwnd -ne $hwnd -or
-        !$currentConfirmation.cancel.Current.IsEnabled -or
-        $currentConfirmation.cancel.Current.IsOffscreen -or
-        $currentConfirmation.cancel.Current.ProcessId -ne $ownership.main.pid) { throw 'Cancel identity changed before invocation' }
-    $invoke = $currentConfirmation.cancel.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
-    if ($null -eq $invoke) { throw 'Cancel lost native InvokePattern' }
+    if ($null -eq $currentConfirmation -or $currentConfirmation.hwnd -ne $hwnd) {
+        throw "$controlName confirmation changed before invocation"
+    }
+    $currentControl = if ($request.action -eq 'apply') { $currentConfirmation.apply } else { $currentConfirmation.cancel }
+    if (!$currentControl.Current.IsEnabled -or $currentControl.Current.IsOffscreen -or
+        $currentControl.Current.ProcessId -ne $ownership.main.pid) { throw "$controlName identity changed before invocation" }
+    $invoke = $currentControl.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
+    if ($null -eq $invoke) { throw "$controlName lost native InvokePattern" }
     $invoke.Invoke()
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     while ([OwnedDialogWin32]::IsWindow($hwnd) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
-    if ([OwnedDialogWin32]::IsWindow($hwnd)) { throw 'Native dialog did not close after Cancel' }
-    $afterCancelRoot = Read-VerifiedRoot $mainProcess $ownership.mainWindow.title $ownership.mainHwnd
-    [ordered]@{ action = 'Cancel'; dialogHwnd = $hwnd.ToInt64().ToString(); observedTitle = $confirmation.title;
-        mainHwnd = $ownership.mainHwnd; mainWindow = $afterCancelRoot.selected;
-        messageVerified = $true; exactButtonsVerified = $true; cancelHadKeyboardFocus = $focused;
+    if ([OwnedDialogWin32]::IsWindow($hwnd)) { throw "Native dialog did not close after $controlName" }
+    if ($request.action -eq 'cancel') {
+        $afterWindow = (Read-VerifiedRoot $mainProcess $ownership.mainWindow.title $ownership.mainHwnd).selected
+    } else {
+        if ($mainProcess.HasExited -or ![OwnedDialogWin32]::IsWindow($mainHwnd)) { throw 'Owned main process or root ended after Apply' }
+        [uint32]$afterPid = 0
+        $null = [OwnedDialogWin32]::GetWindowThreadProcessId($mainHwnd, [ref]$afterPid)
+        if ($afterPid -ne $ownership.main.pid -or [OwnedDialogWin32]::GetAncestor($mainHwnd, 3) -ne $mainHwnd) {
+            throw 'Owned root identity changed after Apply'
+        }
+        $afterWindows = Read-OwnedWindows $mainProcess
+        $afterMatches = @($afterWindows | Where-Object { $_.hwnd -ceq $ownership.mainHwnd })
+        if ($afterMatches.Count -ne 1 -or !$afterMatches[0].visible -or $afterMatches[0].minimized) {
+            throw 'Owned root is not uniquely visible after Apply'
+        }
+        $afterWindow = $afterMatches[0]
+    }
+    $cancelFocused = if ($request.action -eq 'cancel') { $focused } else { $null }
+    $applyFocused = if ($request.action -eq 'apply') { $focused } else { $null }
+    [ordered]@{ action = $controlName; dialogHwnd = $hwnd.ToInt64().ToString(); observedTitle = $confirmation.title;
+        mainHwnd = $ownership.mainHwnd; mainWindow = $afterWindow;
+        messageVerified = $true; exactButtonsVerified = $true;
+        cancelHadKeyboardFocus = $cancelFocused; applyHadKeyboardFocus = $applyFocused;
         defaultFocusAsserted = $false; closed = $true } | ConvertTo-Json -Depth 5 -Compress
 } finally {
     try {

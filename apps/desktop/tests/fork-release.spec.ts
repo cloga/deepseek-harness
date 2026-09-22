@@ -44,14 +44,14 @@ function readReleaseWorkflow(): ReleaseWorkflow {
 function assertPackagedPluginCommandAcceptance(workflow: ReleaseWorkflow): void {
   const steps = workflow.jobs.build!.steps
   const packaging = steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')
-  const command = steps.findIndex(step => step.name === 'Verify packaged plugin command and native cancellation')
+  const command = steps.findIndex(step => step.name === 'Verify packaged plugin override cold start and native cancellation')
   const finalize = steps.findIndex(step => step.name === 'Finalize release manifest and receipts')
   expect(command).toBeGreaterThan(packaging)
   expect(finalize).toBeGreaterThan(command)
   const step = steps[command]!
   expect(step).not.toHaveProperty('if')
   expect(step).not.toHaveProperty('continue-on-error')
-  expect(step).toMatchObject({ id: 'plugin_command_acceptance', 'timeout-minutes': 12 })
+  expect(step).toMatchObject({ id: 'plugin_command_acceptance', 'timeout-minutes': 20 })
   expect(step.run).toContain('apps/desktop/tests/fixtures/desktop-plugin-command-smoke.ts')
   expect(step.run).toContain('--application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe')
   expect(step.run).toContain('--output dist/desktop-plugin-command-acceptance')
@@ -192,7 +192,7 @@ describe('Desktop fork release plan', () => {
   it.each(['missing', 'optional', 'skipped'] as const)('rejects %s packaged command acceptance', (mode) => {
     const workflow = readReleaseWorkflow()
     const steps = workflow.jobs.build!.steps
-    const index = steps.findIndex(step => step.name === 'Verify packaged plugin command and native cancellation')
+    const index = steps.findIndex(step => step.name === 'Verify packaged plugin override cold start and native cancellation')
     if (mode === 'missing') steps.splice(index, 1)
     else Object.assign(steps[index]!, mode === 'optional' ? { 'continue-on-error': true } : { if: 'false' })
     expect(() => { assertPackagedPluginCommandAcceptance(workflow) }).toThrow()
@@ -339,10 +339,11 @@ describe('Desktop fork release plan', () => {
       },
     })
     deepStrictEqual(plan.desktopProvisioning, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       mode: 'exact',
       plugins: [{
         required: true,
+        sourcePolicy: 'compatible-user-override',
         source: {
           schemaVersion: 1,
           type: 'githubRelease',
