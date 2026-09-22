@@ -262,7 +262,8 @@ describe.skipIf(webSnapshotMode() === 'record')('web e2e: Auto model routing', (
     if (saved.policy === undefined) throw new Error('Saved Auto policy is missing')
     // A second real Host writer advances the namespace revision; the browser's draft must not overwrite it.
     await world().ctx.settings.replace('model-routing', {
-      ...saved,
+      enabled: saved.enabled,
+      ...saved.classifier === undefined ? {} : { classifier: saved.classifier },
       policy: { ...saved.policy, candidates: saved.policy.candidates.map(entry => entry.id === 'small-low' ? { ...entry, relativeCost: 3 } : entry) },
     })
     await card.getByRole('status').filter({ hasText: 'Settings changed elsewhere. Discard this draft to load the latest settings before saving again.' }).waitFor()
