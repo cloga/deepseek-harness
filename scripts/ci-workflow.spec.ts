@@ -43,15 +43,16 @@ describe('CI workflow', () => {
     expect(seal?.run).toContain('finalQualification = $false')
   })
 
-  it('uses the normal full producer before strict expected-output proposal and retains failures', () => {
-    const job = workflowJob(loadWorkflow('.github/workflows/auto-expected-prepare.yml'), 'linux-expected-review')
+  it.each(['expected', 'web'] as const)('uses a separate clean full producer for the %s proposal and retains failures', (kind) => {
+    const job = workflowJob(loadWorkflow('.github/workflows/auto-expected-prepare.yml'), `linux-${kind}-review`)
+    expect(job).not.toHaveProperty('needs')
     expect(job).toMatchObject({ 'runs-on': 'ubuntu-24.04', 'timeout-minutes': 45, permissions: { contents: 'read' } })
     if (!Array.isArray(job.steps) || typeof job.if !== 'string') throw new TypeError('Expected proposal steps and condition are required')
     const steps = job.steps.filter(isRecord)
     expect(steps[0]).toMatchObject({ uses: 'actions/checkout@v6', with: {
       ref: '${{ github.sha }}', 'persist-credentials': false, 'fetch-depth': 0,
     } })
-    const units = steps.findIndex(step => typeof step.run === 'string' && step.run.includes('test_prepare_auto_expected_goldens.py'))
+    const units = steps.findIndex(step => typeof step.run === 'string' && step.run.includes(`test_prepare_auto_${kind}_goldens.py`))
     const install = steps.findIndex(step => typeof step.run === 'string' && step.run.includes('pnpm install --frozen-lockfile'))
     const browser = steps.findIndex(step => typeof step.run === 'string'
       && step.run.includes('pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install --with-deps chromium'))
@@ -66,10 +67,10 @@ describe('CI workflow', () => {
       expect(steps[index]).not.toHaveProperty('if')
       expect(steps[index]).not.toHaveProperty('continue-on-error')
     }
-    expect(steps[review]?.run).toBe('set -euo pipefail\npython3 -B scripts/prepare-auto-expected-goldens.py\n')
+    expect(steps[review]?.run).toBe(`set -euo pipefail\npython3 -B scripts/prepare-auto-${kind}-goldens.py\n`)
     expect(steps.find(step => step.uses === 'actions/upload-artifact@v4')).toMatchObject({
       if: "always() && steps.setup-evidence.outcome == 'success'",
-      with: { name: 'auto-expected-golden-review-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}' },
+      with: { name: `auto-${kind}-golden-review-` + '${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}' },
     })
     const context = { github: { repository: 'cloga/deepseek-harness', ref: 'refs/heads/cloga-auto-minimal-expected-113', event_name: 'push', run_attempt: 1 } }
     expect(runInNewContext(job.if, context, { timeout: 1000 })).toBe(true)

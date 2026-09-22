@@ -310,3 +310,78 @@ jobs:
             ${{ steps.review.outputs.evidence_path }}
           if-no-files-found: error
           retention-days: 14
+
+  linux-web-review:
+    name: Linux Web sidecar proposal (temporary, not qualification)
+    if: >-
+      github.repository == 'cloga/deepseek-harness'
+      && github.ref == 'refs/heads/cloga-auto-minimal-expected-113'
+      && github.event_name == 'push' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      DSH_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: package.json
+          run_install: false
+          dest: ${{ runner.temp }}/setup-pnpm-web-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v6.3.0
+        with:
+          python-version: '3.10'
+      - name: Allocate external Web setup evidence
+        id: setup-evidence
+        run: |
+          set -euo pipefail
+          evidence="$(mktemp -d "$RUNNER_TEMP/auto-web-setup-XXXXXX")"
+          echo "path=$evidence" >> "$GITHUB_OUTPUT"
+          echo "AUTO_WEB_SETUP_DIR=$evidence" >> "$GITHUB_ENV"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} > "$evidence/source.txt"
+          sha256sum pnpm-lock.yaml > "$evidence/lock.sha256"
+      - name: Test Web source and metadata guards offline
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s scripts -p 'test_prepare_auto_web_goldens.py' 2>&1 | tee "$AUTO_WEB_SETUP_DIR/guard-tests.log"
+      - name: Install exact dependencies and prepare the established sandbox
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee "$AUTO_WEB_SETUP_DIR/frozen-install.log"
+          bash scripts/prepare-ci-bubblewrap.sh 2>&1 | tee "$AUTO_WEB_SETUP_DIR/bubblewrap.log"
+      - name: Install normal CI Chromium and hosted dependencies
+        run: |
+          set -euo pipefail
+          pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install --with-deps chromium 2>&1 | tee "$AUTO_WEB_SETUP_DIR/chromium-install.log"
+      - name: Build the normal CI Web producer
+        run: |
+          set -euo pipefail
+          pnpm run build 2>&1 | tee "$AUTO_WEB_SETUP_DIR/full-build.log"
+      - name: Refresh the Cordis owner then run the complete Web CI gate
+        id: review
+        run: |
+          set -euo pipefail
+          python3 -B scripts/prepare-auto-web-goldens.py
+      - name: Retain Web proposals and original failures
+        if: always() && steps.setup-evidence.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-web-golden-review-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.setup-evidence.outputs.path }}
+            ${{ steps.review.outputs.evidence_path }}
+          if-no-files-found: error
+          retention-days: 14
