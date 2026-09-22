@@ -21,6 +21,7 @@ import type { SessionEvent, SessionId, SessionLogOffset as SessionLogOffsetType,
 import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import {
   appendDelegatedPolicyOverrides,
+  appendNativeChildSelection,
   applyChildComposition,
   assertSubagentMaxDepth,
   captureDelegatedPolicyOverrides,
@@ -106,7 +107,8 @@ export async function startInProcessRun(
   options: InProcessRunOptions,
 ): Promise<SubagentRun> {
   assertSubagentMaxDepth(request.maxDepth)
-  if (request.signal.aborted) throw prePublicationAbort()
+  const creationSignal = request.resolvedCreationSignal ?? request.signal
+  if (creationSignal.aborted) throw prePublicationAbort()
   const parent = request.parent
   const childDepth = resolveChildDepth(parent, request.maxDepth)
 
@@ -114,13 +116,13 @@ export async function startInProcessRun(
   const seed = options.seed
   const activationBoundary = SessionLogOffset(seed?.length ?? 0)
 
-  // Capture before the first await: a later parent switch belongs to the
-  // parent's future.
-  const inherited = captureDelegatedPolicyOverrides(parent)
+  // Registry-owned snapshots precede asynchronous selection; direct driver callers retain the ordinary local capture.
+  const inherited = request.resolvedDelegatedPolicies ?? captureDelegatedPolicyOverrides(parent)
 
   let structured: StructuredAttachment | undefined
   const setup = (childCtx: Context, child: Agent): void => {
     appendDelegatedPolicyOverrides(child.session, inherited)
+    if (request.resolvedModelSelection !== undefined) appendNativeChildSelection(childCtx, child.session, request.resolvedModelSelection)
     applyChildComposition(childCtx, parent, {
       persona: request.persona,
       toolFilter: request.toolFilter,
@@ -137,10 +139,19 @@ export async function startInProcessRun(
     meta: childSessionMeta(parent, childDepth, seed !== undefined),
     ...seed !== undefined ? { seed } : {},
     ...seed === undefined ? {} : { inheritedEventCount: activationBoundary },
-    agentOptions: resolveChildAgentOptions(parent, request.agentOptions, childDepth),
-    signal: request.signal,
+    agentOptions: request.resolvedAgentOptions === undefined
+      ? resolveChildAgentOptions(parent, request.agentOptions, childDepth)
+      : { ...request.resolvedAgentOptions, subagentDepth: childDepth },
+    signal: creationSignal,
     setup,
   })
+  try {
+    creationSignal.throwIfAborted()
+  } catch (_error: unknown) {
+    // Keep the pre-publication diagnostic while joining a factory handle that lost the cancellation race.
+    await handle.dispose()
+    throw prePublicationAbort()
+  }
   return drivePublishedRun(
     handle,
     request.signal,

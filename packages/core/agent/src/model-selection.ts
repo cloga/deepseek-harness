@@ -8,20 +8,12 @@ import {
   boundContextSummary,
   createUserMessage,
   type LlmCallConfig,
-  type ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import { scopeTarget, type Scoped } from '@deepseek-ai/dsh-scope'
 import type { Agent, PreStepDecision } from './runtime-types.ts'
 
-/** Complete provider, model, and optional reasoning effort selected for one live Agent. */
-export interface ModelSelection {
-  /** Registered provider route. */
-  provider: string
-  /** Provider-owned model id. */
-  model: string
-  /** Adapter-owned reasoning effort, or provider/default behavior when absent. */
-  reasoningEffort?: ReasoningEffortId
-}
+import type { ModelSelection } from './types.ts'
+export type { ModelSelection } from './types.ts'
 
 /** Mutable model selection plus the value captured for the current step. */
 export interface ModelSelectionRef {

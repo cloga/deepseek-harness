@@ -12,6 +12,7 @@ import type {
   ConfigurablePluginsTabFace, PluginsSettingsSectionInjected,
 } from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import { SubagentModelSelectionCardController } from '../src/client/subagent-model-selection-card-controller.ts'
+import { AutoModelRoutingCardController } from '../src/client/auto-model-routing-card-controller.ts'
 import { apply as hostApply } from '../src/index.ts'
 
 // These specs assert the shipped Chinese copy. The lane has no jsdom `window`,
@@ -132,7 +133,7 @@ describe('ui-settings-plugins apply', () => {
     await ctx.plugin({ inject: [...inject], apply }).await()
 
     expect(slots.entries('settings.plugin.item').map(entry => entry.options.key))
-      .toEqual(['shell', 'agent-loop', 'subagent-model-selection', 'web-search-deepseek'])
+      .toEqual(['shell', 'agent-loop', 'subagent-model-selection', 'model-routing', 'web-search-deepseek'])
   })
 
   it('dispatches the served namespaces its cards claim, and no others', async () => {
@@ -208,6 +209,37 @@ describe('ui-settings-plugins apply', () => {
     expect(reset).toHaveBeenCalledTimes(1)
   })
 
+  it('refreshes Auto choices on provider/settings/credential changes and disposes its staged controller', async () => {
+    const refresh = vi.spyOn(AutoModelRoutingCardController.prototype, 'refreshCatalog')
+    const reset = vi.spyOn(AutoModelRoutingCardController.prototype, 'resetConnection')
+    const dispose = vi.spyOn(AutoModelRoutingCardController.prototype, 'dispose')
+    const { ctx, slots, remote } = await bench(['model-routing'])
+    declareRoot(slots)
+    const fiber = ctx.plugin({ inject: [...inject], apply })
+    await fiber.await()
+    refresh.mockClear()
+    reset.mockClear()
+    dispose.mockClear()
+    try {
+      remote.emit('llm/adapters-updated', [])
+      remote.emit('settings/document-updated', ['model-routing', 1])
+      remote.emit('credentials/reference-updated', ['MODEL_PROVIDER_KEY'])
+      expect(refresh).toHaveBeenCalledTimes(3)
+      ctx.emit('connection/reset')
+      expect(reset).toHaveBeenCalledTimes(1)
+      await fiber.dispose()
+      expect(dispose).toHaveBeenCalledTimes(1)
+      refresh.mockClear()
+      remote.emit('llm/adapters-updated', [])
+      expect(refresh).not.toHaveBeenCalled()
+    } finally {
+      refresh.mockRestore()
+      reset.mockRestore()
+      dispose.mockRestore()
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('ignores a credential change for a reference no card watches', async () => {
     const { ctx, slots, describeCredentials, remote } = await bench()
     declareRoot(slots)
@@ -235,7 +267,7 @@ describe('ui-settings-plugins apply', () => {
     declareRoot(slots)
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
-    expect(slots.entries('settings.plugin.item')).toHaveLength(4)
+    expect(slots.entries('settings.plugin.item')).toHaveLength(5)
 
     await fiber.dispose()
 

@@ -10,6 +10,7 @@ import type {
 } from '@deepseek-ai/dsh-attachment'
 import type { FileUploadReceiptId } from '@deepseek-ai/dsh-client-file-upload/types'
 import type {} from '@deepseek-ai/dsh-client-file-upload'
+import type {} from '@deepseek-ai/dsh-model-routing'
 import {
   ReasoningEffortId, assistantStreamChunks, createUserMessage, freezeMessage,
 } from '@deepseek-ai/dsh-llm'
@@ -47,6 +48,8 @@ import type {
   SessionRenameValue,
   SessionSelectModelRequest,
   SessionSelectModelValue,
+  SessionSelectAutoModelRequest,
+  SessionSelectAutoModelValue,
   SessionUpdateQueueRequest,
   SessionUpdateQueueValue,
   SessionRequestId,
@@ -165,6 +168,45 @@ export class SessionCommandController {
           { provider: request.provider, model: request.model },
         )
       }
+    })
+  }
+
+  /**
+   * Capture explicit Auto intent after resolving an ordinary Session's exact Agent.
+   * The generated Remote request parser validates the mode; no global default is written.
+   * @param request - Session identity and requested Auto tradeoff.
+   * @param signal - Caller cancellation before the intent commits.
+   * @returns The accepted mode, without predicting a provider or model.
+   * @throws RemoteError when Auto is unavailable, route validation fails, or the caller cancels.
+   */
+  async selectAutoModel(
+    request: SessionSelectAutoModelRequest,
+    signal: AbortSignal,
+  ): Promise<SessionSelectAutoModelValue> {
+    if (signal.aborted) throw new RemoteError('gateway/cancelled', 'Auto model selection was cancelled', {})
+    const agent = await this.resolveAgent(request.sessionId)
+    return this.agents.serializeImageAdmission(agent, async () => {
+      if (signal.aborted) throw new RemoteError('gateway/cancelled', 'Auto model selection was cancelled', {})
+      const routing = this.ctx.get('modelRouting')
+      if (routing === undefined || !routing.isAvailable()) {
+        throw new RemoteError(
+          'session/auto-model-unavailable',
+          'Auto model routing is unavailable or not configured',
+          { mode: request.mode },
+        )
+      }
+      try {
+        await routing.enable(agent, request.mode, signal)
+      } catch (error: unknown) {
+        if (signal.aborted) throw new RemoteError('gateway/cancelled', 'Auto model selection was cancelled', {})
+        if (remoteErrorOf(error) !== undefined) throw error
+        throw new RemoteError(
+          'session/auto-model-unavailable',
+          'Auto model routing could not be enabled',
+          { mode: request.mode },
+        )
+      }
+      return { mode: request.mode }
     })
   }
 

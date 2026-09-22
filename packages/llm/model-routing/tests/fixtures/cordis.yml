@@ -1,0 +1,32 @@
+- name: '@deepseek-ai/dsh-llm'
+- name: '@deepseek-ai/dsh-session'
+- name: '@deepseek-ai/dsh-session-projection'
+- name: '@deepseek-ai/dsh-system-prompt'
+- name: '@deepseek-ai/dsh-tools'
+- name: '@deepseek-ai/dsh-agent'
+- name: '@deepseek-ai/dsh-agent-loop'
+- name: '@deepseek-ai/dsh-model-routing'
+  config:
+    enabled: true
+    policy:
+      candidates:
+        - id: light
+          selection: { provider: fixture, model: light, reasoningEffort: low }
+          quality: 1
+          relativeCost: 1
+        - id: strong
+          selection: { provider: fixture, model: strong, reasoningEffort: high }
+          quality: 3
+          relativeCost: 3
+      qualityFloors:
+        efficiency: { routine: 1, standard: 1, complex: 3 }
+        balanced: { routine: 1, standard: 2, complex: 3 }
+        intelligence: { routine: 2, standard: 3, complex: 3 }
+      minConfidence: 0.8
+      conservativeCandidateId: strong
+    classifier:
+      selection: { provider: fixture, model: router, reasoningEffort: low }
+      maxInputBytes: 10000
+      maxOutputTokens: 300
+      maxOutputBytes: 10000
+      timeoutMs: 1000

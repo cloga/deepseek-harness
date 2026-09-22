@@ -126,10 +126,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          node node_modules/vitest/vitest.mjs run packages/core/agent/tests/model-selection.spec.ts packages/llm/model-routing/tests 2>&1 | Tee-Object -FilePath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'focused-tests.log')
+          node node_modules/vitest/vitest.mjs run packages/core/agent/tests/model-selection.spec.ts packages/llm/model-routing/tests packages/api/session-controller/tests/session-auto-models.host.spec.ts packages/client/ui-model-selection/tests packages/client/ui-settings-plugins/tests packages/llm/token-meter/tests/token-usage-projection.spec.ts packages/test-support/llm-replay/tests/routing-replay.spec.ts packages/subagent/subagent/tests/native-model-selection.spec.ts packages/subagent/subagent/tests/native-model-selection-lifecycle.spec.ts packages/subagent/tool-subagent/tests/native-selection-authority.spec.ts 2>&1 | Tee-Object -FilePath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'focused-tests.log')
           $code = $LASTEXITCODE
           [ordered]@{
-            command = 'node node_modules/vitest/vitest.mjs run packages/core/agent/tests/model-selection.spec.ts packages/llm/model-routing/tests'
+            command = 'node node_modules/vitest/vitest.mjs run packages/core/agent/tests/model-selection.spec.ts packages/llm/model-routing/tests packages/api/session-controller/tests/session-auto-models.host.spec.ts packages/client/ui-model-selection/tests packages/client/ui-settings-plugins/tests packages/llm/token-meter/tests/token-usage-projection.spec.ts packages/test-support/llm-replay/tests/routing-replay.spec.ts packages/subagent/subagent/tests/native-model-selection.spec.ts packages/subagent/subagent/tests/native-model-selection-lifecycle.spec.ts packages/subagent/tool-subagent/tests/native-selection-authority.spec.ts'
             exitCode = $code
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'focused-tests.json') -Encoding utf8NoBOM
           exit $code

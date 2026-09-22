@@ -37,7 +37,6 @@ import { registerListSubagentModels } from './list-models.ts'
 import type {} from './model-selection-settings.ts'
 import {
   recordSubagentModelSelection,
-  subagentModelSelectionProjectionDefinition,
   subagentModelSelectionPolicy,
 } from './model-selection-state.ts'
 
@@ -323,7 +322,6 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
   const toolName = config.toolName ?? 'subagent'
 
   const modelSelectionCapable = config.modelSelectionSettings === true
-  ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
 
   const assertSubagentProviderConfiguration = (subagentProvider: SubagentProvider): void => {
     if (typeof config.maxDepth === 'number' && !subagentProvider.capabilities.depthLimit) {
@@ -369,7 +367,13 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
       const providerRouteDefaults = subagentProvider.agentRouteDefaults
       const selectionDescription = providerRouteDefaults !== undefined
         ? ' Child LLM selection is optional. Omit `provider`, `model`, and `reasoning_effort` to use configured child defaults and this provider\'s route defaults. Supply `provider` and `model` together after using `list_subagent_models` to inspect advertised routes and efforts. Changing the effective route without naming an effort uses the selected model\'s default effort.'
-        : ' Child LLM selection is optional. Omit `provider`, `model`, and `reasoning_effort` to use configured child defaults and inherit compatible missing values from the parent Agent. Supply `provider` and `model` together after using `list_subagent_models` to inspect advertised routes and efforts. Changing the effective route without naming an effort uses the selected model\'s default effort.'
+        : subagentProvider.nativeModelSelection === undefined
+          ? ' Child LLM selection is optional. Omit `provider`, `model`, and `reasoning_effort` to use configured child defaults and inherit compatible missing values from the parent Agent. Supply `provider` and `model` together after using `list_subagent_models` to inspect advertised routes and efforts. Changing the effective route without naming an effort uses the selected model\'s default effort.'
+          : ' Child LLM selection is optional. Supply `provider` and `model` together after using `list_subagent_models` to inspect advertised routes and efforts. Explicit provider, model, or reasoning effort suppresses parent rules and Auto; changing the route without naming an effort uses the selected model\'s default effort.'
+      const nativeDefaults = subagentProvider.nativeModelSelection === undefined ? ''
+        : subagentProvider.nativeModelSelection === 'spawn' && modelSelectionEnabled
+          ? ' Implicit child model choice uses configured tool/provider defaults, matching exact parent-model rules, authorized Auto when captured by the parent, then compatible parent defaults.'
+          : ' Child model choice uses configured tool/provider defaults or matching exact parent-model rules, then compatible parent defaults. Auto selection is disabled for this tool.'
       const choiceDescription = !modelSelectionEnabled
         ? ''
         : selectionDescription
@@ -385,7 +389,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
           ? continuable
             ? ' This tool runs in the background by default, immediately returns a durable subagent id, and keeps the child conversation available for later turns. When that run settles, the runtime sends the parent a notice containing its outcome and any final assistant message; `send_message` steers the child\'s nearest step while it is running and starts a turn while it is idle. Set `run_in_background: false` only when your next action depends on receiving the result.'
             : ' This call waits for the result by default. Set `run_in_background: true` to return a job id; collect with `job_output` and stop with `job_kill`.'
-          : ' This call waits for the subagent and returns its result.') + choiceDescription,
+          : ' This call waits for the subagent and returns its result.') + nativeDefaults + choiceDescription,
         parameters: {
           description: {
             type: 'string',
@@ -402,19 +406,25 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
               type: 'string' as const,
               description: providerRouteDefaults !== undefined
                 ? 'LLM provider route for the child. Supply together with model; omit both to use configured child defaults or this provider\'s route defaults.'
-                : 'LLM provider route for the child. Supply together with model; omit both to use configured child defaults or inherit the parent route.',
+                : subagentProvider.nativeModelSelection === undefined
+                  ? 'LLM provider route for the child. Supply together with model; omit both to use configured child defaults or inherit the parent route.'
+                  : 'LLM provider route for the child. Supply together with model; omit both to use the native default-selection order in the tool description.',
             },
             model: {
               type: 'string' as const,
               description: providerRouteDefaults !== undefined
                 ? 'Model id interpreted by provider. Supply together with provider; omit both to use configured child defaults or this provider\'s route defaults.'
-                : 'Model id interpreted by provider. Supply together with provider; omit both to use configured child defaults or inherit the parent route.',
+                : subagentProvider.nativeModelSelection === undefined
+                  ? 'Model id interpreted by provider. Supply together with provider; omit both to use configured child defaults or inherit the parent route.'
+                  : 'Model id interpreted by provider. Supply together with provider; omit both to use the native default-selection order in the tool description.',
             },
             reasoning_effort: {
               type: 'string' as const,
               description: providerRouteDefaults !== undefined
                 ? 'Adapter-owned reasoning effort for the effective child route. Omit to use a compatible configured effort or the selected model\'s default.'
-                : 'Adapter-owned reasoning effort for the effective child route. Omit to inherit a compatible configured/parent effort or use a newly selected model\'s default.',
+                : subagentProvider.nativeModelSelection === undefined
+                  ? 'Adapter-owned reasoning effort for the effective child route. Omit to inherit a compatible configured/parent effort or use a newly selected model\'s default.'
+                  : 'Adapter-owned reasoning effort for the child route. An explicit effort suppresses parent rules and Auto; omission follows the native default-selection order, with Auto choosing model and effort together.',
             },
           } : {},
           ...backgroundEnabled ? {
@@ -494,7 +504,8 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             requestedChildAgentOptions,
             modelRequest,
           )
-          if (requiresRoutePreflight) {
+          // Native creation owns its first await so route, sandbox and authorization capture cannot drift.
+          if (requiresRoutePreflight && subagentProvider.nativeModelSelection === undefined) {
             const llm = runtimeCtx.get('llm')
             if (llm === undefined) {
               throw new Error('cannot resolve the selected child LLM route because the `llm` service is unavailable')
@@ -516,6 +527,8 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             label: args.description,
             prompt: [{ type: 'text', text: args.prompt }] as ContentBlock[],
             parent,
+            ...subagentProvider.nativeModelSelection !== undefined && !modelSelectionCapable
+              ? { disableAutoModelSelection: true as const } : {},
             ...requestedChildAgentOptions !== undefined ? { agentOptions: requestedChildAgentOptions } : {},
             ...config.persona !== undefined ? { persona: config.persona } : {},
             ...config.toolFilter !== undefined ? { toolFilter: config.toolFilter } : {},

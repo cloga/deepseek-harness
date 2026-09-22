@@ -3,26 +3,16 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import { z } from 'zod'
-import { parseRoutingPolicy } from './policy.ts'
-import { parseRoutingClassifierConfig } from './classifier.ts'
+import { autoSelectionSchema } from './schemas.ts'
 import { applyModelRoutingState, initialModelRoutingState } from './routing-state.ts'
-import type { ModelRoutingState, RoutingTaskDecision } from './routing-state.ts'
-import type { ModelRoutingMode } from './types.ts'
-
-/** User-visible intent and last confirmed selection, without classifier inputs or policy internals. */
-export interface ModelRoutingView {
-  readonly mode: 'manual' | ModelRoutingMode
-  readonly lastDecision: Omit<RoutingTaskDecision, 'taskText'> | null
-}
+import type { ModelRoutingState } from './routing-state.ts'
+import type { ModelRoutingView } from './types.ts'
+export type { ModelRoutingView } from './types.ts'
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
     /** Captured Auto intent and actual task binding. */
     modelRouting: ModelRoutingState
-  }
-  interface SessionProjectionMap {
-    /** Auto mode and actual request route; no raw classifier task text. */
-    modelRouting: ModelRoutingView
   }
 }
 
@@ -47,11 +37,7 @@ const stateSchema = z.object({
     z.object({
       kind: z.literal('auto'),
       seq: z.number().int().nonnegative(),
-      selection: z.object({
-        mode: modeSchema,
-        policy: z.unknown().transform(parseRoutingPolicy),
-        classifier: z.unknown().transform(parseRoutingClassifierConfig),
-      }).strict(),
+      selection: autoSelectionSchema,
     }).strict(),
   ]),
   activeTask: decisionSchema.nullable(),

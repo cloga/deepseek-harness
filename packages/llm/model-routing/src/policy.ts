@@ -30,20 +30,20 @@ const policySchema = z.object({
     id: nonEmptyId,
     selection: selectionSchema,
     quality: qualitySchema,
-    relativeCost: z.number().finite().positive(),
+    relativeCost: z.number().positive(),
   }).strict()).min(1),
   qualityFloors: z.object({
     efficiency: floorsSchema,
     balanced: floorsSchema,
     intelligence: floorsSchema,
   }).strict(),
-  minConfidence: z.number().finite().min(0).max(1),
+  minConfidence: z.number().min(0).max(1),
   conservativeCandidateId: nonEmptyId,
 }).strict()
 const classificationSchema = z.object({
   continuity: z.enum(['same-task', 'new-task']),
   complexity: z.enum(['routine', 'standard', 'complex']),
-  confidence: z.number().finite().min(0).max(1),
+  confidence: z.number().min(0).max(1),
   reasonCode: z.enum(['continuation', 'new-task', 'uncertain']),
 }).strict()
 

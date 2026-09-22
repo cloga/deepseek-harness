@@ -38,7 +38,10 @@ async function* scripted(values: StreamChunk[]): AsyncIterable<StreamChunk> {
 function waitForAbort(signal: AbortSignal): Promise<never> {
   signal.throwIfAborted()
   return new Promise((_resolve, reject) => {
-    signal.addEventListener('abort', () => { reject(signal.reason) }, { once: true })
+    signal.addEventListener('abort', () => {
+      const reason: unknown = signal.reason
+      reject(reason instanceof Error ? reason : new Error('fixture aborted'))
+    }, { once: true })
   })
 }
 

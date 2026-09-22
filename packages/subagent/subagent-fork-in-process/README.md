@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-subagent-fork-in-process` is an in-process subagent backend that seeds each child with the parent's completed conversation turns: the child sees every finished turn and none of the in-flight one, so follow-up work builds on the conversation without duplicating it. A delegation tool reaches it under the `fork` provider name, and its behavior matches the spawn backend except for the session seed. Choose it when a subtask continues this conversation; choose spawn when the child must stand alone. The seed is a one-time snapshot taken at fork time: later parent turns never reach the child.
+`dsh-subagent-fork-in-process` is an in-process subagent backend that seeds each child with the parent's completed conversation turns: the child sees every finished turn and none of the in-flight one, so follow-up work builds on the conversation without duplicating it. A delegation tool reaches it under the `fork` provider name, and it shares spawn's native creation lifecycle while excluding task-aware Auto from its own route selection. Choose it when a subtask continues this conversation; choose spawn when the child must stand alone. The seed is a one-time snapshot taken at fork time: later parent turns never reach the child.
 
 ## Table of Contents
 
@@ -29,11 +29,11 @@ Mount this backend when delegated work must build on the parent's conversation. 
 
 ### When to choose it
 
-Choose fork when the child needs the conversation's completed turns — a follow-up analysis, a review, a continuation. Choose spawn when the child should start clean, or an out-of-process backend when the child must not share this process. The seed carries conversation history only: the child still gets a fresh tool scope and none of the parent's authority.
+Choose fork when the child needs the conversation's completed turns — a follow-up analysis, a review, a continuation. Choose spawn when the child should start clean, or an out-of-process backend when the child must not share this process. The seed carries conversation history, not an authority grant: the child gets a fresh tool scope, with captured permission state applied separately by the shared native service.
 
 ### Seed boundary
 
-The seed ends at the parent's last completed turn. A parent's current tool-calling turn is still open when a subagent starts, so that in-flight turn is never included; before the first completed turn the seed is empty and the child behaves like a fresh spawn.
+The seed ends at the parent's last completed turn. A parent's current tool-calling turn is still open when a subagent starts, so that in-flight turn is never included; before the first completed turn the seed is empty, but fork still retains its own model-routing policy rather than enabling fresh-spawn Auto.
 
 ### Minimal configuration
 
@@ -69,7 +69,7 @@ This section explains the design decisions behind the backend and where the beha
 
 ### Design concept
 
-One difference from spawn, expressed as data: the backend computes the balanced completed-turn prefix of the parent's log and hands it to the shared in-process driver as the child's session seed. Because live sequence numbers equal array indexes, the prefix stays a valid seed beginning at sequence zero, and the driver records its length so the result reader never mistakes a seeded parent message for child output.
+The backend supplies a trusted native-fork marker and computes the balanced completed-turn prefix of the parent's log and hands it to the shared in-process driver as the child's session seed. Because live sequence numbers equal array indexes, the prefix stays a valid seed beginning at sequence zero, and the driver records its length so the result reader never mistakes a seeded parent message for child output.
 
 ### Source map
 
@@ -111,7 +111,7 @@ Read these pages when the package-level contract is not enough; they move from t
 
 #### What the model sees
 
-The child receives the parent's balanced completed-turn prefix, then the new task content verbatim. A configured persona shadows prompt text in the child's fresh scope; a tool restriction filters its global wire schemas, executable lookup, and PTC mode SDK bindings but not standalone guidance. The parent's tool view and authority are not inherited; an optional structured-output request adds a child-only contract; the parent's current in-flight turn is excluded.
+The child receives the parent's balanced completed-turn prefix, then the new task content verbatim. A configured persona shadows prompt text in the child's fresh scope; a tool restriction filters its global wire schemas, executable lookup, and PTC mode SDK bindings but not standalone guidance. The parent's live tool view is not copied; captured permission and future-delegation preference are applied separately and do not enable the fork's own Auto mode. An optional structured-output request adds a child-only contract; the parent's current in-flight turn is excluded.
 
 #### Token effect
 
@@ -144,7 +144,7 @@ These limits define when the backend is the wrong choice; they are current packa
 
 - **The seed is a one-time snapshot** — the child sees the parent's completed turns as of the fork and nothing the parent logs afterwards; there is no live context sharing.
 - **Fork lifecycle policy differs by composition** — the base bundle and ACP/headless examples use one-shot fork, while the CLI presets use continuable fork. Both keep the inherited prefix eligible for reuse because parent and child messaging definitions match byte for byte; explicit persona, tool filtering, generated-SDK, or route changes can still break equality. Rationale: the [cache-preserving fork Agent Note](../../../.agents/notes/implemented/architecture/2026-08-10-fork-children-stay-one-shot.md).
-- **Shipped fork tools do not expose child LLM route selection** — they inherit the parent's provider and model so the copied history remains eligible for KV Cache reuse. Route selection stays disabled until a change can preserve reuse or expose a bounded recomputation cost; the [model-selected route Agent Note](../../../.agents/notes/implemented/feature/2026-08-18-model-selected-subagent-routes.md) owns that restriction.
+- **Fork excludes its own task-aware Auto choice** — compatible parent routing remains the default, while explicit configuration or exact user-authored parent rules can change the model or effort and affect cache reuse. Shipped fork tools omit model-facing route fields. A separate captured delegation preference can still guide an authorized later fresh spawn without rerouting the fork; see the [shared native selection contract](../subagent/README.md#native-model-selection).
 
 <a id="dev-note"></a>
 ### Dev Note

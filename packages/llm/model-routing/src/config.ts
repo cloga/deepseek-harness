@@ -31,7 +31,8 @@ const qualityFloorsSchema = z.object({
 /** Discovery schema; the parser also enforces referents, uniqueness and conservative quality. */
 export const Config: z<Config> = z.object({
   enabled: z.boolean().default(false),
-  policy: z.object({
+  // A union leaves absent sections unset instead of applying object's implicit {} default.
+  policy: z.union([z.object({
     candidates: z.array(z.object({
       id: z.string().min(1).required(),
       selection: modelSelectionSchema.required(),
@@ -45,14 +46,14 @@ export const Config: z<Config> = z.object({
     }).required(),
     minConfidence: z.number().min(0).max(1).required(),
     conservativeCandidateId: z.string().min(1).required(),
-  }),
-  classifier: z.object({
+  })]),
+  classifier: z.union([z.object({
     selection: modelSelectionSchema.required(),
     maxInputBytes: z.number().step(1).min(1).required(),
     maxOutputTokens: z.number().step(1).min(1).required(),
     maxOutputBytes: z.number().step(1).min(1).required(),
     timeoutMs: z.number().step(1).min(1).required(),
-  }),
+  })]),
 }) as unknown as z<Config>
 
 /**

@@ -7,11 +7,14 @@ import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { ModelSelectionIntent } from '@deepseek-ai/dsh-agent/types'
 import type { LlmAttemptId, MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ModelRoutingMode } from '@deepseek-ai/dsh-model-routing/types'
 import type { SessionId, SessionSeqCursor } from '@deepseek-ai/dsh-session/types'
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import type { JobId } from '@deepseek-ai/dsh-jobs/brand'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
+
+export type { ModelRoutingMode, ModelRoutingView } from '@deepseek-ai/dsh-model-routing/types'
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
@@ -88,7 +91,7 @@ export interface ModelSelectionProjectionState {
 export interface ModelSelectionProjection {
   /** Selection consumed by the latest recorded model request. */
   readonly lastUsed: ModelSelection | null
-  /** Selection the next request should use, falling back to {@link lastUsed}. */
+  /** Pending manual selection or {@link lastUsed}; never a prediction of an unresolved Auto route. */
   readonly next: ModelSelection | null
 }
 
@@ -134,6 +137,8 @@ export interface ModelCatalog {
   readonly routableProviders: readonly string[]
   readonly groups: readonly ModelProviderGroup[]
   readonly failures: readonly ModelCatalogFailure[]
+  /** Readiness for new Auto choices, not the validity of an existing captured Session policy. */
+  readonly autoRouting?: { readonly available: boolean }
 }
 
 /** One client-requested mutation of a still-pending queue item. */
@@ -173,6 +178,7 @@ export const SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS = 240
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface RemoteErrorDetailsMap {
     'session/model-unavailable': { readonly provider: string; readonly model: string }
+    'session/auto-model-unavailable': { readonly mode: ModelRoutingMode }
     'session/conflict': {
       readonly sessionId: SessionId
       readonly requestedCwd: string
@@ -270,6 +276,17 @@ export interface SessionSelectModelRequest extends ModelSelection {
 /** Accepted model selection after Host resolution. */
 export interface SessionSelectModelValue {
   readonly selected: ModelSelection
+}
+
+/** Explicit Session-local Auto intent; the Host chooses a concrete route only for task work. */
+export interface SessionSelectAutoModelRequest {
+  readonly sessionId: SessionId
+  readonly mode: ModelRoutingMode
+}
+
+/** Accepted Auto intent, not a prediction or claim of actual model use. */
+export interface SessionSelectAutoModelValue {
+  readonly mode: ModelRoutingMode
 }
 
 /** Session rename request. */

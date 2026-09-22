@@ -12,7 +12,7 @@
  * card; the in-menu strip with Retry remains the catalog-load surface.
  */
 import {
-  useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
+  useEffect, useId, useLayoutEffect, useMemo, useRef, useState,
   type CSSProperties, type KeyboardEvent, type FocusEvent,
 } from 'react'
 import { createPortal } from 'react-dom'
@@ -24,10 +24,11 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ModelSelectInjected } from './slots.ts'
+import { AUTO_MODE_LABELS, AUTO_MODE_ROWS } from './auto-modes.ts'
 import css from './ModelSelect.module.css'
 
 /** Which pane the dropdown shows: the two-row root or one drilled-in list. */
-type Pane = 'root' | 'model' | 'effort'
+type Pane = 'root' | 'model' | 'effort' | 'auto'
 
 /** One dynamic effort row; undefined means preserve the provider default. */
 interface EffortChoice {
@@ -46,13 +47,12 @@ const MEASURE_STYLE: CSSProperties = { visibility: 'hidden', left: 0, top: 0 }
  * @returns the trigger and, while open, the two-level menu.
  */
 export function ModelSelect(
-  { locked, available, directory, load, select, t }:
+  { locked, available, useDirectory, selectionError, load, select, selectAuto, t }:
   ModelSelectInjected & { locked: boolean } & PropsLocale<'model'>,
 ) {
-  const state = useSyncExternalStore(
-    fn => directory.subscribe(fn),
-    () => directory.getSnapshot(),
-  )
+  const state = useDirectory(snapshot => snapshot)
+  const autoMode = state.autoRouting?.mode ?? 'manual'
+  const automatic = autoMode !== 'manual'
   const [open, setOpen] = useState(false)
   const [pane, setPane] = useState<Pane>('root')
   // The in-menu error strip serves catalog loads (its Retry re-runs the
@@ -86,12 +86,12 @@ export function ModelSelect(
     : choices.findIndex(c => c.selection.provider === state.current?.provider && c.selection.model === state.current.model)
   const currentChoice = choices[selectedIndex]
   const reasoning = currentChoice?.model.reasoning
-  const effectiveEffort = state.current?.reasoningEffort ?? reasoning?.defaultEffort
-  const effortLabel = reasoning === undefined
-    ? undefined
-    : effectiveEffort === undefined
-      ? t('effort.providerDefault')
-      : reasoning.efforts.find(level => level.id === effectiveEffort)?.name ?? effectiveEffort
+  const effectiveEffort = automatic
+    ? state.current?.reasoningEffort
+    : state.current?.reasoningEffort ?? reasoning?.defaultEffort
+  const effortLabel = effectiveEffort === undefined
+    ? !automatic && reasoning !== undefined ? t('effort.providerDefault') : undefined
+    : reasoning?.efforts.find(level => level.id === effectiveEffort)?.name ?? effectiveEffort
   const effortChoices = useMemo<readonly EffortChoice[]>(() => reasoning === undefined
     ? []
     : [
@@ -172,7 +172,7 @@ export function ModelSelect(
   }
 
   const moveFocus = (offset: number): void => {
-    const items = itemRefs.current.filter(item => item !== null)
+    const items = itemRefs.current.filter(item => item !== null && !item.disabled)
     if (items.length === 0) return
     const active = items.findIndex(item => item === document.activeElement)
     const next = (Math.max(active, 0) + offset + items.length) % items.length
@@ -207,20 +207,25 @@ export function ModelSelect(
       if (rootRef.current !== null) close(true)
       return
     }
-    const message = directory.getSnapshot().error
+    const message = selectionError()
     if (message !== null) {
       toastSeq.current += 1
-      setToast({ seq: toastSeq.current, text: t('error.action', { message }) })
+      setToast({ seq: toastSeq.current, text: message === 'session/auto-model-unavailable'
+        ? t('auto.unavailable') : t('error.action', { message }) })
     }
   }
 
   const choose = (selection: ModelSelection): void => {
-    if (state.current?.provider === selection.provider && state.current.model === selection.model) {
+    const sameRoute = state.current?.provider === selection.provider && state.current.model === selection.model
+    if (!automatic && sameRoute) {
       close(true)
       return
     }
+    const pinned = sameRoute && state.current?.reasoningEffort !== undefined
+      ? { ...selection, reasoningEffort: state.current.reasoningEffort }
+      : selection
     lastActionRef.current = 'select'
-    void select(selection).then(settleSelection)
+    void select(pinned).then(settleSelection)
   }
 
   const chooseEffort = (effort: string | undefined): void => {
@@ -243,8 +248,14 @@ export function ModelSelect(
     ? t('trigger.loading')
     : currentChoice?.model.name
       ?? (state.current === null ? t('trigger.fallback') : `${state.current.provider}/${state.current.model}`)
-  const triggerLabel = effortLabel === undefined ? modelLabel : `${modelLabel} · ${effortLabel}`
-  const triggerAria = waiting
+  const autoLabel = autoMode === 'manual' ? t('auto.manual') : t(AUTO_MODE_LABELS[autoMode])
+  const displayLabel = automatic ? t('auto.trigger', { mode: autoLabel }) : modelLabel
+  const triggerLabel = automatic
+    ? state.current === null ? t('auto.pending') : effortLabel === undefined
+      ? t('auto.lastUsed', { model: modelLabel })
+      : t('auto.lastUsedEffort', { model: modelLabel, effort: effortLabel })
+    : effortLabel === undefined ? modelLabel : `${modelLabel} · ${effortLabel}`
+  const triggerAria = automatic ? t('auto.triggerAria', { mode: autoLabel }) : waiting
     ? t('trigger.loading')
     : state.current === null
       ? t('trigger.selectAria')
@@ -279,8 +290,10 @@ export function ModelSelect(
         }}
       >
         <IconDataOutline16 className={css.triggerIcon} size={16} />
-        <span className={css.triggerLabel}>{modelLabel}</span>
-        {effortLabel !== undefined && <span className={css.triggerEffort}>{effortLabel}</span>}
+        <span className={css.triggerLabel}>{displayLabel}</span>
+        {automatic
+          ? <span className={css.triggerEffort}>{triggerLabel}</span>
+          : effortLabel !== undefined && <span className={css.triggerEffort}>{effortLabel}</span>}
         <IconChevronDownOutline14 className={clsx(css.chevron, open && css.chevronOpen)} />
       </button>
 
@@ -299,18 +312,48 @@ export function ModelSelect(
         >
           {pane === 'root' && (
             <>
+              {state.autoRouting !== undefined && (
+                <button ref={itemRef()} type="button" role="menuitem" className={css.cell}
+                  disabled={busy} onClick={() => { setPane('auto') }}>
+                  <span className={css.cellLabel}>{t('auto.label')}</span>
+                  <span className={css.cellValue}>{autoLabel}</span>
+                  <IconChevronRightOutline14 className={css.cellChevron} />
+                </button>
+              )}
               <button ref={itemRef()} type="button" role="menuitem" className={css.cell} onClick={() => { setPane('model') }}>
                 <span className={css.cellLabel}>{t('menu.model')}</span>
                 <span className={css.cellValue}>{modelLabel}</span>
                 <IconChevronRightOutline14 className={css.cellChevron} />
               </button>
               {reasoning !== undefined && (
-                <button ref={itemRef()} type="button" role="menuitem" className={css.cell} onClick={() => { setPane('effort') }}>
+                <button ref={itemRef()} type="button" role="menuitem" className={css.cell}
+                  disabled={automatic} title={automatic ? t('auto.effortManaged') : undefined}
+                  onClick={() => { setPane('effort') }}>
                   <span className={css.cellLabel}>{t('menu.effort')}</span>
-                  <span className={css.cellValue}>{effortLabel}</span>
+                  <span className={css.cellValue}>{automatic ? t('auto.label') : effortLabel}</span>
                   <IconChevronRightOutline14 className={css.cellChevron} />
                 </button>
               )}
+            </>
+          )}
+
+          {pane === 'auto' && (
+            <>
+              {!state.autoRouting?.available && <div className={css.status}>{t('auto.unavailable')}</div>}
+              {AUTO_MODE_ROWS.map(choice => (
+                <button ref={itemRef()} type="button" role="menuitemradio" key={choice.mode}
+                  aria-checked={autoMode === choice.mode}
+                  className={clsx(css.option, autoMode === choice.mode && css.selected)}
+                  disabled={busy || state.autoRouting?.available !== true}
+                  title={t(choice.detail)}
+                  onClick={() => {
+                    lastActionRef.current = 'select'
+                    void selectAuto(choice.mode).then(settleSelection)
+                  }}>
+                  <span className={css.optionCopy}><span className={css.modelName}>{t(AUTO_MODE_LABELS[choice.mode])}</span></span>
+                  <span className={css.check}>{autoMode === choice.mode ? <IconCheckOutline16 /> : null}</span>
+                </button>
+              ))}
             </>
           )}
 
@@ -338,7 +381,7 @@ export function ModelSelect(
                     <section role="group" aria-labelledby={headingId} className={css.group} key={group.id}>
                       <div className={css.groupTitle} id={headingId}>{group.name}</div>
                       {group.models.map((model) => {
-                        const selected = state.current?.provider === group.id && state.current.model === model.id
+                        const selected = !automatic && state.current?.provider === group.id && state.current.model === model.id
                         return (
                           <button
                             ref={itemRef()}

@@ -37,7 +37,7 @@ kind: "package-library"
 
 ### 子 agent 获得什么
 
-子 agent 获得父级的工作目录／会话谱系，除非 `request.agentOptions` 覆盖，否则继承父级的提供方、模型、推理强度与输出 token 上限。它获得全新的扁平注册作用域：父级工具限制与权限不会被导入。一次运行会把父级显式的沙箱覆盖项与 `'never'` 审批钉定带入子 agent，并在子 agent 的初始轮次内追加一份每次运行的描述符。
+子 agent 获得父级的工作目录／会话谱系，以及注册表通过[共享原生选择链](../subagent/README.zh.md#native-model-selection)解析的完整模型／推理强度选项。驱动器克隆这些选项仅用于写入深度；绝不会重新合并父级后续路由，也不会在所选组合省略强度时恢复父级强度。已捕获的沙箱／审批状态、路由授权、已解析选择证据与任何独立委派偏好，都在子级工具组合前播种。persona 与工具过滤在子级全新作用域中生效；偏好不授予工具访问权限，也不启用子级自身的 Auto 模式。一次性描述符在子级初始轮次内追加。
 
 -----
 
@@ -54,14 +54,14 @@ kind: "package-library"
 驱动器按以下顺序运行：
 
 1. 校验父级深度与可选的绝对 `maxDepth`，然后把子级深度推导为父级深度加一，并持久化到子级会话 header。
-2. 通过宿主 agent 工厂创建子 agent，并把调用方必需的信号传入创建事务。
-3. 在该事务未发布的设置窗口内，安装请求的 persona、工具限制与结构化输出运行时。
+2. 通过宿主 agent 工厂创建子 agent，使用注册表已解析的选项，以及合并调用方取消与注册表生命周期、仅用于创建的信号。
+3. 在该事务未发布的设置窗口内，先播种已捕获策略与已解析选择证据，再安装请求的 persona、工具限制与结构化输出运行时。
 4. 发布子 agent，保留返回的句柄，并驱动一项任务。
 5. 从完整的自有运行中读取子 agent 自身的输出——最后一条非空 assistant 消息，若无则取其累积的 assistant 文本——以及最终持久化的轮次原因，并排除任何 fork 初始内容。
 
 ### 取消与所有权
 
-必需的请求信号同时覆盖启动阶段与实时运行。发布前，创建事务会观察它、回滚并拒绝；驱动器在发布后再检查一次以消除交接竞态，然后安装最小化的实时运行监听器。兑现后，调用方拥有该运行：提供方插件卸载不会撤销它；`dispose()` 会移除中止监听器、记录取消，并委托给句柄经记忆化的完全停稳事务——后者停止循环、移除 agent 与会话，并撤销作用域内的注册。取消流程会接管所有尚未完成的进行中结果，并将其报告为 `aborted`；已经完成的轮次仍保持完成状态。
+原始请求信号控制在线的一次性运行。启动期间，`resolvedCreationSignal` 还会观察注册表释放；创建事务在取消时回滚，驱动器在启动子级工作前再次检查。注册表卸载会中止待完成启动并等待其停稳，不会接管已经返回给调用方的运行。兑现后，提供方或注册表卸载既不替换原始调用方信号，也不撤销运行。`dispose()` 移除其中止监听器，并等待句柄的停稳事务完成。取消流程接管未完成的进行中结果，并报告 `aborted`；已完成轮次仍保持完成状态。没有注册表所有字段的直接驱动器调用方，保留正常的 await 前捕获与调用方信号行为。
 
 ### 结构化输出
 
@@ -132,7 +132,7 @@ When you have your final answer, you MUST report it by calling the `structured_o
 
 #### 模型看到什么
 
-通过 `dsh-tool-subagent`，无效深度状态会精确变为 `Error: agent subagentDepth must be a non-negative safe integer`、`Error: subagent child depth exceeds the safe-integer range` 或 `Error: subagent depth <attempted> exceeds maxDepth <max>`。发布前取消的中止原因会通过注册表的 `Error: <message>` 包装传递。
+通过 `dsh-tool-subagent`，无效深度状态会精确变为 `Error: agent subagentDepth must be a non-negative safe integer`、`Error: subagent child depth exceeds the safe-integer range` 或 `Error: subagent depth <attempted> exceeds maxDepth <max>`。驱动器的取消检查报告 `Error: subagent request was aborted before child publication`；异步选择期间取消时，也可能通过消费方的 `Error: <message>` 包装保留调用方的中止原因。
 
 #### Token 影响
 

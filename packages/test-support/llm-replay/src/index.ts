@@ -1,9 +1,9 @@
 /**
  * Keyless snapshot-test LLM replay. It derives one model-call script per
- * recorded session from v3 embedded Assistant streams and explicitly marked local
- * compaction calls, then binds fresh live sessions to parent/child scripts by
- * first-call order. Throw and hang cases require an explicit override because
- * a session log cannot reconstruct them alone.
+ * recorded session from embedded Assistant streams, audited task classifiers,
+ * and marked local compaction calls, then binds fresh live sessions to scripts
+ * by first-call order. Calls whose retained data cannot reproduce the observed
+ * outcome require an explicit override at their recorded call position.
  * @module @deepseek-ai/dsh-llm-replay
  */
 
@@ -11,6 +11,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { delimiter as pathDelimiter } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-compaction'
+import type { RoutingClassifierRequestEvent, RoutingClassifierResultEvent, TaskClassification } from '@deepseek-ai/dsh-model-routing'
 import type {} from '@deepseek-ai/dsh-deepseek-llm-api-extensions'
 import { SESSION_FORMAT_VERSION, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionLogOffset as SessionLogOffsetType } from '@deepseek-ai/dsh-session'
@@ -32,7 +33,10 @@ import type {
   SystemPromptUpdate,
   TokenUsage,
 } from '@deepseek-ai/dsh-llm'
-import { LlmAdapter, LlmError, ReasoningEffortId, expandAssistantStream, offloadedImageText, requestImageHandleText, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import {
+  BlockAssembler, LlmAdapter, LlmError, ReasoningEffortId, expandAssistantStream,
+  offloadedImageText, requestImageHandleText, resolveRetryPolicy,
+} from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 
 const PACKED_CHUNK_ROW_TYPES = new Set(['text-chunks', 'reasoning-chunks', 'tool-call-chunks'])
@@ -55,9 +59,9 @@ interface ParsedSessionFixture {
 
 /**
  * One recorded model call. `throw` may replay prefix chunks before failing;
- * `hang` models cancellation. Derived chunk entries come from ordinary model
- * streams and complete outputs of explicitly marked local compaction calls;
- * an override sidecar can supply any variant.
+ * `hang` models cancellation. Derived chunk entries come from ordinary streams,
+ * supported classifier audits and marked local compaction outputs; an explicit
+ * override sidecar supplies calls whose recorded data cannot replay their outcome.
  */
 export type ReplayEntry =
   | { kind: 'chunks'; chunks: StreamChunk[] }
@@ -443,31 +447,162 @@ export function parseSessionHeader(text: string): {
   }
 }
 
+/** A non-executable recorded call keeps its position until an explicit patch replaces it. */
+type RecordedReplayEntry = ReplayEntry | { kind: 'override-required'; message: string }
+
+function executableEntries(script: RecordedReplayEntry[]): ReplayEntry[] {
+  return script.map((entry) => {
+    if (entry.kind === 'override-required') throw new Error(entry.message)
+    return entry
+  })
+}
+
+function routingKeys(value: unknown, required: readonly string[], optional: readonly string[] = []): value is Record<string, unknown> {
+  return isRecord(value) && required.every(key => Object.hasOwn(value, key))
+    && Object.keys(value).every(key => required.includes(key) || optional.includes(key))
+}
+
+function classifierClassification(value: unknown): value is TaskClassification {
+  return routingKeys(value, ['continuity', 'complexity', 'confidence', 'reasonCode'])
+    && (value['continuity'] === 'same-task' || value['continuity'] === 'new-task')
+    && typeof value['complexity'] === 'string' && ['routine', 'standard', 'complex'].includes(value['complexity'])
+    && typeof value['confidence'] === 'number' && Number.isFinite(value['confidence'])
+    && value['confidence'] >= 0 && value['confidence'] <= 1
+    && typeof value['reasonCode'] === 'string' && ['continuation', 'new-task', 'uncertain'].includes(value['reasonCode'])
+}
+
+/** Validate durable audit envelopes before correlating them; the format catalog owns nested message/config schemas. */
+function routingRequest(value: unknown): RoutingClassifierRequestEvent {
+  if (!routingKeys(value, ['callId', 'intentSeq', 'taskText', 'config', 'system', 'messages'])
+    || typeof value['callId'] !== 'string' || value['callId'].length === 0
+    || !Number.isSafeInteger(value['intentSeq']) || Number(value['intentSeq']) < 0
+    || typeof value['taskText'] !== 'string' || typeof value['system'] !== 'string'
+    || !isRecord(value['config']) || typeof value['config']['provider'] !== 'string' || value['config']['provider'].length === 0
+    || typeof value['config']['model'] !== 'string' || value['config']['model'].length === 0
+    || !Array.isArray(value['messages'])) {
+    throw new Error('llm-replay: malformed model/routing-request audit')
+  }
+  return value as unknown as RoutingClassifierRequestEvent
+}
+
+function routingUsage(value: unknown): boolean {
+  return routingKeys(value, ['inputTokens', 'outputTokens'], ['totalTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens'])
+    && Object.values(value).every(count => typeof count === 'number' && Number.isFinite(count) && count >= 0)
+}
+
+function routingResult(value: unknown): RoutingClassifierResultEvent {
+  if (!routingKeys(value, ['callId', 'stream', 'outcome'], ['classification', 'usage'])
+    || typeof value['callId'] !== 'string' || value['callId'].length === 0 || !Array.isArray(value['stream'])
+    || typeof value['outcome'] !== 'string'
+    || !['success', 'input-limit', 'preflight-error', 'provider-error', 'invalid-output', 'max-tokens',
+      'non-text', 'missing-finish', 'output-limit', 'timeout', 'aborted'].includes(value['outcome'])
+    || (value['classification'] !== undefined && !classifierClassification(value['classification']))
+    || (value['outcome'] === 'success' && value['classification'] === undefined)
+    || (value['outcome'] !== 'success' && value['classification'] !== undefined)
+    || (value['usage'] !== undefined && !routingUsage(value['usage']))) {
+    throw new Error('llm-replay: malformed model/routing-result audit')
+  }
+  return value as unknown as RoutingClassifierResultEvent
+}
+
+/** The classifier stops as soon as any non-text/non-reasoning member is observed. */
+function classifierNonText(chunk: StreamChunk): boolean {
+  return (chunk.type === 'block-start' && chunk.blockType !== 'text' && chunk.blockType !== 'reasoning')
+    || (chunk.type === 'block-end' && chunk.block.type !== 'text' && chunk.block.type !== 'reasoning')
+    || chunk.type === 'tool-call-delta'
+    || (chunk.type === 'finish' && chunk.reason.kind === 'tool-calls')
+}
+
+function classifierEntry(result: RoutingClassifierResultEvent): RecordedReplayEntry {
+  const chunks = [...expandAssistantStream(result.stream).map(member => member.chunk)]
+  const unsupported = ['input-limit', 'preflight-error', 'missing-finish', 'output-limit', 'timeout', 'aborted']
+  if (unsupported.includes(result.outcome)) {
+    return {
+      kind: 'override-required',
+      message: `llm-replay: classifier call ${result.callId} outcome ${result.outcome} requires an explicit replay.override.json entry`,
+    }
+  }
+  const last = chunks.at(-1)
+  const endedAt = chunks.findIndex(chunk => chunk.type === 'finish' || classifierNonText(chunk))
+  if (endedAt >= 0 && endedAt !== chunks.length - 1) {
+    throw new Error(`llm-replay: classifier call ${result.callId} retains chunks after its stopping member`)
+  }
+  const invalidOutcome = (): never => {
+    throw new Error(`llm-replay: classifier call ${result.callId} stream contradicts outcome ${result.outcome}`)
+  }
+  if (result.outcome === 'provider-error') {
+    if (endedAt >= 0) return invalidOutcome()
+    // The audit redacts the original diagnostic. This safe finish preserves failure, not original error bytes.
+    chunks.push({ type: 'finish', reason: {
+      kind: 'error', failure: { code: 'UNKNOWN', message: 'Recorded classifier provider failure (diagnostic redacted).' },
+    } })
+  } else if (result.outcome === 'non-text') {
+    if (last === undefined || !classifierNonText(last)) return invalidOutcome()
+  } else if (result.outcome === 'max-tokens') {
+    if (last?.type !== 'finish' || last.reason.kind !== 'max-tokens') return invalidOutcome()
+  } else {
+    if (last?.type !== 'finish' || last.reason.kind !== 'stop') return invalidOutcome()
+    const assembler = new BlockAssembler()
+    for (const chunk of chunks) assembler.push(chunk)
+    const text = assembler.blocks().map(block => block.type === 'text' ? block.text : '').join('')
+    let parsed: unknown
+    try { parsed = JSON.parse(text) as unknown } catch (_error: unknown) {
+      // Invalid classifier JSON is recorded output, not a replay-loader diagnostic.
+      parsed = undefined
+    }
+    if (result.outcome === 'invalid-output') {
+      if (classifierClassification(parsed)) return invalidOutcome()
+    } else if (!classifierClassification(parsed) || result.classification === undefined
+      || parsed.continuity !== result.classification.continuity || parsed.complexity !== result.classification.complexity
+      || parsed.confidence !== result.classification.confidence || parsed.reasonCode !== result.classification.reasonCode) {
+      return invalidOutcome()
+    }
+  }
+  return { kind: 'chunks', chunks }
+}
+
 /**
- * Reconstruct the per-`stream()` replay script from a recorded session log.
- *
- * Reads one embedded stream from each Assistant settlement. A `compaction/summary` explicitly marked
- * as one local LLM-stream call becomes a canonical successful stream from its
- * complete `rawOutput` at the summary's log position. A
- * missing assistant terminator means the live stream threw, so derivation
- * rejects and the scenario must provide an explicit override. Multiple calls
- * may share one turn and step when the loop retries.
+ * Reconstruct ordinary, compaction and audited classifier calls without provider I/O.
+ * Classifier slots follow request order and pair results by callId. Unpaired or
+ * contradictory audit records reject. Incomplete ordinary streams and lossy
+ * classifier outcomes require explicit overrides; direct derivation refuses them.
  * @param events - the recorded session's events.
- * @returns one `chunks` entry per recorded model call, in call order.
+ * @returns executable entries in recorded call order.
  */
 export function deriveReplayScript(events: SessionEvent[]): ReplayEntry[] {
-  const script: ReplayEntry[] = []
+  return executableEntries(deriveRecordedScript(events))
+}
+
+function deriveRecordedScript(events: SessionEvent[]): RecordedReplayEntry[] {
+  const script: RecordedReplayEntry[] = []
+  const routing = new Map<string, { index: number; settled: boolean }>()
   const close = (key: string | undefined, chunks: StreamChunk[]): void => {
     if (chunks.length === 0) return
     if (chunks[chunks.length - 1]?.type !== 'finish') {
-      throw new Error(
-        `llm-replay: model call ${key} ended without a finish chunk (a thrown stream); `
-        + 'this scenario needs a replay.override.json sidecar',
-      )
-    }
-    script.push({ kind: 'chunks', chunks })
+      script.push({
+        kind: 'override-required',
+        message: `llm-replay: model call ${key} ended without a finish chunk (a thrown stream); `
+          + 'this scenario needs a replay.override.json sidecar',
+      })
+    } else script.push({ kind: 'chunks', chunks })
   }
   for (const event of events) {
+    if (event.type === 'model/routing-request') {
+      const request = routingRequest(event.data)
+      if (routing.has(request.callId)) throw new Error(`llm-replay: duplicate classifier request ${request.callId}`)
+      routing.set(request.callId, { index: script.length, settled: false })
+      script.push({ kind: 'override-required', message: `llm-replay: classifier request ${request.callId} has no result` })
+      continue
+    }
+    if (event.type === 'model/routing-result') {
+      const result = routingResult(event.data)
+      const request = routing.get(result.callId)
+      if (request === undefined) throw new Error(`llm-replay: classifier result ${result.callId} has no preceding request`)
+      if (request.settled) throw new Error(`llm-replay: duplicate classifier result ${result.callId}`)
+      script[request.index] = classifierEntry(result)
+      request.settled = true
+      continue
+    }
     if (event.type === 'compaction/summary') {
       // JSONL decoding crosses an untyped durable boundary, so retain its wider
       // shape even though current in-process producers enforce this correlation.
@@ -494,6 +629,9 @@ export function deriveReplayScript(events: SessionEvent[]): ReplayEntry[] {
     if (event.type !== 'assistant/message' && event.type !== 'assistant/attempt') continue
     const chunks = expandAssistantStream(event.data.stream).map(member => member.chunk)
     close(`${String(event.data.turn)}/${String(event.data.step)}`, chunks)
+  }
+  for (const [callId, request] of routing) {
+    if (!request.settled) throw new Error(`llm-replay: classifier request ${callId} has no result`)
   }
   return script
 }
@@ -776,7 +914,13 @@ function resolveReplayScript(
 ): ReplayEntry[] {
   if (config.overrideFile !== undefined && existsSync(config.overrideFile)) {
     const doc = readOverrideDoc(JSON.parse(readFileSync(config.overrideFile, 'utf8')) as unknown, config.overrideFile)
-    if (Array.isArray(doc)) return doc
+    if (Array.isArray(doc)) {
+      // Replacing output cannot conceal corrupt classifier correlation; ordinary whole-script recovery remains unchanged.
+      if (fixture !== undefined) {
+        deriveRecordedScript(fixture.events.filter(event => event.type === 'model/routing-request' || event.type === 'model/routing-result'))
+      }
+      return doc
+    }
     const script = deriveScriptFromFixture(config.file, fixture)
     const derivedLength = script.length
     const seenIndexes = new Set<number>()
@@ -793,17 +937,17 @@ function resolveReplayScript(
       seenIndexes.add(patch.at)
       script[patch.at] = patch.entry
     }
-    return script
+    return executableEntries(script)
   }
-  return deriveScriptFromFixture(config.file, fixture)
+  return executableEntries(deriveScriptFromFixture(config.file, fixture))
 }
 
-/** Derive a script from an already migrated fixture, failing loud when it is absent. */
-function deriveScriptFromFixture(file: string, fixture: ParsedSessionFixture | undefined): ReplayEntry[] {
+/** Preserve unresolved call slots until explicit override patches have been applied. */
+function deriveScriptFromFixture(file: string, fixture: ParsedSessionFixture | undefined): RecordedReplayEntry[] {
   if (fixture === undefined) {
     throw new Error(`llm-replay: fixture not found: ${file} — run \`pnpm run test:snapshot:record\` first`)
   }
-  return deriveReplayScript(fixture.events)
+  return deriveRecordedScript(fixture.events)
 }
 
 /**

@@ -1,13 +1,10 @@
 /** Configuration, audit events, and outcomes of the auxiliary task classifier. */
 
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { AssistantStreamRecord, LlmCallConfig, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
-import type { TaskClassification } from './types.ts'
-
-/** Identity of one audited auxiliary classifier dispatch. */
-export type RoutingCallId = Branded<'RoutingCallId'>
+import type { RoutingCallId, TaskClassification } from './types.ts'
+export type { RoutingCallId } from './types.ts'
 
 /** Explicit deployment limits; no classifier route or budget is defaulted. */
 export interface RoutingClassifierConfig {

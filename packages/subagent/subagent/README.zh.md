@@ -46,6 +46,17 @@ kind: "package-reference"
 
 一次性子 agent 只运行一次，并以单个结果结算，可附带可选的结构化输出与失败时的安全诊断。启动请求可以通过 `agentOptions` 覆盖子 Agent 的提供方、模型、推理强度与输出 token 上限；每个请求的选项都要求提供方声明对应能力。可继续子 agent 保留持久会话并按顺序接受后续消息：调用方收到稳定的子 agent id、发送相邻 Agent 消息，并可中断当前轮次而不销毁子 agent。工具行的 `backgroundMode` 选择形态（默认 `one-shot`，或在支持的提供方上使用 `continuable`）。
 
+<a id="native-model-selection"></a>
+### 原生模型选择
+
+原生 spawn 与 fork 共用一条创建时选择链。显式或已配置的提供方、模型、推理强度，以及提供方持有的路由默认值优先。否则，用户编写的精确父模型规则优先；获准的全新 spawn 随后可以使用任务感知 Auto；其余情形继承直接父级的兼容值。规则匹配读取父级最新请求实际使用的路由，而不是选择器中尚未使用的选择；父级首次请求前由创建选项提供值。配置的输出 token 上限单独捕获。外部后端保留既有选择行为。
+
+可选的 `subagent` 设置命名空间公开 `modelRules`，默认没有规则。每条规则把一个精确的 `parent` 提供方／模型对映射到 `child` 对；重复的父级对会被拒绝。没有设置服务时，组合配置仍然有效；设置变化影响后续创建，不改变进行中的捕获或已有子级。匹配目标在创建前经过校验；不可用的规则目标不会回退到 Auto。
+
+任务感知 Auto 与权限 Auto 审查相互独立。它要求已捕获的委派偏好、原生全新 spawn 提供方，以及父级已捕获的 `subagent/model-selection-policy` 路由授权。服务拥有这一语义不变、首条记录生效的投影；工具消费方仍为全新 Session 捕获同意，记录缺失仍表示禁用。Auto 将候选池与获准的精确路由求交，并校验实时模型／推理强度支持。缺少同意时仍可正常继承；已准入的候选池为空，或保守候选未获准／不可用时，会拒绝而非降级。显式请求被拒后绝不会用 Auto 补救。仅可拒绝的调用标志会禁用本次调用的 Auto 选择，不会禁用精确用户规则或后续委派偏好。
+
+每个原生子级都会单独接收已捕获的委派偏好；该偏好与子级自身的固定模型、复制的路由授权相互独立，包括通过显式请求、父模型规则或 fork 继承选出的子级。偏好本身不授予任何模型访问权限，也绝不会为子级自身的对话启用 Auto。后续全新孙级会依据其实际直接父级与自身已捕获的授权重新执行选择链。fork 自身不使用任务感知 Auto；显式配置或用户规则仍可改变其路由并影响缓存复用。可继续子级的描述符固定模型与推理强度，冷恢复时不重新分类。
+
 ### 消息、中断与发现
 
 每个确切在线 Agent 都可以对直接可继续 child 使用 `sendMessage()`；驻留的可继续 child 还可以对自己的直接 parent 使用它。正在工作的目标通过 Steer 在最近 step 接收 Agent 消息；空闲目标启动轮次，且只有直接 child 可以冷恢复。parent 也可以随时中断正在运行的后代或列举自己的子级。浏览器发出的继续执行提示词会独立选择 Queue 或 Steer，并且可以携带图片部分：Host 先通过附件存储完成整批图片的准入与持久化，子级 inbox 才接受这条消息；当子级声明的模型不接受图片输入时拒绝投递。发现覆盖两种形态：服务列举直接子级与完整后代树——模式、活动状态与谱系——直接读取在线会话状态与可选持久化，不加载任何子 agent。
@@ -83,18 +94,24 @@ kind: "package-reference"
 | [`src/inbox.ts`](src/inbox.ts) | Activation 局部的 Queue 和 Steer 准入，以及同步 closing cutoff |
 | [`src/types.ts`](src/types.ts) | 公开的请求、结果与提供方约定 |
 | [`src/descriptor.ts`](src/descriptor.ts) | 版本化的 `subagent/descriptor` 会话事件词汇 |
-| [`src/child-agent.ts`](src/child-agent.ts) | 子级组装、委派策略、深度辅助函数 |
+| [`src/child-agent.ts`](src/child-agent.ts) | 子级组装、已捕获选项合并、委派策略与深度辅助函数 |
+| [`src/native-model-selection.ts`](src/native-model-selection.ts) | 共享的捕获、解析、授权、拓扑检查与创建证据 |
+| [`src/model-rules.ts`](src/model-rules.ts) | 精确父路由规则的校验与匹配 |
+| [`src/model-selection-policy.ts`](src/model-selection-policy.ts) | 共享精确路由授权类型与校验 |
+| [`src/model-selection-state.ts`](src/model-selection-state.ts) | 首条记录生效的权限投影与子级播种 |
 | [`src/list-children.ts`](src/list-children.ts) | 基于在线会话存储与可选持久化的发现 |
 | [`src/control.ts`](src/control.ts) | 浏览器控制面组装：目录活性采样、浏览器时区校验、失败分码 |
 | [`src/control-types.ts`](src/control-types.ts) | client-safe 的目录行、控制面请求、回执与失败 |
 
 ### 一次性流程
 
-请求先对照提供方声明的能力进行校验，随后对持久化描述符做快照，再由提供方构建子 agent。两个进程内提供方都声明 `agentOptions`：创建子级时把请求字段叠加到父级最新已记录请求的提供方、模型与推理强度之上；父级还没有请求时回退到创建选项，并保留配置的 token 上限。它们还会在第一次 await 前快照委派权限状态：Auto 或 Full access 父级让子级获得相同的 `permission/preset` 身份，而既有沙箱覆盖与审批策略固定仍然生效；同时记录这两个身份可防止 fork 中更早的同旋钮组合身份胜出。Auto 随后会独立审查 child 的每个受支持调用：普通项目内工作为低风险并直接允许；中风险工作必须在既有创建 prompt 或已核验的 human／直接父级消息中获得动作、准确目标和范围的明确授权，且不与 human 限制冲突；高风险工作始终拒绝。reviewer 从 `parentSession` 与既有消息派生这份上下文；委派不会新增父 call metadata、委派记录、review receipt 或 Session format。更改路由而不显式指定推理强度时，会清除继承的路由自有强度，使所选模型解析自己的默认值。DSH SDK 也声明 `agentOptions`，但会运行独立子运行时，因此不继承 Auto；ACP、Codex 与 Claude Code 同样在父级委派调用通过审查后保留各自的权限系统。成功时运行被发布、所有权转移给调用方；失败时提供方回滚每个尚未发布的资源。结果携带子 agent 的最终输出、可选的结构化值、停止原因与可选的安全诊断。
+请求先对照提供方声明的能力进行校验，随后对持久化描述符做快照，再由提供方构建子 agent。两个进程内提供方都声明 `agentOptions`，并使用[原生选择链](#native-model-selection)。注册表在异步选择前捕获父级选项、路由授权与权限状态；驱动器接收完整的已解析选项，绝不会再与父级的后续状态合并。这份权限快照与模型路由相互独立：使用权限 Auto 审查或 Full access 的父级让子级获得相同的 `permission/preset` 身份，而既有沙箱覆盖与审批策略固定仍然生效；同时记录这两个身份可防止 fork 中更早的同旋钮组合身份胜出。权限 Auto 随后会独立审查 child 的每个受支持调用：普通项目内工作为低风险并直接允许；中风险工作必须在既有创建 prompt 或已核验的 human／直接父级消息中获得动作、准确目标和范围的明确授权，且不与 human 限制冲突；高风险工作始终拒绝。reviewer 从 `parentSession` 与既有消息派生这份上下文；权限审查不会新增父 call metadata 或 review receipt。模型选择证据单独记录。更改路由而不显式指定推理强度时，会清除继承的路由自有强度，使所选模型解析自己的默认值。DSH SDK 也声明 `agentOptions`，但会运行独立子运行时，因此不继承权限 Auto 审查；ACP、Codex 与 Claude Code 同样在父级委派调用通过审查后保留各自的权限系统。成功时运行被发布、所有权转移给调用方；失败时提供方回滚每个尚未发布的资源。结果携带子 agent 的最终输出、可选的结构化值、停止原因与可选的安全诊断。
+
+原生设置在任何继承标记之后、工具组合之前记录 `subagent/model-selection`；它描述已解析的创建选择，而不是已经分发的模型调用。`request/header` 负责记录实际请求使用情况。独立的 `model/delegation-auto` 数据携带未来委派偏好，既有路由策略事件携带授权。Auto 选出的组合自身未指定推理强度时，也绝不会重新继承父级的强度，即使提供方／模型相同也如此。注册表卸载会取消原生启动并等待其停稳；组合的创建信号不会替换控制已返回一次性运行的原始调用方信号。
 
 ### 可继续流程
 
-管理器预留 child 身份、解析持久化描述符、创建（或冷恢复）child、把它安装进 Activation 并提交提示词。模型编写的消息通过固定 Steer 调度跨一条 parent/child 边；浏览器人类 prompt 通过内部适配器选择 Queue 或 best-effort Steer，其他 host 协议仍可保留 Queue 以创建独立轮次。Session queue command 仅根据 child 自身的 continuable descriptor 准入在线 subagent-owned Agent。Settlement 会等待 Agent 活动结束、Inbox 为空且没有所拥有子级，再在准入开放时 flush 最终 Session 状态。管理器随后在 child lock 内重新验证 wake generation、Session 序号、Inbox 与所拥有子级；`Agent.runMaintenance()` 的同步 task 入口会占用 idle 阶段，并在同一个 JavaScript turn 内关闭私有 subagent Inbox，然后才释放句柄。直接 child 不存在 Activation 时会从持久化会话冷恢复。当驻留 Activation 结算时，管理器会在 parent 自身的轮次流中告知该 child 的直接 parent。
+全新原生创建时，管理器会在分类器工作前校验非路由组合，并预留 child 身份与父级所有权。随后解析完整模型选项、构建最终描述符、创建 child Agent、安装 Activation 并提交提示词。冷恢复使用保存的描述符，不再次运行选择链。模型编写的消息通过固定 Steer 调度跨一条 parent/child 边；浏览器人类 prompt 通过内部适配器选择 Queue 或 best-effort Steer，其他 host 协议仍可保留 Queue 以创建独立轮次。Session queue command 仅根据 child 自身的 continuable descriptor 准入在线 subagent-owned Agent。Settlement 会等待 Agent 活动结束、Inbox 为空且没有所拥有子级，再在准入开放时 flush 最终 Session 状态。管理器随后在 child lock 内重新验证 wake generation、Session 序号、Inbox 与所拥有子级；`Agent.runMaintenance()` 的同步 task 入口会占用 idle 阶段，并在同一个 JavaScript turn 内关闭私有 subagent Inbox，然后才释放句柄。直接 child 不存在 Activation 时会从持久化会话冷恢复。当驻留 Activation 结算时，管理器会在 parent 自身的轮次流中告知该 child 的直接 parent。
 
 本地子级创建成功时，父 Session 追加一条 `subagent/catalog` 事实。一次性创建在提供方返回后记录；可继续创建在初始 inbox 准入后、返回子级 id 前记录。失败会释放子级，不发布补偿性目录事件。一次性目录追加失败时会处理 run 的结果拒绝，并保留目录错误；资源释放失败会单独记录。`subagentCatalog` projection 排除 fork 继承的事实，通过 Session 观察和客户端快照中的 `projections.values.subagentCatalog` 暴露直接子级列表。无效的自身 catalog payload（包括不支持的版本）会使 projection 恢复失败。其不可变存储和检查点校验使用 [`dsh-chunked-list`](../../util/chunked-list/README.zh.md)。其视图对 D 条事实以 O(D) 时间保留父目录事件顺序。[父目录决策](../../../.agents/notes/implemented/architecture/2026-09-01-parent-owned-subagent-catalog.zh.md) 说明排序、持久化成本和替代方案。
 
@@ -115,6 +132,7 @@ kind: "package-reference"
 当包级约定不够用时阅读以下页面。它们从共享 seam 逐步进入后端、面向模型的工具与设计决策。
 
 - [Subagent 子系统](../../../docs/subsystems/subagent.zh.md)——服务约定、提供方约定与终态结果语义。
+- [任务感知路由设计提案](../../../.agents/notes/proposed/feature/2026-09-21-task-aware-auto-routing.zh.md)——路由理由与父模型规则集成背景。
 - [Subagent 能力 seam](../../../.agents/notes/implemented/feature/2026-06-21-subagent-capability-seam.zh.md)——委派能力家族的设计记录。
 - [可继续的 subagent](../../../.agents/notes/implemented/feature/2026-07-28-continuable-subagent-conversations.zh.md)——接受后续轮次的持久子级。
 - [进程内 spawn 后端](../subagent-spawn-in-process/README.zh.md)——最容易组合的提供方。
@@ -126,6 +144,20 @@ kind: "package-reference"
 
 <a id="model-experience"></a>
 ## 模型体验
+
+### 路由请求
+
+#### 模型看到什么
+
+子级使用已解析的模型与推理强度运行。获准的任务感知 Auto 可以把独立子任务发送给有明确限额的分类器；其提示词与审计行为归 [model-routing](../../llm/model-routing/README.zh.md) 所有。创建证据与委派偏好仅进入日志，不成为对话消息。
+
+#### Token 影响
+
+分类器用量记录在直接父级之下，即使后续子级创建失败，也可能已经产生计费。显式路由／强度选择、提供方持有的路由默认值、匹配的父模型规则与正常继承不调用分类器。子级承担自身对话模型的 token；不会根据路由名称推断货币节省。
+
+#### KV Cache 影响
+
+选择不会改写父级对话前缀。全新 spawn 使用自身缓存；fork 的路由或推理强度变化可能影响继承前缀的复用。
 
 ### 结算通知
 
@@ -150,7 +182,7 @@ kind: "package-reference"
 ##### 委派范围声明
 
 ```markdown
-You are a delegated subagent: your permission scope was fixed when you were started and cannot be widened from inside this session — operations that require approval are rejected automatically. When the job needs access beyond that scope, do not retry the denied operation; state the limitation in your reply so the delegating agent can handle it.
+You are a delegated subagent: your permission scope was fixed when you were started and cannot be widened from inside this session — operations that require approval are rejected automatically. When the task needs access beyond that scope, do not retry the denied operation; state the limitation in your reply so the delegating agent can handle it.
 ```
 
 #### Token 影响

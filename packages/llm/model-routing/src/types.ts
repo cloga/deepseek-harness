@@ -1,6 +1,13 @@
 /** Immutable inputs and decisions for task-aware model selection. */
 
-import type { ModelSelection } from '@deepseek-ai/dsh-agent'
+import type { ModelSelection } from '@deepseek-ai/dsh-agent/types'
+import type { Branded } from '@deepseek-ai/dsh-brand'
+import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
+
+/** Identity of one task whose selected model and effort remain cache-affine. */
+export type RoutingTaskId = Branded<'RoutingTaskId'>
+/** Identity of one audited auxiliary classifier dispatch. */
+export type RoutingCallId = Branded<'RoutingCallId'>
 
 /** User-selected tradeoff whose quality floors are supplied by the deployment. */
 export type ModelRoutingMode = 'efficiency' | 'balanced' | 'intelligence'
@@ -57,6 +64,29 @@ export interface RoutingDecision {
   readonly reason: RoutingDecisionReason
   /** Present when a confident task is selected using its mode's quality floor. */
   readonly qualityFloor?: ModelRoutingQuality
+}
+
+/** Browser-safe actual-use facts; private task text and policy internals are excluded. */
+export interface RoutingDecisionView {
+  readonly taskId: RoutingTaskId
+  readonly intentSeq: SessionSeq
+  readonly selection: ModelSelection
+  readonly candidateId: string
+  readonly reason: RoutingDecisionReason
+  readonly classifierCallId?: RoutingCallId
+}
+
+/** User-visible intent and last confirmed selection. */
+export interface ModelRoutingView {
+  readonly mode: 'manual' | ModelRoutingMode
+  readonly lastDecision: RoutingDecisionView | null
+}
+
+declare module '@deepseek-ai/dsh-session-projection/types' {
+  interface SessionProjectionMap {
+    /** Auto mode and actual request route; no raw classifier task text. */
+    modelRouting: ModelRoutingView
+  }
 }
 
 /** Same-process selection inputs; only eligible IDs may be selected. */

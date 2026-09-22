@@ -78,6 +78,12 @@
         provider: deepseek-official
         model: deepseek-flash
 
+    # Auto is an explicit Session choice after an authorized candidate policy is configured.
+    - id: model-routing
+      name: '@deepseek-ai/dsh-model-routing'
+      config:
+        enabled: false
+
     - id: jobs
       name: '@deepseek-ai/dsh-jobs-local'
 

@@ -1,13 +1,9 @@
 /** Durable Auto intent and confirmed task-route state, separate from manual model selection. */
 
-import type { ModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { SessionEvent, SessionSeq } from '@deepseek-ai/dsh-session'
-import type { RoutingCallId, RoutingClassifierConfig } from './classifier-types.ts'
-import type { ModelRoutingMode, ModelRoutingPolicy, RoutingDecisionReason } from './types.ts'
-
-/** Identity of one task whose selected model and effort remain cache-affine. */
-export type RoutingTaskId = Branded<'RoutingTaskId'>
+import type { RoutingClassifierConfig } from './classifier-types.ts'
+import type { ModelRoutingMode, ModelRoutingPolicy, RoutingDecisionView } from './types.ts'
+export type { RoutingTaskId } from './types.ts'
 
 /** Policy captured by an explicit Auto selection; later settings changes do not replace it. */
 export interface AutoSelection {
@@ -17,13 +13,7 @@ export interface AutoSelection {
 }
 
 /** Concrete route observed on a conversation request, not a classifier's proposal. */
-export interface RoutingTaskDecision {
-  readonly taskId: RoutingTaskId
-  readonly intentSeq: SessionSeq
-  readonly selection: ModelSelection
-  readonly candidateId: string
-  readonly reason: RoutingDecisionReason
-  readonly classifierCallId?: RoutingCallId
+export interface RoutingTaskDecision extends RoutingDecisionView {
   /** Bounded classified task text used only for the next continuity check, never in the wire view. */
   readonly taskText?: string
 }
@@ -39,7 +29,7 @@ export interface ModelRoutingState {
   readonly activeTask: RoutingTaskDecision | null
 }
 
-declare module '@deepseek-ai/dsh-session' {
+declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /** Explicit opt-in with a captured, credential-free routing policy. */
     'model/auto-selection': AutoSelection

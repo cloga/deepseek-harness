@@ -5,16 +5,33 @@
  */
 
 /**
- * Durable cumulative provider usage for a complete session log.
- *
- * The four buckets are disjoint. In particular, reasoning tokens are already
+ * Four disjoint provider-reported token buckets. Reasoning tokens are already
  * included in `outputTokens` and are not accumulated again.
  */
-export interface TokenUsageProjection {
+export interface TokenUsageBuckets {
   uncachedInputTokens: number
   outputTokens: number
   cacheReadTokens: number
   cacheWriteTokens: number
+}
+
+/** Observed routing overhead, with counts distinguishing missing and unfinished usage. */
+export interface RoutingTokenUsageProjection extends Readonly<TokenUsageBuckets> {
+  /** Audited classifier requests; a request without a settlement has unknown usage. */
+  readonly startedCalls: number
+  /** Classifier settlements, including failures and cancellation. */
+  readonly settledCalls: number
+  /** Settlements reporting usage; the other settled calls have unknown usage, not zero cost. */
+  readonly usageReportedCalls: number
+}
+
+/**
+ * Observed cumulative conversation and routing usage for a complete session log.
+ * Missing provider reports are not estimated; these totals are not a complete bill.
+ */
+export interface TokenUsageProjection extends TokenUsageBuckets {
+  /** Classifier-only subtotal, already included in the four total buckets; absent before routing audits. */
+  readonly routing?: RoutingTokenUsageProjection
 }
 
 /**
@@ -29,7 +46,7 @@ export interface TokenUsageProjection {
  */
 export interface ContextPressureProjection {
   /**
-   * Provider-reported prompt size of the most recent request: uncached input
+   * Provider-reported prompt size of the most recent conversation request: uncached input
    * plus cache reads and writes. Response output is excluded, so this does not
    * grow as the current turn streams. Absent until a provider reports usage.
    */
@@ -67,7 +84,7 @@ export interface ContextBreakdownProjection {
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
-    /** Provider-reported usage accumulated across the complete durable log. */
+    /** Observed conversation and classifier usage accumulated across the complete durable log. */
     tokenUsage: TokenUsageProjection
     /** Newest request pressure paired with the newest known route capacity. */
     contextPressure: ContextPressureProjection

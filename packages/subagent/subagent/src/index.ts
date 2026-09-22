@@ -30,6 +30,8 @@
  */
 
 import { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-attachment'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import type { Scoped } from '@deepseek-ai/dsh-scope'
@@ -76,6 +78,16 @@ import { snapshotSubagentDescriptor } from './descriptor.ts'
 import { subagentIdentityProjectionDefinition, subagentTimingProjectionDefinition } from './projection.ts'
 import { establishCatalogChild, subagentCatalogProjectionDefinition } from './catalog.ts'
 import { deliverSubagentPrompt } from './internal.ts'
+import { assertSubagentModelRules, SubagentModelRuleSchema } from './model-rules.ts'
+import type { SubagentModelRule } from './model-rules.ts'
+import { captureNativeChildSelection } from './native-model-selection.ts'
+import { subagentModelSelectionProjectionDefinition } from './model-selection-state.ts'
+
+export * from './model-selection-policy.ts'
+export * from './model-selection-state.ts'
+export type { SubagentModelRule } from './model-rules.ts'
+export { appendNativeChildSelection } from './native-model-selection.ts'
+export type { ChildModelSelection, NativeChildModelSelection } from './native-model-selection.ts'
 
 export type {} from './catalog.ts'
 export * from './out-of-process.ts'
@@ -118,6 +130,7 @@ export {
   applyChildComposition,
   captureDelegatedPolicyOverrides,
   childSessionMeta,
+  mergeChildAgentOptions,
   parentAgentOptionsForDelegation,
   resolveChildAgentOptions,
   resolveChildDepth,
@@ -184,8 +197,17 @@ interface BrowserPromptSource {
   readonly clientTimeZone?: string
 }
 
+/** Host-owned deterministic parent route rules; omitted rules preserve inheritance. */
+export interface Config {
+  readonly modelRules?: SubagentModelRule[]
+}
+
 /** Named provider registry with one-shot runs, durable discovery, and continuable-child operations. */
 export class SubagentRuntime extends TypertRemoteService {
+  static Config: z<Config> = z.object({ modelRules: z.array(SubagentModelRuleSchema).default([]) })
+  private settingsSource: () => Config
+  private readonly nativeLifetime = new AbortController()
+  private readonly nativeStarts = new Set<Promise<unknown>>()
   private providers = new Map<string, SubagentProvider>()
   private continuations: SubagentContinuationManager | undefined
   /**
@@ -195,8 +217,17 @@ export class SubagentRuntime extends TypertRemoteService {
    */
   private readonly emitLifecycle: LifecycleEmitter
 
-  constructor(ctx: Context) {
+  constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'subagents')
+    assertSubagentModelRules(config.modelRules)
+    this.settingsSource = () => config
+    ctx.inject(['settings'], (settingsCtx) => {
+      settingsCtx.settings.installSection(ctx, 'subagent', SubagentRuntime.Config, config, {
+        validate: (value) => { assertSubagentModelRules(value.modelRules) },
+        setSource: (source) => { this.settingsSource = source },
+        onChange: () => {},
+      })
+    })
     this.emitLifecycle = createLifecycleEmitter(this.ctx, parent => scopeTarget(this, parent))
     ctx.inject(['agents'], (childCtx: Context) => {
       const manager = new SubagentContinuationManager(childCtx, {
@@ -213,7 +244,28 @@ export class SubagentRuntime extends TypertRemoteService {
       projectionCtx.sessionProjections.register(subagentCatalogProjectionDefinition)
       projectionCtx.sessionProjections.register(subagentTimingProjectionDefinition)
       projectionCtx.sessionProjections.register(subagentIdentityProjectionDefinition)
+      projectionCtx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
     })
+    ctx.effect(() => async () => {
+      this.nativeLifetime.abort(new Error('subagent native creation service disposed'))
+      await Promise.allSettled([...this.nativeStarts])
+      this.nativeStarts.clear()
+    }, 'subagents: cancel and join native creation')
+  }
+
+  private nativeStart<T>(signal: AbortSignal, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const ownedSignal = AbortSignal.any([signal, this.nativeLifetime.signal])
+    ownedSignal.throwIfAborted()
+    const pending = Promise.withResolvers<T>()
+    this.nativeStarts.add(pending.promise)
+    void pending.promise.then(() => this.nativeStarts.delete(pending.promise), () => this.nativeStarts.delete(pending.promise))
+    // Reserve teardown ownership before entering synchronously, including a reentrant unload.
+    try {
+      void operation(ownedSignal).then(pending.resolve, pending.reject)
+    } catch (error: unknown) {
+      pending.reject(error)
+    }
+    return pending.promise
   }
 
   /**
@@ -226,7 +278,20 @@ export class SubagentRuntime extends TypertRemoteService {
    * @throws when continuation services are unavailable or materialization fails.
    */
   async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart> {
-    return this.requireContinuations().startContinuable(spec)
+    const manager = this.requireContinuations()
+    const provider = this.expectProvider(spec.provider)
+    if (provider.prepareContinuable === undefined) {
+      throw new SubagentError(`subagent provider "${provider.name}" does not support continuable children (no prepareContinuable capability)`,
+        'UNSUPPORTED_CAPABILITY')
+    }
+    const captured = captureNativeChildSelection(this.ctx, provider, spec.request, this.settingsSource().modelRules,
+      () => { this.assertCurrentProvider(spec.provider, provider) })
+    if (captured === undefined) return manager.startContinuable(spec)
+    try {
+      return await this.nativeStart(spec.signal, signal => manager.startContinuable({ ...spec, signal }, captured))
+    } finally {
+      captured.dispose()
+    }
   }
 
   /**
@@ -507,6 +572,9 @@ export class SubagentRuntime extends TypertRemoteService {
    * @returns the exact Cordis effect disposer.
    */
   registerProvider(provider: SubagentProvider): () => void {
+    if (provider.nativeModelSelection !== undefined && !provider.capabilities.agentOptions) {
+      throw new SubagentError('native model selection requires the provider to support agentOptions', 'UNSUPPORTED_CAPABILITY')
+    }
     const name = provider.name
     // oxlint-disable-next-line typescript/no-misused-promises -- synchronous disposer
     return this.ctx.effect(function* (this: SubagentRuntime) {
@@ -555,16 +623,52 @@ export class SubagentRuntime extends TypertRemoteService {
    */
   async start(name: string, request: SubagentStartRequest): Promise<SubagentRun> {
     const provider = this.expectProvider(name)
-    this.assertCapabilities(provider, request)
-    assertSubagentMaxDepth(request.maxDepth)
-    if (request.outputSchema !== undefined) assertObjectJsonSchema(request.outputSchema)
+    // These provider-facing fields are produced only here, never accepted from a consumer's object spread.
+    const {
+      resolvedAgentOptions: _options, resolvedDelegatedPolicies: _policies,
+      resolvedModelSelection: _selection, resolvedCreationSignal: _signal, ...consumer
+    } = request as ResolvedSubagentStartRequest
+    this.assertCapabilities(provider, consumer)
+    if (provider.nativeModelSelection !== undefined && consumer.signal.aborted) {
+      throw new Error('subagent request was aborted before child publication')
+    }
+    assertSubagentMaxDepth(consumer.maxDepth)
+    if (consumer.outputSchema !== undefined) assertObjectJsonSchema(consumer.outputSchema)
     const descriptor = snapshotSubagentDescriptor({
       mode: 'one-shot',
       provider: name,
-      ...request.label !== undefined ? { label: request.label } : {},
+      ...consumer.label !== undefined ? { label: consumer.label } : {},
     })
-    const resolved: ResolvedSubagentStartRequest = { ...request, descriptor }
-    const run = await provider.start(resolved)
+    const captured = captureNativeChildSelection(this.ctx, provider, consumer, this.settingsSource().modelRules,
+      () => { this.assertCurrentProvider(name, provider) })
+    if (captured === undefined) return this.publishStart(provider, { ...consumer, descriptor })
+    try {
+      return await this.nativeStart(consumer.signal, async (signal) => {
+        const selected = await captured.resolve(signal)
+        signal.throwIfAborted()
+        captured.assertCurrent()
+        return this.publishStart(provider, {
+          ...consumer, descriptor,
+          agentOptions: selected.agentOptions,
+          resolvedAgentOptions: selected.agentOptions,
+          resolvedDelegatedPolicies: selected.delegatedPolicies,
+          resolvedModelSelection: selected.modelSelection,
+          resolvedCreationSignal: signal,
+        })
+      })
+    } finally {
+      captured.dispose()
+    }
+  }
+
+  private async publishStart(provider: SubagentProvider, request: ResolvedSubagentStartRequest): Promise<SubagentRun> {
+    const descriptor = request.descriptor
+    const run = await provider.start(request)
+    if (request.resolvedCreationSignal?.aborted) {
+      void run.result.catch(() => undefined)
+      await run.dispose()
+      request.resolvedCreationSignal.throwIfAborted()
+    }
     const child = run.localAgent?.session
     if (child !== undefined) {
       try {
@@ -582,7 +686,13 @@ export class SubagentRuntime extends TypertRemoteService {
         throw error
       }
     }
-    return observeRun(this.emitLifecycle, name, request.parent, run)
+    return observeRun(this.emitLifecycle, provider.name, request.parent, run)
+  }
+
+  private assertCurrentProvider(name: string, provider: SubagentProvider): void {
+    if (this.providers.get(name) !== provider) {
+      throw new Error(`subagent provider "${name}" changed during native model selection; retry delegation`)
+    }
   }
 
   /**

@@ -61,6 +61,7 @@ function completedTurnPrefix(parent: Agent): SessionEvent[] {
  * persona section).
  */
 class ForkInProcessProvider implements SubagentProvider {
+  readonly nativeModelSelection = 'fork' as const
   readonly capabilities: SubagentCapabilities = {
     agentOptions: true,
     outputSchema: true,
