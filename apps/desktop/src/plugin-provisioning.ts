@@ -135,13 +135,14 @@ export function parseDesktopPluginProvisioningPlan(value: unknown): DesktopPlugi
   if (!record(value) || (value.schemaVersion !== 1 && value.schemaVersion !== 2)
     || value.mode !== 'exact' || !Array.isArray(value.plugins)
     || Object.keys(value).sort().join(',') !== 'mode,plugins,schemaVersion') throw new Error('desktop plugin provisioning: invalid plan')
-  const schemaVersion = value.schemaVersion
   const names = new Set<string>()
   let dependencyRegistry: string | undefined
-  const plugins = value.plugins.map((entry: unknown): DesktopPluginProvisioningEntry => {
-    const keys = schemaVersion === 1 ? 'required,source' : 'required,source,sourcePolicy'
-    if (!record(entry) || Object.keys(entry).sort().join(',') !== keys || typeof entry.required !== 'boolean'
-      || schemaVersion === 2 && entry.sourcePolicy !== 'strict-pin' && entry.sourcePolicy !== 'compatible-user-override') {
+  const parseEntry = (entry: unknown, keys: string): {
+    record: Record<string, unknown>
+    required: boolean
+    source: DesktopAttestedPluginSource
+  } => {
+    if (!record(entry) || Object.keys(entry).sort().join(',') !== keys || typeof entry.required !== 'boolean') {
       throw new Error('desktop plugin provisioning: invalid plugin entry')
     }
     const source = attestedSource(entry.source, 'desktop plugin provisioning: plugins require a checksum-attested GitHub Release source')
@@ -150,13 +151,24 @@ export function parseDesktopPluginProvisioningPlan(value: unknown): DesktopPlugi
     const registry = source.dependencyRegistry ?? 'https://registry.npmjs.org/'
     dependencyRegistry ??= registry
     if (dependencyRegistry !== registry) throw new Error('desktop plugin provisioning: every plugin must use the same dependency registry')
-    return schemaVersion === 2
-      ? { required: entry.required, source, sourcePolicy: entry.sourcePolicy as DesktopPluginSourcePolicy }
-      : { required: entry.required, source }
+    return { record: entry, required: entry.required, source }
+  }
+  if (value.schemaVersion === 1) {
+    const plugins = value.plugins.map((value: unknown): DesktopPluginProvisioningEntryV1 => {
+      const entry = parseEntry(value, 'required,source')
+      return { required: entry.required, source: entry.source }
+    })
+    return { schemaVersion: 1, mode: 'exact', plugins }
+  }
+  const plugins = value.plugins.map((value: unknown): DesktopPluginProvisioningEntryV2 => {
+    const entry = parseEntry(value, 'required,source,sourcePolicy')
+    const sourcePolicy = entry.record.sourcePolicy
+    if (sourcePolicy !== 'strict-pin' && sourcePolicy !== 'compatible-user-override') {
+      throw new Error('desktop plugin provisioning: invalid plugin entry')
+    }
+    return { required: entry.required, source: entry.source, sourcePolicy }
   })
-  return schemaVersion === 1
-    ? { schemaVersion: 1, mode: 'exact', plugins }
-    : { schemaVersion: 2, mode: 'exact', plugins }
+  return { schemaVersion: 2, mode: 'exact', plugins }
 }
 
 function failurePhase(value: unknown): Extract<DesktopPluginProvisioningResult, { status: 'optional-failed' }>['phase'] {
