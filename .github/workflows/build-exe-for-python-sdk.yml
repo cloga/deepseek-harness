@@ -32,6 +32,26 @@ on:
         required: false
   workflow_dispatch:
     inputs:
+      sdk_golden_review:
+        description: 'Review only: propose four advanced SDK goldens for an approved stable candidate; no publication.'
+        type: boolean
+        required: false
+        default: false
+      sdk_golden_source_sha:
+        description: 'Exact reviewed commit SHA; must equal the dispatched branch checkout.'
+        type: string
+        required: false
+        default: ''
+      sdk_golden_lock_sha256:
+        description: 'Independently verified committed pnpm-lock.yaml SHA-256.'
+        type: string
+        required: false
+        default: ''
+      sdk_golden_preparation_run:
+        description: 'Successful same-source Auto preparation run with all five outcomes and byte-identical lock.'
+        type: string
+        required: false
+        default: ''
       targets:
         description: >-
           Comma-separated pkg targets to build. Any subset of:
@@ -45,9 +65,9 @@ concurrency:
   # Keep the called workflow distinct from its caller's concurrency group;
   # github.workflow identifies the caller inside a reusable workflow and keeps
   # an ordinary CI run from cancelling a full release validation on the same ref.
-  group: build-single-exe-${{ github.workflow }}-${{ github.ref }}
-  # Release-owned builds are part of an intentional publication transaction.
-  cancel-in-progress: ${{ !inputs.release }}
+  group: build-single-exe-${{ github.event_name == 'workflow_dispatch' && inputs.sdk_golden_review && 'sdk-golden-review' || github.workflow }}-${{ github.ref }}
+  # Release transactions and explicitly approved golden proposals retain their owned run.
+  cancel-in-progress: ${{ !inputs.release && !(github.event_name == 'workflow_dispatch' && inputs.sdk_golden_review) }}
 
 permissions:
   contents: read
@@ -62,7 +82,7 @@ jobs:
   # construct the matrix before the dependent jobs.
   plan:
     name: plan targets
-    if: inputs.ci || inputs.release || github.event_name == 'workflow_dispatch'
+    if: (inputs.ci || inputs.release || github.event_name == 'workflow_dispatch') && !(github.event_name == 'workflow_dispatch' && inputs.sdk_golden_review)
     runs-on: >-
       ${{ inputs.ci && !inputs.release && vars.DSH_CI_FAILOVER_LINUX == 'blacksmith'
           && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
@@ -502,3 +522,108 @@ jobs:
           path: dist-python/${{ steps.runtime-posix.outputs.wheel || steps.runtime-windows.outputs.wheel }}
           if-no-files-found: error
           retention-days: 7
+
+  # Separate review artifact generation; ordinary PR and installed-wheel comparisons stay unchanged.
+  sdk-golden-review:
+    name: Windows SDK advanced golden review (not qualification)
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.sdk_golden_review
+      && github.repository == 'cloga/deepseek-harness'
+      && github.ref == 'refs/heads/cloga-auto-minimal-golden-113'
+      && github.run_attempt == 1
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: auto-sdk-golden-review-${{ github.ref }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DSH_TELEMETRY_DISABLED: '1'
+      DSH_BUILD_CLIENT_PROFILE: official
+      SDK_GOLDEN_SOURCE_SHA: ${{ inputs.sdk_golden_source_sha }}
+      SDK_GOLDEN_LOCK_SHA256: ${{ inputs.sdk_golden_lock_sha256 }}
+      SDK_GOLDEN_PREPARATION_RUN: ${{ inputs.sdk_golden_preparation_run }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6.3.0
+        with:
+          python-version: '3.10'
+
+      - name: Run offline golden review guard tests before candidate work
+        run: |
+          python -m unittest discover -s scripts -p 'test_prepare_auto_sdk_*.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate explicit source and successful preparation identity
+        id: prepared
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const crypto = require('node:crypto');
+            const sha = process.env.SDK_GOLDEN_SOURCE_SHA;
+            const lock = process.env.SDK_GOLDEN_LOCK_SHA256;
+            const runId = process.env.SDK_GOLDEN_PREPARATION_RUN;
+            if (!/^[a-f0-9]{40}$/.test(sha ?? '') || sha !== context.sha) throw new Error('Dispatch does not name the exact reviewed checkout.');
+            if (!/^[a-f0-9]{64}$/.test(lock ?? '') || !/^[1-9][0-9]*$/.test(runId ?? '') || !Number.isSafeInteger(Number(runId))) throw new Error('Explicit lock hash and preparation run are required.');
+            const actualLock = crypto.createHash('sha256').update(fs.readFileSync('pnpm-lock.yaml')).digest('hex');
+            if (actualLock !== lock) throw new Error('Committed lock differs from the approved hash.');
+            const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: Number(runId) });
+            if (run.head_sha !== sha || run.head_branch !== 'cloga-auto-minimal-golden-113' || run.repository.full_name !== 'cloga/deepseek-harness' || run.head_repository.full_name !== 'cloga/deepseek-harness' || run.status !== 'completed' || run.conclusion !== 'success' || run.event !== 'push' || run.path !== '.github/workflows/auto-routing-prepare.yml') throw new Error('Preparation is not a successful exact-source branch run.');
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, { ...context.repo, run_id: Number(runId), per_page: 100 });
+            const name = `auto-routing-prepare-${sha}-${runId}-${run.run_attempt}`;
+            const matches = artifacts.filter(a => a.name === name && !a.expired);
+            if (matches.length !== 1) throw new Error('Exactly one retained preparation artifact is required.');
+            const metadataPath = path.join(process.env.RUNNER_TEMP, `sdk-golden-input-${context.runId}.json`);
+            fs.writeFileSync(metadataPath, JSON.stringify({ run, artifact: matches[0] }, null, 2) + '\n', { flag: 'wx' });
+            core.setOutput('metadata', metadataPath);
+            core.setOutput('artifact-id', String(matches[0].id));
+
+      - uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ steps.prepared.outputs.artifact-id }}
+          run-id: ${{ inputs.sdk_golden_preparation_run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/sdk-golden-approved-preparation
+          merge-multiple: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: package.json
+          run_install: false
+          dest: ${{ runner.temp }}/setup-pnpm-js-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Enable hosted Windows symlink support
+        run: |
+          reg add 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' /t REG_DWORD /f /v AllowDevelopmentWithoutDevLicense /d 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build exact candidate and propose four advanced goldens
+        id: review
+        env:
+          SDK_GOLDEN_PREPARATION_DIR: ${{ runner.temp }}/sdk-golden-approved-preparation
+          SDK_GOLDEN_PREPARATION_METADATA: ${{ steps.prepared.outputs.metadata }}
+        run: |
+          python scripts/prepare-auto-sdk-goldens.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Retain proposed goldens and original failures (never adopt automatically)
+        if: always() && steps.review.outputs.evidence_path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-sdk-golden-review-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.review.outputs.evidence_path }}
+          if-no-files-found: error
+          retention-days: 14

@@ -9,6 +9,22 @@ function evaluateRunsOn(selector: unknown, context: Record<string, unknown>): un
   return runInNewContext(selector.trim().slice(3, -2), context, { timeout: 1000 })
 }
 
+function assertSdkGoldenReviewUnitOrder(job: Record<string, unknown>): void {
+  if (!Array.isArray(job.steps)) throw new TypeError('SDK golden review steps are required')
+  const steps = job.steps.filter(isRecord)
+  const units = steps.findIndex(step => typeof step.run === 'string'
+    && step.run.includes("python -m unittest discover -s scripts -p 'test_prepare_auto_sdk_*.py'"))
+  const packages = steps.findIndex(step => step.uses === 'pnpm/action-setup@v4')
+  const build = steps.findIndex(step => step.id === 'review')
+  expect(units).toBeGreaterThanOrEqual(0)
+  expect(packages).toBeGreaterThan(units)
+  expect(build).toBeGreaterThan(packages)
+  expect(steps[units]).not.toHaveProperty('if')
+  expect(steps[units]).not.toHaveProperty('continue-on-error')
+  expect(steps[units]?.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }')
+  expect(steps[build]).not.toHaveProperty('continue-on-error')
+}
+
 const root = resolve(import.meta.dirname, '..')
 const runnerPrivatePnpmDestination = /^\$\{\{ runner\.temp \}\}\/setup-pnpm-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}$/
 const nativeWindowsPnpmDestination = '${{ runner.temp }}/setup-pnpm-js-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}'
@@ -76,9 +92,163 @@ describe('CI workflow', () => {
   it('cancels reusable CI builds without cancelling release-owned builds', () => {
     const workflow = loadWorkflow('.github/workflows/build-exe-for-python-sdk.yml')
     expect(workflow.concurrency).toEqual({
-      group: 'build-single-exe-${{ github.workflow }}-${{ github.ref }}',
-      'cancel-in-progress': '${{ !inputs.release }}',
+      group: "build-single-exe-${{ github.event_name == 'workflow_dispatch' && inputs.sdk_golden_review && 'sdk-golden-review' || github.workflow }}-${{ github.ref }}",
+      'cancel-in-progress': "${{ !inputs.release && !(github.event_name == 'workflow_dispatch' && inputs.sdk_golden_review) }}",
     })
+  })
+
+  it('preserves ordinary SDK planning and concurrency for every non-review trigger', () => {
+    const workflow = loadWorkflow('.github/workflows/build-exe-for-python-sdk.yml')
+    const plan = workflowJob(workflow, 'plan')
+    if (!isRecord(workflow.concurrency) || typeof workflow.concurrency.group !== 'string' || typeof plan.if !== 'string') {
+      throw new TypeError('SDK workflow must define concurrency and planning expressions')
+    }
+    for (const event of ['pull_request', 'push', 'workflow_call', 'workflow_dispatch']) {
+      for (const ci of [false, true]) for (const release of [false, true]) for (const review of [undefined, false, true]) {
+        const context = {
+          github: { event_name: event, workflow: 'CI', ref: 'refs/heads/fixture' },
+          inputs: { ci, release, sdk_golden_review: review },
+        }
+        const explicitReview = event === 'workflow_dispatch' && review
+        expect(runInNewContext(plan.if, context, { timeout: 1000 }))
+          .toBe((ci || release || event === 'workflow_dispatch') && !explicitReview)
+        expect(evaluateRunsOn(workflow.concurrency['cancel-in-progress'], context)).toBe(!release && !explicitReview)
+        const group = workflow.concurrency.group.replace(/\$\{\{\s*(.*?)\s*\}\}/gu,
+          (_match: string, expression: string) => String(runInNewContext(expression, context, { timeout: 1000 })))
+        expect(group).toBe(`build-single-exe-${explicitReview ? 'sdk-golden-review' : 'CI'}-refs/heads/fixture`)
+      }
+    }
+  })
+
+  it('keeps SDK golden generation default-off, source-bound and read-only with units before expensive work', () => {
+    const workflow = loadWorkflow('.github/workflows/build-exe-for-python-sdk.yml')
+    const dispatch = workflowEvent(workflow, 'workflow_dispatch')
+    const call = workflowEvent(workflow, 'workflow_call')
+    const job = workflowJob(workflow, 'sdk-golden-review')
+    if (!isRecord(dispatch.inputs) || !isRecord(call.inputs) || !Array.isArray(job.steps)) {
+      throw new TypeError('SDK workflow must define dispatch inputs, reusable inputs and review steps')
+    }
+    expect(dispatch.inputs.sdk_golden_review).toMatchObject({ type: 'boolean', required: false, default: false })
+    expect(Object.keys(call.inputs).sort()).toEqual(['ci', 'release', 'targets'])
+    expect(job).toMatchObject({
+      'runs-on': 'windows-2025', 'timeout-minutes': 45,
+      permissions: { contents: 'read', actions: 'read' },
+      concurrency: { group: 'auto-sdk-golden-review-${{ github.ref }}', 'cancel-in-progress': false },
+      defaults: { run: { shell: 'pwsh' } },
+    })
+    expect(job.env).toMatchObject({
+      SDK_GOLDEN_SOURCE_SHA: '${{ inputs.sdk_golden_source_sha }}',
+      SDK_GOLDEN_LOCK_SHA256: '${{ inputs.sdk_golden_lock_sha256 }}',
+      SDK_GOLDEN_PREPARATION_RUN: '${{ inputs.sdk_golden_preparation_run }}',
+    })
+    const steps = job.steps.filter(isRecord)
+    expect(steps[0]).toEqual({ uses: 'actions/checkout@v6', with: { ref: '${{ github.sha }}', 'persist-credentials': false } })
+    const validate = steps.find(step => step.id === 'prepared')
+    if (!isRecord(validate?.with) || typeof validate.with.script !== 'string') throw new TypeError('Preparation metadata check is required')
+    expect(validate.with.script).toContain('sha !== context.sha')
+    expect(validate.with.script).toContain("run.conclusion !== 'success'")
+    expect(validate.with.script).toContain('run.head_sha !== sha')
+    expect(validate.with.script).toContain('actualLock !== lock')
+    expect(steps.find(step => step.uses === 'actions/download-artifact@v8')).toMatchObject({ with: {
+      'artifact-ids': '${{ steps.prepared.outputs.artifact-id }}', 'run-id': '${{ inputs.sdk_golden_preparation_run }}',
+    } })
+    expect(steps.find(step => step.id === 'review')).toMatchObject({
+      run: 'python scripts/prepare-auto-sdk-goldens.py\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n',
+    })
+    expect(steps.find(step => step.uses === 'actions/upload-artifact@v4')).toMatchObject({
+      if: "always() && steps.review.outputs.evidence_path != ''",
+      with: { name: 'auto-sdk-golden-review-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}' },
+    })
+    assertSdkGoldenReviewUnitOrder(job)
+  })
+
+  it.each(['event', 'disabled', 'repository', 'branch', 'rerun'])(
+    'refuses SDK golden execution for an unapproved %s', (reason) => {
+      const job = workflowJob(loadWorkflow('.github/workflows/build-exe-for-python-sdk.yml'), 'sdk-golden-review')
+      if (typeof job.if !== 'string') throw new TypeError('Review condition is required')
+      const context = {
+        github: { event_name: 'workflow_dispatch', repository: 'cloga/deepseek-harness',
+          ref: 'refs/heads/cloga-auto-minimal-golden-113', run_attempt: 1 },
+        inputs: { sdk_golden_review: true },
+      }
+      expect(runInNewContext(job.if, context, { timeout: 1000 })).toBe(true)
+      if (reason === 'event') context.github.event_name = 'pull_request'
+      else if (reason === 'disabled') context.inputs.sdk_golden_review = false
+      else if (reason === 'repository') context.github.repository = 'other/repository'
+      else if (reason === 'branch') context.github.ref = 'refs/heads/master'
+      else context.github.run_attempt = 2
+      expect(runInNewContext(job.if, context, { timeout: 1000 })).toBe(false)
+    },
+  )
+
+  it.each(['missing', 'late', 'ignored'])('rejects %s offline SDK review guards', (damage) => {
+    const job = workflowJob(loadWorkflow('.github/workflows/build-exe-for-python-sdk.yml'), 'sdk-golden-review')
+    if (!Array.isArray(job.steps)) throw new TypeError('SDK review steps are required')
+    const steps = job.steps.filter(isRecord)
+    const index = steps.findIndex(step => step.name === 'Run offline golden review guard tests before candidate work')
+    expect(index).toBeGreaterThanOrEqual(0)
+    const units = steps[index]!
+    if (damage === 'ignored') units['continue-on-error'] = true
+    else {
+      steps.splice(index, 1)
+      if (damage === 'late') steps.push(units)
+      job.steps = steps
+    }
+    expect(() => { assertSdkGoldenReviewUnitOrder(job) }).toThrow()
+  })
+
+  it('keeps temporary preparation frozen and records all five SDK prerequisite outcomes', () => {
+    const workflow = loadWorkflow('.github/workflows/auto-routing-prepare.yml')
+    expect(workflow.permissions).toEqual({ contents: 'read' })
+    expect(workflowEvent(workflow, 'push').branches).toEqual(['cloga-auto-minimal-golden-113'])
+    const prepare = workflowJob(workflow, 'prepare')
+    if (!Array.isArray(prepare.steps)) throw new TypeError('Preparation steps are required')
+    const steps = prepare.steps.filter(isRecord)
+    const generation = steps.find(step => step.id === 'generate')
+    expect(generation?.run).toContain('pnpm install --lockfile-only --frozen-lockfile --ignore-scripts')
+    expect(generation?.run).not.toContain('--no-frozen-lockfile')
+    const contracts = steps.find(step => step.id === 'contracts')
+    expect(contracts?.run).toContain('tsc -b tsconfig.host.json')
+    expect(contracts?.run).toContain('tsdown/dist/run.mjs --env.DSH_BUILD_FACE host')
+    expect(contracts?.run).toContain('tsc -b tsconfig.client.json')
+    expect(contracts?.run).toContain("'contracts.log'")
+    const seal = steps.find(step => step.name === 'Seal preparation receipt without changing earlier observations')
+    expect(seal?.env).toMatchObject({ CONTRACTS_OUTCOME: '${{ steps.contracts.outcome }}' })
+    expect(seal?.run).toContain('hostAndClientContracts = $env:CONTRACTS_OUTCOME')
+    expect(seal?.run).toContain('Frozen preparation changed the committed lockfile.')
+    expect(steps.findIndex(step => step.id === 'contracts')).toBeLessThan(steps.indexOf(seal!))
+  })
+
+  it('bounds Linux snapshot proposals to the temporary branch and preserves failure evidence', () => {
+    const job = workflowJob(loadWorkflow('.github/workflows/auto-routing-prepare.yml'), 'linux-snapshot-review')
+    expect(job).toMatchObject({ 'runs-on': 'ubuntu-24.04', 'timeout-minutes': 45, permissions: { contents: 'read' } })
+    if (!Array.isArray(job.steps) || typeof job.if !== 'string') throw new TypeError('Bounded Linux job requires steps and condition')
+    const steps = job.steps.filter(isRecord)
+    expect(steps[0]).toMatchObject({ uses: 'actions/checkout@v6', with: {
+      ref: '${{ github.sha }}', 'persist-credentials': false, 'fetch-depth': 0,
+    } })
+    const units = steps.findIndex(step => typeof step.run === 'string' && step.run.includes('test_prepare_auto_snapshot_goldens.py'))
+    const install = steps.findIndex(step => typeof step.run === 'string' && step.run.includes('pnpm install --frozen-lockfile'))
+    const host = steps.findIndex(step => typeof step.run === 'string' && step.run.includes('pnpm run build:lib:host'))
+    const review = steps.findIndex(step => step.id === 'review')
+    expect(units).toBeGreaterThanOrEqual(0)
+    expect(install).toBeGreaterThan(units)
+    expect(host).toBeGreaterThan(install)
+    expect(review).toBeGreaterThan(host)
+    for (const index of [units, install, host, review]) {
+      expect(steps[index]).not.toHaveProperty('continue-on-error')
+      expect(steps[index]).not.toHaveProperty('if')
+    }
+    expect(steps[review]?.run).toBe('set -euo pipefail\npython3 -B scripts/prepare-auto-snapshot-goldens.py\n')
+    expect(steps.find(step => step.uses === 'actions/upload-artifact@v4')).toMatchObject({
+      if: "always() && steps.setup-evidence.outcome == 'success'",
+      with: { name: 'auto-snapshot-golden-review-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}' },
+    })
+    const context = { github: { repository: 'cloga/deepseek-harness', ref: 'refs/heads/cloga-auto-minimal-golden-113', event_name: 'push', run_attempt: 1 } }
+    expect(runInNewContext(job.if, context, { timeout: 1000 })).toBe(true)
+    for (const [key, value] of [['repository', 'other/repo'], ['ref', 'refs/heads/master'], ['event_name', 'pull_request'], ['run_attempt', 2]] as const) {
+      expect(runInNewContext(job.if, { github: { ...context.github, [key]: value } }, { timeout: 1000 })).toBe(false)
+    }
   })
 
   it('does not cancel protected publication or deployment transactions', () => {
@@ -959,7 +1129,7 @@ describe('Python release workflows', () => {
       DEEPSEEK_API_KEY_EXTERNAL: { required: false },
     })
     expect(workflow.concurrency).toMatchObject({
-      group: 'build-single-exe-${{ github.workflow }}-${{ github.ref }}',
+      group: "build-single-exe-${{ github.event_name == 'workflow_dispatch' && inputs.sdk_golden_review && 'sdk-golden-review' || github.workflow }}-${{ github.ref }}",
     })
     expect(build.defaults).toBeUndefined()
     expect(plan.if).toContain('inputs.ci')

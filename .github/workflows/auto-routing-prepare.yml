@@ -1,0 +1,309 @@
+name: Minimal Auto golden preparation (temporary)
+
+# Temporary exact-source evidence for golden generation; never merge this lane.
+# Frozen dependency verification and generated proposals are not release qualification.
+on:
+  push:
+    branches:
+      - cloga-auto-minimal-golden-113
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    if: github.repository == 'cloga/deepseek-harness' && github.ref == 'refs/heads/cloga-auto-minimal-golden-113'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DSH_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      # Resolve pnpm 11.7.0 from the exact source's root packageManager field.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: package.json
+          run_install: false
+          dest: ${{ runner.temp }}/setup-pnpm-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Capture source and generator inputs before generation
+        id: inputs
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $sourceSha = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read checked-out source SHA.' }
+          if ($sourceSha -ne $env:GITHUB_SHA) { throw 'Checkout does not match the triggering source SHA.' }
+          $pnpmVersion = (& pnpm --version).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read pnpm version.' }
+          if ($pnpmVersion -ne '11.7.0') { throw 'This preparation lane requires root-pinned pnpm 11.7.0.' }
+          $nodeVersion = (& node --version).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read Node version.' }
+          if ($nodeVersion -notmatch '^v24\.') { throw 'This preparation lane requires Node 24.' }
+          $artifactRoot = Join-Path $env:RUNNER_TEMP ('auto-routing-prepare-{0}-{1}-{2}' -f $env:GITHUB_RUN_ID, $env:GITHUB_RUN_ATTEMPT, [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $artifactRoot | Out-Null
+          "AUTO_ROUTING_PREPARE_DIR=$artifactRoot" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "path=$artifactRoot" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          $inputHashes = [ordered]@{}
+          # Bind every tracked resolver manifest, not only the new routing package.
+          $manifestPaths = @(& git ls-files -- 'package.json' '**/package.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot enumerate tracked dependency manifests.' }
+          $generatorInputs = @($manifestPaths) + @('pnpm-workspace.yaml', '.github/workflows/auto-routing-prepare.yml')
+          foreach ($path in ($generatorInputs | Sort-Object -Unique)) {
+            $inputHashes[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          $inputs = [ordered]@{
+            schemaVersion = 1
+            purpose = 'temporary exact-source frozen preparation for golden proposals; not final CI or release qualification'
+            repository = $env:GITHUB_REPOSITORY
+            sourceSha = $sourceSha
+            sourceRef = $env:GITHUB_REF
+            workflow = $env:GITHUB_WORKFLOW
+            workflowRef = $env:GITHUB_WORKFLOW_REF
+            workflowSha = $env:GITHUB_WORKFLOW_SHA
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/attempts/$env:GITHUB_RUN_ATTEMPT"
+            nodeVersion = $nodeVersion
+            pnpmVersion = $pnpmVersion
+            originalLockSha256 = (Get-FileHash -LiteralPath 'pnpm-lock.yaml' -Algorithm SHA256).Hash.ToLowerInvariant()
+            inputHashes = $inputHashes
+          }
+          $inputs | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $artifactRoot 'inputs.json') -Encoding utf8NoBOM
+
+      - name: Verify candidate lockfile with frozen pnpm resolution
+        id: generate
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          pnpm install --lockfile-only --frozen-lockfile --ignore-scripts 2>&1 | Tee-Object -FilePath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'generate.log')
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { exit $code }
+          $lockPath = Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'pnpm-lock.yaml'
+          Copy-Item -LiteralPath 'pnpm-lock.yaml' -Destination $lockPath
+          [ordered]@{
+            command = 'pnpm install --lockfile-only --frozen-lockfile --ignore-scripts'
+            exitCode = $code
+            resultingLockSha256 = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'generated-lock.json') -Encoding utf8NoBOM
+
+      - name: Install the candidate lockfile frozen
+        id: install
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          pnpm install --frozen-lockfile --ignore-scripts 2>&1 | Tee-Object -FilePath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'frozen-install.log')
+          $code = $LASTEXITCODE
+          [ordered]@{
+            command = 'pnpm install --frozen-lockfile --ignore-scripts'
+            exitCode = $code
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'frozen-install.json') -Encoding utf8NoBOM
+          exit $code
+
+      - name: Generate third-party notices with complete dependencies
+        id: notices
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          node --import tsx/esm scripts/gen-third-party-notices.ts 2>&1 | Tee-Object -FilePath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'third-party-notices.log')
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { exit $code }
+          Copy-Item -LiteralPath 'THIRD_PARTY_NOTICES.md' -Destination (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'THIRD_PARTY_NOTICES.md')
+
+      - name: Run focused model selection and routing tests
+        id: tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          node node_modules/vitest/vitest.mjs run packages/core/agent/tests/model-selection.spec.ts packages/llm/model-routing/tests packages/api/session-controller/tests/session-auto-models.host.spec.ts packages/client/ui-model-selection/tests packages/client/ui-settings-plugins/tests packages/llm/token-meter/tests/token-usage-projection.spec.ts packages/test-support/llm-replay/tests/routing-replay.spec.ts packages/subagent/subagent/tests/native-model-selection.spec.ts packages/subagent/subagent/tests/native-model-selection-lifecycle.spec.ts packages/subagent/tool-subagent/tests/native-selection-authority.spec.ts 2>&1 | Tee-Object -FilePath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'focused-tests.log')
+          $code = $LASTEXITCODE
+          [ordered]@{
+            command = 'node node_modules/vitest/vitest.mjs run packages/core/agent/tests/model-selection.spec.ts packages/llm/model-routing/tests packages/api/session-controller/tests/session-auto-models.host.spec.ts packages/client/ui-model-selection/tests packages/client/ui-settings-plugins/tests packages/llm/token-meter/tests/token-usage-projection.spec.ts packages/test-support/llm-replay/tests/routing-replay.spec.ts packages/subagent/subagent/tests/native-model-selection.spec.ts packages/subagent/subagent/tests/native-model-selection-lifecycle.spec.ts packages/subagent/tool-subagent/tests/native-selection-authority.spec.ts'
+            exitCode = $code
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'focused-tests.json') -Encoding utf8NoBOM
+          exit $code
+
+      - name: Generate Host contracts and check Client types
+        id: contracts
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          & {
+            node --max-old-space-size=4096 node_modules/typescript/bin/tsc -b tsconfig.host.json
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            node node_modules/tsdown/dist/run.mjs --env.DSH_BUILD_FACE host
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            node node_modules/typescript/bin/tsc -b tsconfig.client.json
+          } 2>&1 | Tee-Object -FilePath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'contracts.log')
+          exit $LASTEXITCODE
+
+      - name: Seal preparation receipt without changing earlier observations
+        if: always() && steps.inputs.outcome == 'success'
+        env:
+          GENERATE_OUTCOME: ${{ steps.generate.outcome }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          NOTICES_OUTCOME: ${{ steps.notices.outcome }}
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          CONTRACTS_OUTCOME: ${{ steps.contracts.outcome }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $inputsPath = Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'inputs.json'
+          $inputs = Get-Content -LiteralPath $inputsPath -Raw | ConvertFrom-Json -AsHashtable
+          $integrityErrors = @()
+          foreach ($path in $inputs.inputHashes.Keys) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              $integrityErrors += "Source input is missing: $path"
+            } elseif ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $inputs.inputHashes[$path]) {
+              $integrityErrors += "Source input changed after capture: $path"
+            }
+          }
+          $generatedPath = Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'generated-lock.json'
+          $resultingLockSha256 = $null
+          if (Test-Path -LiteralPath $generatedPath -PathType Leaf) {
+            $generated = Get-Content -LiteralPath $generatedPath -Raw | ConvertFrom-Json
+            $resultingLockSha256 = $generated.resultingLockSha256
+            if ($resultingLockSha256 -ne $inputs.originalLockSha256) {
+              $integrityErrors += 'Frozen preparation changed the committed lockfile.'
+            }
+            foreach ($path in @('pnpm-lock.yaml', (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'pnpm-lock.yaml'))) {
+              if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                $integrityErrors += "Generated lockfile is missing: $path"
+              } elseif ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $resultingLockSha256) {
+                $integrityErrors += "Generated lockfile changed after generation: $path"
+              }
+            }
+          } elseif ($env:GENERATE_OUTCOME -eq 'success') {
+            $integrityErrors += 'Successful generation did not retain a generated-lock receipt.'
+          }
+          $evidenceHashes = [ordered]@{}
+          foreach ($name in @('inputs.json', 'generated-lock.json', 'generate.log', 'frozen-install.json', 'frozen-install.log', 'focused-tests.json', 'focused-tests.log', 'contracts.log', 'third-party-notices.log', 'THIRD_PARTY_NOTICES.md')) {
+            $path = Join-Path $env:AUTO_ROUTING_PREPARE_DIR $name
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+              $evidenceHashes[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+          }
+          [ordered]@{
+            schemaVersion = 1
+            repository = $inputs.repository
+            sourceSha = $inputs.sourceSha
+            workflowRef = $inputs.workflowRef
+            workflowSha = $inputs.workflowSha
+            runId = $inputs.runId
+            runAttempt = $inputs.runAttempt
+            runUrl = $inputs.runUrl
+            originalLockSha256 = $inputs.originalLockSha256
+            resultingLockSha256 = $resultingLockSha256
+            inputHashes = $inputs.inputHashes
+            evidenceHashes = $evidenceHashes
+            outcomes = [ordered]@{
+              generation = $env:GENERATE_OUTCOME
+              frozenInstall = $env:INSTALL_OUTCOME
+              notices = $env:NOTICES_OUTCOME
+              focusedTests = $env:TESTS_OUTCOME
+              hostAndClientContracts = $env:CONTRACTS_OUTCOME
+            }
+            focusedTestsPassed = $env:TESTS_OUTCOME -eq 'success'
+            inputIntegrityPassed = $integrityErrors.Count -eq 0
+            integrityErrors = $integrityErrors
+            finalQualification = $false
+            requiredNextStep = 'Require the resulting lock to remain byte-identical before explicit SDK proposal dispatch; review generated outputs separately and run normal CI on the final source. This artifact authorizes no publication.'
+          } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $env:AUTO_ROUTING_PREPARE_DIR 'receipt.json') -Encoding utf8NoBOM
+          if ($integrityErrors.Count -ne 0) { throw ($integrityErrors -join '; ') }
+
+      # Retain failed-test evidence too; native failures above still fail the job.
+      # No commits, pushes, releases, or automatic artifact adoption.
+      - name: Upload source-bound preparation evidence
+        if: always() && steps.inputs.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-routing-prepare-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.inputs.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  linux-snapshot-review:
+    name: Linux source snapshot proposal (temporary, not qualification)
+    if: >-
+      github.repository == 'cloga/deepseek-harness'
+      && github.ref == 'refs/heads/cloga-auto-minimal-golden-113'
+      && github.event_name == 'push' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      DSH_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: package.json
+          run_install: false
+          dest: ${{ runner.temp }}/setup-pnpm-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v6.3.0
+        with:
+          python-version: '3.10'
+      - name: Allocate external setup evidence
+        id: setup-evidence
+        run: |
+          set -euo pipefail
+          evidence="$(mktemp -d "$RUNNER_TEMP/auto-snapshot-setup-XXXXXX")"
+          echo "path=$evidence" >> "$GITHUB_OUTPUT"
+          echo "AUTO_SNAPSHOT_SETUP_DIR=$evidence" >> "$GITHUB_ENV"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} > "$evidence/source.txt"
+          sha256sum pnpm-lock.yaml > "$evidence/lock.sha256"
+      - name: Test source and artifact guards offline
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s scripts -p 'test_prepare_auto_snapshot_goldens.py' 2>&1 | tee "$AUTO_SNAPSHOT_SETUP_DIR/guard-tests.log"
+      - name: Install exact dependencies and prepare the established sandbox
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee "$AUTO_SNAPSHOT_SETUP_DIR/frozen-install.log"
+          bash scripts/prepare-ci-bubblewrap.sh 2>&1 | tee "$AUTO_SNAPSHOT_SETUP_DIR/bubblewrap.log"
+      - name: Build native prerequisites and Host contracts
+        run: |
+          set -euo pipefail
+          pnpm run build:native-system 2>&1 | tee "$AUTO_SNAPSHOT_SETUP_DIR/native-build.log"
+          pnpm run build:lib:host 2>&1 | tee "$AUTO_SNAPSHOT_SETUP_DIR/host-build.log"
+      - name: Refresh once then replay source snapshots
+        id: review
+        run: |
+          set -euo pipefail
+          python3 -B scripts/prepare-auto-snapshot-goldens.py
+      - name: Retain source-bound proposals and original failures
+        if: always() && steps.setup-evidence.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-snapshot-golden-review-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.setup-evidence.outputs.path }}
+            ${{ steps.review.outputs.evidence_path }}
+          if-no-files-found: error
+          retention-days: 14
