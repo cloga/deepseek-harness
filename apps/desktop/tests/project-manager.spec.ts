@@ -1125,7 +1125,9 @@ describe('desktop external plugin profile', () => {
     await manager.mutate({ type: 'plugin-install', source: manual.source }, hooks())
     const plan = { schemaVersion: 1, mode: 'exact', plugins: [{ required: false, source: target.source }] }
     const artifact = readFileSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${target.source.sha256}.tgz`))
-    const acquisition = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('planned source must not be reacquired'))
+    const acquisition = vi.mocked(globalThis.fetch)
+    acquisition.mockClear()
+    acquisition.mockRejectedValue(new Error('planned source must not be reacquired'))
     let healthChecks = 0
     const state = await manager.reconcileProvisioning(plan, hooks({
       healthCheck: async () => { healthChecks++ },
