@@ -1,4 +1,12 @@
-/** Read-only finalized installer verification shared with the CI qualification verifier. */
+/** Read-only installer ownership and finalized release verification shared with CI fixtures. */
+
+/**
+ * Reject root escapes and existing symlink/reparse aliases.
+ * @param root - Existing owned root.
+ * @param path - Requested strict descendant.
+ * @returns Absolute owned path; missing descendants remain subject to the caller's existence checks.
+ */
+export function ownedUpgradePath(root: string, path: string): string
 
 /**
  * Verify original installer and receipt bytes against reviewed source identity and canonical self-hashes.
