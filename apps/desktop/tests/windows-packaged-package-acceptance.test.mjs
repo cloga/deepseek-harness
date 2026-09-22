@@ -760,22 +760,23 @@ test('owned standard-provider phase diagnostics cover each operation without qua
   const file = readFileSync(fileURLToPath(import.meta.url), 'utf8')
   const start = file.indexOf("\ntest('native helper initializes standard providers for owned classic Win32 controls',")
   const end = file.indexOf("test(", start + 5)
-  const owner = file.slice(start, end)
+  const ownerTest = file.slice(start, end)
+  const owner = nativeProviderUnitScript()
   assert(start > 0 && end > start)
-  const groups = ['assembly-load', 'owned-controls-compile', 'owned-windows-create', 'negative-observation',
+  const groups = ['assembly-load', 'interop-declare', 'owned-windows-create', 'negative-observation',
     'native-initialize', 'positive-observation', 'foreign-owner-refusal', 'owned-windows-cleanup']
   const phases = groups.flatMap(group => [`${group}-start`, `${group}-done`])
   assert.deepEqual([...owner.matchAll(/\[fixture-phase:([a-z-]+)\]/gu)].map(match => match[1]), phases)
-  const operations = ['Add-Type -AssemblyName UIAutomationClient', 'Add-Type -TypeDefinition',
-    "$window = [OwnedNativeControls]::Create", '$before = @(Observe-Control', '\n    Initialize-Native\n',
+  const operations = ['Add-Type -AssemblyName UIAutomationClient', '$assembly = [AppDomain]::CurrentDomain.DefineDynamicAssembly',
+    '$window = New-OwnedControl', '$before = @(Observe-Control', '\n    Initialize-Native\n',
     '$after = @(Observe-Control', 'try { Invoke-Control', 'for ($i=$handles.Count-1;']
   groups.forEach((group, index) => {
     const before = owner.indexOf(`[fixture-phase:${group}-start]`), operation = owner.indexOf(operations[index])
     const after = owner.indexOf(`[fixture-phase:${group}-done]`)
     assert(before >= 0 && before < operation && operation < after, group)
   })
-  assert.match(owner, /powershell\.exe'\), \{ phases: true \}\)/u)
-  assert(!owner.includes('timeout:')) // Keep the helper's existing 15-second budget.
+  assert.match(ownerTest, /powershell\.exe'\), \{ phases: true \}\)/u)
+  assert(!ownerTest.includes('timeout:')) // Keep the helper's existing 15-second budget.
   const wrapper = file.slice(file.indexOf('function powershellUnit('), file.indexOf("test('package observer binds"))
   assert.match(wrapper, /timeout = 15_000, phases = false/u)
   assert(wrapper.indexOf('fixture-phase:script-start') < wrapper.indexOf("+ body"))
@@ -793,41 +794,97 @@ test('owned standard-provider phase diagnostics cover each operation without qua
   assert.match(owner, /try \{ \[Console\]::Error\.WriteLine\('\[fixture-phase:owned-windows-cleanup-done\]'\) \} catch/u)
 })
 
-test('native helper initializes standard providers for owned classic Win32 controls', { skip: process.platform !== 'win32' }, t => {
+test('owned provider fixture declares only fixed in-process Win32 interop and preserves cold production initialization', () => {
+  const body = nativeProviderUnitScript()
+  const initialize = native.match(/function Initialize-Native \{[^]*?\$script:nativeReady = \$true\r?\n\}/u)?.[0]
+  const invoke = native.match(/function Invoke-Control\(\$Node\) \{[^]*?\r?\n\}/u)?.[0]
+  assert.ok(initialize && invoke)
+  assert.equal(body.match(/function Initialize-Native \{[^]*?\$script:nativeReady = \$true\r?\n\}/u)?.[0], initialize)
+  assert.equal(body.match(/function Invoke-Control\(\$Node\) \{[^]*?\r?\n\}/u)?.[0], invoke)
+  assert.equal(body.split(initialize).length, 2)
+  const fixture = body.replace(initialize, '').replace(invoke, '')
+  assert.doesNotMatch(fixture, /Add-Type\s+-(?:TypeDefinition|MemberDefinition|Path)|CSharpCodeProvider|csc\.exe|Start-Process|System\.Windows\.Forms|RegisterClientSideProviderAssembly|\.Invoke\(/iu)
+  assert.equal((fixture.match(/DefinePInvokeMethod\(/gu) ?? []).length, 1)
+  const declarations = fixture.slice(fixture.indexOf('$declarations = @('), fixture.indexOf('foreach ($entry in $declarations)'))
+  assert.deepEqual([...declarations.matchAll(/name='([^']+)'/gu)].map(match => match[1]),
+    ['CreateWindowExW', 'DestroyWindow', 'IsWindow', 'GetWindowThreadProcessId'])
+  for (const literal of [
+    "name='CreateWindowExW'; result=[IntPtr]; parameters=[type[]]@([uint32],[string],[string],[uint32],[int],[int],[int],[int],[IntPtr],[IntPtr],[IntPtr],[IntPtr])",
+    "name='DestroyWindow'; result=[bool]; parameters=[type[]]@([IntPtr])",
+    "name='IsWindow'; result=[bool]; parameters=[type[]]@([IntPtr])",
+    "name='GetWindowThreadProcessId'; result=[uint32]; parameters=[type[]]@([IntPtr],[uint32].MakeByRefType())",
+    "$entry.name, 'user32.dll', $entry.name", '[Reflection.Emit.AssemblyBuilderAccess]::Run',
+    '[Runtime.InteropServices.CallingConvention]::Winapi', '[Runtime.InteropServices.CharSet]::Unicode',
+    '[Reflection.MethodImplAttributes]::PreserveSig', '[Runtime.InteropServices.UnmanagedType]::Bool',
+    "$method.DefineParameter(2, [Reflection.ParameterAttributes]::Out, 'process')",
+    '[uint32]2415919104', '[uint32]1342177280', 'CreateWindowExW([uint32]134217728',
+    'GetWindowThreadProcessId($Handle, [ref]$owner)', 'IsWindow($Handle) -and $owner -eq [uint32]$OwnerPid',
+    "New-OwnedControl '#32770' 'Owned synthetic folder picker' ([IntPtr]::Zero) 0",
+    "New-OwnedControl 'Edit' 'owned-path' $window 1152", "New-OwnedControl 'Button' 'Select Folder' $window 1",
+  ]) assert(fixture.includes(literal), literal)
+  const call = fixture.indexOf('\n    Initialize-Native\n')
+  assert.equal((fixture.match(/^    Initialize-Native$/gmu) ?? []).length, 1)
+  assert(fixture.indexOf("throw 'The isolated provider-omission negative control no longer reproduces'") < call)
+  assert(call < fixture.indexOf('$after = @(Observe-Control'))
+  assert(fixture.indexOf('for ($i=$handles.Count-1;') < fixture.indexOf('DestroyWindow($handles[$i])'))
+})
+
+function nativeProviderUnitScript() {
   const initialize = native.match(/function Initialize-Native \{[^]*?\$script:nativeReady = \$true\r?\n\}/u)?.[0]
   const invoke = native.match(/function Invoke-Control\(\$Node\) \{[^]*?\r?\n\}/u)?.[0]
   assert.ok(initialize && invoke)
   assert.ok(initialize.includes('RegisterClientSideProviderAssembly'))
-  const observed = powershellUnit(t, `
+  return `
 [Console]::Error.WriteLine('[fixture-phase:assembly-load-start]')
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing
 [Console]::Error.WriteLine('[fixture-phase:assembly-load-done]')
 ${initialize}
 ${invoke}
-[Console]::Error.WriteLine('[fixture-phase:owned-controls-compile-start]')
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class OwnedNativeControls {
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern IntPtr CreateWindowEx(uint exStyle, string kind, string title, uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr data);
-    [DllImport("user32.dll")] public static extern bool DestroyWindow(IntPtr window);
-    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr window);
-    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
-    public static IntPtr Create(string kind, string text, IntPtr parent, int id) {
-        IntPtr handle = CreateWindowEx(0x08000000, kind, text, parent==IntPtr.Zero ? 0x90000000u : 0x50000000u,
-            parent==IntPtr.Zero ? -30000 : 10, parent==IntPtr.Zero ? -30000 : 10, 320, 120, parent, (IntPtr)id, IntPtr.Zero, IntPtr.Zero);
-        if(handle==IntPtr.Zero) throw new InvalidOperationException("Owned native test window creation failed");
-        return handle;
+[Console]::Error.WriteLine('[fixture-phase:interop-declare-start]')
+# Declare only the fixed fixture Win32 entrypoints in memory; no C# compiler or helper process.
+$assembly = [AppDomain]::CurrentDomain.DefineDynamicAssembly([Reflection.AssemblyName]::new('OwnedNativeControls'), [Reflection.Emit.AssemblyBuilderAccess]::Run)
+$module = $assembly.DefineDynamicModule('OwnedNativeControls')
+$type = $module.DefineType('OwnedNativeControls', [Reflection.TypeAttributes]'Public, Abstract, Sealed')
+$declarations = @(
+    @{ name='CreateWindowExW'; result=[IntPtr]; parameters=[type[]]@([uint32],[string],[string],[uint32],[int],[int],[int],[int],[IntPtr],[IntPtr],[IntPtr],[IntPtr]) },
+    @{ name='DestroyWindow'; result=[bool]; parameters=[type[]]@([IntPtr]) },
+    @{ name='IsWindow'; result=[bool]; parameters=[type[]]@([IntPtr]) },
+    @{ name='GetWindowThreadProcessId'; result=[uint32]; parameters=[type[]]@([IntPtr],[uint32].MakeByRefType()) }
+)
+foreach ($entry in $declarations) {
+    $method = $type.DefinePInvokeMethod($entry.name, 'user32.dll', $entry.name,
+        [Reflection.MethodAttributes]'Public, Static, PinvokeImpl', [Reflection.CallingConventions]::Standard,
+        $entry.result, $entry.parameters, [Runtime.InteropServices.CallingConvention]::Winapi, [Runtime.InteropServices.CharSet]::Unicode)
+    $method.SetImplementationFlags($method.GetMethodImplementationFlags() -bor [Reflection.MethodImplAttributes]::PreserveSig)
+    if ($entry.result -eq [bool]) {
+        $return = $method.DefineParameter(0, [Reflection.ParameterAttributes]::Retval, $null)
+        $marshal = [Reflection.Emit.CustomAttributeBuilder]::new(
+            [Runtime.InteropServices.MarshalAsAttribute].GetConstructor([type[]]@([Runtime.InteropServices.UnmanagedType])),
+            [object[]]@([Runtime.InteropServices.UnmanagedType]::Bool))
+        $return.SetCustomAttribute($marshal)
     }
-    public static bool Owned(IntPtr window, int pid) { uint owner; GetWindowThreadProcessId(window,out owner); return IsWindow(window) && owner==(uint)pid; }
+    if ($entry.name -eq 'GetWindowThreadProcessId') { $null = $method.DefineParameter(2, [Reflection.ParameterAttributes]::Out, 'process') }
 }
-'@
-[Console]::Error.WriteLine('[fixture-phase:owned-controls-compile-done]')
+$script:ownedNative = $type.CreateType()
+function New-OwnedControl([string]$Kind, [string]$Text, [IntPtr]$Parent, [int]$Id) {
+    $style = if ($Parent -eq [IntPtr]::Zero) { [uint32]2415919104 } else { [uint32]1342177280 } # 0x90000000 / 0x50000000
+    $position = if ($Parent -eq [IntPtr]::Zero) { -30000 } else { 10 }
+    $handle = $script:ownedNative::CreateWindowExW([uint32]134217728, $Kind, $Text, $style,
+        $position, $position, 320, 120, $Parent, [IntPtr]$Id, [IntPtr]::Zero, [IntPtr]::Zero) # 0x08000000
+    if ($handle -eq [IntPtr]::Zero) { throw 'Owned native test window creation failed' }
+    return $handle
+}
+function Test-OwnedControl([IntPtr]$Handle, [int]$OwnerPid) {
+    [uint32]$owner = 0
+    $null = $script:ownedNative::GetWindowThreadProcessId($Handle, [ref]$owner)
+    return $script:ownedNative::IsWindow($Handle) -and $owner -eq [uint32]$OwnerPid
+}
+[Console]::Error.WriteLine('[fixture-phase:interop-declare-done]')
 $handles = [Collections.Generic.List[IntPtr]]::new()
 $primary = $null
 $cleanupErrors = [Collections.Generic.List[Exception]]::new()
 function Observe-Control([IntPtr]$Handle) {
-    if (-not [OwnedNativeControls]::Owned($Handle,$PID)) { throw 'Foreign native test handle' }
+    if (-not (Test-OwnedControl $Handle $PID)) { throw 'Foreign native test handle' }
     $node = [System.Windows.Automation.AutomationElement]::FromHandle($Handle)
     if ($node.Current.ProcessId -ne $PID) { throw 'Foreign UIA test owner' }
     $value = $null; $invokePattern = $null
@@ -837,9 +894,9 @@ function Observe-Control([IntPtr]$Handle) {
 }
 try {
     [Console]::Error.WriteLine('[fixture-phase:owned-windows-create-start]')
-    $window = [OwnedNativeControls]::Create('#32770','Owned synthetic folder picker',[IntPtr]::Zero,0); $handles.Add($window)
-    $edit = [OwnedNativeControls]::Create('Edit','owned-path',$window,1152); $handles.Add($edit)
-    $button = [OwnedNativeControls]::Create('Button','Select Folder',$window,1); $handles.Add($button)
+    $window = New-OwnedControl '#32770' 'Owned synthetic folder picker' ([IntPtr]::Zero) 0; $handles.Add($window)
+    $edit = New-OwnedControl 'Edit' 'owned-path' $window 1152; $handles.Add($edit)
+    $button = New-OwnedControl 'Button' 'Select Folder' $window 1; $handles.Add($button)
     [Console]::Error.WriteLine('[fixture-phase:owned-windows-create-done]')
     # Negative control: the exact former assembly-only setup cannot supply classic providers.
     [Console]::Error.WriteLine('[fixture-phase:negative-observation-start]')
@@ -869,12 +926,12 @@ try {
     try { [Console]::Error.WriteLine('[fixture-phase:owned-windows-cleanup-start]') } catch { # Diagnostics cannot bypass owned cleanup or replace its primary error.
     }
     for ($i=$handles.Count-1;$i -ge 0;$i--) {
-        if ([OwnedNativeControls]::IsWindow($handles[$i]) -and -not [OwnedNativeControls]::DestroyWindow($handles[$i])) {
+        if ($script:ownedNative::IsWindow($handles[$i]) -and -not $script:ownedNative::DestroyWindow($handles[$i])) {
             $cleanupErrors.Add([InvalidOperationException]::new('Owned native test window destruction failed'))
         }
     }
     foreach ($handle in $handles) {
-        if ([OwnedNativeControls]::IsWindow($handle)) { $cleanupErrors.Add([InvalidOperationException]::new('Owned native test handle survived cleanup')) }
+        if ($script:ownedNative::IsWindow($handle)) { $cleanupErrors.Add([InvalidOperationException]::new('Owned native test handle survived cleanup')) }
     }
     try { [Console]::Error.WriteLine('[fixture-phase:owned-windows-cleanup-done]') } catch { # Existing primary and cleanup failures remain authoritative.
     }
@@ -887,7 +944,12 @@ if ($null -ne $primary) {
 }
 if ($cleanupErrors.Count -gt 0) { throw [AggregateException]::new('Native test cleanup failed', $cleanupErrors.ToArray()) }
 [pscustomobject]@{ before=$before; after=$after; foreignRejected=$true; cleanupVerified=$true; appLaunched=$false; invoked=$false } | ConvertTo-Json -Depth 4 -Compress
-`, join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), { phases: true })
+`
+}
+
+test('native helper initializes standard providers for owned classic Win32 controls', { skip: process.platform !== 'win32' }, t => {
+  const observed = powershellUnit(t, nativeProviderUnitScript(),
+    join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), { phases: true })
   assert.deepEqual(observed.before, [
     { type: 'ControlType.Pane', id: '1152', value: false, invoke: false },
     { type: 'ControlType.Pane', id: '1', value: false, invoke: false },
