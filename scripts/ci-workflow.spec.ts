@@ -68,6 +68,8 @@ describe('CI workflow', () => {
       expect(steps[index]).not.toHaveProperty('continue-on-error')
     }
     expect(steps[review]?.run).toBe(`set -euo pipefail\npython3 -B scripts/prepare-auto-${kind}-goldens.py\n`)
+    if (kind === 'web') expect(steps[review]?.name)
+      .toBe('Refresh five diagnosed Web owners then run the complete Web CI gate')
     expect(steps.find(step => step.uses === 'actions/upload-artifact@v4')).toMatchObject({
       if: "always() && steps.setup-evidence.outcome == 'success'",
       with: { name: `auto-${kind}-golden-review-` + '${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}' },

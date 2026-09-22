@@ -370,7 +370,7 @@ jobs:
         run: |
           set -euo pipefail
           pnpm run build 2>&1 | tee "$AUTO_WEB_SETUP_DIR/full-build.log"
-      - name: Refresh the Cordis owner then run the complete Web CI gate
+      - name: Refresh five diagnosed Web owners then run the complete Web CI gate
         id: review
         run: |
           set -euo pipefail

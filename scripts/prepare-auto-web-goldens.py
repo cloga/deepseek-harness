@@ -28,13 +28,38 @@ TEST = "scripts/test_prepare_auto_web_goldens.py"
 INFRASTRUCTURE = {WORKFLOW, DRIVER, TEST, "scripts/ci-workflow.spec.ts",
                   "scripts/prepare-auto-expected-goldens.py", "scripts/test_prepare_auto_expected_goldens.py"}
 TARGET = "apps/web/tests/cordis-tool-round.e2e.ts"
+TARGET_FILES = [TARGET, "apps/web/tests/ptc-round.e2e.ts", "apps/web/tests/replay-round-trip.e2e.ts",
+                "apps/web/tests/plugin-config.e2e.ts", "apps/web/tests/manual-compact-model-selection.e2e.ts"]
 OWNER = "snapshots/web/cordis-tool-round/"
-CANDIDATES = frozenset(OWNER + name for name in ("session.v3.jsonl", "system-prompt.expected.md", "tool-schemas.expected.json"))
+CANDIDATES = frozenset({
+    "snapshots/web/cordis-tool-round/session.v3.jsonl",
+    "snapshots/web/cordis-tool-round/system-prompt.expected.md",
+    "snapshots/web/cordis-tool-round/tool-schemas.expected.json",
+    "snapshots/web/cordis-tool-round/ui.expected.md",
+    "snapshots/web/ptc-round/session.v3.jsonl",
+    "snapshots/web/ptc-round/system-prompt.expected.md",
+    "snapshots/web/ptc-round/tool-schemas.expected.json",
+    "snapshots/web/ptc-round/ui.expected.md",
+    "snapshots/web/ptc-round/trajectory.expected.md",
+    "snapshots/web/ptc-round/code.expected.md",
+    "snapshots/web/fresh-round-trip/session.v3.jsonl",
+    "snapshots/web/fresh-round-trip/system-prompt.expected.md",
+    "snapshots/web/fresh-round-trip/tool-schemas.expected.json",
+    "snapshots/web/fresh-round-trip/ui.expected.md",
+    "snapshots/web/fresh-round-trip/submission-echo.expected.md",
+    "snapshots/web/fresh-round-trip/ui-expanded.expected.md",
+    "snapshots/web/fresh-round-trip/web-context.expected.md",
+    "snapshots/web/manual-compact-model-selection/session.v3.jsonl",
+    "snapshots/web/manual-compact-model-selection/system-prompt.expected.md",
+    "snapshots/web/manual-compact-model-selection/tool-schemas.expected.json",
+    "snapshots/web/manual-compact-model-selection/checkpoint.expected.md",
+    "apps/web/tests/expected/plugin-config/section.expected.md",
+})
 UI_ORACLE = OWNER + "ui.expected.md"
 HMR_SOURCE = "packages/client/ui-conversation/src/client/locales.ts"
 HMR_TEST = "apps/web/tests/hmr-live.e2e.ts"
 VERSION_SOURCE = "packages/core/session/src/types.ts"
-REFRESH_COMMAND = ["pnpm", "run", "test:web:built", TARGET]
+REFRESH_COMMAND = ["pnpm", "run", "test:web:built", *TARGET_FILES]
 REPLAY_COMMAND = ["pnpm", "run", "test:web:ci"]
 REFRESH_SECONDS = 600
 REPLAY_SECONDS = 1200
@@ -109,7 +134,7 @@ def safe_path(root, name):
 
 def check_changes(before, after, tracked, stage):
     require(stage in ("refresh", "replay"), "invalid-stage-mode")
-    flags = {"ownedHmrMetadataRestored": False, "ownedUiMetadataUnchanged": False}
+    flags = {"ownedHmrMetadataRestored": False}
     for name in sorted(before.keys() | after.keys()):
         old, new = before.get(name), after.get(name)
         if old == new:
@@ -120,10 +145,7 @@ def check_changes(before, after, tracked, stage):
         require(old["mode"] == new["mode"], "file-mode-mutation")
         same_bytes = old["sha256"] == new["sha256"]
         if stage == "refresh":
-            if name in CANDIDATES:
-                continue
-            require(name == UI_ORACLE and same_bytes, "non-candidate-refresh-mutation")
-            flags["ownedUiMetadataUnchanged"] = True
+            require(name in CANDIDATES, "non-candidate-refresh-mutation")
         else:
             require(name == HMR_SOURCE and same_bytes, "replay-wrote-source-or-output")
             flags["ownedHmrMetadataRestored"] = True
@@ -131,7 +153,7 @@ def check_changes(before, after, tracked, stage):
 
 
 def check_required_files(before, tracked):
-    required = CANDIDATES | {UI_ORACLE, HMR_SOURCE}
+    required = CANDIDATES | {HMR_SOURCE}
     require(required <= tracked, "owned-files-must-be-tracked")
     require(all(name in before and before[name]["kind"] == "file" for name in required), "owned-files-must-be-regular")
 
@@ -321,7 +343,7 @@ def check_git_identity(evidence, source_binding):
 def execute(root, env):
     evidence = None
     result = {"successful": False, "proposal_only": True, "independently_qualified": False,
-              "ownedHmrMetadataRestored": False, "ownedUiMetadataUnchanged": False, "error_code": "initialization-failed"}
+              "ownedHmrMetadataRestored": False, "error_code": "initialization-failed"}
     try:
         evidence = Evidence(root, env)
         guard_environment(env, platform.system())
@@ -336,7 +358,7 @@ def execute(root, env):
         check_scripts(safe_path(root, "package.json").read_text(encoding="utf-8"))
         current_version(safe_path(root, VERSION_SOURCE).read_text(encoding="utf-8"))
         require(before["pnpm-lock.yaml"]["sha256"] == digest(evidence.git("show", BASE + ":pnpm-lock.yaml")), "baseline-lock-mismatch")
-        inputs = [WORKFLOW, DRIVER, TEST, "package.json", "pnpm-lock.yaml", "vitest.web.config.ts", TARGET,
+        inputs = [WORKFLOW, DRIVER, TEST, "package.json", "pnpm-lock.yaml", "vitest.web.config.ts", *TARGET_FILES,
                   "apps/web/tests/scaffold.ts", "scripts/run-web-snapshots.ts", HMR_TEST, HMR_SOURCE, VERSION_SOURCE]
         require(all(name in before and before[name]["kind"] == "file" for name in inputs), "missing-input")
         source_binding.update(input_sha256={name: before[name]["sha256"] for name in inputs},
@@ -357,8 +379,7 @@ def execute(root, env):
                 refreshed = evidence.capture("refresh", before)
             finally:
                 check_git_identity(evidence, source_binding)
-            flags = check_changes(before, refreshed, tracked, "refresh")
-            result["ownedUiMetadataUnchanged"] = flags["ownedUiMetadataUnchanged"]
+            check_changes(before, refreshed, tracked, "refresh")
         require_keyless_checkout(root)
         try:
             evidence.run("replay", REPLAY_COMMAND, REPLAY_SECONDS, child_environment(env, "replay"))

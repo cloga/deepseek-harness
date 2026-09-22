@@ -56,7 +56,11 @@ class Guards(unittest.TestCase):
             d.guard_environment(dict(environment(), NODE_OPTIONS="--import=/injected"), "Linux")
 
     def test_exact_maintained_commands_without_filters_or_hmr_skip(self):
-        self.assertEqual(d.REFRESH_COMMAND, ["pnpm", "run", "test:web:built", "apps/web/tests/cordis-tool-round.e2e.ts"])
+        targets = ["apps/web/tests/cordis-tool-round.e2e.ts", "apps/web/tests/ptc-round.e2e.ts",
+                   "apps/web/tests/replay-round-trip.e2e.ts", "apps/web/tests/plugin-config.e2e.ts",
+                   "apps/web/tests/manual-compact-model-selection.e2e.ts"]
+        self.assertEqual(d.TARGET_FILES, targets)
+        self.assertEqual(d.REFRESH_COMMAND, ["pnpm", "run", "test:web:built", *targets])
         self.assertEqual(d.REPLAY_COMMAND, ["pnpm", "run", "test:web:ci"])
         self.assertEqual(d.SCRIPT_VALUES, {"test:web:built": "vitest run --config vitest.web.config.ts",
                                           "test:web:ci": "tsx scripts/run-web-snapshots.ts"})
@@ -109,10 +113,34 @@ class Guards(unittest.TestCase):
 
 
 class ChangePolicy(unittest.TestCase):
-    def test_exact_three_content_candidates_exclude_ui_and_hmr(self):
-        self.assertEqual(d.CANDIDATES, {"snapshots/web/cordis-tool-round/" + name for name in
-                                      ("session.v3.jsonl", "system-prompt.expected.md", "tool-schemas.expected.json")})
-        self.assertNotIn(d.UI_ORACLE, d.CANDIDATES)
+    def test_exact_twenty_two_content_candidates_exclude_hmr(self):
+        expected = {
+            "snapshots/web/cordis-tool-round/session.v3.jsonl",
+            "snapshots/web/cordis-tool-round/system-prompt.expected.md",
+            "snapshots/web/cordis-tool-round/tool-schemas.expected.json",
+            "snapshots/web/cordis-tool-round/ui.expected.md",
+            "snapshots/web/ptc-round/session.v3.jsonl",
+            "snapshots/web/ptc-round/system-prompt.expected.md",
+            "snapshots/web/ptc-round/tool-schemas.expected.json",
+            "snapshots/web/ptc-round/ui.expected.md",
+            "snapshots/web/ptc-round/trajectory.expected.md",
+            "snapshots/web/ptc-round/code.expected.md",
+            "snapshots/web/fresh-round-trip/session.v3.jsonl",
+            "snapshots/web/fresh-round-trip/system-prompt.expected.md",
+            "snapshots/web/fresh-round-trip/tool-schemas.expected.json",
+            "snapshots/web/fresh-round-trip/ui.expected.md",
+            "snapshots/web/fresh-round-trip/submission-echo.expected.md",
+            "snapshots/web/fresh-round-trip/ui-expanded.expected.md",
+            "snapshots/web/fresh-round-trip/web-context.expected.md",
+            "snapshots/web/manual-compact-model-selection/session.v3.jsonl",
+            "snapshots/web/manual-compact-model-selection/system-prompt.expected.md",
+            "snapshots/web/manual-compact-model-selection/tool-schemas.expected.json",
+            "snapshots/web/manual-compact-model-selection/checkpoint.expected.md",
+            "apps/web/tests/expected/plugin-config/section.expected.md",
+        }
+        self.assertEqual(len(d.CANDIDATES), 22)
+        self.assertEqual(d.CANDIDATES, expected)
+        self.assertIn(d.UI_ORACLE, d.CANDIDATES)
         self.assertNotIn(d.HMR_SOURCE, d.CANDIDATES)
 
     def test_only_candidates_allow_refresh_content_or_metadata_changes(self):
@@ -120,14 +148,15 @@ class ChangePolicy(unittest.TestCase):
             for after in (row(b"new"), row(stamp=2)):
                 flags = d.check_changes({name: row()}, {name: after}, {name}, "refresh")
                 self.assertFalse(flags["ownedHmrMetadataRestored"])
-                self.assertFalse(flags["ownedUiMetadataUnchanged"])
+                self.assertNotIn("ownedUiMetadataUnchanged", flags)
 
-    def test_ui_exact_metadata_only_refresh_exception(self):
+    def test_cordis_ui_is_now_an_ordinary_content_candidate(self):
         name = d.UI_ORACLE
-        flags = d.check_changes({name: row()}, {name: row(stamp=2)}, {name}, "refresh")
-        self.assertTrue(flags["ownedUiMetadataUnchanged"])
-        self.assertFalse(flags["ownedHmrMetadataRestored"])
-        for after in (row(b"different-aria"), row(kind="link"), row(mode=0o755)):
+        for after in (row(b"different-aria"), row(stamp=2)):
+            flags = d.check_changes({name: row()}, {name: after}, {name}, "refresh")
+            self.assertNotIn("ownedUiMetadataUnchanged", flags)
+            self.assertFalse(flags["ownedHmrMetadataRestored"])
+        for after in (row(kind="link"), row(mode=0o755)):
             with self.subTest(after=after), self.assertRaises(d.Refusal):
                 d.check_changes({name: row()}, {name: after}, {name}, "refresh")
 
@@ -141,7 +170,7 @@ class ChangePolicy(unittest.TestCase):
         name = d.HMR_SOURCE
         flags = d.check_changes({name: row()}, {name: row(stamp=2)}, {name}, "replay")
         self.assertTrue(flags["ownedHmrMetadataRestored"])
-        self.assertFalse(flags["ownedUiMetadataUnchanged"])
+        self.assertNotIn("ownedUiMetadataUnchanged", flags)
         self.assertFalse(d.check_changes({name: row()}, {name: row()}, {name}, "replay")["ownedHmrMetadataRestored"])
 
     def test_hmr_content_mode_link_and_untracked_changes_never_exempt(self):
@@ -172,6 +201,18 @@ class ChangePolicy(unittest.TestCase):
             for stage in ("refresh", "replay"):
                 with self.subTest(name=name, stage=stage), self.assertRaises(d.Refusal):
                     d.check_changes({name: row()}, {name: row(b"new")}, {name}, stage)
+
+    def test_expansion_never_admits_sibling_extra_or_historical_outputs(self):
+        for owner in ("cordis-tool-round", "ptc-round", "fresh-round-trip", "manual-compact-model-selection"):
+            for filename in ("extra.expected.md", "session.v2.jsonl", "session.1.v3.jsonl", "snapshot.yml"):
+                name = "snapshots/web/" + owner + "/" + filename
+                for after in (row(b"new"), row(stamp=2)):
+                    with self.subTest(name=name, after=after), self.assertRaises(d.Refusal):
+                        d.check_changes({name: row()}, {name: after}, {name}, "refresh")
+        for name in ("apps/web/tests/expected/plugin-config/extra.expected.md",
+                     "apps/web/tests/expected/plugin-config-other/section.expected.md"):
+            with self.subTest(name=name), self.assertRaises(d.Refusal):
+                d.check_changes({name: row()}, {name: row(b"new")}, {name}, "refresh")
 
     def test_candidate_replay_content_and_metadata_writes_rejected(self):
         for name in d.CANDIDATES:
@@ -339,7 +380,7 @@ class FilesystemTests(unittest.TestCase):
             self.assertNotIn(b"never-print", data)
 
     def pipeline(self, failure=None, mutation=None, mutate_stage="refresh", timeout=None, capture_failure=None, lock_mismatch=False):
-        for name in (d.WORKFLOW, d.DRIVER, d.TEST, "pnpm-lock.yaml", "vitest.web.config.ts", d.TARGET,
+        for name in (d.WORKFLOW, d.DRIVER, d.TEST, "pnpm-lock.yaml", "vitest.web.config.ts", *d.TARGET_FILES,
                      "apps/web/tests/scaffold.ts", "scripts/run-web-snapshots.ts", d.HMR_TEST, d.HMR_SOURCE, d.UI_ORACLE):
             self.write(name, b"input")
         self.write("package.json", json.dumps({"scripts": d.SCRIPT_VALUES}).encode())
@@ -409,7 +450,12 @@ class FilesystemTests(unittest.TestCase):
                     touch(d.HMR_TEST)
                 elif mutation == "new":
                     self.write(d.OWNER + "extra.expected.jsonl", b"bad")
-            receipt = {"classification": "timeout" if timeout == label else "exited", "exit_code": 1 if failure == label else 0}
+            manual_failure = failure == "manual-compact" and label == "refresh"
+            if manual_failure:
+                self.write("snapshots/web/manual-compact-model-selection/checkpoint.expected.md", b"partial-manual-checkpoint")
+                (evidence.path / "refresh.mock.stderr").write_text("AggregateError: manual compact Web fixture cleanup failed\n", encoding="utf-8")
+            receipt = {"classification": "timeout" if timeout == label else "exited",
+                       "exit_code": 1 if failure == label or manual_failure else 0}
             d.write_json(evidence.path / (label + ".mock-receipt.json"), receipt)
             d.require(receipt["classification"] == "exited", "stage-timeout")
             d.require(receipt["exit_code"] == 0, "stage-failed")
@@ -437,12 +483,12 @@ class FilesystemTests(unittest.TestCase):
         result = json.loads((path / "result.json").read_text())
         self.assertTrue(result["successful"])
         self.assertTrue(result["ownedHmrMetadataRestored"])
-        self.assertTrue(result["ownedUiMetadataUnchanged"])
+        self.assertNotIn("ownedUiMetadataUnchanged", result)
         self.assertTrue(result["proposal_only"])
         self.assertFalse(result["independently_qualified"])
         self.assertEqual((path / "refresh.patch").read_bytes(), b"GIT binary patch\n")
 
-    def test_all_three_originals_and_proposals_including_unchanged_are_retained(self):
+    def test_all_twenty_two_originals_and_proposals_including_unchanged_are_retained(self):
         status, stages, path, checks = self.pipeline()
         original = json.loads((path / "original.candidates.json").read_text())
         refreshed = json.loads((path / "refresh.candidates.json").read_text())
@@ -450,7 +496,8 @@ class FilesystemTests(unittest.TestCase):
         self.assertEqual(set(original), d.CANDIDATES)
         self.assertEqual(set(refreshed), d.CANDIDATES)
         self.assertEqual(refreshed, replayed)
-        self.assertNotIn(d.UI_ORACLE, original)
+        self.assertEqual(len(original), 22)
+        self.assertIn(d.UI_ORACLE, original)
         self.assertNotIn(d.HMR_SOURCE, original)
         for name in d.CANDIDATES:
             self.assertEqual((path / "blobs" / original[name]["sha256"]).read_bytes(), ("original:" + name).encode())
@@ -458,7 +505,7 @@ class FilesystemTests(unittest.TestCase):
         self.assertEqual(original[d.OWNER + "system-prompt.expected.md"], refreshed[d.OWNER + "system-prompt.expected.md"])
         inventory = json.loads((path / "replay.inventory.json").read_text())
         self.assertEqual(inventory[d.HMR_SOURCE]["sha256"], d.digest(b"input"))
-        self.assertEqual(inventory[d.UI_ORACLE]["sha256"], d.digest(b"input"))
+        self.assertEqual(inventory[d.UI_ORACLE]["sha256"], d.digest(("original:" + d.UI_ORACLE).encode()))
 
     def test_source_binding_includes_hmr_gate_scaffold_scripts_and_lock(self):
         status, stages, path, checks = self.pipeline()
@@ -467,7 +514,8 @@ class FilesystemTests(unittest.TestCase):
         self.assertEqual(binding["lock_sha256"], d.digest(b"input"))
         self.assertEqual(binding["session_format_version"], 3)
         self.assertEqual(binding["all_generator_inputs"], "original.inventory.json")
-        for name in (d.WORKFLOW, d.DRIVER, d.TEST, d.HMR_SOURCE, d.HMR_TEST, "apps/web/tests/scaffold.ts", "scripts/run-web-snapshots.ts"):
+        for name in (d.WORKFLOW, d.DRIVER, d.TEST, d.HMR_SOURCE, d.HMR_TEST, *d.TARGET_FILES,
+                     "apps/web/tests/scaffold.ts", "scripts/run-web-snapshots.ts"):
             self.assertEqual(binding["input_sha256"][name], d.digest(b"input"))
         self.assertEqual(json.loads((path / "tool-versions.json").read_text())["pnpm"], "11.7.0")
 
@@ -480,6 +528,21 @@ class FilesystemTests(unittest.TestCase):
         self.assertFalse(json.loads((path / "result.json").read_text())["successful"])
         self.assertEqual(json.loads((path / "refresh.mock-receipt.json").read_text())["exit_code"], 1)
 
+    def test_manual_compact_cleanup_error_is_a_strict_refresh_failure(self):
+        status, stages, path, checks = self.pipeline(failure="manual-compact")
+        self.assertEqual(status, 1)
+        self.assertEqual(stages, ["refresh"])
+        result = json.loads((path / "result.json").read_text())
+        self.assertFalse(result["successful"])
+        self.assertEqual(result["error_code"], "stage-failed")
+        self.assertIn("AggregateError", (path / "refresh.mock.stderr").read_text())
+        self.assertEqual(json.loads((path / "refresh.mock-receipt.json").read_text())["exit_code"], 1)
+        proposals = json.loads((path / "refresh.candidates.json").read_text())
+        self.assertEqual(len(proposals), 22)
+        name = "snapshots/web/manual-compact-model-selection/checkpoint.expected.md"
+        self.assertEqual((path / "blobs" / proposals[name]["sha256"]).read_bytes(), b"partial-manual-checkpoint")
+        self.assertIn(("refresh", "index"), checks)
+
     def test_replay_failure_with_restored_hmr_remains_unsuccessful(self):
         status, stages, path, checks = self.pipeline(failure="replay")
         self.assertEqual(status, 1)
@@ -490,11 +553,13 @@ class FilesystemTests(unittest.TestCase):
         self.assertTrue(result["ownedHmrMetadataRestored"])
         self.assertEqual(result["error_code"], "stage-failed")
 
-    def test_ui_content_change_stops_before_replay(self):
+    def test_cordis_ui_content_proposal_requires_successful_full_replay(self):
         status, stages, path, checks = self.pipeline(mutation="ui-content")
-        self.assertEqual(status, 1)
-        self.assertEqual(stages, ["refresh"])
-        self.assertEqual(json.loads((path / "result.json").read_text())["error_code"], "non-candidate-refresh-mutation")
+        self.assertEqual(status, 0)
+        self.assertEqual(stages, ["refresh", "replay"])
+        self.assertTrue(json.loads((path / "result.json").read_text())["successful"])
+        proposals = json.loads((path / "refresh.candidates.json").read_text())
+        self.assertEqual(proposals[d.UI_ORACLE]["sha256"], d.digest(b"changed-aria"))
         self.assertEqual((path / "blobs" / d.digest(b"changed-aria")).read_bytes(), b"changed-aria")
 
     def test_hmr_unrestored_content_fails_and_is_not_flagged_restored(self):
