@@ -229,13 +229,19 @@ describe('CI workflow', () => {
     } })
     const units = steps.findIndex(step => typeof step.run === 'string' && step.run.includes('test_prepare_auto_snapshot_goldens.py'))
     const install = steps.findIndex(step => typeof step.run === 'string' && step.run.includes('pnpm install --frozen-lockfile'))
-    const host = steps.findIndex(step => typeof step.run === 'string' && step.run.includes('pnpm run build:lib:host'))
+    const browser = steps.findIndex(step => typeof step.run === 'string'
+      && step.run.includes('pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install --with-deps chromium'))
+    const build = steps.findIndex(step => typeof step.run === 'string'
+      && step.run.includes('pnpm run build 2>&1'))
     const review = steps.findIndex(step => step.id === 'review')
     expect(units).toBeGreaterThanOrEqual(0)
     expect(install).toBeGreaterThan(units)
-    expect(host).toBeGreaterThan(install)
-    expect(review).toBeGreaterThan(host)
-    for (const index of [units, install, host, review]) {
+    expect(browser).toBeGreaterThan(install)
+    expect(build).toBeGreaterThan(browser)
+    expect(review).toBeGreaterThan(build)
+    expect(steps[build]?.run).toBe('set -euo pipefail\npnpm run build 2>&1 | tee "$AUTO_SNAPSHOT_SETUP_DIR/full-build.log"\n')
+    expect(steps[browser]?.run).toBe('set -euo pipefail\npnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install --with-deps chromium 2>&1 | tee "$AUTO_SNAPSHOT_SETUP_DIR/chromium-install.log"\n')
+    for (const index of [units, install, browser, build, review]) {
       expect(steps[index]).not.toHaveProperty('continue-on-error')
       expect(steps[index]).not.toHaveProperty('if')
     }

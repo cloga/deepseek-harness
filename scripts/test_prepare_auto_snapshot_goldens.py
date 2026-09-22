@@ -61,7 +61,7 @@ class Guards(unittest.TestCase):
         with self.assertRaises(d.Refusal):
             d.guard_environment(dict(environment(), NODE_OPTIONS="--import=/evil"), "Linux")
 
-    def test_child_is_source_mode_and_keyless(self):
+    def test_child_is_lib_mode_and_keyless(self):
         env = dict(environment(), DSH_EXAMPLE_MODE="lib", DSH_SNAPSHOT="record", API_KEY="secret",
                    GH_TOKEN="secret", NODE_OPTIONS="--import=/evil", DSH_TEST_TIMEOUT="900000",
                    HOME="/home/runner", NODE_EXTRA_CA_CERTS="/trusted/cert.pem")
@@ -70,10 +70,25 @@ class Guards(unittest.TestCase):
             self.assertEqual(child["DSH_SNAPSHOT"], mode)
             self.assertEqual(child["HOME"], env["HOME"])
             self.assertEqual(child["NODE_EXTRA_CA_CERTS"], env["NODE_EXTRA_CA_CERTS"])
-            for key in ("DSH_EXAMPLE_MODE", "API_KEY", "GH_TOKEN", "NODE_OPTIONS", "DSH_TEST_TIMEOUT"):
+            self.assertEqual(child["DSH_EXAMPLE_MODE"], "lib")
+            for key in ("API_KEY", "GH_TOKEN", "NODE_OPTIONS", "DSH_TEST_TIMEOUT"):
                 self.assertNotIn(key, child)
         with self.assertRaises(d.Refusal):
             d.child_environment(env, "record")
+
+    def test_lib_mode_is_owned_and_cannot_inherit_arbitrary_values(self):
+        for mode in (None, "refresh", "replay"):
+            for inherited in (None, "", "source", "lib", "arbitrary-override"):
+                with self.subTest(mode=mode, inherited=inherited):
+                    env = environment()
+                    if inherited is not None:
+                        env["DSH_EXAMPLE_MODE"] = inherited
+                    child = d.child_environment(env, mode)
+                    self.assertEqual(child["DSH_EXAMPLE_MODE"], "lib")
+                    self.assertEqual(child["DSH_TELEMETRY_DISABLED"], "1")
+                    if mode is not None:
+                        self.assertEqual(child["DSH_SNAPSHOT"], mode)
+                    self.assertEqual(env.get("DSH_EXAMPLE_MODE"), inherited)
 
     def test_telemetry_is_always_disabled_without_forwarding_dsh_knobs(self):
         for mode in (None, "refresh", "replay"):
@@ -321,7 +336,7 @@ class FilesystemTests(unittest.TestCase):
             self.assertEqual(env["DSH_SNAPSHOT"], "refresh" if label.startswith("refresh-") else "replay")
             self.assertEqual(timeout, d.STAGE_SECONDS if label.startswith("refresh-") else d.REPLAY_SECONDS)
             self.assertEqual(accepted, (0, 1) if label == "refresh-pass1" else (0,))
-            self.assertNotIn("DSH_EXAMPLE_MODE", env)
+            self.assertEqual(env["DSH_EXAMPLE_MODE"], "lib")
             if label.startswith("refresh-"):
                 output.write_bytes(b"proposal" if label == "refresh-pass1" else b"second-proposal")
                 if mutation == "source" or (mutation == "second-source" and label == "refresh-pass2"):
@@ -344,7 +359,7 @@ class FilesystemTests(unittest.TestCase):
              mock.patch.object(d, "source_guard", return_value=source_binding), \
              mock.patch.object(evidence, "git", side_effect=git), \
              mock.patch.object(evidence, "run", side_effect=run):
-            status = d.execute(self.root, dict(self.env, DSH_EXAMPLE_MODE="lib"))
+            status = d.execute(self.root, dict(self.env, DSH_EXAMPLE_MODE="untrusted-inherited-mode"))
         return status, stages, evidence.path
 
     def test_pipeline_zero_first_exit_still_runs_two_refreshes_and_replay_source_bound(self):

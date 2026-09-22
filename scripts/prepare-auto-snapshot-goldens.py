@@ -76,7 +76,8 @@ def child_environment(env, mode=None):
     if mode is not None:
         require(mode in ("refresh", "replay"), "invalid-stage-mode")
         result["DSH_SNAPSHOT"] = mode
-    result.pop("DSH_EXAMPLE_MODE", None)
+    # Match the established CI snapshot gate; never inherit a different mode.
+    result["DSH_EXAMPLE_MODE"] = "lib"
     return result
 
 
