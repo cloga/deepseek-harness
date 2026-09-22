@@ -613,6 +613,26 @@ describe('PluginManagerPage', () => {
     expect(document.querySelector('[data-plugin-package]')).toBeNull()
   })
 
+  it.each([en, zh])('shows every selected bundle without claiming active packages: $preparedSelectionTargets', (dict) => {
+    const selection = { schemaVersion: 2, kind: 'selection', transactionId: '44444444-4444-4444-8444-444444444444',
+      state: 'prepared', packageNames: ['@fixture/alpha', '@fixture/beta'], baseFingerprint: 'd'.repeat(64), health: 'pending' } as const
+    const { actions, setLanguage } = renderTab({ pendingPackages: [PREPARED, selection] }, {}, {}, true)
+    setLanguage(dict)
+    const statuses = screen.getAllByRole('status')
+    expect(statuses).toHaveLength(2)
+    expect(statuses[0]?.textContent).toContain(`${PREPARED.packageName}: ${dict.preparedNotice.replace('{id}', PREPARED.transactionId)}`)
+    const selected = statuses[1]!
+    expect(selected.textContent).toContain(dict.preparedSelectionTargets.replace('{names}', '@fixture/alpha, @fixture/beta'))
+    expect(selected.textContent).toContain(dict.preparedNotice.replace('{id}', selection.transactionId))
+    expect(document.querySelector('[data-plugin-package]')).toBeNull()
+    expect(screen.queryByRole('switch')).toBeNull()
+    fireEvent.click(within(selected).getByRole('button', { name: dict.discardPrepared }))
+    expect(actions.cancelPrepared).toHaveBeenCalledExactlyOnceWith(selection.transactionId)
+    expect(actions.uninstall).not.toHaveBeenCalled()
+    expect(actions.setEnabled).not.toHaveBeenCalled()
+    expect(actions.runInstall).not.toHaveBeenCalled()
+  })
+
   it('keeps pending stages read-only when no discard action is supplied and inventory is loading', () => {
     renderTab({ status: 'loading', pendingPackages: [PREPARED] })
     expect(screen.getByRole('status').textContent).toContain(en.preparedNotice.replace('{id}', PREPARED.transactionId))

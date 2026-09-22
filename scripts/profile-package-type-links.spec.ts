@@ -13,7 +13,10 @@ it('classifies staging with its declaration owner and actual manager consumer', 
   expect(roles[0]).toMatchObject({ pkg: 'app-boot', mode: 'core', consumers: ['plugin-manager'] })
 })
 
-it.each(['ProfilePackageMutation', 'ProfilePreparedPackageChange', 'ProfileVerifiedReleaseSource'])(
+it.each([
+  'ProfilePackageMutation', 'ProfilePreparedPackageChange', 'ProfilePreparedBundleSelection',
+  'ProfilePendingPackageChange', 'ProfileVerifiedReleaseSource',
+])(
   'links %s to authored boot documentation instead of exempting it', (name) => {
     expect(LINK_MAP[name]).toBe('boot.md')
     expect(FOUNDATION_TYPE_NAMES.has(name)).toBe(false)

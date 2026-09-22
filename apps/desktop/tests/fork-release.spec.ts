@@ -49,6 +49,28 @@ function readReleaseWorkflow(): ReleaseWorkflow {
   return load(readFileSync(resolve(repositoryRoot, '.github', 'workflows', 'desktop-fork-release.yml'), 'utf8')) as ReleaseWorkflow
 }
 
+function assertPackagedPluginCommandAcceptance(workflow: ReleaseWorkflow): void {
+  const steps = workflow.jobs.build!.steps
+  const packaging = steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')
+  const command = steps.findIndex(step => step.name === 'Verify packaged plugin command and native cancellation')
+  const finalize = steps.findIndex(step => step.name === 'Finalize release manifest and receipts')
+  expect(command).toBeGreaterThan(packaging)
+  expect(finalize).toBeGreaterThan(command)
+  const step = steps[command]!
+  expect(step).not.toHaveProperty('if')
+  expect(step).not.toHaveProperty('continue-on-error')
+  expect(step).toMatchObject({ id: 'plugin_command_acceptance', 'timeout-minutes': 12 })
+  expect(step.run).toContain('apps/desktop/tests/fixtures/desktop-plugin-command-smoke.ts')
+  expect(step.run).toContain('--application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe')
+  expect(step.run).toContain('--output dist/desktop-plugin-command-acceptance')
+  const upload = steps.find(candidate => candidate.with?.name === 'desktop-plugin-command-acceptance-${{ steps.plan.outputs.version }}')
+  expect(upload).toMatchObject({
+    uses: 'actions/upload-artifact@v4',
+    if: "${{ !cancelled() && (steps.plugin_command_acceptance.outcome == 'success' || steps.plugin_command_acceptance.outcome == 'failure') }}",
+    with: { path: 'dist/desktop-plugin-command-acceptance/**', 'if-no-files-found': 'error' },
+  })
+}
+
 function assertMetadataAuthScope(workflow: ReleaseWorkflow): void {
   expect(workflow.env ?? {}).not.toHaveProperty(metadataTokenEnv)
   const authenticatedSteps: string[] = []
@@ -213,6 +235,18 @@ describe('Desktop fork release plan', () => {
     assertQualificationGate(readReleaseWorkflow())
   })
 
+  it('requires independent packaged plugin command acceptance before release finalization', () => {
+    assertPackagedPluginCommandAcceptance(readReleaseWorkflow())
+  })
+
+  it.each(['missing', 'optional', 'skipped'] as const)('rejects %s packaged command acceptance', (mode) => {
+    const workflow = readReleaseWorkflow()
+    const steps = workflow.jobs.build!.steps
+    const index = steps.findIndex(step => step.name === 'Verify packaged plugin command and native cancellation')
+    if (mode === 'missing') steps.splice(index, 1)
+    else Object.assign(steps[index]!, mode === 'optional' ? { 'continue-on-error': true } : { if: 'false' })
+    expect(() => { assertPackagedPluginCommandAcceptance(workflow) }).toThrow()
+  })
   it.each([
     'missing', 'duplicate', 'before-upgrade', 'after-seal', 'conditional', 'continue-on-error',
     'wrong-source', 'public-summary-path', 'swallowed-exit', 'diagnostic-for-release', 'unguarded-diagnostic',
@@ -347,7 +381,7 @@ describe('Desktop fork release plan', () => {
       schemaVersion: 2,
       channel: 'cloga-windows-x64',
       version: '0.1.6-alpha.2.cloga.1',
-      sequence: 31,
+      sequence: 32,
       upstreamVersion: '0.1.6-alpha.2',
       migration: {
         owner: 'cloga/dsh-windows-ops',
@@ -392,7 +426,7 @@ describe('Desktop fork release plan', () => {
       mode: 'github-release-managed',
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
-      currentSequence: 31,
+      currentSequence: 32,
       minimumSequence: 2,
       provisioning: {
         capability: { id: 'desktopNativePluginProvisioning' },

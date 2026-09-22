@@ -92,7 +92,7 @@ function expectedAfter(input: DesktopPreparedPackageActivation, before: string |
   const verified = input.verifiedRelease
   if (verified === undefined || input.mutation.kind !== 'install' || input.mutation.source.type !== 'githubRelease'
     || JSON.stringify(verified.source) !== JSON.stringify(input.mutation.source)
-    || verified.packageName !== input.prepared.packageName) fail()
+    || !('packageName' in input.prepared) || verified.packageName !== input.prepared.packageName) fail()
   const owner = provisioningOwner(input)
   const previous = store(before)
   if (Object.hasOwn(previous.receipts, verified.packageName) || Object.hasOwn(previous.owners, verified.packageName)) fail()
@@ -109,7 +109,7 @@ function expectedAfter(input: DesktopPreparedPackageActivation, before: string |
 }
 
 function expectedProvisioningState(input: DesktopPreparedPackageActivation, after: string): string {
-  if (provisioningOwner(input) !== 'release' || input.provisioning === undefined) fail()
+  if (provisioningOwner(input) !== 'release' || input.provisioning === undefined || !('packageName' in input.prepared)) fail()
   const receipt = store(after).receipts[input.prepared.packageName]
   if (receipt === undefined) fail()
   const state = buildDesktopProvisioningState({ schemaVersion: 1, mode: 'exact',
@@ -119,6 +119,7 @@ function expectedProvisioningState(input: DesktopPreparedPackageActivation, afte
 }
 
 function targetEnabled(input: DesktopPreparedPackageActivation): boolean {
+  if (!('packageName' in input.prepared)) fail()
   const manifest = readOptional(join(input.owner.profile, 'package.json'))
   if (manifest === null) fail()
   const value: unknown = JSON.parse(manifest)
@@ -161,6 +162,11 @@ export function desktopReceiptFileTransitions(proof: DesktopReceiptTransition): 
  * @returns Proof, or undefined for disabled/nonverified manual packages and removals.
  */
 export function prepareDesktopPackageReceipt(input: DesktopPreparedPackageActivation): DesktopReceiptTransition | undefined {
+  if (input.mutation.kind === 'selection') {
+    if (input.verifiedRelease !== undefined || input.provisioning !== undefined || input.registryTarget !== undefined
+      || !('kind' in input.prepared) || input.prepared.kind !== 'selection') fail()
+    return undefined
+  }
   if (input.verifiedRelease === undefined || !targetEnabled(input)) {
     if (input.provisioning !== undefined) fail()
     return undefined

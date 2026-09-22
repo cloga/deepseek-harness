@@ -22,7 +22,9 @@
 
 `ProfilePackageMutation` 选择 `install` 或 `remove`。安装携带结构化来源、可选的组合包启用状态以及可选的构建审批请求；移除则指定包名。Launcher 负责来源校验、支持的操作和暂存准备，Plugin Manager 仍是面向用户的入口。
 
-`ProfilePreparedPackageChange` 包含事务 id、`prepared` 状态、包名、基线指纹和准备阶段的健康状态。它既不是已激活收据，也不代表运行中的 Host 已健康就绪。待处理查询读取 launcher 的固定 profile；取消操作丢弃暂存变更，而不移除已激活的插件。
+`ProfilePreparedPackageChange` 保留安装／移除结果的五个字段：事务 id、`prepared` 状态、包名、基线指纹和准备阶段的健康状态。普通暂存及 `ChangeResult.prepared` 继续使用该结果，不接受组合包选择记录。
+
+`ProfilePreparedBundleSelection` 标识 schema 2、种类为 `selection` 的待处理记录，以实际排序且唯一的包名列表代替单一包名。`ProfilePendingPackageChange` 是仅用于待处理／状态／列表查询的联合类型。这些记录既不是已激活收据，也不证明运行中的 Host 健康，更不构成激活授权。待处理查询读取 launcher 的固定 profile；取消操作丢弃暂存变更，而不移除已激活的插件。
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 

@@ -40,13 +40,13 @@ Node 准备内置解释器和 Python 库，无需系统 Python 或 pip。[下载
 | 插件变更 | Desktop 与 Web 需要一致的安装和激活行为。 | 主应用使用共享 Web 插件管理器和内置 pnpm。 |
 | 更新 | 桌面壳与 dsh 独立更新会重新产生版本分裂，而桌面壳未变化的数据块不应强制完整传输。 | Electron 壳、匹配的 dsh 运行时与 pnpm 组成一个已签名更新单元。平台更新产物可以复用未变化的数据块，但运行时版本选择绝不脱离 Desktop 发布。 |
 
-[薄壳决策](../../.agents/notes/implemented/architecture/2026-09-10-desktop-web-wrapper.zh.md)负责共享 Web 行为与 Desktop 适配。[Electron 打包与更新决策](../../.agents/notes/implemented/architecture/2026-08-25-electron-desktop-packaging-and-updates.zh.md)负责发布身份、签名及更新验收。
+[薄壳决策](../../.agents/notes/implemented/architecture/2026-09-10-desktop-web-wrapper.zh.md)负责共享 Web 行为与 Desktop 适配。[Electron 打包与更新决策](../../.agents/notes/implemented/architecture/2026-08-25-electron-desktop-packaging-and-updates.zh.md)负责发布身份、签名及更新验收。[插件 slash command 决策](../../.agents/notes/implemented/feature/2026-09-20-desktop-plugin-slash-command.zh.md)负责受信命令桥接和命令来源的原生确认。
 
 ## 安装归属
 
 Electron 拥有 `$DSH_HOME/profiles/desktop`。其 `dependencies` 包含 pnpm 安装的包；`dsh.profile.bundles` 包含内置 bundle，后接已启用插件。签名应用从 `resources/app.asar/dsh` 提供 dsh、私有 Desktop Host 及其生产依赖。打包应用选择 runtime profile 解析，不创建包链接；开发 profile 使用文件系统链接。宿主与插件在同一个 Electron Node 模式进程中执行；Desktop 不启用 `--preserve-symlinks`。CLI 不能启动或修改此 profile。
 
-应用 preload 暴露启动就绪、致命启动失败上报和原生目录选择。产品页面使用共享认证 HTTP API，并获得 Desktop 标记、更新展示数据和打开原生确认的操作，不能选择安装产物或授权安装。插件管理使用 Web 应用经过认证的 HTTP API；Electron 不提供插件管理 IPC 或独立管理页面。任何渲染器都不获得文件系统访问、原始 Electron IPC、shell 或任意 pnpm 参数。
+应用 preload 暴露启动就绪、致命启动失败上报和原生目录选择。产品页面使用共享认证 HTTP API，并获得 Desktop 标记、更新展示数据和打开原生确认的操作，不能选择安装产物或授权安装。插件管理使用 Web 应用经过认证的 HTTP API；Electron 不向渲染器提供插件管理 IPC 或独立管理页面。任何渲染器都不获得文件系统访问、原始 Electron IPC、shell 或任意 pnpm 参数。
 
 产品 UI 保留 Web 操作，包括通过共享认证 HTTP 路由执行的“打开方式…”。Desktop 使用 Web 的自动目录选择机制，并以共享 Web 模板的 bundle 列表初始化新 profile。
 
@@ -81,6 +81,12 @@ Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.
 原生弹窗详情最多包含 1,200 个 UTF-16 代码单元和八行诊断；完整的已报告错误写入 Electron 控制台。Host 错误诊断仅保留 stderr 输出的最后 64 Ki 个字符。更早的输出会被丢弃，避免长期运行的 Host 使壳的诊断缓冲区无限增长。
 
 恢复操作等待 Host 关闭后才修改插件启用状态。原生恢复操作在 profile 事务锁内调用共享 app-boot 恢复函数。它禁用第三方 bundle，并将 profile 的 `cordis.patch.yml` 重命名为 `cordis.patch.yml.bak-<timestamp>`（重名时追加序号），无需解析；下次启动创建空 patch。已安装包和已有备份保留。home 级 patch 不变。Electron 控制台记录备份路径（或原文件不存在）以及 home 级 patch 未修改。profile 数据无效、重命名失败或写入失败会作为恢复操作错误报告；已完成的修改保留，Desktop 不会假装恢复成功后重启。Desktop 不提供 profile 重置操作或应急 HTML 文档。
+
+### Desktop 插件命令
+
+内置 `/desktop-plugin` 命令通过 alpha2 上同一 fork 启动器持有的暂存与激活所有者提供清单查询、npm／GitHub／已验证 Release 安装、移除、仅限 registry 的更新以及组合包选择。它不扩大 preload，也不授予 CLI 对保留 profile 的访问权。本地路径和任意 URL 被排除，因为 Session 工作目录不是 profile 的包解析基准。[命令决策](../../.agents/notes/implemented/feature/2026-09-20-desktop-plugin-slash-command.zh.md)定义支持的输入与持久化结算。
+
+已准备的命令不代表变更已应用。匹配的命令完成记录必须成功落盘，随后才能进行默认取消的原生确认。尚未获准写入激活日志的命令准备，不能通过普通 Web 审阅或重启后的自动流程激活；准入前取消只请求丢弃该命令自己的候选，并保留清理失败状态。普通 Web“稍后”仍保留其准备。选择变更保留包字节、来源锁、receipt 和归属；disable-all 准备一个原子目标集合，而不是逐包执行独立事务。
 
 ### Fork 安全扩展
 
@@ -253,7 +259,7 @@ pnpm run package:desktop:win:x64:unsigned
 
 ### Fork 拥有的 Windows 发布
 
-最新验证的发布元数据标识不可变的 `0.1.6-alpha.1.cloga.16`，sequence 为 27，包含内置 Core `0.1.6-alpha.1` 和 Copilot `0.4.0-alpha.33`（Release 392765616）。五个原始配套资产、源码绑定和校验和已核验；安装器未下载或逐字节验证，且该 workflow 不包含安装升级通道。这些仅涉及元数据的观察不构成原生安装验收或 Ops 晋级；Ops 自行维护经过独立验收的部署 lock。alpha2 候选版本仍为 `0.1.6-alpha.2.cloga.1`，使用 Copilot `0.4.0-alpha.35`，暂定 sequence 为 31；候选版本不会预留 sequence，发布前必须重新检查通道。其 plan 不构成发布或已安装升级证据。安装器升级 fixture（测试前置数据）仍锁定 `0.1.6-alpha.1.cloga.2`，sequence 为 12，使用 Copilot alpha.24，不证明从 `.cloga.16` 升级已通过验收。
+[经过评审的源码 plan](release/cloga-windows-x64.json)固定候选 Desktop、Core 和插件身份及暂定 sequence。发布前重新检查已发布和正在发布的版本：分支不会预留 sequence，plan 或构建成功也不构成已发布产物或已安装升级证据。[安装器升级基线](tests/fixtures/windows-upgrade-baseline.json)仍为 `0.1.6-alpha.1.cloga.2`、sequence 12、Copilot alpha.24；其验收不证明从所有后续版本升级均已通过。可选的 Ops 部署 lock 和验收与产品发布完成保持独立。
 
 `release/cloga-windows-x64.json` 中经过评审的 plan 同时推进语义版本与整数 sequence。每次手动触发 `Desktop fork release (Windows x64)` workflow 都必须提供 `confirm_version` 与 `expected_source_sha`。安装依赖之前，源码锁定值必须恰好为 40 个小写十六进制字符，并与检出的 `HEAD` 完全一致；确认未变的版本号不代表授权较新的 commit。Workflow 固定 Node 24.13.0 与 pnpm 11.7.0，从冻结 lockfile 安装，测试 Desktop，打包固定 cloga 身份，并验证独立 helper、capability、未签名 installer、已安装 executable、runtime descriptor 与原生/托管互斥。
 

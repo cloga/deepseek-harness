@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest'
-import type { ProfilePackageTransactions, ProfilePreparedPackageChange } from '@deepseek-ai/dsh-app-boot'
+import type { ProfilePackageTransactions, ProfilePreparedPackageChange, ProfilePreparedBundleSelection } from '@deepseek-ai/dsh-app-boot'
 import { DesktopPackageTransactionIpc } from '../src/package-transaction-ipc.ts'
 
 const transactionId = '11111111-1111-4111-8111-111111111111'
@@ -44,6 +44,42 @@ it('forwards only a validated staged mutation and keeps its request identity', a
   const mutation = { kind: 'install', source: { schemaVersion: 1, type: 'packageSpec', spec: 'plugin' }, enabled: false } as const
   expect(await ipc.handle(request('stage', { requestId: transactionId, mutation }))).toMatchObject({ ok: true, value: prepared })
   expect(backend.stage).toHaveBeenCalledExactlyOnceWith(transactionId, mutation, expect.any(AbortSignal))
+})
+
+it('exposes versioned selection pending state without widening the public stage request or result', async () => {
+  const { backend, ipc } = fixture()
+  const selection: ProfilePreparedBundleSelection = {
+    schemaVersion: 2, kind: 'selection', transactionId, state: 'prepared', packageNames: ['first', 'second'],
+    baseFingerprint: 'b'.repeat(64), health: 'pending',
+  }
+  backend.status.mockResolvedValue(selection)
+  backend.listPending.mockResolvedValue([prepared, selection])
+  expect(await ipc.handle(request('status', { transactionId }))).toMatchObject({ ok: true, value: selection })
+  expect(await ipc.handle(request('list'))).toMatchObject({ ok: true, value: [prepared, selection] })
+  expect(await ipc.handle(request('stage', { requestId: transactionId, mutation: { kind: 'selection', packageNames: ['first'], enabled: false } })))
+    .toMatchObject({ ok: false })
+  expect(backend.stage).not.toHaveBeenCalled()
+  // A faulty JavaScript backend cannot smuggle a selection result through the unchanged install/remove method.
+  backend.stage.mockResolvedValue(selection as unknown as ProfilePreparedPackageChange)
+  expect(await ipc.handle(request('stage', { requestId: transactionId, mutation: { kind: 'remove', name: 'first' } })))
+    .toMatchObject({ ok: false })
+})
+
+it('rejects malformed or foreign selection pending records rather than relabeling a package', async () => {
+  const { backend, ipc } = fixture()
+  const selection = { schemaVersion: 2, kind: 'selection', transactionId, state: 'prepared', packageNames: ['first'],
+    baseFingerprint: 'b'.repeat(64), health: 'pending' } as const
+  for (const invalid of [
+    { ...selection, packageNames: [] }, { ...selection, packageNames: ['second', 'first'] },
+    { ...selection, packageName: 'fake-target' }, { ...selection, generation: 'untrusted-authority' },
+  ]) {
+    backend.status.mockResolvedValue(invalid as unknown as ProfilePreparedBundleSelection)
+    backend.listPending.mockResolvedValue([invalid as unknown as ProfilePreparedBundleSelection])
+    expect(await ipc.handle(request('status', { transactionId }))).toMatchObject({ ok: false })
+    expect(await ipc.handle(request('list'))).toMatchObject({ ok: false })
+  }
+  backend.status.mockResolvedValue({ ...selection, transactionId: rpcId })
+  expect(await ipc.handle(request('status', { transactionId }))).toMatchObject({ ok: false })
 })
 
 it('aborts in-flight work without cancelling a durable prepare that wins the race', async () => {

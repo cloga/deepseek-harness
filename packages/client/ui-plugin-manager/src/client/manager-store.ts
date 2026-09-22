@@ -84,6 +84,11 @@ export interface PackageView {
 
 /** The existing Remote owns the complete Release descriptor vocabulary and validation. */
 type VerifiedReleaseSource = Exclude<Parameters<ClientContext['remote']['pluginManager']['installBundle']>[0], string>
+/** Pending inventory follows its Remote result; installation results remain the legacy single-package record. */
+type PendingPackageChanges = Extract<
+  Awaited<ReturnType<ClientContext['remote']['pluginManager']['listPendingPackageChanges']>>,
+  { ok: true }
+>['value']
 
 /** A Host-inspected package spec, or a Release descriptor still awaiting Host verification. */
 export type InstallSubject = (Extract<PluginSpecInspection, { status: 'accepted' }> | {
@@ -191,7 +196,7 @@ export interface PluginManagerState {
   readonly status: 'idle' | 'loading' | 'ready' | 'error' | 'unavailable'
   readonly packages: readonly PackageView[]
   /** Durable stages recovered from the launcher's profile owner after reconnect. */
-  readonly pendingPackages?: readonly NonNullable<ChangeResult['prepared']>[]
+  readonly pendingPackages?: PendingPackageChanges
   /** Package names and row keys with an action crossing the wire. */
   readonly busy: readonly string[]
   readonly notice: ManagerNotice | null

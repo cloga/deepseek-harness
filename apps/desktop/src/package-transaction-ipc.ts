@@ -1,5 +1,5 @@
 /** Fixed child-to-shell package protocol; no renderer can select paths or executables. */
-import { parseProfilePreparedChange, parseProfileTransactionId, type ProfilePackageTransactions, type ProfilePackageMutation } from '@deepseek-ai/dsh-app-boot'
+import { parseProfilePendingChange, parseProfilePreparedChange, parseProfileTransactionId, type ProfilePackageTransactions, type ProfilePackageMutation } from '@deepseek-ai/dsh-app-boot'
 import { parseDesktopPluginSource } from './plugin-source.ts'
 
 /** One Host connection, independent of the longer-lived staging backend. */
@@ -59,7 +59,7 @@ export class DesktopPackageTransactionIpc {
           keys(input, ['type', 'protocolVersion', 'rpcId', 'operation', 'transactionId'])
           const id = parseProfileTransactionId(input.transactionId)
           const record = await this.backend.status(id)
-          result = record === undefined ? null : parseProfilePreparedChange(record)
+          result = record === undefined ? null : parseProfilePendingChange(record)
           if (record !== undefined && record.transactionId !== id) throw new Error('desktop packages: status identity mismatch')
           break
         }
@@ -67,7 +67,7 @@ export class DesktopPackageTransactionIpc {
           keys(input, ['type', 'protocolVersion', 'rpcId', 'operation'])
           const list = await this.backend.listPending()
           if (!Array.isArray(list) || list.length > 100) throw new Error('desktop packages: pending record limit exceeded')
-          result = list.map(parseProfilePreparedChange)
+          result = list.map(parseProfilePendingChange)
           break
         }
         case 'abort': {

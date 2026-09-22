@@ -9,9 +9,10 @@ import { createGunzip } from 'node:zlib'
 import { t, type ReadEntry } from 'tar'
 import { valid, validRange, satisfies, subset } from 'semver'
 import {
-  loadOverlayPatches, parseProfilePreparedChange, parseProfileTransactionId,
+  loadOverlayPatches, parseProfilePreparedChange, parseProfilePendingChange, parseProfileTransactionId,
   prepareProfileRootConfig, readProfileManifest, withProfilePackageLease,
   type ProfilePackageMutation, type ProfilePackageTransactions, type ProfilePreparedPackageChange,
+  type ProfilePreparedBundleSelection, type ProfilePendingPackageChange,
 } from '@deepseek-ai/dsh-app-boot'
 import { acquireDesktopPluginArtifact, parseDesktopPluginSource, type DesktopVerifiedPluginArtifact } from './plugin-source.ts'
 import { acquireDesktopSourcePackage } from './plugin-package-artifact.ts'
@@ -23,6 +24,15 @@ import { desktopPackageReceiptPosition, desktopReceiptFileTransitions, desktopRe
 import { desktopPackageArtifactSpecifier, readDesktopPackageLocks, verifyDesktopPackageArtifact, writeDesktopPackageLocks, type DesktopPackageInstallLock } from './plugin-package-lock.ts'
 import { DESKTOP_RUNTIME_FILE, inventoryDesktopRuntime, readDesktopRuntime, runtimePath, type DesktopRuntimeDescriptor } from './runtime-tree.ts'
 import { readDesktopPackageActivationPhase } from './profile-package-activation.ts'
+import {
+  parseDesktopPackageCommandOrigin, parseDesktopPackageSelectionRequest, parseDesktopPackageSelectionMutation, parseDesktopRegistryUpdate,
+  type DesktopPackageCommandOrigin, type DesktopPackageCommandRequest,
+  type DesktopPackageSelectionRequest, type DesktopPackageSelectionMutation,
+} from './profile-package-command.ts'
+export type { DesktopPackageCommandOrigin, DesktopPackageSelectionRequest } from './profile-package-command.ts'
+
+/** Private selection intents share the existing stage/activation owner, not the public mutation request protocol. */
+export type DesktopPackageMutation = ProfilePackageMutation | DesktopPackageSelectionMutation
 import { DESKTOP_PLUGIN_PROVISIONING_STATE_FILE, buildDesktopProvisioningState, desktopPluginProvisioningPlanSha256, parseDesktopPluginProvisioningPlan, parseDesktopPluginProvisioningState, type DesktopPluginProvisioningPlan, type DesktopPluginProvisioningEntry, type DesktopPluginProvisioningState } from './plugin-provisioning.ts'
 
 /** A runner must disable inherited environment and resolve only after the child has exited, including on abort. */
@@ -105,8 +115,9 @@ export interface DesktopPreparedPackageActivation {
   /** Present on every real backend result; optional only for legacy shell test fixtures. */
   readonly intentFingerprint?: string
   readonly provisioning?: DesktopPreparedProvisioningContext
-  readonly mutation: ProfilePackageMutation
-  readonly prepared: ProfilePreparedPackageChange
+  readonly commandOrigin?: DesktopPackageCommandOrigin
+  readonly mutation: DesktopPackageMutation
+  readonly prepared: ProfilePendingPackageChange
   readonly candidateFingerprint: string
   readonly verifiedRelease?: Omit<DesktopVerifiedPluginArtifact, 'path'>
   readonly registryTarget?: DesktopPreparedRegistryTarget
@@ -134,6 +145,24 @@ export type DesktopProvisioningAssessment = {
 
 /** The additional reader is shell-private, not part of the remotely callable protocol. */
 export interface DesktopProfilePackageTransactions extends ProfilePackageTransactions {
+  /** @param requestId - New command-owned UUID. @param mutation - Existing data-only install/remove request.
+   * @param origin - Shell-stamped command identity, never activation permission. @param signal - Preparation cancellation.
+   * @returns Pending single-package preparation bound to the command origin.
+   */
+  stageCommand(requestId: string, mutation: ProfilePackageMutation, origin: DesktopPackageCommandOrigin,
+    signal: AbortSignal): Promise<ProfilePreparedPackageChange>
+  /** @param requestId - New command-owned UUID. @param request - Exact selection request; all is disable-only.
+   * @param origin - Shell-stamped command identity. @param signal - Preparation cancellation.
+   * @returns One atomic candidate with the actual eligible target set, not an installed package.
+   */
+  stageSelection(requestId: string, request: DesktopPackageSelectionRequest, origin: DesktopPackageCommandOrigin,
+    signal: AbortSignal): Promise<ProfilePreparedBundleSelection>
+  /** @param requestId - New command-owned UUID. @param name - Existing direct-registry package.
+   * @param version - Exact registry version. @param origin - Shell-stamped command identity. @param signal - Cancellation.
+   * @returns Registry replacement after the existing-target condition is checked under the profile lease.
+   */
+  stageRegistryUpdate(requestId: string, name: string, version: string, origin: DesktopPackageCommandOrigin,
+    signal: AbortSignal): Promise<ProfilePreparedPackageChange>
   /** Read under the common lease without mutating the profile.
    * @returns Evidence classification, with health still pending for exact matches.
    */
@@ -189,20 +218,24 @@ interface Identity {
 interface ConfigInput { path: string; sha256: string | null }
 interface InventoryEntry { path: string; kind: 'file' | 'directory' | 'link'; sha256?: string; target?: string }
 interface PreparedRecord {
-  schemaVersion: 1
+  schemaVersion: 1 | 2
+  commandOrigin?: DesktopPackageCommandOrigin
+  commandRequest?: DesktopPackageCommandRequest
+  selectionBaseManifest?: string
   owner: Identity
   requestFingerprint: string
-  result: ProfilePreparedPackageChange
+  result: ProfilePendingPackageChange
   baseFiles: InventoryEntry[]
   baseInputs: ConfigInput[]
   baseGraphFingerprint: string
   candidateFingerprint: string
-  mutation: ProfilePackageMutation
+  mutation: DesktopPackageMutation
   provisioning?: DesktopPreparedProvisioningContext
   verifiedRelease?: Omit<DesktopVerifiedPluginArtifact, 'path'>
   registryTarget?: DesktopPreparedRegistryTarget
 }
-interface Running { abort: AbortController; requestKey: string; done: Promise<ProfilePreparedPackageChange> }
+interface CommandPreparation { origin: DesktopPackageCommandOrigin; request: DesktopPackageCommandRequest }
+interface Running { abort: AbortController; requestKey: string; done: Promise<ProfilePendingPackageChange> }
 const NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/u
 const RECORD = 'PREPARED.json'
 const OWNER = 'owner.json'
@@ -407,8 +440,35 @@ function parseMutation(input: unknown): ProfilePackageMutation {
     ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
     ...(input.approvedBuilds === undefined ? {} : { approvedBuilds: [] }) }
 }
+function parseCommandRequest(value: unknown): DesktopPackageCommandRequest {
+  if (!record(value)) fail('invalid command preparation request')
+  if (value.kind === 'mutation' && Object.keys(value).sort().join(',') === 'kind,mutation') {
+    return { kind: 'mutation', mutation: parseMutation(value.mutation) }
+  }
+  if (value.kind === 'selection' && Object.keys(value).sort().join(',') === 'enabled,kind,names') {
+    return { kind: 'selection', ...parseDesktopPackageSelectionRequest({ names: value.names, enabled: value.enabled }) }
+  }
+  if (value.kind === 'registry-update' && Object.keys(value).sort().join(',') === 'kind,name,version') {
+    return parseDesktopRegistryUpdate(value.name, value.version)
+  }
+  return fail('invalid command preparation request')
+}
+function parsePreparedMutation(value: unknown): DesktopPackageMutation {
+  return record(value) && value.kind === 'selection' ? parseDesktopPackageSelectionMutation(value) : parseMutation(value)
+}
+function assertCommandMutation(request: DesktopPackageCommandRequest, mutation: DesktopPackageMutation): void {
+  if (request.kind === 'mutation') {
+    if (stable(request.mutation) !== stable(mutation)) fail('command mutation differs from its request')
+  } else if (request.kind === 'registry-update') {
+    const expected = { kind: 'install', source: { schemaVersion: 1, type: 'npmRegistry', spec: `${request.name}@${request.version}` } }
+    if (stable(expected) !== stable(mutation)) fail('registry update differs from its request')
+  } else if (mutation.kind !== 'selection' || mutation.enabled !== request.enabled
+    || (request.names !== 'all' && stable(mutation.packageNames) !== stable(request.names))) {
+    fail('selection differs from its request')
+  }
+}
 type RegistryRequest = Extract<ReturnType<typeof parseDesktopPluginInstallSpec>, { kind: 'registry' }>
-function registryRequestOf(mutation: ProfilePackageMutation, profile: string): RegistryRequest | undefined {
+function registryRequestOf(mutation: DesktopPackageMutation, profile: string): RegistryRequest | undefined {
   if (mutation.kind !== 'install' || mutation.source.type === 'githubRelease') return undefined
   const parsed = parseDesktopPluginInstallSpec(mutation.source.spec, profile)
   if (mutation.source.type === 'npmRegistry' && parsed.kind !== 'registry') fail('npmRegistry requires a registry package spec')
@@ -601,7 +661,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
   const runtimeDir = canonical(options.runtimeDir, true)
   const installAnchor = canonical(options.installAnchor, false)
   const dependencyRegistry = registryUrl(options.dependencyRegistry)
-  const checkSourceRegistry = (mutation: ProfilePackageMutation): void => {
+  const checkSourceRegistry = (mutation: DesktopPackageMutation): void => {
     if (mutation.kind === 'install' && mutation.source.type === 'githubRelease' && mutation.source.dependencyRegistry !== undefined
       && registryUrl(mutation.source.dependencyRegistry) !== dependencyRegistry) fail('source registry conflicts with the explicit profile registry policy')
   }
@@ -659,11 +719,85 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
     if (hash(readFileSync(planResource.file)) !== planResource.sha256
       || desktopPluginProvisioningPlanSha256(parseDesktopPluginProvisioningPlan(json(planResource.file))) !== planResource.planSha256) fail('packaged provisioning resource changed')
   }
-  const intentHash = (mutation: ProfilePackageMutation, provisioning?: DesktopPreparedProvisioningContext): string =>
-    hash(JSON.stringify(provisioning === undefined ? mutation : { mutation, provisioning }))
-  const requestKey = (mutation: ProfilePackageMutation, provisioning = false): string => hash(JSON.stringify(provisioning
-    ? { mutation, planSha256: planResource?.planSha256, planResourceSha256: planResource?.sha256 } : mutation))
-  const parseProvisioning = (value: unknown, mutation: ProfilePackageMutation): DesktopPreparedProvisioningContext | undefined => {
+  const selectionManifest = (text: string): Record<string, unknown> => {
+    const value: unknown = JSON.parse(text)
+    if (!record(value) || !record(value.dependencies) || !record(value.dsh) || !record(value.dsh.profile)
+      || !strings(value.dsh.profile.bundles) || new Set(value.dsh.profile.bundles).size !== value.dsh.profile.bundles.length
+      || value.dsh.profile.bundles.some(name => !NAME.test(name))) fail('invalid selection base manifest')
+    return value
+  }
+  const eligibleSelectionNames = (location: string, manifest: Record<string, unknown>): string[] => {
+    if (!record(manifest.dependencies)) fail('selection requires installed dependencies')
+    const names: string[] = []
+    for (const name of Object.keys(manifest.dependencies).sort()) {
+      if (!NAME.test(name)) fail('invalid installed package name')
+      if (name === '@deepseek-ai/dsh-base' || name === '@deepseek-ai/dsh-web-app'
+        || runtime.sharedPackages.some(shared => shared.name === name)) continue
+      const packagePath = realpathSync(join(location, 'node_modules', name))
+      if (!inside(location, packagePath)) fail('selection target escapes the owned profile')
+      const metadata = readProfileManifest('dsh', canonical(packagePath, true))
+      if (metadata.name !== name || typeof metadata.version !== 'string') fail('selection package identity mismatch')
+      const patch = metadata.dsh?.bundle?.patch
+      if (patch === undefined) continue
+      if (typeof patch !== 'string') fail('selection target has invalid bundle metadata')
+      const patchPath = canonical(resolve(packagePath, patch), false)
+      if (!inside(packagePath, patchPath)) fail('selection bundle patch escapes its package')
+      loadOverlayPatches('dsh', patchPath)
+      names.push(name)
+    }
+    return names
+  }
+  const resolveCommandMutation = (command: CommandPreparation): DesktopPackageMutation => {
+    const request = command.request
+    if (request.kind === 'mutation') return request.mutation
+    const manifest = selectionManifest(readFileSync(join(profile, 'package.json'), 'utf8'))
+    if (!record(manifest.dependencies)) fail('invalid command base dependencies')
+    if (request.kind === 'registry-update') {
+      if (!Object.hasOwn(manifest.dependencies, request.name)
+        || readDesktopPackageLocks(profile)[request.name] !== undefined
+        || readDesktopPluginReceipts(profile).receipts[request.name] !== undefined
+        || !isDirectRegistrySelector(request.name, manifest.dependencies[request.name], profile)) {
+        fail('registry update requires an existing direct registry target, not a source-owned package')
+      }
+      if (runtime.sharedPackages.some(shared => shared.name === request.name)) fail('cannot mutate a runtime-owned package')
+      const installed = json(join(realpathSync(join(profile, 'node_modules', request.name)), 'package.json'))
+      if (!record(installed) || installed.name !== request.name) fail('registry update requires an installed target')
+      return { kind: 'install', source: { schemaVersion: 1, type: 'npmRegistry', spec: `${request.name}@${request.version}` } }
+    }
+    const eligible = eligibleSelectionNames(profile, manifest)
+    const names = request.names === 'all' ? eligible : [...request.names]
+    if (names.some(name => !eligible.includes(name))) fail('selection requires installed eligible third-party bundles')
+    return parseDesktopPackageSelectionMutation({ kind: 'selection', packageNames: names, enabled: request.enabled })
+  }
+  const verifySelection = (location: string, value: Pick<PreparedRecord, 'mutation' | 'commandRequest' | 'selectionBaseManifest' | 'baseFiles'>): void => {
+    if (value.mutation.kind !== 'selection' || value.commandRequest?.kind !== 'selection'
+      || value.selectionBaseManifest === undefined) fail('selection record lacks its original request')
+    const manifest = selectionManifest(value.selectionBaseManifest)
+    const eligible = eligibleSelectionNames(location, manifest)
+    const names = value.commandRequest.names === 'all' ? eligible : value.commandRequest.names
+    if (stable(names) !== stable(value.mutation.packageNames) || names.some(name => !eligible.includes(name))) {
+      fail('selection target set differs from its original installed graph')
+    }
+    const dsh = manifest.dsh
+    if (!record(dsh) || !record(dsh.profile) || !strings(dsh.profile.bundles)) fail('invalid selection base')
+    const original = dsh.profile.bundles
+    dsh.profile.bundles = value.mutation.enabled
+      ? [...original, ...names.filter(name => !original.includes(name))] : original.filter(name => !names.includes(name))
+    if (stable(json(join(location, 'package.json'))) !== stable(manifest)) fail('selection candidate changed more than bundle selection')
+    const unchanged = (files: readonly InventoryEntry[]): readonly InventoryEntry[] => files.filter(entry => entry.path !== 'package.json')
+    if (stable(unchanged(inventory(location, false))) !== stable(unchanged(value.baseFiles))) {
+      fail('selection changed retained metadata or artifact bytes')
+    }
+  }
+  const intentHash = (mutation: DesktopPackageMutation,
+    provisioning?: DesktopPreparedProvisioningContext, command?: CommandPreparation): string =>
+    hash(JSON.stringify(command === undefined ? provisioning === undefined ? mutation : { mutation, provisioning }
+      : { mutation, commandOrigin: command.origin, commandRequest: command.request }))
+  const requestKey = (mutation: DesktopPackageMutation | undefined, provisioning = false, command?: CommandPreparation): string =>
+    hash(JSON.stringify(command === undefined ? provisioning
+      ? { mutation, planSha256: planResource?.planSha256, planResourceSha256: planResource?.sha256 } : mutation
+      : { commandOrigin: command.origin, commandRequest: command.request }))
+  const parseProvisioning = (value: unknown, mutation: DesktopPackageMutation): DesktopPreparedProvisioningContext | undefined => {
     if (value === undefined) return undefined
     if (fixedSource === undefined || planResource === undefined || !record(value)
       || Object.keys(value).sort().join(',') !== 'ownerDecision,planResourceSha256,planSha256,previousSelected,schemaVersion,source'
@@ -737,26 +871,56 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
     if (JSON.stringify(identity) !== JSON.stringify(owner)) fail('foreign transaction owner')
     if (!existsSync(join(root, RECORD))) return undefined
     const value = json(join(root, RECORD))
-    if (!record(value) || value.schemaVersion !== 1 || JSON.stringify(value.owner) !== JSON.stringify(owner)
-      || Object.keys(value).filter(key => key !== 'verifiedRelease' && key !== 'provisioning' && key !== 'registryTarget').sort().join(',') !== 'baseFiles,baseGraphFingerprint,baseInputs,candidateFingerprint,mutation,owner,requestFingerprint,result,schemaVersion'
+    if (!record(value)) fail('invalid prepared record')
+    const commandKeys = value.schemaVersion === 2 ? ['commandOrigin', 'commandRequest',
+      ...(record(value.mutation) && value.mutation.kind === 'selection' ? ['selectionBaseManifest'] : [])] : []
+    const requiredKeys = ['baseFiles', 'baseGraphFingerprint', 'baseInputs', 'candidateFingerprint', 'mutation',
+      'owner', 'requestFingerprint', 'result', 'schemaVersion', ...commandKeys].sort().join(',')
+    if ((value.schemaVersion !== 1 && value.schemaVersion !== 2) || JSON.stringify(value.owner) !== JSON.stringify(owner)
+      || Object.keys(value).filter(key => key !== 'verifiedRelease' && key !== 'provisioning' && key !== 'registryTarget').sort().join(',') !== requiredKeys
       || typeof value.requestFingerprint !== 'string' || !/^[a-f0-9]{64}$/u.test(value.requestFingerprint)
       || typeof value.candidateFingerprint !== 'string' || !/^[a-f0-9]{64}$/u.test(value.candidateFingerprint)
       || typeof value.baseGraphFingerprint !== 'string' || !/^[a-f0-9]{64}$/u.test(value.baseGraphFingerprint)
       || !array(value.baseFiles) || !array(value.baseInputs)) fail('invalid prepared record')
-    const result = parseProfilePreparedChange(value.result)
+    const command = value.schemaVersion === 2 ? {
+      origin: parseDesktopPackageCommandOrigin(value.commandOrigin), request: parseCommandRequest(value.commandRequest),
+    } : undefined
+    const mutation = command === undefined ? parseMutation(value.mutation) : parsePreparedMutation(value.mutation)
+    const result = mutation.kind === 'selection' ? parseProfilePendingChange(value.result) : parseProfilePreparedChange(value.result)
+    if (mutation.kind === 'selection') {
+      if (!('kind' in result) || result.kind !== 'selection' || stable(result.packageNames) !== stable(mutation.packageNames)) {
+        fail('selection result differs from its mutation')
+      }
+    }
+    const packageName = 'packageName' in result ? result.packageName : undefined
     if (result.transactionId !== id || result.health !== 'pending'
       || hash(JSON.stringify({ owner, files: value.baseFiles, inputs: value.baseInputs })) !== result.baseFingerprint) fail('prepared identity mismatch')
-    const mutation = parseMutation(value.mutation)
     checkSourceRegistry(mutation)
     const provisioning = parseProvisioning(value.provisioning, mutation)
-    if (intentHash(mutation, provisioning) !== value.requestFingerprint) fail('prepared request mismatch')
+    if (command !== undefined) {
+      if (provisioning !== undefined) fail('command preparation cannot claim provisioning authority')
+      assertCommandMutation(command.request, mutation)
+    }
+    if (intentHash(mutation, provisioning, command) !== value.requestFingerprint) fail('prepared request mismatch')
+    if (mutation.kind === 'remove' && packageName !== mutation.name) fail('prepared removal identifies another target')
+    let selectionBaseManifest: string | undefined
+    if (mutation.kind === 'selection') {
+      if (typeof value.selectionBaseManifest !== 'string' || Buffer.byteLength(value.selectionBaseManifest) > 8 * 1024 * 1024) {
+        fail('selection base manifest is missing or oversized')
+      }
+      selectionBaseManifest = value.selectionBaseManifest
+      const baseManifest = value.baseFiles.find(entry => record(entry) && entry.path === 'package.json')
+      if (!record(baseManifest) || baseManifest.kind !== 'file' || baseManifest.sha256 !== hash(selectionBaseManifest)) {
+        fail('selection base manifest does not match the original inventory')
+      }
+    }
     let verifiedRelease: Omit<DesktopVerifiedPluginArtifact, 'path'> | undefined
     if (mutation.kind === 'install' && mutation.source.type === 'githubRelease') {
       const verified = value.verifiedRelease
       if (!record(verified) || Object.keys(verified).sort().join(',') !== 'assetId,packageName,releaseId,source,version'
         || !Number.isSafeInteger(verified.releaseId) || (verified.releaseId as number) <= 0
         || verified.assetId !== mutation.source.assetId || verified.packageName !== mutation.source.packageName
-        || verified.version !== mutation.source.version || result.packageName !== mutation.source.packageName
+        || verified.version !== mutation.source.version || packageName !== mutation.source.packageName
         || JSON.stringify(parseDesktopPluginSource(verified.source)) !== JSON.stringify(mutation.source)) fail('invalid prepared Release evidence')
       verifiedRelease = { source: mutation.source, releaseId: verified.releaseId as number, assetId: mutation.source.assetId,
         packageName: mutation.source.packageName, version: mutation.source.version }
@@ -767,7 +931,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
       const target = value.registryTarget
       if (!record(target) || Object.keys(target).filter(key => key !== 'tarball').sort().join(',') !== 'integrity,packageKey,packageName,registry,requestedSpec,schemaVersion,version'
         || target.schemaVersion !== 1 || target.requestedSpec !== registryRequest.spec || target.registry !== dependencyRegistry
-        || target.packageName !== registryRequest.name || target.packageName !== result.packageName
+        || target.packageName !== registryRequest.name || target.packageName !== packageName
         || typeof target.version !== 'string' || valid(target.version) !== target.version
         || typeof target.packageKey !== 'string' || target.packageKey.length > 4096 || /[\u0000-\u001f\u007f]/u.test(target.packageKey)
         || (target.packageKey !== `${target.packageName}@${target.version}` && (!target.packageKey.startsWith(`${target.packageName}@${target.version}(`) || !target.packageKey.endsWith(')')))
@@ -781,19 +945,23 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
       owner, requestFingerprint: value.requestFingerprint, candidateFingerprint: value.candidateFingerprint,
     })
     if (discarded !== undefined && !allowDiscard) fail(discarded === 'discarded' ? 'transaction was explicitly discarded' : 'discard cleanup is incomplete')
+    const prepared: PreparedRecord = { schemaVersion: value.schemaVersion, owner, requestFingerprint: value.requestFingerprint, result,
+      baseFiles: value.baseFiles as InventoryEntry[], baseInputs: value.baseInputs as ConfigInput[],
+      baseGraphFingerprint: value.baseGraphFingerprint,
+      candidateFingerprint: value.candidateFingerprint, mutation,
+      ...(command === undefined ? {} : { commandOrigin: command.origin, commandRequest: command.request }),
+      ...(selectionBaseManifest === undefined ? {} : { selectionBaseManifest }),
+      ...(provisioning === undefined ? {} : { provisioning }),
+      ...(registryTarget === undefined ? {} : { registryTarget }),
+      ...(verifiedRelease === undefined ? {} : { verifiedRelease }) }
     if (!recovery) {
       const candidate = join(root, 'profile')
       canonical(candidate, true)
       if (fingerprint(inventory(candidate, true, runtimeDir)) !== value.candidateFingerprint) fail('prepared files changed')
       if (registryRequest !== undefined && stable(deriveRegistryTarget(candidate, registryRequest, dependencyRegistry)) !== stable(registryTarget)) fail('prepared registry resolution changed')
+      if (mutation.kind === 'selection') verifySelection(candidate, prepared)
     }
-    return { schemaVersion: 1, owner, requestFingerprint: value.requestFingerprint, result,
-      baseFiles: value.baseFiles as InventoryEntry[], baseInputs: value.baseInputs as ConfigInput[],
-      baseGraphFingerprint: value.baseGraphFingerprint,
-      candidateFingerprint: value.candidateFingerprint, mutation,
-      ...(provisioning === undefined ? {} : { provisioning }),
-      ...(registryTarget === undefined ? {} : { registryTarget }),
-      ...(verifiedRelease === undefined ? {} : { verifiedRelease }) }
+    return prepared
   }
   const activationInput = (id: string, value: PreparedRecord): DesktopPreparedPackageActivation => ({
     transactionDir: directory(id), candidateDir: join(directory(id), 'profile'), rollbackDir: join(directory(id), 'rollback'),
@@ -801,11 +969,12 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
       ...(owner.provisioningPlanResource === undefined ? {} : { provisioningPlanResource: { ...owner.provisioningPlanResource } }) },
     intentFingerprint: value.requestFingerprint,
     ...(value.provisioning === undefined ? {} : { provisioning: value.provisioning }),
+    ...(value.commandOrigin === undefined ? {} : { commandOrigin: value.commandOrigin }),
     mutation: value.mutation, prepared: value.result, candidateFingerprint: value.candidateFingerprint,
     ...(value.verifiedRelease === undefined ? {} : { verifiedRelease: value.verifiedRelease }),
     ...(value.registryTarget === undefined ? {} : { registryTarget: value.registryTarget }),
   })
-  const pending = (id: string, listing = false): ProfilePreparedPackageChange | undefined => {
+  const pending = (id: string, listing = false): ProfilePendingPackageChange | undefined => {
     const value = readPrepared(id, true, true)
     if (value === undefined) return undefined
     const discarded = readDiscard(id, value)
@@ -835,7 +1004,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
       if (role !== 'active') fail('receipt transitions apply only to the active tree')
       const proof = validateDesktopReceiptTransition(input, receiptTransition)
       const selection = readProfileManifest('dsh', path).dsh?.profile?.bundles
-      if (selection?.includes(input.prepared.packageName) !== true) fail('a disabled package cannot earn an active receipt')
+      if (!('packageName' in input.prepared) || selection?.includes(input.prepared.packageName) !== true) fail('a disabled package cannot earn an active receipt')
       desktopPackageReceiptPosition(input, proof)
       for (const transition of desktopReceiptFileTransitions(proof)) {
         const before = transition.before
@@ -845,6 +1014,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
     }
     const actual = fingerprint(files)
     if (actual !== (role === 'rollback' ? value.baseGraphFingerprint : value.candidateFingerprint)) fail(`activation ${role} tree changed`)
+    if (role !== 'rollback' && value.mutation.kind === 'selection') verifySelection(path, value)
     if (role !== 'rollback' && value.registryTarget !== undefined) {
       const request = registryRequestOf(value.mutation, profile)
       if (request === undefined || stable(deriveRegistryTarget(path, request, dependencyRegistry)) !== stable(value.registryTarget)) fail('activation registry resolution changed')
@@ -910,28 +1080,39 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
     }
   }
   const prepare = async (
-    id: string, mutation: ProfilePackageMutation, key: string, signal: AbortSignal, provisioningRequested = false,
-  ): Promise<ProfilePreparedPackageChange> => {
+    id: string, requestedMutation: ProfilePackageMutation | undefined, key: string, signal: AbortSignal, provisioningRequested = false,
+    command?: CommandPreparation,
+  ): Promise<ProfilePendingPackageChange> => {
     // The common lease checks cancellation before/after its bounded wait. Never abandon its pending callback.
     return withProfilePackageLease(profile, async () => {
       const previous = readPrepared(id, true)
       if (previous !== undefined) {
         if (readDesktopPackageActivationPhase(activationInput(id, previous)) !== undefined) fail('activation already owns this transaction')
-        if (requestKey(previous.mutation, previous.provisioning !== undefined) !== key) fail('transaction id already binds a different mutation or purpose')
+        const priorCommand = previous.commandOrigin === undefined || previous.commandRequest === undefined ? undefined
+          : { origin: previous.commandOrigin, request: previous.commandRequest }
+        if (requestKey(previous.mutation, previous.provisioning !== undefined, priorCommand) !== key) fail('transaction id already binds a different mutation or purpose')
         const checked = readPrepared(id)
         if (checked === undefined) fail('prepared record disappeared during validation')
+        const commandBase = command === undefined ? undefined : hash(JSON.stringify({
+          owner, files: inventory(profile, false), inputs: configInputs(),
+        }))
+        if (command !== undefined && (commandBase !== checked.result.baseFingerprint
+          || fingerprint(inventory(profile, true, runtimeDir, false)) !== checked.baseGraphFingerprint)) fail('command preparation base changed')
         return checked.result
       }
       signal.throwIfAborted()
+      const mutation = command === undefined ? parseMutation(requestedMutation) : resolveCommandMutation(command)
+      checkSourceRegistry(mutation)
       const registryRequest = registryRequestOf(mutation, profile)
-      const knownName = mutation.kind === 'remove' ? mutation.name : mutation.source.type === 'githubRelease' ? mutation.source.packageName : registryRequest?.name
+      const knownName = mutation.kind === 'remove' ? mutation.name : mutation.kind === 'selection' ? undefined
+        : mutation.source.type === 'githubRelease' ? mutation.source.packageName : registryRequest?.name
       if (knownName !== undefined && runtime.sharedPackages.some(shared => shared.name === knownName)) fail('cannot mutate a runtime-owned package')
       if (provisioningRequested) {
         const assessment = await assessLocked()
         if (assessment.status !== 'provisionable') fail(`private provisioning is not provisionable: ${assessment.status}; ${assessment.status === 'invalid-evidence' ? assessment.diagnostic : assessment.status === 'preserved-user-choice' ? assessment.reason : 'qualify the exact installed graph without restaging'}`)
       }
       const provisioning = provisioningRequested ? chooseProvisioning() : undefined
-      const requestFingerprint = intentHash(mutation, provisioning)
+      const requestFingerprint = intentHash(mutation, provisioning, command)
       const root = directory(id)
       if (existsSync(root)) fail('incomplete transaction requires explicit recovery; refusing to overwrite it')
       mkdirSync(root, { mode: 0o700 })
@@ -941,6 +1122,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
         const baseFiles = inventory(profile, false)
         const baseGraphFingerprint = fingerprint(inventory(profile, true, runtimeDir, false))
         const baseInputs = configInputs()
+        const selectionBaseManifest = mutation.kind === 'selection' ? readFileSync(join(profile, 'package.json'), 'utf8') : undefined
         const baseFingerprint = hash(JSON.stringify({ owner, files: baseFiles, inputs: baseInputs }))
         const candidate = join(root, 'profile')
         snapshot(profile, candidate, baseFiles)
@@ -987,10 +1169,14 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
         const pack = async (source: string, archive: string): Promise<void> => {
           signal.throwIfAborted(); await options.packDirectory(source, archive, signal); signal.throwIfAborted()
         }
-        let packageName: string
+        let packageName: string | undefined
         let registryTarget: DesktopPreparedRegistryTarget | undefined
         let verifiedRelease: Omit<DesktopVerifiedPluginArtifact, 'path'> | undefined
-        if (mutation.kind === 'remove') {
+        if (mutation.kind === 'selection') {
+          const names = mutation.packageNames
+          bundles = mutation.enabled ? [...bundles, ...names.filter(name => !bundles.includes(name))]
+            : bundles.filter(name => !names.includes(name))
+        } else if (mutation.kind === 'remove') {
           packageName = mutation.name
           if (!ownedTarget(packageName) && !isDirectRegistrySelector(packageName, originalDependencies[packageName], profile)) fail('removal requires an owned source or direct registry dependency')
           Reflect.deleteProperty(dependencies, packageName); Reflect.deleteProperty(locks, packageName)
@@ -1043,6 +1229,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
           locks[packageName] = lock; dependencies[packageName] = desktopPackageArtifactSpecifier(lock)
         }
         if (mutation.kind === 'install') {
+          if (packageName === undefined) fail('installation target is missing')
           if (mutation.enabled === false) bundles = bundles.filter(name => name !== packageName)
           else if ((mutation.enabled === true || !Object.hasOwn(originalDependencies, packageName)) && !bundles.includes(packageName)) {
             bundles.push(packageName)
@@ -1051,14 +1238,19 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
         signal.throwIfAborted()
         if (runtime.sharedPackages.some(shared => shared.name === packageName)) fail('cannot mutate a runtime-owned package')
         // A removed/replaced target is not a retained artifact: its missing/corrupt old bytes must not prevent repair.
-        const retained = Object.fromEntries(Object.entries(originalDependencies).filter(([name]) => name !== packageName))
-        // Ownership was inferred above from the intact old evidence. Never expose stale target health in the candidate.
-        if (priorProvisioning !== undefined
-          && (provisioning !== undefined || priorProvisioning.plugins.some(entry => entry.name === packageName))) {
-          unlinkSync(join(candidate, DESKTOP_PLUGIN_PROVISIONING_STATE_FILE))
+        const retained = Object.fromEntries(Object.entries(originalDependencies)
+          .filter(([name]) => mutation.kind === 'selection' || name !== packageName))
+        // Selection preserves the original source/receipt ownership and every recorded byte.
+        if (mutation.kind !== 'selection') {
+          if (packageName === undefined) fail('mutation target is missing')
+          // Ownership was inferred above from intact old evidence. Replaced targets cannot expose stale health.
+          if (priorProvisioning !== undefined
+            && (provisioning !== undefined || priorProvisioning.plugins.some(entry => entry.name === packageName))) {
+            unlinkSync(join(candidate, DESKTOP_PLUGIN_PROVISIONING_STATE_FILE))
+          }
+          Reflect.deleteProperty(receiptStore.receipts, packageName); Reflect.deleteProperty(receiptStore.owners, packageName)
+          if (existsSync(join(candidate, DESKTOP_PLUGIN_RECEIPTS_FILE))) writeFileSync(join(candidate, DESKTOP_PLUGIN_RECEIPTS_FILE), `${JSON.stringify(receiptStore, undefined, 2)}\n`, { mode: 0o600 })
         }
-        Reflect.deleteProperty(receiptStore.receipts, packageName); Reflect.deleteProperty(receiptStore.owners, packageName)
-        if (existsSync(join(candidate, DESKTOP_PLUGIN_RECEIPTS_FILE))) writeFileSync(join(candidate, DESKTOP_PLUGIN_RECEIPTS_FILE), `${JSON.stringify(receiptStore, undefined, 2)}\n`, { mode: 0o600 })
         const artifacts: DesktopArtifactSpecifier[] = []
         for (const [name, selector] of Object.entries(retained)) {
           const lock = locks[name]
@@ -1079,24 +1271,27 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
           } else if (typeof selector !== 'string' || (runtimeLinkIdentity(name, selector, runtime, runtimeDir) === undefined && !isDirectRegistrySelector(name, selector, profile))) fail(`unsupported unowned file/transport dependency: ${name}`)
         }
         if (Object.keys(locks).some(name => !Object.hasOwn(dependencies, name))) fail('orphaned source lock')
-        writeDesktopPackageLocks(candidate, locks)
+        if (mutation.kind !== 'selection') writeDesktopPackageLocks(candidate, locks)
         manifest.dsh = { ...dsh, profile: { ...dsh.profile, bundles } }
         const saveManifest = (selection: Record<string, unknown>): void => {
           manifest.dependencies = selection
           writeFileSync(manifestPath, `${JSON.stringify(manifest, undefined, 2)}\n`, { mode: 0o600 })
         }
         saveManifest(retained)
-        normalizeDesktopArtifactSpecifiers(candidate, artifacts)
+        if (mutation.kind !== 'selection') normalizeDesktopArtifactSpecifiers(candidate, artifacts)
         const originalLock = readPackageLock(candidate)
         if (Object.keys(retained).length !== 0 && originalLock === undefined) fail('retained dependencies require an existing frozen lock')
         if (originalLock !== undefined) {
-          Reflect.deleteProperty(originalLock.dependencies, packageName)
+          if (mutation.kind !== 'selection') {
+            if (packageName === undefined) fail('mutation target is missing')
+            Reflect.deleteProperty(originalLock.dependencies, packageName)
+          }
           if (Object.keys(originalLock.dependencies).sort().join('\0') !== Object.keys(retained).sort().join('\0')) fail('profile manifest and lock roots disagree')
           for (const [name, selector] of Object.entries(retained)) {
             const entry = originalLock.dependencies[name]
             if (!record(entry) || entry.specifier !== selector) fail('retained manifest selector does not match the frozen lock')
           }
-          savePackageLock(candidate, originalLock)
+          if (mutation.kind !== 'selection') savePackageLock(candidate, originalLock)
         }
         const baseline = originalLock === undefined
           ? undefined : retainedGraph(originalLock, Object.keys(retained), artifacts, runtime, runtimeDir)
@@ -1135,6 +1330,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
         saveManifest(dependencies)
         const expectedManifest = stable(manifest)
         if (mutation.kind === 'install') {
+          if (packageName === undefined) fail('installation target is missing')
           const registryCacheArgs: string[] = []
           if (registryRequest !== undefined) {
             const cache = join(root, 'registry-resolution-cache')
@@ -1206,7 +1402,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
           loadOverlayPatches('dsh', patchPath)
         }
         // Validate disabled installed bundles as well: their package source is not allowed to evade YAML validation.
-        if (mutation.kind === 'install' && !bundles.includes(packageName)) {
+        if (mutation.kind === 'install' && packageName !== undefined && !bundles.includes(packageName)) {
           const path = realpathSync(join(candidate, 'node_modules', packageName))
           const patch = readProfileManifest('dsh', path).dsh?.bundle?.patch
           if (typeof patch !== 'string' || !inside(path, resolve(path, patch))) fail('installed package has no confined bundle patch')
@@ -1214,20 +1410,28 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
           if (!inside(path, patchPath)) fail('bundle patch escapes package')
           loadOverlayPatches('dsh', patchPath)
         }
-        if (mutation.kind === 'remove') markDesktopPluginRemoved(candidate, packageName, planResource?.planSha256)
-        else clearDesktopPluginRemoval(candidate, packageName)
+        if (mutation.kind !== 'selection') {
+          if (packageName === undefined) fail('mutation target is missing')
+          if (mutation.kind === 'remove') markDesktopPluginRemoved(candidate, packageName, planResource?.planSha256)
+          else clearDesktopPluginRemoval(candidate, packageName)
+        }
         // The base inventory binds the original approval bytes; candidate records the explicit shared graph policy.
         removeOwnedTree(acquisition)
         checkIdentity()
         if (hash(JSON.stringify({ owner, files: inventory(profile, false), inputs: configInputs() })) !== baseFingerprint) fail('active profile changed during staging')
         if (fingerprint(inventory(profile, true, runtimeDir, false)) !== baseGraphFingerprint) fail('active package graph changed during staging')
         const candidateFingerprint = fingerprint(inventory(candidate, true, runtimeDir))
-        const result: ProfilePreparedPackageChange = { transactionId: id, state: 'prepared', packageName, baseFingerprint, health: 'pending' }
-        const prepared: PreparedRecord = { schemaVersion: 1, owner, requestFingerprint, result, baseFiles, baseInputs,
-          baseGraphFingerprint, candidateFingerprint, mutation,
+        const result: ProfilePendingPackageChange = mutation.kind === 'selection'
+          ? { schemaVersion: 2, kind: 'selection', transactionId: id, state: 'prepared', packageNames: [...mutation.packageNames], baseFingerprint, health: 'pending' }
+          : parseProfilePreparedChange({ transactionId: id, state: 'prepared', packageName, baseFingerprint, health: 'pending' })
+        const prepared: PreparedRecord = { schemaVersion: command === undefined ? 1 : 2, owner, requestFingerprint,
+          result, baseFiles, baseInputs, baseGraphFingerprint, candidateFingerprint, mutation,
+          ...(command === undefined ? {} : { commandOrigin: command.origin, commandRequest: command.request }),
+          ...(selectionBaseManifest === undefined ? {} : { selectionBaseManifest }),
           ...(provisioning === undefined ? {} : { provisioning }),
           ...(registryTarget === undefined ? {} : { registryTarget }),
           ...(verifiedRelease === undefined ? {} : { verifiedRelease }) }
+        if (mutation.kind === 'selection') verifySelection(candidate, prepared)
         signal.throwIfAborted()
         try { durableJson(join(root, RECORD), prepared) } catch (error) {
           // Rename may have succeeded before a directory flush failed. Never erase or report cancellation of that record.
@@ -1250,16 +1454,27 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
     }, wait, signal)
   }
   const stageRequest = async (
-    requestId: string, request: ProfilePackageMutation, externalSignal: AbortSignal, provisioningRequested: boolean,
-  ): Promise<ProfilePreparedPackageChange> => {
+    requestId: string, request: ProfilePackageMutation | undefined, externalSignal: AbortSignal, provisioningRequested: boolean,
+    suppliedCommand?: CommandPreparation,
+  ): Promise<ProfilePendingPackageChange> => {
     const id = parseProfileTransactionId(requestId)
-    const mutation = parseMutation(request)
-    checkSourceRegistry(mutation)
-    const key = requestKey(mutation, provisioningRequested)
-    const prepared = readPrepared(id, true)
+    const command = suppliedCommand === undefined ? undefined : {
+      origin: parseDesktopPackageCommandOrigin(suppliedCommand.origin), request: parseCommandRequest(suppliedCommand.request),
+    }
+    if (command !== undefined) {
+      externalSignal.throwIfAborted()
+      if (provisioningRequested) fail('commands cannot stage private provisioning')
+    }
+    const mutation = command === undefined ? parseMutation(request) : undefined
+    if (mutation !== undefined) checkSourceRegistry(mutation)
+    const key = requestKey(mutation, provisioningRequested, command)
+    // Manual history preserves its old idempotent reader; command target resolution/revalidation stays under the lease.
+    const prepared = command === undefined ? readPrepared(id, true) : undefined
     if (prepared !== undefined) {
       if (readDesktopPackageActivationPhase(activationInput(id, prepared)) !== undefined) fail('activation already owns this transaction')
-      if (requestKey(prepared.mutation, prepared.provisioning !== undefined) !== key) fail('transaction id already binds a different mutation or purpose')
+      const priorCommand = prepared.commandOrigin === undefined || prepared.commandRequest === undefined ? undefined
+        : { origin: prepared.commandOrigin, request: prepared.commandRequest }
+      if (requestKey(prepared.mutation, prepared.provisioning !== undefined, priorCommand) !== key) fail('transaction id already binds a different mutation or purpose')
       const checked = readPrepared(id)
       if (checked === undefined) fail('prepared record disappeared during validation')
       return checked.result
@@ -1271,7 +1486,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
     }
     const abort = new AbortController()
     const signal = AbortSignal.any([abort.signal, externalSignal, AbortSignal.timeout(timeout)])
-    const done = prepare(id, mutation, key, signal, provisioningRequested)
+    const done = prepare(id, mutation, key, signal, provisioningRequested, command)
     const control: Running = { abort, requestKey: key, done }
     running.set(id, control)
     try { return await done } finally { if (running.get(id) === control) running.delete(id) }
@@ -1300,11 +1515,28 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
         return observed
       }, wait)
     },
-    stage(requestId, request, signal) { return stageRequest(requestId, request, signal, false) },
+    async stage(requestId, request, signal) { return parseProfilePreparedChange(await stageRequest(requestId, request, signal, false)) },
+    async stageCommand(requestId, mutation, origin, signal) {
+      return parseProfilePreparedChange(await stageRequest(requestId, undefined, signal, false, {
+        origin, request: { kind: 'mutation', mutation },
+      }))
+    },
+    async stageRegistryUpdate(requestId, name, version, origin, signal) {
+      return parseProfilePreparedChange(await stageRequest(requestId, undefined, signal, false, {
+        origin, request: parseDesktopRegistryUpdate(name, version),
+      }))
+    },
+    async stageSelection(requestId, request, origin, signal) {
+      const selected = parseProfilePendingChange(await stageRequest(requestId, undefined, signal, false, {
+        origin, request: { kind: 'selection', ...parseDesktopPackageSelectionRequest(request) },
+      }))
+      if (!('kind' in selected) || selected.kind !== 'selection') fail('selection did not produce a selection outcome')
+      return selected
+    },
     async stageProvisioning(requestId, signal) {
       if (fixedSource === undefined || planResource === undefined) fail('no packaged provisioning plan is configured')
       checkPlanResource()
-      return stageRequest(requestId, { kind: 'install', source: fixedSource }, signal, true)
+      return parseProfilePreparedChange(await stageRequest(requestId, { kind: 'install', source: fixedSource }, signal, true))
     },
     readPreparedForActivation(transactionId) { return synchronousResult(() => {
       const id = parseProfileTransactionId(transactionId)
@@ -1327,7 +1559,7 @@ export function createDesktopProfilePackageTransactions(options: DesktopProfileP
     },
     status(id) { return synchronousResult(() => pending(parseProfileTransactionId(id))) },
     listPending() { return synchronousResult(() => {
-      const results: ProfilePreparedPackageChange[] = []
+      const results: ProfilePendingPackageChange[] = []
       for (const name of readdirSync(dirname(profile)).sort()) {
         if (!name.startsWith(prefix)) continue
         const id = name.slice(prefix.length)

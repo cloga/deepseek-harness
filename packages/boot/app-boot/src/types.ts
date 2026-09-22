@@ -35,3 +35,17 @@ export interface ProfilePreparedPackageChange {
   readonly baseFingerprint: string
   readonly health: 'pending' | 'passed'
 }
+
+/** Versioned pending selection of installed bundles; no package acquisition or activation is implied. */
+export interface ProfilePreparedBundleSelection {
+  readonly schemaVersion: 2
+  readonly kind: 'selection'
+  readonly transactionId: string
+  readonly state: 'prepared'
+  readonly packageNames: readonly string[]
+  readonly baseFingerprint: string
+  readonly health: 'pending' | 'passed'
+}
+
+/** Read-only pending inventory preserves legacy package preparations and explicit multi-bundle selections. */
+export type ProfilePendingPackageChange = ProfilePreparedPackageChange | ProfilePreparedBundleSelection

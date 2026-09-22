@@ -39,7 +39,10 @@ const runtime: DesktopRuntimeDescriptor = {
   platform: process.platform,
   arch: process.arch,
   files: [],
-  release: { schemaVersion: 1, version: '1.0.0', hostProtocolVersion: DESKTOP_HOST_PROTOCOL_VERSION, nodeVersion: '24.13.0', pnpmVersion: '11.7.0' },
+  release: {
+    schemaVersion: 1, version: '1.0.0', hostProtocolVersion: DESKTOP_HOST_PROTOCOL_VERSION,
+    nodeVersion: '24.13.0', pnpmVersion: '11.7.0',
+  },
   sharedPackages: [
     '@deepseek-ai/dsh', '@deepseek-ai/dsh-desktop-host', '@deepseek-ai/cordis',
     '@deepseek-ai/schemastery', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-credentials',

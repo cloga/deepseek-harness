@@ -21,6 +21,9 @@ Core#67 集成官方基于 Web 的 Host 和共享 `runProfile` 拓扑。官方 P
 | 独立更新提示栏与协议 2 | Settings 的 `DesktopUpdateIndicator`、收起状态的 `DesktopUpdateBadge` 及协议 1 的 `status`/`open`/`subscribe` 已负责展示 | 退役重复提示栏及其适配器；使用官方所有者，而非第二套轮询 UI。 |
 | 未保存输入的更新保护 | 官方任务检查本身不证明覆盖所有已挂载草稿、附件或待完成发送 | 仅保留可选的标量 `reportImpact`（`hasDraft`、`attachmentCount`、`submitting`）；官方等效覆盖经过验证后删除。它只能阻止安装，不能授权安装或携带内容。 |
 | Fork 插件窗口和插件 IPC | 共享 Web PluginManager 和认证 HTTP 路由负责管理 | 退役独立 UI；通过类型化 app-boot 集成迁移有依据的后端安全能力。端到端验收前不得宣称这些操作就绪。 |
+| 私有 Desktop slash-command 桥接 | 框架完整支持，但没有该桥接：精确目标版本提供 commands registry 及 `command/run`／`command/done` 事件，其 Desktop Host 入口没有注册 Desktop 插件命令 | 复用官方 registry 和 Session 生命周期；在官方 Desktop 提供等效持久化落盘、确认应答、原生同意及活动 Host 取消归属前，保留狭窄的精确子进程适配器。 |
+| Launcher 暂存与待处理记录 | 官方不提供：精确目标版本既无 app-boot `types.ts`，也无 `profile-package-transactions.ts`，其 PluginManager `ChangeResult` 没有 `prepared` 状态或字段 | 既有五字段暂存结果和七字段选择待处理结果都是 alpha2 上的 fork 集成，不是官方功能。普通暂存保持不变，仅扩展待处理查询；在官方提供等效支持及明确数据迁移后回归。 |
+| 原子选择及受控 registry 更新 | 部分支持：官方 PluginManager 和 profile helper 提供普通文件锁保护的原地组合包选择，但没有仅候选的原子选择、日志绑定的命令授权或保留来源／receipt 的原生激活 | 保留官方共享 UI 和组合包表达；在官方行为验证等效的 lease 内目标资格、产物／归属保留、确认、准入、健康及恢复前，保留 fork 事务所有者。 |
 | 来源快照和经过验证的 Release | 共享包安装不证明具备等效的不可变获取、快照重建、归属保留或回滚 | 保留现有机制并迁移消费方；仅在官方等效行为及失败覆盖经过验证后退役。 |
 | InputHub 壳与独立发送安全 | 官方对话与输入变更要求迁移消费方；名称相似不构成等效证据 | 保留 InputHub 并迁移壳与独立发送处理；删除任何适配器前，必须验证草稿、附件、发送中状态、资源释放和导航回归。 |
 | 祖先 SDK/包约束 | 运行时解析代际本身不约束祖先包查找 | 保留 profile/共享包与继承 Worker 约束；退役前要求等效原生解析及拒绝逃逸用例。 |
@@ -52,7 +55,7 @@ Core#67 集成官方基于 Web 的 Host 和共享 `runProfile` 拓扑。官方 P
 ## 验收标准
 
 - 官方 PluginManager 是唯一管理 UI；协议 1 负责更新展示，不存在 fork 提示栏或协议 2 要求。
-- PREPARED 支持取消和状态查询，不触发在线激活、成功活动 receipt 或 Host 中断。并发请求、陈旧指纹、进程退出和重启恢复在同一租约下失败关闭。
+- 普通 Web“稍后”保留 PREPARED 供状态查询／丢弃，不触发在线激活、成功活动 receipt 或 Host 中断。准入前的命令取消在工作停止后只丢弃自己的准备；孤立命令准备不能获得普通 Web 激活权。并发请求、陈旧指纹、进程退出及重启恢复在同一 lease 下失败关闭；已经获准激活的事务保留独立恢复规则。
 - 恶意归档、钩子、来源漂移、损坏的保留产物、peer 身份冲突、祖先 SDK 查找和 Worker 继承保留拒绝测试。Windows birthtime 与产物锁分隔符用例在 Windows 上执行。
 - 显式授权的壳激活验证暂存健康、最终位置就绪、实际清单与 receipt，以及失败回滚。可选失败或仅完成准备都不记录成功 receipt。
 - 官方更新 UI 与 InputHub 迁移取得已挂载输入框、独立发送、陈旧报告、资源释放和多行 Goal 的浏览器证据。安装绝不把标量影响报告当作同意。

@@ -12,13 +12,13 @@ import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import { pluginEntryId, readPluginInventory } from '@deepseek-ai/dsh-host-plugin-inventory'
 import {
   readProfileManifest, resolveBundleDir, loadOverlayPatches, composeEntries, reconcileProfilePatches, readProfilePatches, OPTIONAL_BUNDLES,
-  profilePackageLeaseTarget, parseProfilePreparedChange, parseProfileTransactionId, ProfilePackageCancelledError,
+  profilePackageLeaseTarget, parseProfilePreparedChange, parseProfilePendingChange, parseProfileTransactionId, ProfilePackageCancelledError,
 } from '@deepseek-ai/dsh-app-boot'
 import type {} from '@deepseek-ai/dsh-hmr'
 import type {
   ProfileContext, ProfileManifest, ProfilePackageMutation,
 } from '@deepseek-ai/dsh-app-boot'
-import type { ProfilePreparedPackageChange, ProfileVerifiedReleaseSource } from '@deepseek-ai/dsh-app-boot/types'
+import type { ProfilePendingPackageChange, ProfileVerifiedReleaseSource } from '@deepseek-ai/dsh-app-boot/types'
 import { bundleManifest, runProfilePnpm, saveManifest, viewProfilePackage } from './operations.ts'
 import { classifyInstallFailure } from './install-failure.ts'
 import { InvalidInstallSpecError, parseInstallSpec } from './install-spec.ts'
@@ -476,13 +476,13 @@ export class PluginManager extends TypertRemoteService {
    * @returns Pending record, or undefined after cancellation or activation.
    */
   @Remote
-  async pendingPackageChange(transactionId: string): Promise<ProfilePreparedPackageChange | undefined> {
+  async pendingPackageChange(transactionId: string): Promise<ProfilePendingPackageChange | undefined> {
     const service = this.ownerContext.get('profilePackageTransactions')
     if (this.profile.stagedPackageTransactions !== true || service?.protocolVersion !== 1) throw new Error('Launcher package staging is unavailable')
     const id = parseProfileTransactionId(transactionId)
     const result = await service.status(id)
     if (result === undefined) return undefined
-    const parsed = parseProfilePreparedChange(result)
+    const parsed = parseProfilePendingChange(result)
     if (parsed.transactionId !== id) throw new Error('Launcher returned another package transaction')
     return parsed
   }
@@ -503,13 +503,13 @@ export class PluginManager extends TypertRemoteService {
    * @returns Pending package changes, or an empty list when the profile does not require staging.
    */
   @Remote
-  async listPendingPackageChanges(): Promise<readonly ProfilePreparedPackageChange[]> {
+  async listPendingPackageChanges(): Promise<readonly ProfilePendingPackageChange[]> {
     if (this.profile.stagedPackageTransactions !== true) return []
     const service = this.ownerContext.get('profilePackageTransactions')
     if (service?.protocolVersion !== 1) throw new Error('Launcher package staging is unavailable')
     const records = await service.listPending()
     if (!Array.isArray(records) || records.length > 100) throw new Error('Launcher returned an invalid pending transaction list')
-    return records.map(parseProfilePreparedChange)
+    return records.map(parseProfilePendingChange)
   }
 
   private installStagedBundle(spec: string | ProfileVerifiedReleaseSource, options?: InstallBundleOptions): Promise<ChangeResult> {

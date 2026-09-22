@@ -1,0 +1,102 @@
+name: Alpha2 source catalog capture (internal artifact only)
+
+on:
+  push:
+    branches: [cloga-official-first-016a2]
+  workflow_dispatch:
+    inputs:
+      expected_source:
+        description: Exact reviewed branch checkout commit (40 lowercase hexadecimal characters)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# This independent task lane neither replaces nor cancels ordinary PR CI.
+# No concurrency group: a later attempt must not cancel an earlier capture.
+jobs:
+  capture:
+    if: github.repository == 'cloga/deepseek-harness' && github.ref == 'refs/heads/cloga-official-first-016a2'
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DSH_TELEMETRY_DISABLED: '1'
+      EXPECTED_SOURCE: ${{ github.event_name == 'push' && github.sha || inputs.expected_source }}
+      CAPTURE_ROOT: ${{ runner.temp }}/alpha2-source-catalogs-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          clean: true
+
+      - name: Guard exact task-branch source before dependency setup
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_EVENT_NAME -cnotin @('push', 'workflow_dispatch')) { throw 'Unsupported capture event' }
+          if ($env:EXPECTED_SOURCE -cnotmatch '\A[a-f0-9]{40}\z') { throw 'Invalid expected source' }
+          if ($env:GITHUB_SHA -cne $env:EXPECTED_SOURCE) { throw 'Dispatch source differs from workflow source' }
+          if ($env:GITHUB_REF -cne 'refs/heads/cloga-official-first-016a2') { throw 'Not the reviewed task branch' }
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:EXPECTED_SOURCE) { throw 'Checkout source mismatch' }
+          $dirty = git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0 -or $dirty) { throw 'Fresh clean checkout required' }
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.7.0'
+          dest: ${{ runner.temp }}/alpha2-catalog-pnpm
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.13.0'
+          package-manager-cache: false
+
+      - name: Verify inert capture guards
+        run: |
+          node --test scripts/capture-alpha2-source-catalogs.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Bind original source bytes before frozen installation
+        run: |
+          $pnpmVersion = pnpm --version
+          if ($LASTEXITCODE -ne 0 -or $pnpmVersion -cne '11.7.0') { throw 'Unexpected pnpm version' }
+          node scripts/capture-alpha2-source-catalogs.mjs --phase begin --expected-source $env:EXPECTED_SOURCE --pnpm-version $pnpmVersion --output $env:CAPTURE_ROOT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install normal frozen dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/capture-alpha2-source-catalogs.mjs --phase baseline --expected-source $env:EXPECTED_SOURCE --pnpm-version '11.7.0' --output $env:CAPTURE_ROOT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run maintained source generators and owning freshness checks
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($task in @('gen-cordis-catalog', 'gen-cordis-inspect-catalog', 'gen-client-catalog', 'gen-doc-graphs', 'gen-third-party-notices',
+            'verify-cordis-catalog', 'verify-cordis-inspect-catalog', 'verify-client-catalog', 'verify-doc-graphs', 'verify-third-party-notices')) {
+            pnpm run $task
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Capture only approved changed outputs and recheck late changes
+        run: |
+          node scripts/capture-alpha2-source-catalogs.mjs --phase capture --expected-source $env:EXPECTED_SOURCE --pnpm-version '11.7.0' --output $env:CAPTURE_ROOT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/capture-alpha2-source-catalogs.mjs --phase verify --expected-source $env:EXPECTED_SOURCE --pnpm-version '11.7.0' --output $env:CAPTURE_ROOT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Success only. No partial catalog, private state, node_modules or whole-tree upload.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: alpha2-source-catalogs-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CAPTURE_ROOT }}/artifact
+          if-no-files-found: error
+          retention-days: 7

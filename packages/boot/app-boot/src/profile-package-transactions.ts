@@ -4,8 +4,10 @@ import { basename, dirname, join, resolve } from 'node:path'
 import type {} from '@deepseek-ai/cordis'
 import { withFileLock } from '@deepseek-ai/dsh-atomic-write'
 
-import type { ProfilePreparedPackageChange, ProfileVerifiedReleaseSource } from './types.ts'
-export type { ProfilePreparedPackageChange, ProfileVerifiedReleaseSource } from './types.ts'
+import type { ProfilePendingPackageChange, ProfilePreparedPackageChange, ProfileVerifiedReleaseSource } from './types.ts'
+export type {
+  ProfilePendingPackageChange, ProfilePreparedBundleSelection, ProfilePreparedPackageChange, ProfileVerifiedReleaseSource,
+} from './types.ts'
 
 /** Structured source identity; a verified source never silently degrades to a package string. */
 export type ProfilePackageSource = ProfileVerifiedReleaseSource
@@ -42,12 +44,12 @@ export interface ProfilePackageTransactions {
    * @param transactionId - Durable transaction identity returned by staging.
    * @returns Prepared record, or undefined when no pending stage remains.
    */
-  status(transactionId: string): Promise<ProfilePreparedPackageChange | undefined>
+  status(transactionId: string): Promise<ProfilePendingPackageChange | undefined>
   /**
    * List pending preparations owned by the launcher's fixed profile.
    * @returns Prepared records, without implying that any graph is active.
    */
-  listPending(): Promise<readonly ProfilePreparedPackageChange[]>
+  listPending(): Promise<readonly ProfilePendingPackageChange[]>
   /**
    * Cancel or discard a preparation through its owner without removing an active plugin.
    * @param transactionId - Durable transaction identity to cancel.
@@ -82,6 +84,45 @@ export function parseProfilePreparedChange(value: unknown): ProfilePreparedPacka
     || (input.health !== 'pending' && input.health !== 'passed')) throw new Error('profile packages: invalid prepared result')
   return { transactionId: parseProfileTransactionId(input.transactionId), state: 'prepared', packageName: input.packageName,
     baseFingerprint: input.baseFingerprint, health: input.health }
+}
+
+/**
+ * Validate pending inventory without widening the ordinary install/remove stage result.
+ * @param value - Untrusted pending record from the launcher.
+ * @returns A copied legacy preparation or versioned, sorted bundle selection.
+ */
+export function parseProfilePendingChange(value: unknown): ProfilePendingPackageChange {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('profile packages: invalid pending result')
+  const input = value as Record<string, unknown>
+  const selection = Object.hasOwn(input, 'schemaVersion') || Object.hasOwn(input, 'kind')
+  const fields = selection
+    ? ['schemaVersion', 'kind', 'transactionId', 'state', 'packageNames', 'baseFingerprint', 'health']
+    : ['transactionId', 'state', 'packageName', 'baseFingerprint', 'health']
+  if (Reflect.ownKeys(input).length !== fields.length || Object.keys(input).length !== fields.length
+    || fields.some(field => !Object.hasOwn(input, field))) throw new Error('profile packages: invalid pending result fields')
+  if (typeof input.transactionId !== 'string' || input.transactionId.length !== 36
+    || typeof input.baseFingerprint !== 'string' || input.baseFingerprint.length !== 64) {
+    throw new Error('profile packages: invalid prepared result')
+  }
+  if (!selection) return parseProfilePreparedChange(input)
+  if (input.schemaVersion !== 2 || input.kind !== 'selection' || input.state !== 'prepared'
+    || typeof input.baseFingerprint !== 'string' || !/^[a-f0-9]{64}$/u.test(input.baseFingerprint)
+    || (input.health !== 'pending' && input.health !== 'passed')
+    || !Array.isArray(input.packageNames) || input.packageNames.length < 1 || input.packageNames.length > 100) {
+    throw new Error('profile packages: invalid pending selection')
+  }
+  const packageNames: string[] = []
+  for (const name of input.packageNames as unknown[]) {
+    const previous = packageNames.at(-1)
+    if (typeof name !== 'string' || name.length > 214 || name.trim() !== name
+      || !/^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/u.test(name)
+      || (previous !== undefined && previous >= name)) {
+      throw new Error('profile packages: invalid sorted selection names')
+    }
+    packageNames.push(name)
+  }
+  return { schemaVersion: 2, kind: 'selection', transactionId: parseProfileTransactionId(input.transactionId),
+    state: 'prepared', packageNames, baseFingerprint: input.baseFingerprint, health: input.health }
 }
 
 declare module '@deepseek-ai/cordis' {

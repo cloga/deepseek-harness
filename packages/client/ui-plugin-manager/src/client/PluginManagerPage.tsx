@@ -954,7 +954,9 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
         : null}
       {state.pendingPackages?.map(pending => (
         <p key={pending.transactionId} className={css.resultWarn} role="status">
-          {pending.packageName}: {t('preparedNotice', { id: pending.transactionId })}
+          {'kind' in pending
+            ? t('preparedSelectionTargets', { names: pending.packageNames.join(', ') })
+            : pending.packageName}: {t('preparedNotice', { id: pending.transactionId })}
           {props.cancelPrepared === undefined ? null : (
             <Button variant="outline" size="sm" onClick={() => { props.cancelPrepared?.(pending.transactionId) }}>{t('discardPrepared')}</Button>
           )}

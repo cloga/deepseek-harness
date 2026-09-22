@@ -206,6 +206,244 @@ async function seedExactPlanned(f: Awaited<ReturnType<typeof provisioningFixture
 }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) })
 
+describe('Desktop private command staging', () => {
+  const signal = () => new AbortController().signal
+  const origin = () => ({ kind: 'desktop-command' as const, generation: randomUUID(), requestId: 1, commandId: 'command-1' })
+  async function selectedFixture() {
+    const f = fixture()
+    await seedReceipt(f, pluginName)
+    writeProfileRootConfig(f.profile)
+    f.packDirectory.mockClear()
+    return f
+  }
+  const preparedRecord = (f: ReturnType<typeof fixture>, id: string) =>
+    jsonObject(readFileSync(join(f.transaction(id), 'PREPARED.json'), 'utf8'))
+
+  it('preserves legacy journal bytes while binding command install origin into the new journal', async () => {
+    const f = fixture()
+    const legacyId = randomUUID()
+    await f.backend.stage(legacyId, f.mutation, signal())
+    const legacyPath = join(f.transaction(legacyId), 'PREPARED.json')
+    const legacyBytes = readFileSync(legacyPath)
+    expect(preparedRecord(f, legacyId).schemaVersion).toBe(1)
+    expect(preparedRecord(f, legacyId)).not.toHaveProperty('commandOrigin')
+    const id = randomUUID()
+    const commandOrigin = origin()
+    const result = await f.backend.stageCommand(id, f.mutation, commandOrigin, signal())
+    expect(result.packageName).toBe(pluginName)
+    const record = preparedRecord(f, id)
+    expect(record).toMatchObject({ schemaVersion: 2, commandOrigin, commandRequest: { kind: 'mutation', mutation: f.mutation } })
+    expect(record.requestFingerprint).toBe(createHash('sha256').update(JSON.stringify({
+      mutation: record.mutation, commandOrigin, commandRequest: record.commandRequest,
+    })).digest('hex'))
+    expect((await f.backend.readPreparedForActivation(id))?.commandOrigin).toEqual(commandOrigin)
+    expect(await f.backend.stageCommand(id, f.mutation, commandOrigin, signal())).toEqual(result)
+    expect(readFileSync(legacyPath).equals(legacyBytes)).toBe(true)
+    await expect(f.backend.stage(id, f.mutation, signal())).rejects.toThrow('different mutation or purpose')
+    await expect(f.backend.stageCommand(id, f.mutation, { ...commandOrigin, commandId: 'another' }, signal())).rejects.toThrow('different mutation or purpose')
+  })
+
+  it('stages selection only without reacquisition or receipt, lock, provisioning and artifact changes', async () => {
+    const f = await selectedFixture()
+    const before = f.active()
+    const metadataBefore = inventoryDesktopRuntime(f.profile).filter(file => !file.path.startsWith('node_modules/') && file.path !== 'package.json')
+    const id = randomUUID()
+    const commandOrigin = origin()
+    const result = await f.backend.stageSelection(id, { names: [pluginName], enabled: false }, commandOrigin, signal())
+    expect(result).toMatchObject({ schemaVersion: 2, kind: 'selection', packageNames: [pluginName], state: 'prepared', health: 'pending' })
+    expect(result).not.toHaveProperty('packageName')
+    const input = await f.backend.readPreparedForActivation(id)
+    expect(input?.mutation).toEqual({ kind: 'selection', packageNames: [pluginName], enabled: false })
+    expect(input?.commandOrigin).toEqual(commandOrigin)
+    const candidate = join(f.transaction(id), 'profile')
+    expect(object(jsonObject(readFileSync(join(candidate, 'package.json'), 'utf8')), 'dsh', 'profile').bundles).toEqual([])
+    expect(inventoryDesktopRuntime(candidate).filter(file => !file.path.startsWith('node_modules/') && file.path !== 'package.json')).toEqual(metadataBefore)
+    expect(f.active()).toEqual(before)
+    expect(f.packDirectory).not.toHaveBeenCalled()
+    expect(f.fetcher).not.toHaveBeenCalled()
+    expect(f.pnpmRunner.mock.calls).toHaveLength(1)
+    expect(f.pnpmRunner.mock.calls[0]![0].args).toContain('--frozen-lockfile')
+    expect(f.pnpmRunner.mock.calls[0]![0].args).not.toContain('add')
+    expect(await f.backend.status(id)).toEqual(result)
+    expect(await f.backend.listPending()).toEqual([result])
+    await f.backend.cancel(id)
+    expect(await f.backend.listPending()).toEqual([])
+    expect(existsSync(candidate)).toBe(false)
+    expect(preparedRecord(f, id).schemaVersion).toBe(2)
+    expect(jsonObject(readFileSync(join(f.transaction(id), 'DISCARDED.json'), 'utf8')).state).toBe('discarded')
+    expect(f.active()).toEqual(before)
+  })
+
+  it('prepares disable-all as one sorted atomic selection and never selects runtime packages', async () => {
+    const f = await selectedFixture()
+    await seedReceipt(f, '@example/another')
+    const id = randomUUID()
+    const result = await f.backend.stageSelection(id, { names: 'all', enabled: false }, origin(), signal())
+    expect(result.packageNames).toEqual(['@example/another', pluginName].sort())
+    expect((await f.backend.readPreparedForActivation(id))?.mutation).toEqual({ kind: 'selection', packageNames: result.packageNames, enabled: false })
+    expect(await f.backend.listPending()).toHaveLength(1)
+    await expect(f.backend.stageSelection(randomUUID(), { names: ['@deepseek-ai/dsh'], enabled: false }, origin(), signal()))
+      .rejects.toThrow('eligible')
+    await expect(f.backend.stageSelection(randomUUID(), { names: 'all', enabled: true }, origin(), signal())).rejects.toThrow()
+  })
+
+  it('enables an installed disabled target without replacing its source ownership', async () => {
+    const f = await selectedFixture()
+    const manifestPath = join(f.profile, 'package.json')
+    const manifest = jsonObject(readFileSync(manifestPath, 'utf8'))
+    object(manifest, 'dsh', 'profile').bundles = []
+    write(manifestPath, manifest)
+    const before = readFileSync(join(f.profile, 'desktop-plugin-receipts.json'))
+    const id = randomUUID()
+    await f.backend.stageSelection(id, { names: [pluginName], enabled: true }, origin(), signal())
+    const candidate = join(f.transaction(id), 'profile')
+    expect(object(jsonObject(readFileSync(join(candidate, 'package.json'), 'utf8')), 'dsh', 'profile').bundles).toEqual([pluginName])
+    expect(readFileSync(join(candidate, 'desktop-plugin-receipts.json')).equals(before)).toBe(true)
+  })
+
+  it.each(['generation', 'requestId', 'commandId', 'extra-origin', 'schema1-origin', 'mutation-target', 'result-target', 'mixed-result'] as const)(
+    'rejects corrupt command record %s without rewriting it', async (damage) => {
+      const f = await selectedFixture()
+      const id = randomUUID()
+      await f.backend.stageSelection(id, { names: [pluginName], enabled: false }, origin(), signal())
+      const path = join(f.transaction(id), 'PREPARED.json')
+      const value = preparedRecord(f, id)
+      if (damage === 'generation') object(value.commandOrigin).generation = 'foreign'
+      else if (damage === 'requestId') object(value.commandOrigin).requestId = 0
+      else if (damage === 'commandId') object(value.commandOrigin).commandId = 'different'
+      else if (damage === 'extra-origin') object(value.commandOrigin).approved = true
+      else if (damage === 'schema1-origin') value.schemaVersion = 1
+      else if (damage === 'mutation-target') object(value.mutation).packageNames = ['@example/other']
+      else if (damage === 'result-target') object(value.result).packageNames = ['@example/other']
+      else object(value.result).packageName = pluginName
+      write(path, value)
+      const corrupt = readFileSync(path)
+      await expect(f.backend.status(id)).rejects.toThrow()
+      expect(readFileSync(path).equals(corrupt)).toBe(true)
+    },
+  )
+
+  it('rejects a rehashed selection claiming another target set', async () => {
+    const f = await selectedFixture()
+    const id = randomUUID()
+    await f.backend.stageSelection(id, { names: 'all', enabled: false }, origin(), signal())
+    const path = join(f.transaction(id), 'PREPARED.json')
+    const value = preparedRecord(f, id)
+    object(value.mutation).packageNames = ['@example/not-installed']
+    object(value.result).packageNames = ['@example/not-installed']
+    value.requestFingerprint = createHash('sha256').update(JSON.stringify({
+      mutation: value.mutation, commandOrigin: value.commandOrigin, commandRequest: value.commandRequest,
+    })).digest('hex')
+    write(path, value)
+    await expect(f.backend.status(id)).rejects.toThrow('target set')
+  })
+
+  it.each(['manifest', 'receipt'] as const)('rejects rehashed original %s evidence that disagrees with preserved candidate semantics', async (field) => {
+    const f = await selectedFixture()
+    const id = randomUUID()
+    await f.backend.stageSelection(id, { names: [pluginName], enabled: false }, origin(), signal())
+    const path = join(f.transaction(id), 'PREPARED.json')
+    const value = preparedRecord(f, id)
+    if (!isArray(value.baseFiles)) throw new Error('fixture requires base file evidence')
+    if (field === 'manifest') {
+      const manifest = jsonObject(stringValue(value.selectionBaseManifest))
+      manifest.userField = { forged: true }
+      value.selectionBaseManifest = JSON.stringify(manifest)
+      const entry = value.baseFiles.find(entry => object(entry).path === 'package.json')
+      object(entry).sha256 = createHash('sha256').update(stringValue(value.selectionBaseManifest)).digest('hex')
+    } else {
+      const entry = value.baseFiles.find(entry => object(entry).path === 'desktop-plugin-receipts.json')
+      object(entry).sha256 = 'f'.repeat(64)
+    }
+    object(value.result).baseFingerprint = createHash('sha256').update(JSON.stringify({
+      owner: value.owner, files: value.baseFiles, inputs: value.baseInputs,
+    })).digest('hex')
+    write(path, value)
+    await expect(f.backend.status(id)).rejects.toThrow(field === 'manifest' ? 'more than bundle selection' : 'retained metadata')
+  })
+
+  it('resolves registry-update admission after its awaited profile lease rather than before it', async () => {
+    const f = fixture()
+    const name = 'registry-addon'
+    const path = join(f.profile, 'package.json')
+    const manifest = jsonObject(readFileSync(path, 'utf8'))
+    object(manifest, 'dependencies')[name] = '1.0.0'
+    write(path, manifest)
+    await graph({ cwd: f.profile, args: [], env: {}, signal: signal() })
+    const entered = deferred<undefined>()
+    const release = deferred<undefined>()
+    const holding = withProfilePackageLease(f.profile, async () => { entered.resolve(undefined); await release.promise })
+    await entered.promise
+    const id = randomUUID()
+    const staging = f.backend.stageRegistryUpdate(id, name, '2.0.0', origin(), signal())
+    const rejected = expect(staging).rejects.toThrow('direct registry target')
+    try {
+      Reflect.deleteProperty(object(manifest, 'dependencies'), name)
+      write(path, manifest)
+    } finally { release.resolve(undefined); await holding }
+    await rejected
+    expect(existsSync(f.transaction(id))).toBe(false)
+    expect(f.pnpmRunner).not.toHaveBeenCalled()
+  })
+
+  it('reconstructs command preparation in a fresh backend without rewriting its journal', async () => {
+    const f = await selectedFixture()
+    const id = randomUUID()
+    const commandOrigin = origin()
+    const request = { names: [pluginName], enabled: false }
+    const result = await f.backend.stageSelection(id, request, commandOrigin, signal())
+    const path = join(f.transaction(id), 'PREPARED.json')
+    const before = readFileSync(path)
+    const restored = createDesktopProfilePackageTransactions(f.options)
+    expect(await restored.status(id)).toEqual(result)
+    expect((await restored.readPreparedForRecovery(id))?.commandOrigin).toEqual(commandOrigin)
+    expect(await restored.stageSelection(id, request, commandOrigin, signal())).toEqual(result)
+    expect(readFileSync(path).equals(before)).toBe(true)
+  })
+
+  it('rejects command retries and activation after original target/base drift', async () => {
+    const f = await selectedFixture()
+    const id = randomUUID()
+    const commandOrigin = origin()
+    const request = { names: 'all', enabled: false } as const
+    await f.backend.stageSelection(id, request, commandOrigin, signal())
+    const path = join(f.profile, 'package.json')
+    const manifest = jsonObject(readFileSync(path, 'utf8'))
+    manifest.userField = { changed: true }
+    write(path, manifest)
+    await expect(f.backend.stageSelection(id, request, commandOrigin, signal())).rejects.toThrow('base changed')
+    await expect(f.backend.readPreparedForActivation(id)).rejects.toThrow('base no longer matches')
+  })
+
+  it('refuses an already aborted command before acquiring or allocating preparation state', async () => {
+    const f = await selectedFixture()
+    const id = randomUUID()
+    const controller = new AbortController()
+    const reason = new Error('cancelled before stage')
+    controller.abort(reason)
+    await expect(f.backend.stageSelection(id, { names: [pluginName], enabled: false }, origin(), controller.signal)).rejects.toBe(reason)
+    expect(existsSync(f.transaction(id))).toBe(false)
+  })
+
+  it('requires an existing registry target under the lease and never converts a source-owned package', async () => {
+    const f = await selectedFixture()
+    await expect(f.backend.stageRegistryUpdate(randomUUID(), pluginName, '2.0.0', origin(), signal())).rejects.toThrow('direct registry target')
+    await expect(f.backend.stageRegistryUpdate(randomUUID(), 'missing', '2.0.0', origin(), signal())).rejects.toThrow('direct registry target')
+    expect(f.pnpmRunner).not.toHaveBeenCalled()
+    const name = 'registry-addon'
+    const manifestPath = join(f.profile, 'package.json')
+    const manifest = jsonObject(readFileSync(manifestPath, 'utf8'))
+    object(manifest, 'dependencies')[name] = '1.0.0'
+    write(manifestPath, manifest)
+    await graph({ cwd: f.profile, args: [], env: {}, signal: signal() })
+    const id = randomUUID()
+    const result = await f.backend.stageRegistryUpdate(id, name, '2.0.0', origin(), signal())
+    expect(result.packageName).toBe(name)
+    expect(preparedRecord(f, id).commandRequest).toEqual({ kind: 'registry-update', name, version: '2.0.0' })
+    expect(object(jsonObject(readFileSync(join(f.transaction(id), 'profile/package.json'), 'utf8')), 'dependencies')[name]).toBe('2.0.0')
+  })
+})
+
 describe('Desktop stage-only package transactions', () => {
   it('requires trusted fresh-profile authorization and preserves an already prepared creation across restart', async () => {
     const f = await provisioningFixture()

@@ -47,6 +47,20 @@ describe('ASAR runtime inspection carrier', () => {
     expect(() => readPackagedDesktopRuntimeDescriptor('packaged Electron.exe', runtime)).toThrow('descriptor missing')
   })
 
+  it('uses the caller-owned descriptor environment without ambient home or credentials', () => {
+    vi.stubEnv('DSH_HOME', 'production-home')
+    vi.stubEnv('AMBIENT_ONLY', 'must-not-inherit')
+    const environment = { DSH_HOME: 'fixture-home', HOME: 'fixture-home', APPDATA: 'fixture-appdata',
+      LOCALAPPDATA: 'fixture-localappdata', USERPROFILE: 'fixture-userprofile', PRIVATE_TOKEN: 'do-not-forward' }
+    child.sync.mockReturnValueOnce(Buffer.from('{}'))
+    readPackagedDesktopRuntimeDescriptor('Electron', 'runtime', environment)
+    const options = child.sync.mock.calls[0]![2]
+    expect(options.cwd).toBe('fixture-home')
+    expect(options.env).toEqual({ DSH_HOME: 'fixture-home', HOME: 'fixture-home', APPDATA: 'fixture-appdata',
+      LOCALAPPDATA: 'fixture-localappdata', USERPROFILE: 'fixture-userprofile', ELECTRON_RUN_AS_NODE: '1' })
+    expect(process.env.DSH_HOME).toBe('production-home')
+  })
+
   it('awaits the real inventory verifier and propagates nonzero exits and timeouts', async () => {
     let finish!: Callback
     let started!: () => void

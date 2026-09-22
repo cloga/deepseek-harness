@@ -14,6 +14,8 @@ export interface DesktopProfilePackageActivationOptions {
   readonly profile: string
   readonly backend: Pick<DesktopProfilePackageTransactions,
     'readPreparedForActivation' | 'readPreparedForRecovery' | 'verifyActivationTree'>
+  /** Command-origin preconsent stages require a matching live, persisted command capability; ordinary review cannot supply it. */
+  readonly authorizeCommand?: (input: DesktopPreparedPackageActivation) => void | Promise<void>
   /** Native confirmation, including permission to interrupt the listed live Sessions. */
   readonly confirm: (input: DesktopPreparedPackageActivation) => Promise<boolean>
   /**
@@ -305,7 +307,14 @@ export function createDesktopProfilePackageActivation(options: DesktopProfilePac
         const location = paths(id)
         if (readJournal(location.journal) !== undefined) fail('an activation journal already exists; use explicit recovery')
         if (directory(location.rollbackDir, true)) fail('unidentified rollback directory already exists')
+        const authorize = async (): Promise<void> => {
+          if (input.commandOrigin === undefined) return
+          if (options.authorizeCommand === undefined) fail('command-origin preparation requires its live settlement authority')
+          await options.authorizeCommand(input)
+        }
+        await authorize()
         if (!await options.confirm(input)) return { status: 'cancelled', transactionId: id }
+        await authorize()
         const release = await options.acquireAdmission(input)
         let journal: Journal | undefined
         let stopped = false

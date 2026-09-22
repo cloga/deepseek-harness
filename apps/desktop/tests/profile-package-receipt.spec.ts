@@ -101,6 +101,26 @@ it('validates both evidence positions before changing either file', async () => 
   expect(readFileSync(state, 'utf8')).toBe('{unexpected partial state')
 })
 
+it.each([false, true])('selection enabled=%s preserves existing receipt bytes and earns no new receipt', async (enabled) => {
+  const f = fixture(enabled)
+  const { verifiedRelease: _verified, ...base } = f.input
+  const input: DesktopPreparedPackageActivation = { ...base,
+    mutation: { kind: 'selection', packageNames: ['addon'], enabled },
+    commandOrigin: { kind: 'desktop-command', generation: '11111111-1111-4111-8111-111111111111', requestId: 1, commandId: 'command' },
+    prepared: { schemaVersion: 2, kind: 'selection', transactionId: f.input.prepared.transactionId,
+      state: 'prepared', packageNames: ['addon'], baseFingerprint: '4'.repeat(64), health: 'pending' },
+  }
+  writeFileSync(f.receipt, '{"schemaVersion":1, "receipts":{}, "owners":{}}\n')
+  const before = readFileSync(f.receipt)
+  expect(prepareDesktopPackageReceipt(input)).toBeUndefined()
+  await commitDesktopPackageReceipt(input)
+  expect(readFileSync(f.receipt).equals(before)).toBe(true)
+  expect(() => { prepareDesktopPackageReceipt({ ...input, verifiedRelease: f.input.verifiedRelease! }) }).toThrow('invalid or unqualified')
+  const verified = fixture()
+  const proof = prepareDesktopPackageReceipt(verified.input)!
+  expect(() => { validateDesktopReceiptTransition(input, proof) }).toThrow('invalid or unqualified')
+})
+
 it('does not produce an active receipt for a disabled verified bundle', () => {
   expect(prepareDesktopPackageReceipt(fixture(false).input)).toBeUndefined()
 })

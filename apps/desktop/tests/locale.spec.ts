@@ -23,6 +23,17 @@ describe('desktop locale dictionaries', () => {
     }
   })
 
+  it('keeps native command consent distinct from ordinary staged-package review', () => {
+    expect(en.pluginCommandPrompt).toBe('Restart the Desktop Host to apply this change?')
+    expect(en.pluginCommandApply).toBe('Apply and Restart Host')
+    expect(en.pluginCommandCancel).toBe('Cancel')
+    expect(zh.pluginCommandPrompt).toBe('是否重启 Desktop Host 以应用此更改？')
+    expect(zh.pluginCommandApply).toBe('应用并重启 Host')
+    expect(zh.pluginCommandCancel).toBe('取消')
+    expect(en.packageActivate).toBe('Activate and restart Host')
+    expect(en.updateLater).toBe('Update later')
+  })
+
   it('formats named values without consuming unknown placeholders', () => {
     expect(formatDesktopMessage('{name}@{version} {missing}', { name: 'plugin', version: '1.2.3' }))
       .toBe('plugin@1.2.3 {missing}')

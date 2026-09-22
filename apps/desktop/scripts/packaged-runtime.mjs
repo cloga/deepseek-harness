@@ -2,7 +2,7 @@
 import { execFile, execFileSync } from 'node:child_process'
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { promisify } from 'node:util'
 
 const run = promisify(execFile)
@@ -38,15 +38,16 @@ export function packagedDesktopRuntimeEnvironment(environment = process.env) {
  * Read the original descriptor bytes through Electron's ASAR filesystem.
  * @param {string} executable - Packaged Electron executable, never bundled upstream Node.
  * @param {string} runtimeRoot - ASAR-backed runtime directory.
+ * @param {NodeJS.ProcessEnv} [environment] - Optional caller-owned inspection environment; no ambient variables are merged into it.
  * @returns {Buffer} Exact packaged bytes used by release receipts and installed evidence.
  */
-export function readPackagedDesktopRuntimeDescriptor(executable, runtimeRoot) {
+export function readPackagedDesktopRuntimeDescriptor(executable, runtimeRoot, environment) {
   return execFileSync(executable, ['--input-type=module', '--eval', [
     requireElectron,
     'import { readFileSync } from "node:fs";',
     `process.stdout.write(readFileSync(${JSON.stringify(join(runtimeRoot, 'desktop-runtime.json'))}));`,
   ].join('\n')], {
-    env: packagedDesktopRuntimeEnvironment(), windowsHide: true,
+    env: packagedDesktopRuntimeEnvironment(environment), cwd: environment?.DSH_HOME, windowsHide: true,
     timeout: 120_000, maxBuffer: 64 * 1024 * 1024,
   })
 }
@@ -111,16 +112,21 @@ function verifyUnpackedFileNames(unpacked, expected) {
  * @param {string} runtimeRoot - ASAR-backed runtime directory.
  * @param {string} version - Expected upstream shell/runtime version.
  * @param {{ platform: NodeJS.Platform, arch: string }} target - Required runtime target.
+ * @param {NodeJS.ProcessEnv} [environment] - Optional caller-owned environment with an absolute TMPDIR, TEMP or TMP for materialization.
  * @returns {Promise<void>} Resolves after successful verification and child exit.
  */
-export async function verifyPackagedDesktopRuntime(executable, runtimeRoot, version, target) {
+export async function verifyPackagedDesktopRuntime(executable, runtimeRoot, version, target, environment) {
+  const temporaryRoot = environment === undefined ? tmpdir() : environment.TMPDIR ?? environment.TEMP ?? environment.TMP
+  if (typeof temporaryRoot !== 'string' || !isAbsolute(temporaryRoot)) {
+    throw new Error('desktop runtime: explicit inspection environment requires an absolute temporary directory')
+  }
   const { readAsar } = await import('app-builder-lib/out/asar/asar.js')
   const archive = await readAsar(dirname(runtimeRoot))
   const entries = runtimeEntries(archive.header)
   const unpacked = join(`${dirname(runtimeRoot)}.unpacked`, 'dsh')
   // Electron's virtual directory listing cannot observe unrecorded sidecar files.
   verifyUnpackedFileNames(unpacked, entries.filter(entry => entry.node.unpacked === true).map(entry => entry.path))
-  const materialized = mkdtempSync(join(tmpdir(), 'dsh-asar-verification-'))
+  const materialized = mkdtempSync(join(temporaryRoot, 'dsh-asar-verification-'))
   try {
     for (const { path, node } of entries) {
       const destination = join(materialized, ...path.split('/'))
@@ -139,7 +145,7 @@ export async function verifyPackagedDesktopRuntime(executable, runtimeRoot, vers
       `import { verifyDesktopRuntime } from ${JSON.stringify(verifier)};`,
       `await verifyDesktopRuntime(${JSON.stringify(materialized)}, ${JSON.stringify(version)}, ${JSON.stringify(target)});`,
     ].join('\n')], {
-      env: packagedDesktopRuntimeEnvironment(), windowsHide: true,
+      env: packagedDesktopRuntimeEnvironment(environment), cwd: environment?.DSH_HOME, windowsHide: true,
       timeout: 120_000, maxBuffer: 1024 * 1024,
     })
   } finally {

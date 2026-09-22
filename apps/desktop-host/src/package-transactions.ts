@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import {
-  parseProfilePreparedChange, parseProfileTransactionId, ProfilePackageCancelledError,
+  parseProfilePendingChange, parseProfilePreparedChange, parseProfileTransactionId, ProfilePackageCancelledError,
   type ProfilePackageMutation, type ProfilePackageTransactions, type ProfilePreparedPackageChange,
 } from '@deepseek-ai/dsh-app-boot'
 
@@ -85,12 +85,12 @@ export async function provideDesktopPackageTransactions(ctx: Context): Promise<v
     },
     async status(transactionId) {
       const result = await call('status', { transactionId: parseProfileTransactionId(transactionId) })
-      return result === null ? undefined : parseProfilePreparedChange(result)
+      return result === null ? undefined : parseProfilePendingChange(result)
     },
     async listPending() {
       const result = await call('list')
       if (!Array.isArray(result) || result.length > 100) throw new Error('desktop packages: invalid pending list')
-      return result.map(parseProfilePreparedChange)
+      return result.map(parseProfilePendingChange)
     },
     async cancel(transactionId) { await call('cancel', { transactionId: parseProfileTransactionId(transactionId) }) },
   }

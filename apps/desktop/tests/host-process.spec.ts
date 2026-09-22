@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ModuleKind, ScriptTarget, transpileModule } from 'typescript'
 import { describe, expect, it, vi, type TestContext } from 'vitest'
-import { DesktopHostProcess, DesktopHostUncleanExitError } from '../src/host-process.ts'
+import { DesktopHostProcess, DesktopHostUncleanExitError, type DesktopPluginCommandEvent } from '../src/host-process.ts'
 
 interface OwnedHostFixtures {
   roots: string[]
@@ -95,14 +95,97 @@ function hostEnvironment(runtime: string, environment: NodeJS.ProcessEnv = { ...
 function hostProcess(
   test: TestContext, runtime: string, profile = runtime, onFailure?: (error: Error) => void,
   environment = hostEnvironment(runtime),
+  onPluginCommand?: (host: DesktopHostProcess, event: DesktopPluginCommandEvent) => void,
 ): DesktopHostProcess {
   const resources = owned(test)
-  const host = new DesktopHostProcess(process.execPath, runtime, profile, undefined, hostEnvironment(runtime, environment), onFailure)
+  const host = new DesktopHostProcess(process.execPath, runtime, profile, undefined, hostEnvironment(runtime, environment), onFailure,
+    undefined, 'link', undefined, undefined, false, onPluginCommand)
   resources.hosts.push(host)
   return host
 }
 
 describe('desktop host process', () => {
+  it('routes command control over the retained alpha2 child without replacing URL or task protocols', async (test) => {
+    const runtime = projectWithHost(test, `
+process.send({ type: 'ready', url: 'http://127.0.0.1:3080/?token=fixture', injections: [] })
+process.send({ type: 'plugin-command-request', requestId: 1, commandId: 'command-list', operation: { type: 'list' } })
+process.on('message', message => {
+  if (message.type === 'plugin-command-response' && message.requestId === 1 && message.result.kind === 'list') {
+    process.send({ type: 'plugin-command-settled', requestId: 1, commandId: 'command-list' })
+  }
+  if (message.type === 'update-tasks') process.send({ type: 'update-tasks', requestId: message.requestId, active: false })
+  if (message.type === 'shutdown') process.send({ type: 'shutdown-complete' }, () => process.disconnect())
+})
+`)
+    const events: string[] = []
+    const settled = Promise.withResolvers<undefined>()
+    const host = hostProcess(test, runtime, runtime, undefined, hostEnvironment(runtime), (source, event) => {
+      expect(source).toBe(host)
+      events.push(event.type)
+      if (event.type === 'plugin-command-request') {
+        void source.pluginCommandResponse(event.requestId, { kind: 'list', plugins: [] }).catch(settled.reject)
+      } else if (event.type === 'plugin-command-settled') settled.resolve(undefined)
+    })
+    expect(await host.start()).toEqual({ url: 'http://127.0.0.1:3080/?token=fixture', injections: [], packages: undefined })
+    await settled.promise
+    expect(events).toEqual(['plugin-command-request', 'plugin-command-settled'])
+    expect(await host.updateTasks('inspect')).toBe(false)
+    await host.stop(true)
+    await expect(host.pluginCommandResponse(1, { kind: 'prepared' })).rejects.toThrow('Host is unavailable')
+  })
+
+  it('returns a safe unavailable response when no command consumer owns the child', async (test) => {
+    const runtime = projectWithHost(test, `
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+process.send({ type: 'ready', url: 'http://127.0.0.1:3080/' })
+process.send({ type: 'plugin-command-request', requestId: 1, commandId: 'command-list', operation: { type: 'list' } })
+process.on('message', message => {
+  if (message.type === 'plugin-command-response') writeFileSync(join(process.argv[3], 'reply.json'), JSON.stringify(message))
+  if (message.type === 'shutdown') process.send({ type: 'shutdown-complete' }, () => process.disconnect())
+})
+`)
+    const host = hostProcess(test, runtime)
+    await host.start()
+    const path = join(runtime, 'reply.json')
+    await expect.poll(() => existsSync(path)).toBe(true)
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({
+      type: 'plugin-command-response', requestId: 1, result: { kind: 'error', code: 'unavailable' },
+    })
+    await host.stop(true)
+  })
+
+  it('rejects malformed command events before dispatching or interpreting them as task responses', async (test) => {
+    const runtime = projectWithHost(test, `
+process.send({ type: 'ready', url: 'http://127.0.0.1:3080/' })
+process.send({ type: 'plugin-command-request', requestId: 1, commandId: 'command-list', operation: { type: 'list' }, authority: true })
+process.on('message', () => {})
+`)
+    const failed = vi.fn()
+    const dispatch = vi.fn()
+    const host = hostProcess(test, runtime, runtime, failed, hostEnvironment(runtime), dispatch)
+    await host.start()
+    await expect.poll(() => failed.mock.calls.length).toBe(1)
+    expect(failed).toHaveBeenCalledWith(new Error('dsh desktop host sent an invalid IPC event'))
+    expect(dispatch).not.toHaveBeenCalled()
+    await host.stop()
+  })
+
+  it('contains a command listener exception through the existing child failure owner', async (test) => {
+    const runtime = projectWithHost(test, `
+process.send({ type: 'ready', url: 'http://127.0.0.1:3080/' })
+process.send({ type: 'plugin-command-cancel', requestId: 1 })
+process.on('message', () => {})
+`)
+    const primary = new Error('owned command listener failed')
+    const failed = vi.fn()
+    const host = hostProcess(test, runtime, runtime, failed, hostEnvironment(runtime), () => { throw primary })
+    await host.start()
+    await expect.poll(() => failed.mock.calls.length).toBe(1)
+    expect(failed).toHaveBeenCalledWith(primary)
+    await host.stop()
+  })
+
   it('correlates task inspections and admission changes over private IPC', async (test) => {
     const host = hostProcess(test, projectWithHost(test))
     await expect(host.updateTasks('inspect')).rejects.toThrow('Host is unavailable')

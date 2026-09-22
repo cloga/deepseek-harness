@@ -9,7 +9,8 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import {
   boot, composeEntries, initProfile, readProfilePatches, readProfileManifest, reconcileProfilePatches,
   OPTIONAL_BUNDLES, ProfilePackageCancelledError, withProfilePackageLease,
-  type ProfileContext, type ProfilePackageTransactions, type ProfilePreparedPackageChange, type ProfileVerifiedReleaseSource,
+  type ProfileContext, type ProfilePackageTransactions, type ProfilePreparedBundleSelection,
+  type ProfilePreparedPackageChange, type ProfileVerifiedReleaseSource,
 } from '@deepseek-ai/dsh-app-boot'
 import PluginManager, { type Config, type PluginChange, type PluginInstallLogChunk, type PluginInstallProgress, type PluginInstallRequestId } from '../src/index.ts'
 import Hmr from '@deepseek-ai/dsh-hmr'
@@ -777,6 +778,10 @@ describe('staged package transactions', () => {
   const prepared = (packageName = 'addon', transactionId: string = requestId): ProfilePreparedPackageChange => ({
     transactionId, state: 'prepared', packageName, baseFingerprint: 'a'.repeat(64), health: 'pending',
   })
+  const selection = (): ProfilePreparedBundleSelection => ({
+    schemaVersion: 2, kind: 'selection', transactionId: requestId, state: 'prepared',
+    packageNames: ['addon', 'extra'], baseFingerprint: 'a'.repeat(64), health: 'pending',
+  })
   const verifiedRelease = (): ProfileVerifiedReleaseSource => ({
     schemaVersion: 1, type: 'githubRelease', owner: 'fixture', repo: 'addon', tag: 'v2.0.0', asset: 'addon-2.0.0.tgz',
     assetId: 17, packageName: 'addon', version: '2.0.0', size: 123, sha256: 'b'.repeat(64), targetCommit: 'c'.repeat(40),
@@ -825,6 +830,52 @@ describe('staged package transactions', () => {
       expect(changes).toEqual([])
     }
   }
+
+  it('reads legacy and selection preparations without changing active package state', async () => {
+    const service = transactions()
+    const selected = selection()
+    const previous = prepared('addon', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+    service.status.mockResolvedValue(selected)
+    service.listPending.mockResolvedValue([previous, selected])
+    const { ctx, dir, manager } = await stagedFixture(service)
+    const unchanged = observeActiveProfile(ctx, dir)
+    const single = await manager.pendingPackageChange(requestId)
+    expect(single).toEqual(selected)
+    expect(single).not.toBe(selected)
+    expect(await manager.listPendingPackageChanges()).toEqual([previous, selected])
+    expect((await manager.listBundles()).some(bundle => bundle.name === 'addon')).toBe(false)
+    expect(service.stage).not.toHaveBeenCalled()
+    expect(service.cancel).not.toHaveBeenCalled()
+    unchanged()
+  })
+
+  it.each(['install', 'remove'] as const)('refuses a selection record returned by ordinary %s staging', async (operation) => {
+    const service = transactions()
+    const stage = vi.fn(async () => selection())
+    // Model malformed launcher output without lying about the legacy stage API's static return type.
+    expect(Reflect.set(service, 'stage', stage)).toBe(true)
+    const { ctx, dir, manager } = await stagedFixture(service)
+    const unchanged = observeActiveProfile(ctx, dir)
+    const result = operation === 'install' ? await manager.installBundle('addon', { requestId }) : await manager.removeBundle('extra')
+    expect(result).toMatchObject({ application: 'failed', changed: false, error: { code: 'operation-error' } })
+    expect(result.prepared).toBeUndefined()
+    expect(stage).toHaveBeenCalledOnce()
+    unchanged()
+  })
+
+  it.each(['unsorted', 'mixed', 'wrong-id'] as const)('refuses malformed selection status and list replies: %s', async (damage) => {
+    const service = transactions()
+    const value = damage === 'unsorted' ? { ...selection(), packageNames: ['extra', 'addon'] }
+      : damage === 'mixed' ? { ...selection(), packageName: 'fake-target' }
+        : { ...selection(), transactionId: 'wrong-id' }
+    expect(Reflect.set(service, 'status', vi.fn(async () => value))).toBe(true)
+    expect(Reflect.set(service, 'listPending', vi.fn(async () => [value]))).toBe(true)
+    const { ctx, dir, manager } = await stagedFixture(service)
+    const unchanged = observeActiveProfile(ctx, dir)
+    await expect(manager.pendingPackageChange(requestId)).rejects.toThrow()
+    await expect(manager.listPendingPackageChanges()).rejects.toThrow()
+    unchanged()
+  })
 
   it('refuses verified Release input on a normal profile before invoking stock mutation', async () => {
     const { ctx, dir, manager } = await fixture('startup')

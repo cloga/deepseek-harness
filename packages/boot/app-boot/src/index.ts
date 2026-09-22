@@ -22,9 +22,10 @@ export { sanitizeProfile } from './profile-sanitize.ts'
 export { ProfilePackageCancelledError } from './profile-package-cancellation.ts'
 export { PROFILE_ROOT_FILENAME, PROFILE_ROOT_CONFIG, prepareProfileRootConfig, writeProfileRootConfig } from './profile-root.ts'
 export {
-  profilePackageLeaseTarget, withProfilePackageLease, parseProfileTransactionId, parseProfilePreparedChange,
+  profilePackageLeaseTarget, withProfilePackageLease, parseProfileTransactionId, parseProfilePreparedChange, parseProfilePendingChange,
   type ProfilePackageTransactions, type ProfilePackageMutation, type ProfilePackageSource,
-  type ProfilePreparedPackageChange, type ProfileVerifiedReleaseSource, type ProfilePackageHealth,
+  type ProfilePreparedPackageChange, type ProfilePreparedBundleSelection, type ProfilePendingPackageChange,
+  type ProfileVerifiedReleaseSource, type ProfilePackageHealth,
 } from './profile-package-transactions.ts'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 

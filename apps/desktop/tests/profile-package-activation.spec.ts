@@ -113,6 +113,74 @@ async function interruptedBeforeRename(f: ReturnType<typeof fixture>): Promise<v
   f.release.mockClear()
 }
 
+describe('command-origin activation authority', () => {
+  const commandOrigin = () => ({ kind: 'desktop-command' as const, generation: randomUUID(), requestId: 1, commandId: 'command-1' })
+
+  it('refuses ordinary review and orphan preconsent records before any prompt or profile effect', async () => {
+    const f = fixture()
+    Object.assign(f.input, { commandOrigin: commandOrigin() })
+    await expect(f.controller.activate(f.transactionId)).rejects.toThrow('live settlement authority')
+    expect(f.events).toEqual([])
+    expect(existsSync(f.journalPath)).toBe(false)
+    expect(fingerprint(f.profile)).toBe(f.input.baseGraphFingerprint)
+    expect(fingerprint(f.candidateDir)).toBe(f.input.candidateFingerprint)
+    await expect(f.controller.recover(f.transactionId)).rejects.toThrow('journal is unavailable')
+    expect(f.confirm).not.toHaveBeenCalled()
+  })
+
+  it('requires the invocation-bound origin before consent and again before admission', async () => {
+    const f = fixture()
+    const origin = commandOrigin()
+    Object.assign(f.input, { commandOrigin: origin })
+    const authorizeCommand = vi.fn((input: DesktopPreparedPackageActivation) => {
+      expect(input.commandOrigin).toEqual(origin)
+      expect(input.prepared.transactionId).toBe(f.transactionId)
+      f.events.push('authorize')
+    })
+    const controller = createDesktopProfilePackageActivation({ ...f.options, authorizeCommand })
+    expect(await controller.activate(f.transactionId)).toMatchObject({ status: 'committed' })
+    expect(f.events.slice(0, 4)).toEqual(['authorize', 'confirm', 'authorize', 'admit'])
+    expect(authorizeCommand).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not admit a command whose authority expires during deferred native consent', async () => {
+    const f = fixture()
+    Object.assign(f.input, { commandOrigin: commandOrigin() })
+    const revoked = new Error('exact command authority revoked')
+    let live = true
+    const authorizeCommand = vi.fn(() => { if (!live) throw revoked })
+    f.confirm.mockImplementation(async () => { live = false; return true })
+    const controller = createDesktopProfilePackageActivation({ ...f.options, authorizeCommand })
+    await expect(controller.activate(f.transactionId)).rejects.toBe(revoked)
+    expect(f.acquireAdmission).not.toHaveBeenCalled()
+    expect(f.qualify).not.toHaveBeenCalled()
+    expect(f.stopHost).not.toHaveBeenCalled()
+    expect(existsSync(f.journalPath)).toBe(false)
+  })
+
+  it('preserves failed or undefined command authorization without prompting', async () => {
+    const f = fixture()
+    Object.assign(f.input, { commandOrigin: commandOrigin() })
+    const controller = createDesktopProfilePackageActivation({ ...f.options, authorizeCommand: () => { throw undefined } })
+    await expect(controller.activate(f.transactionId)).rejects.toBeUndefined()
+    expect(f.confirm).not.toHaveBeenCalled()
+    expect(f.acquireAdmission).not.toHaveBeenCalled()
+  })
+
+  it('keeps already-admitted journal recovery behind fresh consent without requiring the lost original command', async () => {
+    const f = fixture()
+    Object.assign(f.input, { commandOrigin: commandOrigin() })
+    const authorized = createDesktopProfilePackageActivation({ ...f.options, authorizeCommand: () => {} })
+    f.stopHost.mockRejectedValueOnce(new Error('interrupted admitted stop'))
+    await expect(authorized.activate(f.transactionId)).rejects.toThrow('interrupted admitted stop')
+    expect(json(f.journalPath).phase).toBe('stopping')
+    f.events.length = 0
+    expect(await f.controller.recover(f.transactionId)).toMatchObject({ status: 'rolled-back' })
+    expect(f.events[0]).toBe('confirm')
+    expect(f.verifyHost).toHaveBeenCalledWith(f.input, 'previous')
+  })
+})
+
 describe('shell-only prepared package activation', () => {
   it('constructs inertly and leaves prepared state untouched when native confirmation is refused', async () => {
     const f = fixture()

@@ -2,7 +2,7 @@ import { WINDOWS_TITLEBAR_HEIGHT } from '../src/windows-layout.ts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { IpcMainInvokeEvent } from 'electron'
 import { join } from 'node:path'
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import type { MenuItemConstructorOptions, MessageBoxOptions } from 'electron'
 import { DESKTOP_IPC, type DesktopUpdateState } from '../src/ipc.ts'
@@ -15,15 +15,21 @@ import type { DesktopManagedUpdateSelection } from '../src/managed-update-coordi
 import type { DesktopManagedUpdateAcknowledgement } from '../src/managed-update-launcher.ts'
 import { MANAGED_UPDATE_RECOVERY_ARGUMENT } from '../src/managed-update-recovery.ts'
 import { managedCapability, managedManifest } from './managed-update-fixture.ts'
-import type { DesktopPreparedPackageActivation, DesktopProvisioningAssessment } from '../src/profile-package-staging.ts'
+import type { DesktopPreparedPackageActivation, DesktopProvisioningAssessment, DesktopProfilePackageTransactions } from '../src/profile-package-staging.ts'
+import type { DesktopPluginCommandEvent, DesktopPluginCommandOperation, DesktopPluginCommandResponse } from '../src/desktop-plugin-command-protocol.ts'
 import type { DesktopProfilePackageActivationOptions } from '../src/profile-package-activation.ts'
 import type { ProfilePackageHealth } from '@deepseek-ai/dsh-app-boot'
 
 const manifestRead = vi.hoisted(() => ({ read: undefined as (() => Promise<string>) | undefined }))
+const inventoryFixture = vi.hoisted(() => ({ profile: 'desktop-test-profile', sharedPackages: [] as { name: string }[] }))
 
 const baseline = vi.hoisted(() => ({
   assess: vi.fn<() => Promise<DesktopProvisioningAssessment>>(),
   commit: vi.fn(), stage: vi.fn(), create: vi.fn(), completion: vi.fn(), list: vi.fn(),
+  commandStage: vi.fn<DesktopProfilePackageTransactions['stageCommand']>(),
+  selectionStage: vi.fn<DesktopProfilePackageTransactions['stageSelection']>(),
+  registryStage: vi.fn<DesktopProfilePackageTransactions['stageRegistryUpdate']>(),
+  cancelCommand: vi.fn<DesktopProfilePackageTransactions['cancel']>(),
   createdProfile: false,
 }))
 
@@ -46,9 +52,14 @@ vi.mock('../src/profile-package-activation.ts', async (importOriginal) => {
     return {
       activate: async (transactionId: string) => {
         await packageReview.beforeConfirm?.()
+        if (input.commandOrigin !== undefined) {
+          if (options.authorizeCommand === undefined) throw new Error('Command fixture requires invocation-bound admission')
+          await options.authorizeCommand(input)
+        }
         const accepted = await options.confirm(input)
         packageReview.confirmed?.(accepted)
         if (accepted) {
+          if (input.commandOrigin !== undefined) await options.authorizeCommand!(input)
           if (packageReview.run === undefined) throw new Error('review-only fixture must not activate')
           await packageReview.run(options, input)
         }
@@ -155,6 +166,7 @@ const harness = await vi.hoisted(async () => {
   class FakeHost {
     readonly pid = 456
     readonly updateTasks = vi.fn(async (_action: 'inspect' | 'lock' | 'unlock') => false)
+    readonly pluginCommandResponse = vi.fn(async (_requestId: number, _response: DesktopPluginCommandResponse) => {})
     url = 'http://127.0.0.1:3080/?token=test'
     readonly ready = deferred()
     readonly exited = deferred()
@@ -176,10 +188,12 @@ const harness = await vi.hoisted(async () => {
       readonly packageManager?: { pnpm: string; nodeBin: string },
       readonly packageTransactions?: unknown,
       readonly initiallyLocked?: boolean,
+      readonly onPluginCommand?: (host: FakeHost, event: DesktopPluginCommandEvent) => void,
     ) {
       hosts.push(this)
       if (drainingHosts) { this.ready.resolve(); this.exited.resolve() }
     }
+    emitPluginCommand(event: DesktopPluginCommandEvent) { this.onPluginCommand?.(this, event) }
   }
   const app = Object.assign(new EventEmitter(), {
     isPackaged: true,
@@ -295,8 +309,10 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     return encoding === undefined ? original.readFile(path) : original.readFile(path, encoding)
   }) }
 })
-vi.mock('../src/runtime-tree.ts', () => ({ readDesktopRuntime: () => ({ release: { version: '1.0.0' } }) }))
-vi.mock('../src/paths.ts', () => ({ resolveDesktopPaths: () => ({ profile: 'desktop-test-profile' }) }))
+vi.mock('../src/runtime-tree.ts', () => ({
+  readDesktopRuntime: () => ({ release: { version: '1.0.0' }, sharedPackages: inventoryFixture.sharedPackages }),
+}))
+vi.mock('../src/paths.ts', () => ({ resolveDesktopPaths: () => ({ profile: inventoryFixture.profile }) }))
 vi.mock('../src/managed-update-state.ts', () => ({ loadDesktopManagedUpdateConfiguration: async () => managed.config }))
 vi.mock('../src/managed-update-node.ts', () => ({ resolveDesktopManagedNode: () => ({ path: 'verified-primary-node.exe', sha256: 'a'.repeat(64) }) }))
 vi.mock('../src/managed-update-launcher.ts', async (importOriginal) => {
@@ -374,6 +390,8 @@ function applicationMenuItems(): MenuItemConstructorOptions[] {
 }
 
 beforeEach(() => {
+  inventoryFixture.profile = 'desktop-test-profile'
+  inventoryFixture.sharedPackages = []
   manifestRead.read = undefined
   managed.config = undefined
   managed.messages = undefined
@@ -391,10 +409,16 @@ beforeEach(() => {
   baseline.assess.mockReset().mockResolvedValue({ status: 'preserved-user-choice', reason: 'ambiguous-legacy', packageName: 'fixture-provider',
     planSha256: 'a'.repeat(64), planResourceSha256: 'b'.repeat(64) })
   baseline.stage.mockReset()
+  baseline.commandStage.mockReset()
+  baseline.selectionStage.mockReset()
+  baseline.registryStage.mockReset()
+  baseline.cancelCommand.mockReset().mockResolvedValue(undefined)
   baseline.commit.mockReset().mockResolvedValue({ planSha256: 'a'.repeat(64) })
   baseline.completion.mockReset().mockResolvedValue({ status: 'none' })
   baseline.list.mockReset().mockImplementation(async () => packageReview.input === undefined ? [] : [packageReview.input.prepared])
-  baseline.create.mockReset().mockImplementation(() => ({ protocolVersion: 1, stage: vi.fn(), status: vi.fn(), cancel: vi.fn(),
+  baseline.create.mockReset().mockImplementation(() => ({
+    protocolVersion: 1, stage: vi.fn(), status: vi.fn(), cancel: baseline.cancelCommand,
+    stageCommand: baseline.commandStage, stageSelection: baseline.selectionStage, stageRegistryUpdate: baseline.registryStage,
     listPending: baseline.list,
     assessProvisioning: baseline.assess, commitSatisfiedProvisioning: baseline.commit, stageProvisioning: baseline.stage,
   }))
@@ -1745,6 +1769,263 @@ describe('desktop main startup', () => {
     const action = applicationMenuItems().find(item => item.label === en.packageReview)!
     return { host, review: () => { Reflect.apply(action.click!, undefined, []) } }
   }
+
+  async function readyForNativeCommand() {
+    const f = await readyForPackageLifecycle()
+    const template = packageReview.input!
+    baseline.selectionStage.mockImplementation(async (transactionId, request, origin, signal) => {
+      signal.throwIfAborted()
+      const packageNames = request.names === 'all' ? ['fixture-provider', 'second-plugin'] : [...request.names]
+      const prepared = { schemaVersion: 2 as const, kind: 'selection' as const, transactionId, state: 'prepared' as const,
+        packageNames, baseFingerprint: 'e'.repeat(64), health: 'pending' as const }
+      packageReview.input = { ...template, commandOrigin: origin,
+        mutation: { kind: 'selection', packageNames, enabled: request.enabled }, prepared }
+      return prepared
+    })
+    return f
+  }
+
+  it.each(['installed', 'invalid-identity', 'lease-contention'] as const)(
+    'lists command inventory through the actual profile parser and lease: %s', async (scenario) => {
+      const root = mkdtempSync(join(tmpdir(), 'dsh-main-command-inventory-'))
+      const profile = join(root, 'profile')
+      inventoryFixture.profile = profile
+      inventoryFixture.sharedPackages = [{ name: '@deepseek-ai/dsh' }, { name: 'runtime-only' }]
+      const fixtureFiles = [
+        ['package.json', { dependencies: { 'z-disabled': '^9.0.0', '@example/enabled': '^1.0.0',
+          '@deepseek-ai/dsh': '1.0.0', 'runtime-only': '1.0.0' },
+        dsh: { profile: { bundles: ['@example/enabled', '@deepseek-ai/dsh', 'runtime-only'] } } }],
+        ['node_modules/@example/enabled/package.json', { name: '@example/enabled', version: '1.2.3' }],
+        ['node_modules/z-disabled/package.json', { name: scenario === 'invalid-identity' ? 'wrong-name' : 'z-disabled', version: '9.8.7' }],
+      ] as const
+      const paths = fixtureFiles.map(([relative, data]) => {
+        const path = join(profile, relative)
+        mkdirSync(join(path, '..'), { recursive: true })
+        writeFileSync(path, JSON.stringify(data))
+        return path
+      })
+      const before = paths.map(path => readFileSync(path, 'utf8'))
+      const release = Promise.withResolvers<undefined>()
+      let heldLease: Promise<undefined> | undefined
+      try {
+        const boot = await import('@deepseek-ai/dsh-app-boot')
+        const lease = vi.spyOn(boot, 'withProfilePackageLease')
+        managedFixture()
+        const host = await readyForUpdate()
+        await invoke(DESKTOP_IPC.boot)
+        if (scenario === 'lease-contention') {
+          const entered = Promise.withResolvers<undefined>()
+          heldLease = boot.withProfilePackageLease(profile, () => { entered.resolve(undefined); return release.promise }, 0)
+          await entered.promise
+        }
+        lease.mockClear()
+        const urls = [...harness.windows[0]!.urls]
+        const response = Promise.withResolvers<DesktopPluginCommandResponse>()
+        host.pluginCommandResponse.mockImplementationOnce(async (_id, result) => { response.resolve(result) })
+        host.emitPluginCommand({ type: 'plugin-command-request', requestId: 1, commandId: 'inventory-list', operation: { type: 'list' } })
+        expect(await response.promise).toEqual(scenario === 'installed' ? { kind: 'list', plugins: [
+          { name: '@example/enabled', version: '1.2.3', enabled: true },
+          { name: 'z-disabled', version: '9.8.7', enabled: false },
+        ] } : { kind: 'error', code: 'failed' })
+        expect(lease).toHaveBeenCalledExactlyOnceWith(profile, expect.any(Function), 0)
+        expect(paths.map(path => readFileSync(path, 'utf8'))).toEqual(before)
+        expect(host.pluginCommandResponse).toHaveBeenCalledOnce()
+        expect(host.updateTasks).not.toHaveBeenCalled()
+        expect(host.stop).not.toHaveBeenCalled()
+        expect(harness.windows[0]!.urls).toEqual(urls)
+        expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+        expect(baseline.commandStage).not.toHaveBeenCalled()
+        expect(baseline.selectionStage).not.toHaveBeenCalled()
+        expect(baseline.registryStage).not.toHaveBeenCalled()
+        expect(baseline.cancelCommand).not.toHaveBeenCalled()
+        expect(baseline.commit).not.toHaveBeenCalled()
+      } finally {
+        release.resolve(undefined)
+        await heldLease
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+  it('waits for exact persisted command acknowledgement before owned native default-Cancel consent', async () => {
+    const f = await readyForNativeCommand()
+    const urls = [...harness.windows[0]!.urls]
+    f.host.emitPluginCommand({ type: 'plugin-command-request', requestId: 1, commandId: 'command-disable',
+      operation: { type: 'disable', name: 'fixture-provider' } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(baseline.selectionStage).toHaveBeenCalledOnce()
+    expect(f.host.pluginCommandResponse).toHaveBeenCalledWith(1, { kind: 'prepared' })
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(f.host.updateTasks).not.toHaveBeenCalledWith('lock')
+    f.host.emitPluginCommand({ type: 'plugin-command-settled', requestId: 1, commandId: 'wrong-command' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    f.host.emitPluginCommand({ type: 'plugin-command-settled', requestId: 1, commandId: 'command-disable' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledExactlyOnceWith(harness.windows[0], expect.objectContaining({
+      title: en.pluginCommandTitle, message: en.pluginCommandPrompt,
+      buttons: [en.pluginCommandApply, en.pluginCommandCancel], defaultId: 1, cancelId: 1,
+    }))
+    expect(baseline.cancelCommand).toHaveBeenCalledExactlyOnceWith(packageReview.input!.prepared.transactionId)
+    expect(f.host.stop).not.toHaveBeenCalled()
+    expect(harness.windows[0]!.urls).toEqual(urls)
+    expect(f.host.pluginCommandResponse).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['input-drift', 'lock-rejection', 'unlock-uncertain'] as const)(
+    'restores only safely released command admission after native approval: %s', async (failure) => {
+      const f = await readyForNativeCommand()
+      const window = harness.windows[0]!
+      const urls = [...window.urls]
+      window.setEnabled.mockClear()
+      harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
+      packageReview.run = async (options) => {
+        await options.acquireAdmission()
+        throw new Error('failed admission must not proceed')
+      }
+      f.host.updateTasks.mockImplementation(async (action) => {
+        if (action === 'lock') {
+          if (failure === 'input-drift') reportInput({ hasDraft: true, attachmentCount: 0, submitting: false })
+          else throw new Error('fixture admission lock failure')
+        }
+        if (action === 'unlock' && failure === 'unlock-uncertain') throw new Error('fixture uncertain unlock')
+        return false
+      })
+      f.host.emitPluginCommand({ type: 'plugin-command-request', requestId: 1, commandId: 'admission-failure',
+        operation: { type: 'disable', name: 'fixture-provider' } })
+      await vi.advanceTimersByTimeAsync(0)
+      f.host.emitPluginCommand({ type: 'plugin-command-settled', requestId: 1, commandId: 'admission-failure' })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(window, expect.objectContaining({ defaultId: 1, cancelId: 1 }))
+      expect(f.host.updateTasks.mock.calls).toEqual([['inspect'], ['lock'], ['unlock']])
+      expect(window.setEnabled.mock.calls).toEqual(failure === 'unlock-uncertain' ? [[false]] : [[false], [true]])
+      expect(f.host.stop).not.toHaveBeenCalled()
+      expect(harness.hosts).toEqual([f.host])
+      expect(window.urls).toEqual(urls)
+      expect(baseline.commit).not.toHaveBeenCalled()
+      expect(baseline.cancelCommand).toHaveBeenCalledOnce()
+      expect(f.host.pluginCommandResponse).toHaveBeenCalledTimes(1)
+      if (failure === 'unlock-uncertain') {
+        f.host.emitPluginCommand({ type: 'plugin-command-request', requestId: 2, commandId: 'blocked-after-uncertainty',
+          operation: { type: 'disable-all' } })
+        await vi.advanceTimersByTimeAsync(0)
+        expect(f.host.pluginCommandResponse).toHaveBeenLastCalledWith(2, { kind: 'error', code: 'busy' })
+        expect(baseline.selectionStage).toHaveBeenCalledOnce()
+      }
+    })
+
+  it.each([
+    { operation: { type: 'install', source: { type: 'npm', spec: '@example/plugin@1.2.3' } },
+      expected: { kind: 'install', source: { schemaVersion: 1, type: 'npmRegistry', spec: '@example/plugin@1.2.3' } } },
+    { operation: { type: 'install', source: { type: 'github', spec: 'example/plugin#main' } },
+      expected: { kind: 'install', source: { schemaVersion: 1, type: 'packageSpec', spec: 'github:example/plugin#main' } } },
+    { operation: { type: 'remove', name: '@example/plugin' }, expected: { kind: 'remove', name: '@example/plugin' } },
+  ] as const)('routes the trusted %j command through the existing data-only staging owner', async ({ operation, expected }) => {
+    const f = await readyForNativeCommand()
+    baseline.commandStage.mockImplementation(async (transactionId, mutation, origin, signal) => {
+      signal.throwIfAborted()
+      expect(mutation).toEqual(expected)
+      expect(origin).toMatchObject({ kind: 'desktop-command', requestId: 1, commandId: 'mapped-command' })
+      const prepared = { transactionId, state: 'prepared' as const, packageName: '@example/plugin',
+        baseFingerprint: 'e'.repeat(64), health: 'pending' as const }
+      packageReview.input = { ...packageReview.input!, mutation, commandOrigin: origin, prepared }
+      return prepared
+    })
+    f.host.emitPluginCommand({ type: 'plugin-command-request', requestId: 1, commandId: 'mapped-command', operation })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(baseline.commandStage).toHaveBeenCalledOnce()
+    expect(f.host.pluginCommandResponse).toHaveBeenCalledWith(1, { kind: 'prepared' })
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    f.host.emitPluginCommand({ type: 'plugin-command-cancel', requestId: 1 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(baseline.cancelCommand).toHaveBeenCalledExactlyOnceWith(packageReview.input!.prepared.transactionId)
+    expect(f.host.stop).not.toHaveBeenCalled()
+  })
+
+  it('delegates exact registry update eligibility to the lease-owning backend, not an installation alias', async () => {
+    const f = await readyForNativeCommand()
+    baseline.registryStage.mockImplementation(async (transactionId, name, version, origin, signal) => {
+      signal.throwIfAborted()
+      expect([name, version]).toEqual(['@example/plugin', '2.0.0'])
+      expect(origin.commandId).toBe('registry-update')
+      return { transactionId, state: 'prepared', packageName: name, baseFingerprint: 'e'.repeat(64), health: 'pending' }
+    })
+    f.host.emitPluginCommand({ type: 'plugin-command-request', requestId: 1, commandId: 'registry-update',
+      operation: { type: 'update', name: '@example/plugin', version: '2.0.0' } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(baseline.registryStage).toHaveBeenCalledOnce()
+    expect(baseline.commandStage).not.toHaveBeenCalled()
+    expect(baseline.selectionStage).not.toHaveBeenCalled()
+    f.host.emitPluginCommand({ type: 'plugin-command-cancel', requestId: 1 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(baseline.cancelCommand).toHaveBeenCalledOnce()
+  })
+
+  it('rejects unverified release JSON before any staging or native confirmation', async () => {
+    const f = await readyForNativeCommand()
+    const operation: DesktopPluginCommandOperation = { type: 'install', source: { type: 'release', release: {} } }
+    f.host.emitPluginCommand({ type: 'plugin-command-request', requestId: 1, commandId: 'invalid-release', operation })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(f.host.pluginCommandResponse).toHaveBeenCalledExactlyOnceWith(1, { kind: 'error', code: 'failed' })
+    expect(baseline.commandStage).not.toHaveBeenCalled()
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(f.host.stop).not.toHaveBeenCalled()
+  })
+
+  it('does not let ordinary Web review borrow another command capability before native settlement', async () => {
+    const f = await readyForNativeCommand()
+    f.host.emitPluginCommand({ type: 'plugin-command-request', requestId: 1, commandId: 'waiting-command',
+      operation: { type: 'disable-all' } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(baseline.selectionStage.mock.calls[0]?.[1]).toEqual({ names: 'all', enabled: false })
+    f.review()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.dialog.showMessageBox.mock.calls.every(args => args.length === 1)).toBe(true)
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalledWith(harness.windows[0], expect.anything())
+    expect(f.host.updateTasks).not.toHaveBeenCalledWith('lock')
+    expect(f.host.stop).not.toHaveBeenCalled()
+    f.host.emitPluginCommand({ type: 'plugin-command-cancel', requestId: 1 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(baseline.cancelCommand).toHaveBeenCalledExactlyOnceWith(packageReview.input!.prepared.transactionId)
+    expect(baseline.selectionStage).toHaveBeenCalledOnce()
+  })
+
+  it('closes pending native command consent on cancellation without Host interruption or second completion', async () => {
+    const f = await readyForNativeCommand()
+    const answer = Promise.withResolvers<Electron.MessageBoxReturnValue>()
+    packageReview.cleanup = () => { answer.resolve({ response: 1, checkboxChecked: false }) }
+    harness.dialog.showMessageBox.mockImplementation((_owner: unknown, options: MessageBoxOptions) => {
+      options.signal?.addEventListener('abort', () => { answer.resolve({ response: 1, checkboxChecked: false }) }, { once: true })
+      return answer.promise
+    })
+    f.host.emitPluginCommand({ type: 'plugin-command-request', requestId: 1, commandId: 'cancel-native',
+      operation: { type: 'disable', name: 'fixture-provider' } })
+    await vi.advanceTimersByTimeAsync(0)
+    f.host.emitPluginCommand({ type: 'plugin-command-settled', requestId: 1, commandId: 'cancel-native' })
+    await vi.advanceTimersByTimeAsync(0)
+    const options = harness.dialog.showMessageBox.mock.calls[0]![1] as MessageBoxOptions
+    expect(options.signal?.aborted).toBe(false)
+    f.host.emitPluginCommand({ type: 'plugin-command-cancel', requestId: 1 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(options.signal?.aborted).toBe(true)
+    expect(baseline.cancelCommand).toHaveBeenCalledOnce()
+    expect(f.host.stop).not.toHaveBeenCalled()
+    expect(f.host.updateTasks).not.toHaveBeenCalledWith('lock')
+    expect(f.host.pluginCommandResponse).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps shutdown draining the Host even when command stage discard fails', async () => {
+    const f = await readyForNativeCommand()
+    baseline.cancelCommand.mockRejectedValue(new Error('owned stage cleanup failed'))
+    f.host.emitPluginCommand({ type: 'plugin-command-request', requestId: 1, commandId: 'quit-stage',
+      operation: { type: 'disable', name: 'fixture-provider' } })
+    await vi.advanceTimersByTimeAsync(0)
+    harness.app.quit()
+    await f.host.stopping.promise
+    expect(f.host.stop).toHaveBeenCalledOnce()
+    f.host.exited.resolve()
+    await harness.quitCompleted.promise
+    expect(console.error).toHaveBeenCalledWith(expect.objectContaining({ message: 'Desktop command and Host teardown failed' }))
+  })
 
   it('does not create policy work or reconcile a profile when the manifest read finishes after quit', async () => {
     managedFixture()

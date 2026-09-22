@@ -22,6 +22,8 @@ import {
 import { resolveDesktopPaths } from './paths.ts'
 import { DesktopProjectManager } from './project-manager.ts'
 import { DesktopHostProcess, DesktopHostUncleanExitError } from './host-process.ts'
+import { DesktopPluginCommandCoordinator, type DesktopPluginCommandActivation } from './desktop-plugin-command-coordinator.ts'
+import { parseDesktopPluginSource } from './plugin-source.ts'
 import { installDesktopDirectoryPicker } from './directory-picker.ts'
 import { DesktopBackendController } from './backend-controller.ts'
 import { DESKTOP_IPC, SCHEME, assertDesktopSender, type DesktopBaselineNotice, type DesktopUpdateState } from './ipc.ts'
@@ -41,7 +43,7 @@ import { desktopRegistryConfirmationDetail } from './profile-package-confirmatio
 import type { DesktopProvisioningAssessment } from './profile-package-staging.ts'
 import type { DesktopPluginProvisioningState } from './plugin-provisioning.ts'
 import { assertDesktopPackageHealth, qualifyDesktopPackageProfile } from './profile-package-qualification.ts'
-import type { ProfilePackageHealth } from '@deepseek-ai/dsh-app-boot'
+import { readProfileManifest, withProfilePackageLease, type ProfilePackageHealth } from '@deepseek-ai/dsh-app-boot'
 import { DesktopManagedUpdateCoordinator } from './managed-update-coordinator.ts'
 import { loadDesktopManagedUpdateConfiguration } from './managed-update-state.ts'
 import { isDesktopManagedUpdateHelperQuiescent, launchDesktopManagedUpdate, type DesktopManagedUpdateAcknowledgement } from './managed-update-launcher.ts'
@@ -303,10 +305,12 @@ async function main(): Promise<void> {
     let packageHealth: readonly ProfilePackageHealth[] | undefined
     everStartedHost = true
     const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject,
-      hostInspectPort, process.env, onFailure,
+      hostInspectPort, process.env, (error) => { pluginCommands.close(host); onFailure(error) },
       development ? join(app.getAppPath(), '.desktop-build', 'targets', `${process.platform === 'darwin' ? 'mac' : 'win'}-${process.arch}`, 'runtime', 'primary-runtime')
         : join(process.resourcesPath, 'runtime', 'primary-runtime'),
-      development ? 'link' : 'runtime', resources, packageTransactions, packageAdmissionId !== undefined)
+      development ? 'link' : 'runtime', resources, packageTransactions, packageAdmissionId !== undefined,
+      (source, event) => { pluginCommands.handle(source, event) })
+    pluginCommands.bind(host)
     return {
       start: async () => {
         const ready = await host.start()
@@ -317,6 +321,7 @@ async function main(): Promise<void> {
         packageHealth = ready.packages
       },
       stop: async () => {
+        pluginCommands.close(host)
         try { await host.stop(requireCleanStop) }
         catch (error) {
           if (!requireCleanStop || !(error instanceof DesktopHostUncleanExitError)) throw error
@@ -341,12 +346,18 @@ async function main(): Promise<void> {
   const completionOwnsAdmission = (): boolean => managedCompletionOperation !== undefined || managedRecoveryOperation !== undefined
   const completionBootBlocked = (): boolean => managedCompletionAdmission !== undefined
     || packageAdmissionId !== undefined || managedCompletionIssue !== undefined
-  const reviewPackageChanges = (initialRecovery = false, startupTransactionId?: string): Promise<void> => {
-    if (!initialRecovery && (!managedRecoveryReady || startup !== undefined)) return Promise.resolve()
-    if (lifecycleUnavailable() || managedHandoffOperation !== undefined || managedHelperMayRun || completionOwnsAdmission()) {
-      return Promise.resolve()
+  const reviewPackageChanges = (
+    initialRecovery = false, startupTransactionId?: string, command?: DesktopPluginCommandActivation,
+  ): Promise<void> => {
+    if (!initialRecovery && (!managedRecoveryReady || startup !== undefined)) {
+      return command === undefined ? Promise.resolve() : Promise.reject(new Error('Desktop package review is unavailable'))
     }
-    if (packageOperation !== undefined) return packageOperation
+    if (lifecycleUnavailable() || managedHandoffOperation !== undefined || managedHelperMayRun || completionOwnsAdmission()) {
+      return command === undefined ? Promise.resolve() : Promise.reject(new Error('Desktop package review is busy'))
+    }
+    if (packageOperation !== undefined) {
+      return command === undefined ? packageOperation : Promise.reject(new Error('Another Desktop package review is pending'))
+    }
     packageOperation = (async () => {
       if (development || packagePolicy === undefined) throw new Error('Package graph activation requires a packaged staging capability')
       if (shellInstallerOwnsQuit || updateState.phase === 'installing') throw new Error('An application update already owns restart admission')
@@ -371,14 +382,23 @@ async function main(): Promise<void> {
       let approved: { host: typeof backend.host; revision: number | undefined; active: boolean } | undefined
       // Once admitted, activation owns candidate/rollback teardown until it settles, even after quit intent.
       let admitted = false
+      let commandInterrupted = false
       const activation = createDesktopProfilePackageActivation({
         profile: activeProject, backend: transactions,
+        authorizeCommand: (input) => {
+          if (command === undefined || input.commandOrigin === undefined) throw new Error('Command preparation needs its own live native review')
+          command.authorize(input.commandOrigin, input.prepared.transactionId)
+        },
         confirm: async (input) => {
+          if (command !== undefined) {
+            if (input.commandOrigin === undefined) throw new Error('Command preparation lost its origin')
+            command.authorize(input.commandOrigin, input.prepared.transactionId)
+          }
           if (lifecycleUnavailable() || isMandatory()) return false
           const host = backend.host
           const preparedPlanSha256 = input.owner.provisioningPlanResource?.planSha256
           const packagedPlanSha256 = managedUpdate?.capability.provisioning.planSha256
-          if (mayAuthorizeDesktopStartupPackage({ transactionId: id, initialRecovery,
+          if (input.commandOrigin === undefined && mayAuthorizeDesktopStartupPackage({ transactionId: id, initialRecovery,
             everStartedHost, hostPresent: host !== undefined, recoveryTransactionIds: recovering,
             privateProvisioning: input.provisioning !== undefined,
             ...(startupTransactionId === undefined ? {} : { startupTransactionId }),
@@ -390,11 +410,31 @@ async function main(): Promise<void> {
           const revision = initialRecovery && !everStartedHost ? undefined : updateInput.check(messages.updateUnsentInput)
           const active = host === undefined ? packageAdmissionId !== undefined : await host.updateTasks('inspect')
           const detail = desktopRegistryConfirmationDetail(input.registryTarget, messages)
-          const answer = await ordinaryMessageBox({ type: active ? 'warning' : 'question', title: messages.packageReview,
-            message: formatDesktopMessage(messages.packageConfirm, { name: input.prepared.packageName, id }),
-            ...(detail === undefined ? {} : { detail }),
-            buttons: [recovering.includes(id) ? messages.packageRecover : messages.packageActivate, messages.updateLater],
-            defaultId: 1, cancelId: 1 })
+          const name = 'packageName' in input.prepared ? input.prepared.packageName : input.prepared.packageNames.join(', ')
+          const confirmation = formatDesktopMessage(messages.packageConfirm, { name, id })
+          let answer: Electron.MessageBoxReturnValue
+          if (input.commandOrigin === undefined) {
+            answer = await ordinaryMessageBox({ type: active ? 'warning' : 'question', title: messages.packageReview,
+              message: confirmation, ...(detail === undefined ? {} : { detail }),
+              buttons: [recovering.includes(id) ? messages.packageRecover : messages.packageActivate, messages.updateLater],
+              defaultId: 1, cancelId: 1 })
+          } else {
+            const window = mainWindow
+            if (window === undefined || window.isDestroyed()) throw new Error(messages.updateTasksUnavailable)
+            const controller = new AbortController()
+            ordinaryDialogs.add(controller)
+            try {
+              const signal = command === undefined ? controller.signal : AbortSignal.any([controller.signal, command.signal])
+              signal.throwIfAborted()
+              answer = await dialog.showMessageBox(window, {
+                type: active ? 'warning' : 'question', title: messages.pluginCommandTitle,
+                message: messages.pluginCommandPrompt, detail: detail === undefined ? confirmation : `${confirmation}\n\n${detail}`,
+                buttons: [messages.pluginCommandApply, messages.pluginCommandCancel], defaultId: 1, cancelId: 1, signal,
+              })
+              signal.throwIfAborted()
+              if (mainWindow !== window || window.isDestroyed() || backend.host !== host) throw new Error(messages.updateTasksUnavailable)
+            } finally { ordinaryDialogs.delete(controller) }
+          }
           if (answer.response !== 0 || lifecycleUnavailable() || isMandatory()) return false
           approved = { host, revision, active }
           return true
@@ -418,7 +458,10 @@ async function main(): Promise<void> {
           } catch (error) {
             if (!alreadyHeld && !lifecycleUnavailable()) {
               await consent.host?.updateTasks('unlock')
-              packageAdmissionId = undefined
+              if (!lifecycleUnavailable() && backend.host === consent.host && packageAdmissionId === id) {
+                packageAdmissionId = undefined
+                if (!isMandatory() && mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.setEnabled(true)
+              }
             }
             throw error
           }
@@ -446,11 +489,22 @@ async function main(): Promise<void> {
         qualify: async (input, location) => {
           const expected = qualifyDesktopPackageProfile(input, location === 'candidate' ? input.candidateDir : activeProject)
           if (input.mutation.kind === 'install' && input.mutation.enabled !== undefined
-            && expected.some(item => item.name === input.prepared.packageName) !== input.mutation.enabled) {
+            && expected.some(item => 'packageName' in input.prepared && item.name === input.prepared.packageName) !== input.mutation.enabled) {
             throw new Error('Prepared bundle selection does not match the approved package operation')
+          }
+          if (input.mutation.kind === 'selection') {
+            for (const name of input.mutation.packageNames) {
+              if (expected.some(item => item.name === name) !== input.mutation.enabled) {
+                throw new Error('Prepared selection differs from the approved command targets')
+              }
+            }
           }
         },
         stopHost: async () => {
+          if (command !== undefined && !commandInterrupted) {
+            command.interrupt()
+            commandInterrupted = true
+          }
           requireCleanStop = true
           updateStopFailure = undefined
           try {
@@ -467,8 +521,11 @@ async function main(): Promise<void> {
           const current = backend.host
           if (current === undefined) throw new Error(messages.updateTasksUnavailable)
           const expected = qualifyDesktopPackageProfile(input, activeProject)
-          const required = role === 'candidate' && input.mutation.kind === 'install'
-            && expected.some(item => item.name === input.prepared.packageName) ? [input.prepared.packageName] : []
+          const required = role !== 'candidate' ? []
+            : input.mutation.kind === 'selection' && input.mutation.enabled ? input.mutation.packageNames
+              : input.mutation.kind === 'install' && 'packageName' in input.prepared
+                && expected.some(item => 'packageName' in input.prepared && item.name === input.prepared.packageName)
+                ? [input.prepared.packageName] : []
           assertDesktopPackageHealth(expected, current.packageHealth, required)
           if (role === 'candidate' && await current.updateTasks('inspect')) {
             throw new Error('Background or Agent work was observed before package activation verification; no new receipt is committed')
@@ -479,6 +536,7 @@ async function main(): Promise<void> {
       const result = recovering.includes(id) ? await activation.recover(id) : await activation.activate(id)
       if (result.status === 'cancelled' && initialRecovery) throw new Error(messages.packageRefused)
     })().catch(async (error: unknown) => {
+      if (command !== undefined) throw error
       if (!lifecycleUnavailable() && mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.setEnabled(true)
       // The generation-spanning API barrier remains held after an unverified failure.
       if (initialRecovery) throw error
@@ -488,6 +546,57 @@ async function main(): Promise<void> {
     }).finally(() => { packageOperation = undefined })
     return packageOperation
   }
+
+  const commandBackend = (): NonNullable<typeof packageTransactions> => {
+    if (development || packagePolicy === undefined || packageTransactions === undefined) throw new Error('Desktop package staging is unavailable')
+    return packageTransactions
+  }
+  const pluginCommands = new DesktopPluginCommandCoordinator({
+    available: () => !development && packageTransactions !== undefined && managedRecoveryReady && backend.host !== undefined,
+    busy: () => lifecycleUnavailable() || startup !== undefined || packageOperation !== undefined || packageAdmissionId !== undefined
+      || managedHandoffOperation !== undefined || managedHelperMayRun || completionOwnsAdmission()
+      || workspaceRecovery !== undefined || ordinaryDialogs.size > 0
+      || updateState.phase === 'installing' || updateState.phase === 'ready' || isMandatory(),
+    list: () => withProfilePackageLease(activeProject, async () => {
+      const manifest = readProfileManifest('dsh', activeProject)
+      const shared = new Set(readDesktopRuntime(resources.dsh).sharedPackages.map(item => item.name))
+      const selected = manifest.dsh?.profile?.bundles ?? []
+      const plugins = []
+      for (const name of Object.keys(manifest.dependencies ?? {}).sort()) {
+        if (shared.has(name)) continue
+        if (name.length > 214 || !/^(?:@[a-z0-9._~-]+\/)?[a-z0-9][a-z0-9._~-]*$/u.test(name)) {
+          throw new Error('Invalid installed Desktop package name')
+        }
+        const installed: unknown = JSON.parse(await readFile(join(activeProject, 'node_modules', name, 'package.json'), 'utf8'))
+        if (typeof installed !== 'object' || installed === null || !('name' in installed) || installed.name !== name
+          || !('version' in installed) || typeof installed.version !== 'string' || installed.version.length === 0
+          || installed.version.length > 256) throw new Error('Installed Desktop package identity is unavailable')
+        plugins.push({ name, version: installed.version, enabled: selected.includes(name) })
+      }
+      return plugins
+    }, 0),
+    stage: (id, operation, origin, signal) => {
+      const transactions = commandBackend()
+      switch (operation.type) {
+        case 'install': {
+          const source = operation.source.type === 'release' ? parseDesktopPluginSource(operation.source.release)
+            : parseDesktopPluginSource({ schemaVersion: 1, type: operation.source.type === 'npm' ? 'npmRegistry' : 'packageSpec',
+              spec: operation.source.type === 'github' ? `github:${operation.source.spec}` : operation.source.spec })
+          if (operation.source.type === 'release' && source.type !== 'githubRelease') throw new Error('Expected a verified GitHub Release source')
+          return transactions.stageCommand(id, { kind: 'install', source }, origin, signal)
+        }
+        case 'remove': return transactions.stageCommand(id, { kind: 'remove', name: operation.name }, origin, signal)
+        case 'update': return transactions.stageRegistryUpdate(id, operation.name, operation.version, origin, signal)
+        case 'enable':
+        case 'disable': return transactions.stageSelection(id, { names: [operation.name], enabled: operation.type === 'enable' }, origin, signal)
+        case 'disable-all': return transactions.stageSelection(id, { names: 'all', enabled: false }, origin, signal)
+        default: return operation satisfies never
+      }
+    },
+    discard: id => commandBackend().cancel(id),
+    activate: authority => reviewPackageChanges(false, authority.transactionId, authority),
+    report: (error) => { console.error('desktop plugin command failed', error) },
+  })
 
   const updateErrors = new WeakMap<DesktopUpdateState, Promise<void>>()
   const showUpdateFailure = (state: DesktopUpdateState): Promise<void> => {
@@ -539,6 +648,7 @@ async function main(): Promise<void> {
   }
 
   const cancelLifecycleConsent = (): void => {
+    pluginCommands.cancel(new Error('Desktop shutdown or recovery cancelled command preparation'))
     baselineAbort.abort()
     managedRecoveryRequested = false
     managedCompletionBootGate?.resolve(undefined)
@@ -552,8 +662,14 @@ async function main(): Promise<void> {
         packageOperation, managedHandoffOperation, managedCompletionOperation, managedRecoveryOperation,
       ])
       for (const operation of operations) if (operation.status === 'rejected') console.error(operation.reason)
+      const [commandCleanup] = await Promise.allSettled([pluginCommands.dispose()])
       if (managedHelperMayRun) throw new Error('Desktop cannot exit: managed helper cancellation is unconfirmed')
       const results = await Promise.allSettled([backend.close(), startup])
+      if (commandCleanup.status === 'rejected') {
+        const failures: unknown[] = [commandCleanup.reason]
+        for (const result of results) if (result.status === 'rejected') failures.push(result.reason)
+        throw new AggregateError(failures, 'Desktop command and Host teardown failed')
+      }
       if (results[0].status === 'rejected') throw results[0].reason
       if (results[1].status === 'rejected') console.error(results[1].reason)
     })()

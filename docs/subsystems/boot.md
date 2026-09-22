@@ -22,7 +22,9 @@ Ordinary in-place installation treats omitted `InstallBundleOptions.enabled` as 
 
 `ProfilePackageMutation` selects `install` or `remove`. Installation carries a structured source, optional bundle enablement and optional requested build approvals; removal names the package. The launcher owns source validation, supported operations and preparation, while Plugin Manager remains the user-facing entry point.
 
-`ProfilePreparedPackageChange` contains the transaction id, `prepared` state, package name, base fingerprint and preparation health. It is neither an active receipt nor evidence of a healthy running Host. Pending queries read the launcher's fixed profile; cancellation discards a stage without removing an active plugin.
+`ProfilePreparedPackageChange` retains the five-field install/remove result: transaction id, `prepared` state, package name, base fingerprint and preparation health. Ordinary staging and `ChangeResult.prepared` keep this result; they do not accept bundle-selection records.
+
+`ProfilePreparedBundleSelection` identifies a schema-2, `selection` pending record with the actual sorted, unique package names instead of one package name. `ProfilePendingPackageChange` is the union used only by pending/status/list queries. These records are neither active receipts, proof of a healthy running Host, nor activation authority. Pending queries read the launcher's fixed profile; cancellation discards a stage without removing an active plugin.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 

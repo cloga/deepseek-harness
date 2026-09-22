@@ -110,6 +110,26 @@ it('recovers prepared transactions independently of installed inventory and disc
   } finally { b.controller.dispose() }
 })
 
+it('retains the complete pending selection separately from active inventory and discards only its identity', async () => {
+  const selection = { schemaVersion: 2, kind: 'selection', transactionId: '44444444-4444-4444-8444-444444444444',
+    state: 'prepared', packageNames: ['@fixture/alpha', '@fixture/beta'], baseFingerprint: 'd'.repeat(64), health: 'pending' } as const
+  const listPendingPackageChanges = vi.fn().mockResolvedValueOnce(ok([selection])).mockResolvedValue(ok([]))
+  const b = bench({ listPendingPackageChanges })
+  try {
+    await b.controller.load()
+    expect(b.state().pendingPackages).toEqual([selection])
+    expect(b.state().packages).toEqual([packageView(BUNDLE, PLUGINS)])
+    expect(b.state().packages.some(pkg => selection.packageNames.some(name => name === pkg.name))).toBe(false)
+    b.face.cancelPrepared?.(selection.transactionId)
+    await vi.waitFor(() => { expect(b.state().pendingPackages).toEqual([]) })
+    expect(b.plugins.cancelPendingPackageChange).toHaveBeenCalledExactlyOnceWith(selection.transactionId)
+    expect(b.plugins.setBundleEnabled).not.toHaveBeenCalled()
+    expect(b.plugins.removeBundle).not.toHaveBeenCalled()
+    expect(b.plugins.installBundle).not.toHaveBeenCalled()
+    expect(b.state().packages).toEqual([packageView(BUNDLE, PLUGINS)])
+  } finally { b.controller.dispose() }
+})
+
 it.each(['refused', 'rejected'] as const)('keeps a prepared transaction visible when discard is %s', async (failure) => {
   const cancelPendingPackageChange = failure === 'refused'
     ? vi.fn().mockResolvedValue(refused('gateway/internal', 'discard unavailable'))

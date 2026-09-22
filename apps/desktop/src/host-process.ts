@@ -6,6 +6,11 @@ import { pathToFileURL } from 'node:url'
 import { desktopNodeEnvironment } from './node-environment.ts'
 import type { ProfilePackageHealth, ProfilePackageTransactions } from '@deepseek-ai/dsh-app-boot'
 import { DesktopPackageTransactionIpc } from './package-transaction-ipc.ts'
+import {
+  isDesktopPluginCommandEvent, isDesktopPluginCommandResponse,
+  type DesktopPluginCommandEvent, type DesktopPluginCommandResponse,
+} from './desktop-plugin-command-protocol.ts'
+export type { DesktopPluginCommandEvent, DesktopPluginCommandRequest } from './desktop-plugin-command-protocol.ts'
 
 interface ReadyEvent {
   readonly type: 'ready'
@@ -108,6 +113,7 @@ export class DesktopHostProcess {
    * @param profileResolution - Package resolution mode for the application-owned profile.
    * @param packageTransactions - Shell-owned staging backend; when supplied, the child forbids stock live package mutations.
    * @param admissionLocked - Install the shell's API admission barrier before the replacement Host mounts profile entries.
+   * @param onPluginCommand - Handle validated command events from this exact retained child, never from a renderer.
    */
   constructor(
     private readonly node: string,
@@ -121,6 +127,7 @@ export class DesktopHostProcess {
     private readonly packageManager?: { readonly pnpm: string; readonly nodeBin: string },
     private readonly packageTransactions?: ProfilePackageTransactions,
     private readonly admissionLocked = false,
+    private readonly onPluginCommand?: (host: DesktopHostProcess, event: DesktopPluginCommandEvent) => void,
   ) {}
 
   /** Current owned child id, for a detached helper that must wait for both shell and Host exit. */
@@ -163,6 +170,20 @@ export class DesktopHostProcess {
         }).catch((error: unknown) => { this.fail(error instanceof Error ? error : new Error(String(error))) })
         return
       }
+      if (isDesktopPluginCommandEvent(message)) {
+        if (this.stopping) return
+        try {
+          if (this.onPluginCommand !== undefined) this.onPluginCommand(this, message)
+          else if (message.type === 'plugin-command-request') {
+            void this.pluginCommandResponse(message.requestId, { kind: 'error', code: 'unavailable' })
+              .catch((error: unknown) => { this.fail(error instanceof Error ? error : new Error(String(error))) })
+          }
+        } catch (error) {
+          this.fail(error instanceof Error ? error : new Error(String(error)))
+          child.kill('SIGTERM')
+        }
+        return
+      }
       if (!isDesktopHostEvent(message)) {
         this.fail(new Error('dsh desktop host sent an invalid IPC event'))
         child.kill('SIGTERM')
@@ -194,6 +215,28 @@ export class DesktopHostProcess {
       })
     })
     return this.readyPromise
+  }
+
+  /**
+   * Reply over this retained child's control-only IPC channel.
+   * @param requestId - Validated positive command correlation id.
+   * @param result - Bounded public command result, never staging paths or activation authority.
+   * @returns Resolves only when the owned child transport acknowledges the send.
+   */
+  pluginCommandResponse(requestId: number, result: DesktopPluginCommandResponse): Promise<void> {
+    const child = this.child
+    if (!Number.isSafeInteger(requestId) || requestId < 1 || !isDesktopPluginCommandResponse(result)) {
+      return Promise.reject(new Error('desktop plugin command: invalid response'))
+    }
+    if (child === undefined || !child.connected || this.stopping || this.failureReported) {
+      return Promise.reject(new Error('desktop plugin command: Host is unavailable'))
+    }
+    return new Promise<void>((resolve, reject) => {
+      child.send({ type: 'plugin-command-response', requestId, result }, (error) => {
+        if (error === null) resolve()
+        else reject(error)
+      })
+    })
   }
 
   /**

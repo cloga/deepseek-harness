@@ -280,6 +280,8 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   PluginInstallProgress: 'boot.md',
   ProfilePackageMutation: 'boot.md',
   ProfilePreparedPackageChange: 'boot.md',
+  ProfilePreparedBundleSelection: 'boot.md',
+  ProfilePendingPackageChange: 'boot.md',
   ProfileVerifiedReleaseSource: 'boot.md',
   BrowserUseProviderName: 'browser-use.md',
   ComputerUseProviderName: 'computer-use.md',
