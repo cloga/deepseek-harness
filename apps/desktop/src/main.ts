@@ -17,14 +17,16 @@ import {
   type IpcMainInvokeEvent,
 } from 'electron'
 import { resolveDesktopPaths } from './paths.ts'
-import { DesktopProjectManager, type DesktopProjectHooks } from './project-manager.ts'
+import { DesktopProjectManager, type DesktopProjectHooks, type DesktopProjectMutation } from './project-manager.ts'
 import { DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, parseDesktopPluginSource } from './plugin-source.ts'
 import {
   DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
   DESKTOP_PLUGIN_PROVISIONING_PLAN_FILE,
   readDesktopPluginProvisioningPlan,
 } from './plugin-provisioning.ts'
-import { DesktopHostProcess, type DesktopUpdateImpact } from './host-process.ts'
+import {
+  DesktopHostProcess, type DesktopPluginCommandEvent, type DesktopPluginCommandRequest, type DesktopUpdateImpact,
+} from './host-process.ts'
 import { DesktopBackendController, type DesktopBackendState } from './backend-controller.ts'
 import {
   DESKTOP_IPC,
@@ -42,7 +44,7 @@ import { completeDesktopManagedUpdate } from './managed-update-completion.ts'
 import { MANAGED_UPDATE_RECOVERY_ARGUMENT } from './managed-update-recovery.ts'
 import { desktopErrorState } from './startup-error.ts'
 import { startupFailureDocument } from './startup-document.ts'
-import { confirmDesktopPluginMutation } from './plugin-mutation-confirmation.ts'
+import { confirmDesktopPluginMutation, DesktopPluginMutationCancelled } from './plugin-mutation-confirmation.ts'
 import { requestDesktopRendererImpact } from './renderer-impact.ts'
 import { installDesktopWindowNavigation } from './window-navigation.ts'
 
@@ -244,6 +246,10 @@ async function main(): Promise<void> {
   const applicationUrl = `${SCHEME}://app/index.html`
   let navigation: { window: BrowserWindow; url: string; promise: Promise<void> } | undefined
   let emergencyDocument = false
+  let currentHostProcess: DesktopHostProcess | undefined
+  let lastHostPluginCommandRequestId = 0
+  let handleHostPluginCommand: (host: DesktopHostProcess, event: DesktopPluginCommandEvent) => void = () => {}
+  let cancelHostPluginCommands: (host: DesktopHostProcess, reason: Error) => void = () => {}
 
   const showEmergencyError = async (error: unknown): Promise<void> => {
     if (quitting || emergencyDocument) return
@@ -279,7 +285,16 @@ async function main(): Promise<void> {
     if (development === undefined) manager.assertProfileRuntime(activeProject)
     const hostInspectPort = developmentHostInspectPort(development !== undefined)
     const host = new DesktopHostProcess(resources.hostExecutable, development ?? resources.dsh, activeProject,
-      hostInspectPort, process.env, onFailure)
+      hostInspectPort, process.env, (error) => {
+        cancelHostPluginCommands(host, error)
+        if (currentHostProcess === host) currentHostProcess = undefined
+        onFailure(error)
+      }, (source, event) => { handleHostPluginCommand(source, event) })
+    if (currentHostProcess !== undefined) {
+      cancelHostPluginCommands(currentHostProcess, new Error('desktop plugin command: Host replaced'))
+    }
+    currentHostProcess = host
+    lastHostPluginCommandRequestId = 0
     return {
       start: () => host.start(),
       stop: () => host.stop(),
@@ -520,10 +535,11 @@ async function main(): Promise<void> {
   })
 
   const mutate = async (
-    event: IpcMainInvokeEvent,
     mutation: Parameters<DesktopProjectManager['mutate']>[0],
+    prepared?: (signal: AbortSignal) => Promise<void>,
+    externalSignal?: AbortSignal,
+    onInterruption?: () => void,
   ): ReturnType<DesktopProjectManager['mutate']> => {
-    assertDesktopSender(event, ['shell'])
     if (development !== undefined) {
       throw new Error('dsh desktop: plugin package changes require a packaged application')
     }
@@ -532,6 +548,9 @@ async function main(): Promise<void> {
     pluginMutationBusy = true
     const cancellation = new AbortController()
     mutationAbort = cancellation
+    const forwardAbort = (): void => { cancellation.abort(externalSignal?.reason) }
+    if (externalSignal?.aborted === true) forwardAbort()
+    else externalSignal?.addEventListener('abort', forwardAbort, { once: true })
     let interrupted = false
     const hasStartedInterruption = (): boolean => interrupted
     const pending = (async () => {
@@ -542,6 +561,7 @@ async function main(): Promise<void> {
           beforeChange: async () => {
             // This hook runs under the transaction lock after staging; rollback must not ask again.
             if (!hasStartedInterruption()) {
+              await prepared?.(cancellation.signal)
               await confirmDesktopPluginMutation({
                 messages, signal: cancellation.signal, cancelled: hasQuitStarted,
                 readImpact: async (signal) => {
@@ -565,6 +585,7 @@ async function main(): Promise<void> {
                 confirm: async (detail) => {
                   const window = mainWindow
                   if (window === undefined || window.isDestroyed()) throw new Error(messages.pluginImpactUnavailable)
+                  if (prepared !== undefined) console.error('desktop plugin command phase: native-consent-invoked')
                   return (await dialog.showMessageBox(window, {
                     type: 'warning', title: messages.pluginMutationTitle, message: messages.pluginMutationPrompt,
                     detail, buttons: [messages.applyPluginChange, messages.cancel], defaultId: 1, cancelId: 1,
@@ -573,6 +594,7 @@ async function main(): Promise<void> {
                 },
               })
               interrupted = true
+              onInterruption?.()
             }
             await hooks.beforeChange()
           },
@@ -592,10 +614,171 @@ async function main(): Promise<void> {
     })()
     mutationPending = pending
     try { return await pending } finally {
+      externalSignal?.removeEventListener('abort', forwardAbort)
       pluginMutationBusy = false
       if (mutationPending === pending) { mutationPending = undefined; mutationAbort = undefined }
     }
   }
+  type HostPluginCommandState = {
+    readonly host: DesktopHostProcess
+    readonly commandId: string
+    readonly cancellation: AbortController
+    readonly settled: PromiseWithResolvers<void>
+    prepared: boolean
+  }
+  const hostPluginCommands = new Map<number, HostPluginCommandState>()
+  cancelHostPluginCommands = (host, reason): void => {
+    for (const state of hostPluginCommands.values()) {
+      if (state.host === host) state.cancellation.abort(reason)
+    }
+  }
+  const hostMutation = (request: DesktopPluginCommandRequest): DesktopProjectMutation => {
+    switch (request.operation.type) {
+      case 'install': {
+        switch (request.operation.source.type) {
+          case 'npm':
+            return { type: 'plugin-install', source: parseDesktopPluginSource({
+              schemaVersion: 1, type: 'npmRegistry', spec: request.operation.source.spec,
+            }) }
+          case 'github':
+            return { type: 'plugin-add', spec: `github:${request.operation.source.spec}` }
+          case 'release': {
+            const source = parseDesktopPluginSource(request.operation.source.release)
+            if (source.type !== 'githubRelease') {
+              throw new Error('desktop plugin command: expected a verified GitHub Release source')
+            }
+            return { type: 'plugin-install', source }
+          }
+          default: request.operation.source satisfies never
+        }
+        throw new Error('desktop plugin command: unsupported install source')
+      }
+      case 'remove': return { type: 'plugin-remove', name: request.operation.name }
+      case 'update': return { type: 'plugin-update', name: request.operation.name, version: request.operation.version }
+      case 'enable': return { type: 'plugin-toggle', name: request.operation.name, enabled: true }
+      case 'disable': return { type: 'plugin-toggle', name: request.operation.name, enabled: false }
+      case 'disable-all': return { type: 'plugins-disable-all' }
+      case 'list': throw new Error('desktop plugin command: list is not a mutation')
+      default: request.operation satisfies never
+    }
+    throw new Error('desktop plugin command: unsupported operation')
+  }
+  const waitForCommandSettlement = async (state: HostPluginCommandState, signal: AbortSignal): Promise<void> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let rejectAbort: ((error: Error) => void) | undefined
+    const onAbort = (): void => {
+      rejectAbort?.(signal.reason instanceof Error
+        ? signal.reason : new Error('desktop plugin command cancelled'))
+    }
+    try {
+      await Promise.race([
+        state.settled.promise,
+        new Promise<never>((_resolve, reject) => {
+          rejectAbort = reject
+          signal.addEventListener('abort', onAbort, { once: true })
+          if (signal.aborted) onAbort()
+        }),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => { reject(new Error('desktop plugin command: command lifecycle settlement timed out')) }, 10_000)
+          timer.unref()
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      signal.removeEventListener('abort', onAbort)
+    }
+  }
+  const executeHostPluginCommand = async (host: DesktopHostProcess, request: DesktopPluginCommandRequest): Promise<void> => {
+    const state: HostPluginCommandState = {
+      host, commandId: request.commandId, cancellation: new AbortController(), settled: Promise.withResolvers(),
+      prepared: false,
+    }
+    try {
+      if (development !== undefined) {
+        await host.pluginCommandResponse(request.requestId, { kind: 'error', code: 'unavailable' })
+        return
+      }
+      if (pluginMutationBusy || recoveryPending !== undefined || updateConfirmation !== undefined || hasQuitStarted()
+        || updateState.phase === 'installing' || updateState.phase === 'ready') {
+        await host.pluginCommandResponse(request.requestId, { kind: 'error', code: 'busy' })
+        return
+      }
+      if (request.operation.type === 'list') {
+        const plugins = manager.listPlugins().map(plugin => ({
+          name: plugin.name,
+          version: plugin.version,
+          enabled: plugin.enabled,
+        }))
+        await host.pluginCommandResponse(request.requestId, { kind: 'list', plugins })
+        return
+      }
+      hostPluginCommands.set(request.requestId, state)
+      const mutation = hostMutation(request)
+      await mutate(mutation, async (signal) => {
+        const assertCurrent = (): void => {
+          signal.throwIfAborted()
+          if (hasQuitStarted() || currentHostProcess !== host || backend.host === undefined) {
+            throw new Error('desktop plugin command: requesting Host is no longer active')
+          }
+        }
+        assertCurrent()
+        state.prepared = true
+        await host.pluginCommandResponse(request.requestId, { kind: 'prepared' })
+        await waitForCommandSettlement(state, signal)
+        assertCurrent()
+      }, state.cancellation.signal, () => {
+        // Keep cancellation routable throughout consent, but not across the intentional restart.
+        if (hostPluginCommands.get(request.requestId) === state) hostPluginCommands.delete(request.requestId)
+      })
+    } catch (error: unknown) {
+      // mutate alone owns navigation after actual interruption. Preparation and declined
+      // consent must leave the healthy application document (including drafts) intact.
+      if (!state.cancellation.signal.aborted && !hasQuitStarted() && !(error instanceof DesktopPluginMutationCancelled)) {
+        console.error('desktop plugin command failed', error)
+      }
+      if (!state.prepared && !state.cancellation.signal.aborted && currentHostProcess === host && !hasQuitStarted()) {
+        await host.pluginCommandResponse(request.requestId, {
+          kind: 'error', code: 'failed',
+        }).catch((failure: unknown) => { console.error('desktop plugin command response failed', failure) })
+      }
+    } finally {
+      if (hostPluginCommands.get(request.requestId) === state) hostPluginCommands.delete(request.requestId)
+    }
+  }
+  handleHostPluginCommand = (host, event): void => {
+    if (host !== currentHostProcess) return
+    switch (event.type) {
+      case 'plugin-command-request':
+        if (event.requestId <= lastHostPluginCommandRequestId || hostPluginCommands.has(event.requestId)) {
+          void host.pluginCommandResponse(event.requestId, { kind: 'error', code: 'stale' })
+            .catch((error: unknown) => { console.error('desktop plugin command response failed', error) })
+          return
+        }
+        lastHostPluginCommandRequestId = event.requestId
+        void executeHostPluginCommand(host, event)
+        return
+      case 'plugin-command-cancel': {
+        const state = hostPluginCommands.get(event.requestId)
+        if (state !== undefined) {
+          console.error(state.prepared
+            ? 'desktop plugin command phase: prepared-cancellation-received'
+            : 'desktop plugin command phase: cancellation-received')
+          state.cancellation.abort(new Error('desktop plugin command cancelled'))
+        }
+        return
+      }
+      case 'plugin-command-settled': {
+        const state = hostPluginCommands.get(event.requestId)
+        if (state?.commandId === event.commandId) {
+          console.error('desktop plugin command phase: settlement-acknowledged')
+          state.settled.resolve()
+        }
+        return
+      }
+      default: event satisfies never
+    }
+  }
+
   ipcMain.handle(DESKTOP_IPC.localeGet, (event) => {
     assertDesktopSender(event, ['shell'])
     return locale
@@ -606,32 +789,39 @@ async function main(): Promise<void> {
     return manager.listPlugins()
   })
   ipcMain.handle(DESKTOP_IPC.pluginsAdd, (event, spec: unknown) => {
+    assertDesktopSender(event, ['shell'])
     if (typeof spec !== 'string') throw new Error('dsh desktop: plugin spec must be a string')
-    return mutate(event, { type: 'plugin-add', spec })
+    return mutate({ type: 'plugin-add', spec })
   })
   ipcMain.handle(DESKTOP_IPC.pluginsInstall, (event, source: unknown) => {
     assertDesktopSender(event, ['shell'])
-    return mutate(event, { type: 'plugin-install', source: parseDesktopPluginSource(source) })
+    return mutate({ type: 'plugin-install', source: parseDesktopPluginSource(source) })
   })
   ipcMain.handle(DESKTOP_IPC.capabilitiesGet, (event) => {
     assertDesktopSender(event, ['shell'])
     return [DESKTOP_NATIVE_VERIFIED_RELEASE_CAPABILITY, DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY] as const
   })
   ipcMain.handle(DESKTOP_IPC.pluginsRemove, (event, name: unknown) => {
+    assertDesktopSender(event, ['shell'])
     if (typeof name !== 'string') throw new Error('dsh desktop: plugin name must be a string')
-    return mutate(event, { type: 'plugin-remove', name })
+    return mutate({ type: 'plugin-remove', name })
   })
   ipcMain.handle(DESKTOP_IPC.pluginsUpdate, (event, name: unknown, version: unknown) => {
+    assertDesktopSender(event, ['shell'])
     if (typeof name !== 'string' || typeof version !== 'string') {
       throw new Error('dsh desktop: plugin name and version must be strings')
     }
-    return mutate(event, { type: 'plugin-update', name, version })
+    return mutate({ type: 'plugin-update', name, version })
   })
   ipcMain.handle(DESKTOP_IPC.pluginsToggle, (event, name: unknown, enabled: unknown) => {
+    assertDesktopSender(event, ['shell'])
     if (typeof name !== 'string' || typeof enabled !== 'boolean') throw new Error('dsh desktop: invalid plugin activation request')
-    return mutate(event, { type: 'plugin-toggle', name, enabled })
+    return mutate({ type: 'plugin-toggle', name, enabled })
   })
-  ipcMain.handle(DESKTOP_IPC.pluginsDisableAll, event => mutate(event, { type: 'plugins-disable-all' }))
+  ipcMain.handle(DESKTOP_IPC.pluginsDisableAll, (event) => {
+    assertDesktopSender(event, ['shell'])
+    return mutate({ type: 'plugins-disable-all' })
+  })
   ipcMain.handle(DESKTOP_IPC.backendStatus, (event) => {
     assertDesktopSender(event, ['shell'])
     return backendState()

@@ -17,7 +17,7 @@
 | 插件变更 | 包安装和 Host 启动可能失败。 | Desktop 准备并 health-check 私有 staging profile，再把它交换到活动位置。激活失败会恢复先前 profile 与 Host。 |
 | 更新 | 桌面壳与 dsh 独立更新会重新产生版本分裂，而未签名 fork 构建不能削弱原生发布者验证。 | 已签名发布使用原生更新器。cloga fork 发布未签名且由源码仓库拥有的托管通道，并携带独立 helper；两种模式互斥，并且都替换完整 Desktop 发布。 |
 
-[Electron 打包与更新 Agent Note](../../.agents/notes/implemented/architecture/2026-08-25-electron-desktop-packaging-and-updates.zh.md)负责发布验证，[fork 通道 Agent Note](../../.agents/notes/implemented/architecture/2026-09-15-fork-owned-windows-desktop-release-channel.zh.md)负责未签名发布身份与发现，[验证 Release 事务 Agent Note](../../.agents/notes/implemented/architecture/2026-09-15-desktop-verified-release-plugin-transactions.zh.md)负责插件来源验证与激活回滚。
+[Electron 打包与更新 Agent Note](../../.agents/notes/implemented/architecture/2026-08-25-electron-desktop-packaging-and-updates.zh.md)负责发布验证，[fork 通道 Agent Note](../../.agents/notes/implemented/architecture/2026-09-15-fork-owned-windows-desktop-release-channel.zh.md)负责未签名发布身份与发现，[验证 Release 事务 Agent Note](../../.agents/notes/implemented/architecture/2026-09-15-desktop-verified-release-plugin-transactions.zh.md)负责插件来源验证与激活回滚，[插件 slash command Agent Note](../../.agents/notes/implemented/feature/2026-09-20-desktop-plugin-slash-command.zh.md)负责受信 Host 到 Electron 命令桥接。
 
 ## 安装归属
 
@@ -50,6 +50,8 @@ Windows 打包和所有应用窗口统一使用 [assets/whale.png](assets/whale.
 ### 插件来源与快照
 
 插件窗口提供独立的 verified-release JSON 表单，以 `githubRelease` 描述符调用带版本的安装 API。使用经过评审的 lock，其中包含精确 Release、资产、commit、包与 checksum 数据；原生解析器和下载器仍负责最终校验。此显式安装记录用户归属。Release-owned 包名在启动时仍遵循打包计划，因此持久更改该基线需要发布 Desktop。把 Release tgz URL 输入普通来源表单只会创建来源快照，不会生成 verified-release receipt。
+
+内置 `/desktop-plugin` 命令复用同一套 Desktop-owned 事务，不扩大 preload，也不允许 CLI 修改保留 profile。可使用 `list`、`install npm <spec>`、`install github <owner/repo[#ref]>`、`install release <verified-release-json>`、`remove`、`update`、`enable`、`disable` 和 `disable-all`。slash 安装有意不接受本地路径或任意 URL，因为 Session 工作目录不是 Electron profile 的包解析基准。准备阶段在 Host 存活时完成。Host 观察到匹配的 `command/done` 事件后，等待 Session 成功落盘才确认结算；观察器不可用或落盘失败会取消已准备的操作。随后 Electron 展示同一个最新影响报告和默认取消的原生确认框，再中断 Host。来源解析、acquisition、归属、health check、激活与 rollback 仍全部由 `DesktopProjectManager` 负责。
 
 普通来源表单接受以下输入。安装要求包具有真实名称、精确版本、`dsh.bundle.patch`，以及声明的预构建 Host 与 Client 文件。仓库名称不决定安装后的包名称。
 
@@ -126,6 +128,12 @@ Desktop 在启动十秒后静默检查更新，此后运行期间每六小时检
 Windows Ops 每次选择并锁定一个受支持的 upstream baseline。`cloga/deepseek-harness` 在经过评审的 release plan 中记录该选择，并拥有 installer、manifest、receipt、checksums、不可变 tag 与 capability 注入。随后 Windows Ops 锁定、验证并部署这些由源码拥有的资产，不维护另一份 release 定义。旧 `dsh-local-0.1.5-rc.2.local.1` manifest 只能通过显式 migration 条目接受，不能成为第二个持续通道。当 fork 改用带发布者验证的已签名原生产物时，省略 capability 即可删除托管模式，而无需改变原生更新器。
 
 ## 开发
+
+<a id="plugin-acquisition-diagnostic"></a>
+
+手动[插件获取诊断](../../.github/workflows/desktop-plugin-acquisition-diagnostic.yml)使用 `windows-2025`、Node 24.13.0、pnpm 11.7.0 和冻结 lockfile。必填的 `expected_source_sha` 与 `expected_plan_sha256` 在获取过程访问网络前绑定经过评审的诊断 checkout 和 release-plan JSON 原始字节的 SHA-256；plan 固定精确 alpha.35，产品源码保持不变。协调操作者仅在合并后的 workflow 完成注册后发起 dispatch。[采集器](scripts/diagnose-plugin-acquisition.ts)在通过 `desktopSmokeEnvironment` 启动的无凭据子进程中，仅调用一次未修改的 `src/plugin-source` helper `acquireDesktopPluginArtifact`。它保留匿名请求及全部真实 Release、tag、asset、SHA-256、SRI 与归档验证；不重试、不安装插件、不执行下载的代码、不重启应用、不进行 Model/OAuth/账户操作，也不发布。
+
+Fetch 观察器原样转交原始 input/init，最多保留 30 条请求观察：路由类别、主机、状态，以及经过严格格式验证的 `x-ratelimit-remaining`、`x-ratelimit-reset`、`retry-after` 和 `x-github-request-id` header。诊断额外限制预期 API 路由、query、端口、身份认证和请求次数；这些是诊断边界，不改变产品策略。`observerRejection` 单独记录固定拒绝类别，不与已观察的 HTTP 状态混淆，因此内部拒绝不会被误标为 HTTP 403。它不持久化 URL query、`Location`、响应正文、原始错误或 token。Workflow 只上传精确指定的脱敏 JSON 报告，保留一天，获取步骤失败后也上传；获取失败或自有临时目录清理失败都会使运行失败。这是在托管 Node 下对源码 helper 的观察，不是打包的 Electron 载体；runner IP 也可能不同。即使成功也不构成发布验收，单独的 HTTP 403 不能证明限流。[维护决策](../../.agents/notes/implemented/architecture/2026-09-20-managed-desktop-copilot-maintenance.zh.md)负责说明证据限制。
 
 <a id="isolated-provisioning-acceptance"></a>
 

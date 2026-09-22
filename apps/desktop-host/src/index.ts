@@ -26,10 +26,17 @@ import {
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import type {} from '@deepseek-ai/dsh-jobs'
+import type {} from '@deepseek-ai/dsh-commands'
+import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-api-gateway'
 import type { ConnectionFetchHandler } from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-client-modules'
 import { renderIndexInjections, type IndexInjection } from '@deepseek-ai/dsh-host-webserver'
+import {
+  registerDesktopPluginCommandRuntime,
+  type DesktopPluginCommandListRow,
+  type DesktopPluginCommandOperation,
+} from './desktop-plugin-command.ts'
 import {
   DESKTOP_HOST_PROTOCOL_VERSION,
   DESKTOP_PIPE_CHUNK_BYTES,
@@ -58,6 +65,13 @@ export interface DesktopHostFetchCommand {
 /** Commands accepted by the desktop child process. */
 export type DesktopHostCommand = {
   readonly type: 'shutdown'
+} | {
+  readonly type: 'plugin-command-response'
+  readonly requestId: number
+  readonly result:
+    | { readonly kind: 'list'; readonly plugins: readonly DesktopPluginCommandListRow[] }
+    | { readonly kind: 'prepared' }
+    | { readonly kind: 'error'; readonly code: 'busy' | 'failed' | 'invalid' | 'stale' | 'unavailable' }
 }
 
 /** Events emitted by the desktop child process. */
@@ -68,7 +82,26 @@ export type DesktopHostEvent = {
 } | {
   readonly type: 'fatal'
   readonly message: string
+} | {
+  readonly type: 'plugin-command-request'
+  readonly requestId: number
+  readonly commandId: string
+  readonly operation: DesktopPluginCommandOperation
+} | {
+  readonly type: 'plugin-command-cancel'
+  readonly requestId: number
+} | {
+  readonly type: 'plugin-command-settled'
+  readonly requestId: number
+  readonly commandId: string
 }
+
+/** Electron-owned request bridge used by the built-in Desktop plugin command. */
+export type DesktopPluginCommandRequestHandler = (
+  operation: DesktopPluginCommandOperation, commandId: string, signal: AbortSignal,
+) => Promise<{ readonly type: 'list'; readonly rows: readonly DesktopPluginCommandListRow[] }
+  | { readonly type: 'prepared' }
+  | { readonly type: 'error'; readonly code: 'busy' | 'failed' | 'invalid' | 'stale' | 'unavailable' }>
 
 /** Controller returned to tests and the self-executing process entry. */
 export interface DesktopHostController {
@@ -87,8 +120,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isDesktopHostCommand(message: unknown): message is DesktopHostCommand {
-  return typeof message === 'object' && message !== null && 'type' in message
-    && (message as Record<string, unknown>).type === 'shutdown'
+  if (!isRecord(message) || typeof message.type !== 'string') return false
+  if (message.type === 'shutdown') return Object.keys(message).length === 1
+  if (message.type !== 'plugin-command-response' || !Number.isSafeInteger(message.requestId)
+    || (message.requestId as number) < 1 || !isRecord(message.result) || typeof message.result.kind !== 'string') return false
+  const result = message.result
+  if (result.kind === 'prepared') return Object.keys(result).length === 1
+  if (result.kind === 'error') {
+    return typeof result.code === 'string' && ['busy', 'failed', 'invalid', 'stale', 'unavailable'].includes(result.code)
+      && Object.keys(result).every(key => ['kind', 'code'].includes(key))
+  }
+  return result.kind === 'list' && Array.isArray(result.plugins) && result.plugins.every(plugin => isRecord(plugin)
+    && typeof plugin.name === 'string' && typeof plugin.version === 'string' && typeof plugin.enabled === 'boolean'
+    && Object.keys(plugin).every(key => ['name', 'version', 'enabled'].includes(key)))
 }
 
 interface PackageManifest {
@@ -328,7 +372,11 @@ export async function runDesktopHost(
   runtimeDir: string,
   projectDir: string,
   writeResponse: (frame: Buffer) => Promise<void>,
-  options: { allowLinkedPackages?: boolean } = {},
+  options: {
+    allowLinkedPackages?: boolean
+    pluginCommandRequest?: DesktopPluginCommandRequestHandler
+    pluginCommandSettled?: (commandId: string, persisted: boolean) => void
+  } = {},
 ): Promise<DesktopHostController> {
   const absoluteRuntime = resolve(runtimeDir)
   const absoluteProject = resolve(projectDir)
@@ -352,9 +400,24 @@ export async function runDesktopHost(
   const connection = ctx.get('connection')
   const clientModules = ctx.get('clientModules')
   const gateway = ctx.get('typertGateway')
-  if (connection === undefined || clientModules === undefined || gateway === undefined) {
+  const commands = ctx.get('commands')
+  if (connection === undefined || clientModules === undefined || gateway === undefined
+    || (options.pluginCommandRequest !== undefined && commands === undefined)) {
     await ctx.fiber.dispose()
-    throw new Error('dsh desktop: composition did not provide connection, typertGateway, and clientModules')
+    throw new Error('dsh desktop: composition did not provide connection, typertGateway, clientModules, and commands')
+  }
+  if (options.pluginCommandRequest !== undefined && commands !== undefined) {
+    registerDesktopPluginCommandRuntime({
+      commands,
+      effect: (register) => { ctx.effect(register) },
+      onSessionEvent: (listener) => {
+        ctx.on('session/event', (session, event) => {
+          if (event.type === 'command/done') {
+            listener({ type: event.type, data: event.data }, () => ctx.sessions.flush(session))
+          }
+        })
+      },
+    }, options.pluginCommandRequest, (commandId, persisted) => { options.pluginCommandSettled?.(commandId, persisted) })
   }
   const api = connection.createSharedFetchHandler('/api')
   const assets = assetHandler(ctx, absoluteRuntime)
@@ -462,7 +525,50 @@ async function main(): Promise<void> {
       if ((error as NodeJS.ErrnoException).code !== 'ERR_IPC_CHANNEL_CLOSED') throw error
     }
   }
-  const controller = await runDesktopHost(runtimeDir, projectDir, writeResponse, { allowLinkedPackages: option !== undefined })
+  type PendingPluginCommand = {
+    readonly commandId: string
+    readonly resolve: (response: { readonly type: 'list'; readonly rows: readonly DesktopPluginCommandListRow[] }
+      | { readonly type: 'prepared' }
+      | { readonly type: 'error'; readonly code: 'busy' | 'failed' | 'invalid' | 'stale' | 'unavailable' }) => void
+    readonly reject: (error: Error) => void
+    readonly signal: AbortSignal
+    readonly onAbort: () => void
+  }
+  let nextPluginCommandRequestId = 0
+  const pendingPluginCommands = new Map<number, PendingPluginCommand>()
+  const preparedPluginCommands = new Map<string, number>()
+  const requestPluginCommand = (
+    operation: DesktopPluginCommandOperation, commandId: string, signal: AbortSignal,
+  ): Promise<{ readonly type: 'list'; readonly rows: readonly DesktopPluginCommandListRow[] }
+    | { readonly type: 'prepared' }
+    | { readonly type: 'error'; readonly code: 'busy' | 'failed' | 'invalid' | 'stale' | 'unavailable' }> => {
+    if (signal.aborted) {
+      return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('desktop plugin command cancelled'))
+    }
+    const requestId = ++nextPluginCommandRequestId
+    return new Promise((resolvePromise, reject) => {
+      const onAbort = (): void => {
+        if (!pendingPluginCommands.delete(requestId)) return
+        send({ type: 'plugin-command-cancel', requestId })
+        reject(signal.reason instanceof Error ? signal.reason : new Error('desktop plugin command cancelled'))
+      }
+      pendingPluginCommands.set(requestId, { commandId, resolve: resolvePromise, reject, signal, onAbort })
+      signal.addEventListener('abort', onAbort, { once: true })
+      send({ type: 'plugin-command-request', requestId, commandId, operation })
+    })
+  }
+  const settlePluginCommand = (commandId: string, persisted: boolean): void => {
+    const requestId = preparedPluginCommands.get(commandId)
+    if (requestId === undefined) return
+    preparedPluginCommands.delete(commandId)
+    if (persisted) send({ type: 'plugin-command-settled', requestId, commandId })
+    else send({ type: 'plugin-command-cancel', requestId })
+  }
+  const controller = await runDesktopHost(runtimeDir, projectDir, writeResponse, {
+    allowLinkedPackages: option !== undefined,
+    pluginCommandRequest: requestPluginCommand,
+    pluginCommandSettled: settlePluginCommand,
+  })
   send({
     type: 'ready',
     protocolVersion: DESKTOP_HOST_PROTOCOL_VERSION,
@@ -493,6 +599,12 @@ async function main(): Promise<void> {
       discardedRequestBodies.clear()
       requestPipe.destroy()
       closeSync(DESKTOP_REQUEST_PIPE_FD)
+      for (const pending of pendingPluginCommands.values()) {
+        pending.signal.removeEventListener('abort', pending.onAbort)
+        pending.reject(stopped)
+      }
+      pendingPluginCommands.clear()
+      preparedPluginCommands.clear()
       await controller.dispose()
       await Promise.allSettled([...runs])
       await responseWriteTail.catch(() => undefined)
@@ -629,7 +741,24 @@ async function main(): Promise<void> {
       void stop(1)
       return
     }
-    void stop()
+    if (message.type === 'shutdown') {
+      void stop()
+      return
+    }
+    const pending = pendingPluginCommands.get(message.requestId)
+    if (pending === undefined) return
+    pendingPluginCommands.delete(message.requestId)
+    pending.signal.removeEventListener('abort', pending.onAbort)
+    if (message.result.kind === 'list') {
+      pending.resolve({ type: 'list', rows: message.result.plugins })
+      return
+    }
+    if (message.result.kind === 'prepared') {
+      preparedPluginCommands.set(pending.commandId, message.requestId)
+      pending.resolve({ type: 'prepared' })
+      return
+    }
+    pending.resolve({ type: 'error', code: message.result.code })
   })
   process.once('disconnect', () => { void stop() })
   process.once('SIGTERM', () => { void stop() })

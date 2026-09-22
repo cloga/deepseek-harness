@@ -15,8 +15,11 @@ import {
   encodeDesktopRequestData,
   encodeDesktopRequestEnd,
   encodeDesktopRequestStart,
+  isDesktopPluginCommandOperation,
   type DesktopHostCommand,
   type DesktopHostEvent,
+  type DesktopPluginCommandListRow,
+  type DesktopPluginCommandOperation,
   type DesktopHostResponseFrame,
 } from './host-protocol.ts'
 
@@ -38,6 +41,15 @@ function isDesktopHostEvent(message: unknown): message is DesktopHostEvent {
       return candidate.protocolVersion === DESKTOP_HOST_PROTOCOL_VERSION && typeof candidate.dshVersion === 'string'
     case 'fatal':
       return typeof candidate.message === 'string'
+    case 'plugin-command-request':
+      return Number.isSafeInteger(candidate.requestId) && (candidate.requestId as number) > 0
+        && typeof candidate.commandId === 'string' && candidate.commandId.length > 0 && candidate.commandId.length <= 256
+        && isDesktopPluginCommandOperation(candidate.operation)
+    case 'plugin-command-cancel':
+      return Number.isSafeInteger(candidate.requestId) && (candidate.requestId as number) > 0
+    case 'plugin-command-settled':
+      return Number.isSafeInteger(candidate.requestId) && (candidate.requestId as number) > 0
+        && typeof candidate.commandId === 'string' && candidate.commandId.length > 0 && candidate.commandId.length <= 256
     default:
       return false
   }
@@ -71,6 +83,15 @@ export interface DesktopUpdateImpact {
   readonly runningSessions: number
   readonly queuedMessages: number
   readonly runningJobs: number
+}
+
+/** Trusted request emitted by the exact active Desktop Host child. */
+export type DesktopPluginCommandEvent = Exclude<DesktopHostEvent, { readonly type: 'ready' | 'fatal' }>
+
+export interface DesktopPluginCommandRequest {
+  readonly requestId: number
+  readonly commandId: string
+  readonly operation: DesktopPluginCommandOperation
 }
 
 /** One dsh backend running under an owned Node-compatible executable. */
@@ -111,6 +132,7 @@ export class DesktopHostProcess {
     private readonly inspectPort?: number,
     private readonly environment: NodeJS.ProcessEnv = process.env,
     private readonly onFailure?: (error: Error) => void,
+    private readonly onPluginCommand?: (host: DesktopHostProcess, event: DesktopPluginCommandEvent) => void,
   ) {}
 
   /** Start the child once and resolve only after its complete composition is active. */
@@ -324,6 +346,23 @@ export class DesktopHostProcess {
     return write
   }
 
+  /** Reply to one validated command request from this exact child. */
+  pluginCommandResponse(
+    requestId: number,
+    result: { readonly kind: 'list'; readonly plugins: readonly DesktopPluginCommandListRow[] }
+      | { readonly kind: 'prepared' }
+      | { readonly kind: 'error'; readonly code: 'busy' | 'failed' | 'invalid' | 'stale' | 'unavailable' },
+  ): Promise<void> {
+    const child = this.child
+    if (child === undefined || !child.connected) return Promise.reject(new Error('dsh desktop host IPC is unavailable'))
+    return new Promise<void>((resolve, reject) => {
+      child.send({ type: 'plugin-command-response', requestId, result }, (error) => {
+        if (error === null) resolve()
+        else reject(error)
+      })
+    })
+  }
+
   private send(message: DesktopHostCommand): void {
     const child = this.child
     if (child === undefined || !child.connected) throw new Error('dsh desktop host IPC is unavailable')
@@ -446,6 +485,11 @@ export class DesktopHostProcess {
         return
       case 'fatal':
         this.fail(new Error(message.message))
+        return
+      case 'plugin-command-request':
+      case 'plugin-command-cancel':
+      case 'plugin-command-settled':
+        this.onPluginCommand?.(this, message)
         return
       default:
         message satisfies never
