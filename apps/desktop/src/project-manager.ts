@@ -728,17 +728,17 @@ function resolveProvisioning(
       entries.set(source.packageName, { entry, policy, effective: 'plan' })
       continue
     }
-    const verified = manual.enabled && manual.owner === 'user' && manual.receipt !== undefined && manual.snapshot === undefined
-      && manual.dependency === artifactSpecifier(manual.receipt)
-    const identical = verified && JSON.stringify(manual.receipt?.source) === JSON.stringify(source)
-    if (identical) {
-      entries.set(source.packageName, { entry, policy, effective: 'plan', receipt: manual.receipt })
-      continue
-    }
-    if (verified && manual.receipt !== undefined && policy === 'compatible-user-override'
-      && sameDesktopPluginSourceFamily(source, manual.receipt.source)) {
-      entries.set(source.packageName, { entry, policy, effective: 'user-override', receipt: manual.receipt })
-      continue
+    const receipt = manual.receipt
+    if (manual.enabled && manual.owner === 'user' && receipt !== undefined && manual.snapshot === undefined
+      && manual.dependency === artifactSpecifier(receipt)) {
+      if (JSON.stringify(receipt.source) === JSON.stringify(source)) {
+        entries.set(source.packageName, { entry, policy, effective: 'plan', receipt })
+        continue
+      }
+      if (policy === 'compatible-user-override' && sameDesktopPluginSourceFamily(source, receipt.source)) {
+        entries.set(source.packageName, { entry, policy, effective: 'user-override', receipt })
+        continue
+      }
     }
     throw new DesktopProvisioningOverrideError(source.packageName, source.version)
   }
@@ -1255,9 +1255,11 @@ export class DesktopProjectManager {
         // Commit legacy ownership only with the staged profile, before source replacement changes its evidence.
         if (existsSync(join(staging, PLUGIN_RECEIPTS))) writePluginReceipts(staging, readPluginReceipts(staging))
         const removeMutation = mutation.type === 'plugin-remove' ? mutation : undefined
-        const removingSnapshot = removeMutation !== undefined
-          && readDesktopPackageLocks(staging)[removeMutation.name] !== undefined
-        if (removingSnapshot && removeMutation !== undefined) this.pruneSourcePackage(staging, removeMutation.name)
+        let removingSnapshot = false
+        if (removeMutation !== undefined) {
+          removingSnapshot = readDesktopPackageLocks(staging)[removeMutation.name] !== undefined
+          if (removingSnapshot) this.pruneSourcePackage(staging, removeMutation.name)
+        }
         if (mutation.type === 'plugins-reconcile' || mutation.type === 'plugin-restore-planned') {
           for (const entry of mutation.plan.plugins) this.pruneSourcePackage(staging, entry.source.packageName)
         }

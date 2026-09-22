@@ -62,7 +62,9 @@ describe('Desktop plugin provisioning descriptors', () => {
       }], removed: [], rolledBack: false, verified: true,
     }
     expect(parseDesktopPluginProvisioningState(state).plugins[0]).toMatchObject({ requestedSource, effectiveSource, effective: 'user-override' })
-    expect(() => parseDesktopPluginProvisioningState({ ...state, plugins: [{ ...state.plugins[0], effectiveSource: requestedSource }] })).toThrow()
+    expect(() => parseDesktopPluginProvisioningState({
+      ...state, plugins: [{ ...state.plugins[0], effectiveSource: requestedSource }],
+    })).toThrow()
     expect(() => parseDesktopPluginProvisioningState({ ...state, planSchemaVersion: 1 })).toThrow()
     expect(() => parseDesktopPluginProvisioningState({
       ...state, planSchemaVersion: 1, plugins: [{

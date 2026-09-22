@@ -155,8 +155,8 @@ export function parseDesktopPluginProvisioningPlan(value: unknown): DesktopPlugi
       : { required: entry.required, source }
   })
   return schemaVersion === 1
-    ? { schemaVersion: 1, mode: 'exact', plugins: plugins as DesktopPluginProvisioningEntryV1[] }
-    : { schemaVersion: 2, mode: 'exact', plugins: plugins as DesktopPluginProvisioningEntryV2[] }
+    ? { schemaVersion: 1, mode: 'exact', plugins }
+    : { schemaVersion: 2, mode: 'exact', plugins }
 }
 
 function failurePhase(value: unknown): Extract<DesktopPluginProvisioningResult, { status: 'optional-failed' }>['phase'] {
@@ -213,7 +213,9 @@ export function parseDesktopPluginProvisioningState(value: unknown): DesktopPlug
     || typeof value.planSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.planSha256)
     || value.composition !== 'active' || !Array.isArray(value.plugins) || !Array.isArray(value.removed)
     || value.rolledBack !== false || value.verified !== true) throw new Error('desktop plugin provisioning: invalid state')
-  const capability = value.schemaVersion === 1 ? LEGACY_DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY : DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY
+  const capability = value.schemaVersion === 1
+    ? LEGACY_DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY
+    : DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY
   const planSchemaVersion = value.schemaVersion === 1 ? 1 : value.planSchemaVersion
   if (JSON.stringify(value.capability) !== JSON.stringify(capability)
     || (planSchemaVersion !== 1 && planSchemaVersion !== 2)) throw new Error('desktop plugin provisioning: invalid state')

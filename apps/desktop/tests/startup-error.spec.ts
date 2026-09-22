@@ -4,9 +4,10 @@ import { desktopErrorState } from '../src/startup-error.ts'
 
 it('publishes one retained recovery suggestion without inventing health causality', () => {
   const failure = new DesktopProvisioningOverrideHealthError('provider', '1.0.0', new Error('unrelated graph failure'))
-  expect(desktopErrorState(failure)).toMatchObject({
-    message: expect.stringContaining('health failed while user override provider was active'),
-    recovery: { type: 'restore-planned-source', packageName: 'provider', requestedVersion: '1.0.0' },
+  const state = desktopErrorState(failure)
+  expect(state.message).toContain('health failed while user override provider was active')
+  expect(state.recovery).toEqual({
+    type: 'restore-planned-source', packageName: 'provider', requestedVersion: '1.0.0',
   })
 })
 

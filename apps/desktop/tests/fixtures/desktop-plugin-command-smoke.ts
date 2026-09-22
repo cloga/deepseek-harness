@@ -534,7 +534,9 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
       const pages = contexts[0]!.pages()
       assert(pages.length <= 1, 'Unexpected extra root browser pages')
       launchedPage = pages[0]
-      if (launchedPage === undefined) await new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(100, remainingDeadline(startupDeadline))))
+      if (launchedPage === undefined) {
+        await new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(100, remainingDeadline(startupDeadline))))
+      }
     }
     page = launchedPage
     await launchedPage.waitForFunction(() => {
@@ -542,7 +544,7 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
       return location.href === 'dsh-app://app/index.html' || Boolean(error && !error.hidden && error.textContent?.trim())
     }, undefined, { timeout: remainingDeadline(startupDeadline) })
     assert.equal(launchedPage.url(), APPLICATION_URL, 'Packaged application did not reach app-ready')
-    const pageTitle = await withinDeadline(startupDeadline, () => launchedPage!.title())
+    const pageTitle = await withinDeadline(startupDeadline, () => launchedPage.title())
     validateDesktopPageTitle(pageTitle)
     const captured = await nativeHelper<Ownership>(home, environment, { action: 'capture', ...epochIdentity,
       main: listener.main, pageTitle, profile, home,
@@ -596,11 +598,15 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     await managerPage.locator('#status').filter({ hasText: 'Done. The Desktop backend has restarted.' })
       .waitFor({ timeout: remainingDeadline(localApplyDeadline) })
     await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), async () => { await managerPage.close() })
-    const localPageTitle = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), () => page!.title())
-    ownership = await nativeHelper<Ownership>(home, environment, { action: 'capture', ...launchIdentity!,
-      main: mainIdentity!, pageTitle: localPageTitle, profile, home,
-      hostEntry: join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js') }, helperLifecycle,
-      boundedWorkDeadline(performance.now() + 90_000))
+    const localPageTitle = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), () => page.title())
+    ownership = await nativeHelper<Ownership>(
+      home,
+      environment,
+      { action: 'capture', ...launchIdentity, main: mainIdentity, pageTitle: localPageTitle, profile, home,
+        hostEntry: join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js') },
+      helperLifecycle,
+      boundedWorkDeadline(performance.now() + 90_000),
+    )
     assert.notDeepEqual(ownership.host, initialHostIdentity, 'Local plugin Apply must replace the actual Host process')
     const localAudit = auditNames(home).filter(name => !auditsBeforeLocal.includes(name))
       .map(name => JSON.parse(readFileSync(join(home, 'desktop', 'profile-operations', name), 'utf8')) as Record<string, unknown>)
@@ -693,16 +699,20 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     assert(applyNavigations > 0, 'Apply must navigate through the owned startup/application lifecycle')
     evidence.applyNavigations = applyNavigations
     const overrideListText = [
-      `desktop-unrelated-fixture@1.0.0 — enabled`,
-      `dsh-github-copilot@0.4.0-alpha.36 — enabled`,
+      'desktop-unrelated-fixture@1.0.0 — enabled',
+      'dsh-github-copilot@0.4.0-alpha.36 — enabled',
     ].join('\n')
     assert.deepEqual((await execute('/desktop-plugin list', applyDeadline)).result,
       { kind: 'success', text: overrideListText })
-    const overridePageTitle = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), () => page!.title())
-    ownership = await nativeHelper<Ownership>(home, environment, { action: 'capture', ...launchIdentity!,
-      main: mainIdentity!, pageTitle: overridePageTitle, profile, home,
-      hostEntry: join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js') }, helperLifecycle,
-      boundedWorkDeadline(performance.now() + 90_000))
+    const overridePageTitle = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), () => page.title())
+    ownership = await nativeHelper<Ownership>(
+      home,
+      environment,
+      { action: 'capture', ...launchIdentity, main: mainIdentity, pageTitle: overridePageTitle, profile, home,
+        hostEntry: join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js') },
+      helperLifecycle,
+      boundedWorkDeadline(performance.now() + 90_000),
+    )
     assert.notDeepEqual(ownership.host, preOverrideHostIdentity, 'Verified override Apply must replace the actual Host process')
     const overrideAudit = auditNames(home).filter(name => !auditsBeforeOverride.includes(name))
       .map(name => JSON.parse(readFileSync(join(home, 'desktop', 'profile-operations', name), 'utf8')) as Record<string, unknown>)
@@ -710,13 +720,27 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     const assertOverrideEvidence = (): Record<string, unknown> => {
       const state = JSON.parse(readFileSync(join(profile, 'desktop-plugin-provisioning-state.json'), 'utf8')) as {
         schemaVersion: number
-        plugins: Array<{ name: string; sourcePolicy: string; effective: string; requestedSource: unknown; effectiveSource: unknown; receipt: unknown }>
+        plugins: Array<{
+          name: string
+          sourcePolicy: string
+          effective: string
+          requestedSource: unknown
+          effectiveSource: unknown
+          receipt: unknown
+        }>
       }
       const result = state.plugins.find(item => item.name === 'dsh-github-copilot')
       assert(result !== undefined, 'Provisioning state must include Copilot')
       const store = JSON.parse(readFileSync(join(profile, 'desktop-plugin-receipts.json'), 'utf8')) as {
         owners: Record<string, string>
-        receipts: Record<string, { source: unknown; releaseId: number; assetId: number; artifactSha256: string; version: string; states: unknown }>
+        receipts: Record<string, {
+          source: unknown
+          releaseId: number
+          assetId: number
+          artifactSha256: string
+          version: string
+          states: unknown
+        }>
       }
       const receipt = store.receipts['dsh-github-copilot']
       assert(receipt !== undefined, 'Receipt store must include Copilot')
@@ -901,14 +925,24 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     // Never use a Playwright launcher or its PID-kill tree logic. A CDP connection is disconnected only
     // AFTER the retained Job proves quiescence (browser.close on connectOverCDP disconnects the client).
     if (quiescent) {
-      try { await withinDeadline(Math.min(performance.now() + 10_000, fixtureCleanupDeadline), async () => { await browser?.close() }) } catch (error) { errors.push(error) }
+      try {
+        await withinDeadline(Math.min(performance.now() + 10_000, fixtureCleanupDeadline), async () => {
+          await browser?.close()
+        })
+      } catch (error) { errors.push(error) }
       if (owned !== undefined) {
         const pendingHandles = new Set(pendingDesktopPluginHandles(processHandleClosed, jobHandleClosed))
         if (pendingHandles.has('process')) {
-          try { win32.closeHandleChecked(api, owned.process, 'fixture root process'); processHandleClosed = true } catch (error) { errors.push(error) }
+          try {
+            win32.closeHandleChecked(api, owned.process, 'fixture root process')
+            processHandleClosed = true
+          } catch (error) { errors.push(error) }
         }
         if (pendingHandles.has('job')) {
-          try { win32.closeHandleChecked(api, owned.job, 'fixture Job'); jobHandleClosed = true } catch (error) { errors.push(error) }
+          try {
+            win32.closeHandleChecked(api, owned.job, 'fixture Job')
+            jobHandleClosed = true
+          } catch (error) { errors.push(error) }
         }
       }
     } else errors.push(new Error(`Cannot prove process exit AND empty Job; retained handles and private home: ${home}`))

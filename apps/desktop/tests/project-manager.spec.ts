@@ -600,32 +600,39 @@ describe('desktop external plugin profile', () => {
 
   it.each(['0.4.0-alpha.32', '0.4.0-alpha.36'])(
     'retains health-checked compatible verified user override %s without version ordering', async (overrideVersion) => {
-    const { root, manager } = setup()
-    const plannedArchive = verifiedPluginArchive('dsh-github-copilot', '0.4.0-alpha.33')
-    const overrideArchive = verifiedPluginArchive('dsh-github-copilot', overrideVersion)
-    const planned = verifiedSource(plannedArchive, 'dsh-github-copilot', '0.4.0-alpha.33')
-    const override = verifiedSource(overrideArchive, 'dsh-github-copilot', overrideVersion)
-    mockVerifiedPlugins([{ archive: plannedArchive, source: planned }, { archive: overrideArchive, source: override }])
-    const plan = parseDesktopPluginProvisioningPlan({
-      schemaVersion: 2, mode: 'exact', plugins: [{ required: true, source: planned, sourcePolicy: 'compatible-user-override' }],
-    })
-    await manager.applyRelease(hooks(), plan)
-    await manager.mutate({ type: 'plugin-install', source: override }, hooks())
-    const state = JSON.parse(readFileSync(join(manager.paths.profile, 'desktop-plugin-provisioning-state.json'), 'utf8')) as {
-      plugins: Array<{ requestedSource: unknown; effectiveSource: unknown; effective: string }>
-    }
-    expect(state.plugins[0]).toMatchObject({ requestedSource: planned, effectiveSource: override, effective: 'user-override' })
-    expect(receiptStore(manager).owners?.['dsh-github-copilot']).toBe('user')
-    const beforeReuse = calls(root).length
-    await manager.reconcileProvisioning(plan, hooks())
-    expect(calls(root)).toHaveLength(beforeReuse)
-    const dsh = join(root, 'compatible-runtime')
-    runtimeFixture(dsh, '1.1.0', '24.18.0')
-    const next = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
-    await next.applyRelease(hooks(), plan)
-    expect(next.listPlugins()[0]).toMatchObject({ name: 'dsh-github-copilot', version: overrideVersion, source: override })
-    expect(receiptStore(next).owners?.['dsh-github-copilot']).toBe('user')
-  }, 30_000)
+      const { root, manager } = setup()
+      const plannedArchive = verifiedPluginArchive('dsh-github-copilot', '0.4.0-alpha.33')
+      const overrideArchive = verifiedPluginArchive('dsh-github-copilot', overrideVersion)
+      const planned = verifiedSource(plannedArchive, 'dsh-github-copilot', '0.4.0-alpha.33')
+      const override = verifiedSource(overrideArchive, 'dsh-github-copilot', overrideVersion)
+      mockVerifiedPlugins([{ archive: plannedArchive, source: planned }, { archive: overrideArchive, source: override }])
+      const plan = parseDesktopPluginProvisioningPlan({
+        schemaVersion: 2,
+        mode: 'exact',
+        plugins: [{ required: true, source: planned, sourcePolicy: 'compatible-user-override' }],
+      })
+      await manager.applyRelease(hooks(), plan)
+      await manager.mutate({ type: 'plugin-install', source: override }, hooks())
+      const state = JSON.parse(readFileSync(
+        join(manager.paths.profile, 'desktop-plugin-provisioning-state.json'), 'utf8',
+      )) as { plugins: Array<{ requestedSource: unknown; effectiveSource: unknown; effective: string }> }
+      expect(state.plugins[0]).toMatchObject({
+        requestedSource: planned, effectiveSource: override, effective: 'user-override',
+      })
+      expect(receiptStore(manager).owners?.['dsh-github-copilot']).toBe('user')
+      const beforeReuse = calls(root).length
+      await manager.reconcileProvisioning(plan, hooks())
+      expect(calls(root)).toHaveLength(beforeReuse)
+      const dsh = join(root, 'compatible-runtime')
+      runtimeFixture(dsh, '1.1.0', '24.18.0')
+      const next = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
+      await next.applyRelease(hooks(), plan)
+      expect(next.listPlugins()[0]).toMatchObject({
+        name: 'dsh-github-copilot', version: overrideVersion, source: override,
+      })
+      expect(receiptStore(next).owners?.['dsh-github-copilot']).toBe('user')
+    }, 30_000,
+  )
 
   it('rolls back a same-name compatible install when staged health fails', async () => {
     const { manager } = setup()
@@ -769,7 +776,7 @@ describe('desktop external plugin profile', () => {
   it('does not select a targeted recovery when several overrides are active during health failure', async () => {
     const { root, manager } = setup()
     const planned = ['first-provider', 'second-provider'].map(name => pluginFixture(name))
-    const overrides = planned.map(item => {
+    const overrides = planned.map((item) => {
       const archive = verifiedPluginArchive(item.source.packageName, '2.0.0')
       return { archive, source: verifiedSource(archive, item.source.packageName, '2.0.0') }
     })
