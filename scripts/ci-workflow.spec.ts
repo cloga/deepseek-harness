@@ -49,7 +49,9 @@ describe('CI workflow', () => {
     expect(job).toMatchObject({ 'runs-on': 'ubuntu-24.04', 'timeout-minutes': 45, permissions: { contents: 'read' } })
     if (!Array.isArray(job.steps) || typeof job.if !== 'string') throw new TypeError('Expected proposal steps and condition are required')
     const steps = job.steps.filter(isRecord)
-    expect(steps[0]).toMatchObject({ uses: 'actions/checkout@v6', with: {
+    const checkout = steps.findIndex(step => step.uses === 'actions/checkout@v6')
+    expect(checkout).toBeGreaterThanOrEqual(0)
+    expect(steps[checkout]).toMatchObject({ uses: 'actions/checkout@v6', with: {
       ref: '${{ github.sha }}', 'persist-credentials': false, 'fetch-depth': 0,
     } })
     const units = steps.findIndex(step => typeof step.run === 'string' && step.run.includes(`test_prepare_auto_${kind}_goldens.py`))
@@ -70,7 +72,12 @@ describe('CI workflow', () => {
     expect(steps[review]?.run).toBe(`set -euo pipefail\npython3 -B scripts/prepare-auto-${kind}-goldens.py\n`)
     if (kind === 'web') {
       expect(steps[review]?.name).toBe('Refresh five diagnosed Web owners then run the complete Web CI gate')
-      expect(job.env).toMatchObject({ TMPDIR: '${{ runner.temp }}' })
+      expect(job.env).not.toHaveProperty('TMPDIR')
+      const tmpdir = steps.findIndex(step => step.name === 'Use runner-owned temporary storage for Web snapshots')
+      expect(tmpdir).toBeGreaterThanOrEqual(0)
+      expect(tmpdir).toBeLessThan(checkout)
+      expect(steps[tmpdir]?.run).toBe('echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"')
+      expect(steps[tmpdir]).not.toHaveProperty('continue-on-error')
       expect(steps.find(step => step.id === 'setup-evidence')?.run).toContain('test -d "$TMPDIR" && test -w "$TMPDIR"')
     }
     expect(steps.find(step => step.uses === 'actions/upload-artifact@v4')).toMatchObject({

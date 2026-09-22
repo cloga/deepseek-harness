@@ -326,8 +326,9 @@ jobs:
         shell: bash
     env:
       DSH_TELEMETRY_DISABLED: '1'
-      TMPDIR: ${{ runner.temp }}
     steps:
+      - name: Use runner-owned temporary storage for Web snapshots
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
