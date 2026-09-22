@@ -565,7 +565,10 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     evidence.runtimeSha256 = createHash('sha256').update(runtimeBytes).digest('hex')
     mkdirSync(userData)
     const firstLaunch = await launchOwnedRoot()
-    browser = firstLaunch.browser; owned = firstLaunch.owned; page = firstLaunch.page; ownership = firstLaunch.ownership
+    const firstBrowser = firstLaunch.browser
+    const firstOwned = firstLaunch.owned
+    const firstPage = firstLaunch.page
+    browser = firstBrowser; owned = firstOwned; page = firstPage; ownership = firstLaunch.ownership
     launchIdentity = firstLaunch.launchIdentity; mainIdentity = firstLaunch.main
     evidence.pageTitle = firstLaunch.pageTitle
     firstMainIdentity = ownership.main
@@ -581,7 +584,7 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     const managerDeadline = boundedWorkDeadline(performance.now() + 30_000)
     const managerPagePromise = context.waitForEvent('page', { timeout: remainingDeadline(managerDeadline) })
     void managerPagePromise.catch(() => undefined)
-    await withinDeadline(managerDeadline, async () => { await page!.keyboard.press('Control+,') })
+    await withinDeadline(managerDeadline, async () => { await firstPage.keyboard.press('Control+,') })
     const managerPage = await managerPagePromise
     await managerPage.waitForURL('dsh-app://shell/plugin-manager.html', { timeout: remainingDeadline(managerDeadline) })
     await managerPage.locator('#package-spec').fill(archivePath, { timeout: remainingDeadline(managerDeadline) })
@@ -598,7 +601,7 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     await managerPage.locator('#status').filter({ hasText: 'Done. The Desktop backend has restarted.' })
       .waitFor({ timeout: remainingDeadline(localApplyDeadline) })
     await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), async () => { await managerPage.close() })
-    const localPageTitle = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), () => page.title())
+    const localPageTitle = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), () => firstPage.title())
     ownership = await nativeHelper<Ownership>(
       home,
       environment,
@@ -648,15 +651,17 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
       { name: 'desktop-unrelated-fixture', version: '1.0.0' }].sort((a, b) => a.name.localeCompare(b.name))
     const listText = expectedRows.map(row => `${row.name}@${row.version} — enabled`).join('\n')
     const sessionId = `desktop-plugin-command-${randomUUID()}`
-    const created = await remote<{ sessionId: string }>(page, 'session/create', { request: { cwd: workspace, sessionId } },
+    const created = await remote<{ sessionId: string }>(firstPage, 'session/create', { request: { cwd: workspace, sessionId } },
       boundedWorkDeadline(performance.now() + 300_000))
     assert.equal(created.sessionId, sessionId)
-    const registry = await remote<readonly CommandDescriptor[]>(page, 'commands/list', { agentId: sessionId },
+    const registry = await remote<readonly CommandDescriptor[]>(firstPage, 'commands/list', { agentId: sessionId },
       boundedWorkDeadline(performance.now() + 300_000))
     assert.equal(Array.isArray(registry), true, 'Expected command registry array')
     assert(registry.some(command => command.name === 'desktop-plugin'), 'Actual Host registry must contain desktop-plugin before execution')
     const execute = async (line: string, deadline = boundedWorkDeadline(performance.now() + 300_000)): Promise<CommandExecution> => {
-      const execution = await remote<CommandExecution>(page!, 'commands/execute', { agentId: sessionId, line, submittedAttachments: [] }, deadline)
+      const execution = await remote<CommandExecution>(firstPage, 'commands/execute', {
+        agentId: sessionId, line, submittedAttachments: [],
+      }, deadline)
       assert(execution && typeof execution.commandId === 'string' && execution.result, 'RPC must return CommandExecution, not prompt fallback')
       expected.push({ line, execution })
       return execution
@@ -679,23 +684,23 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     const auditsBeforeOverride = auditNames(home)
     assert.deepEqual((await execute(`/desktop-plugin install release ${JSON.stringify(alpha36)}`,
       boundedWorkDeadline(performance.now() + 300_000))).result, { kind: 'success', text: PREPARED })
-    evidence.beforeOverrideApplyTranscript = await exportTranscript(page, home, sessionId, expected,
+    evidence.beforeOverrideApplyTranscript = await exportTranscript(firstPage, home, sessionId, expected,
       boundedWorkDeadline(performance.now() + 30_000))
     const applyDeadline = boundedWorkDeadline(performance.now() + 300_000)
     let applyNavigations = 0
     const onApplyNavigation = (): void => { applyNavigations++ }
-    page.on('domcontentloaded', onApplyNavigation)
-    const firstApplyNavigation = page.waitForEvent('domcontentloaded', { timeout: remainingDeadline(applyDeadline) })
+    firstPage.on('domcontentloaded', onApplyNavigation)
+    const firstApplyNavigation = firstPage.waitForEvent('domcontentloaded', { timeout: remainingDeadline(applyDeadline) })
     void firstApplyNavigation.catch(() => undefined)
     try {
       evidence.nativeApplyOverride = await nativeHelper(home, environment, { action: 'apply', ownership }, helperLifecycle,
         applyDeadline)
       await firstApplyNavigation
-      await page.waitForURL(APPLICATION_URL, { timeout: remainingDeadline(applyDeadline) })
-      await page.getByRole('button', { name: 'Settings', exact: true }).waitFor({
+      await firstPage.waitForURL(APPLICATION_URL, { timeout: remainingDeadline(applyDeadline) })
+      await firstPage.getByRole('button', { name: 'Settings', exact: true }).waitFor({
         state: 'visible', timeout: remainingDeadline(applyDeadline),
       })
-    } finally { page.off('domcontentloaded', onApplyNavigation) }
+    } finally { firstPage.off('domcontentloaded', onApplyNavigation) }
     assert(applyNavigations > 0, 'Apply must navigate through the owned startup/application lifecycle')
     evidence.applyNavigations = applyNavigations
     const overrideListText = [
@@ -704,7 +709,7 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     ].join('\n')
     assert.deepEqual((await execute('/desktop-plugin list', applyDeadline)).result,
       { kind: 'success', text: overrideListText })
-    const overridePageTitle = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), () => page.title())
+    const overridePageTitle = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), () => firstPage.title())
     ownership = await nativeHelper<Ownership>(
       home,
       environment,
@@ -799,13 +804,13 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
       'Strict planned disable must retain the same main and Host identities')
 
     const documentIdentity = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000),
-      () => page!.evaluate(() => performance.timeOrigin))
+      () => firstPage.evaluate(() => performance.timeOrigin))
     let navigations = 0
     const onNavigation = (): void => { navigations++ }
-    page.on('domcontentloaded', onNavigation)
+    firstPage.on('domcontentloaded', onNavigation)
     const auditsBeforeToggle = auditNames(home)
     assert.deepEqual((await execute('/desktop-plugin disable desktop-unrelated-fixture')).result, { kind: 'success', text: PREPARED })
-    evidence.beforeCancelTranscript = await exportTranscript(page, home, sessionId, expected,
+    evidence.beforeCancelTranscript = await exportTranscript(firstPage, home, sessionId, expected,
       boundedWorkDeadline(performance.now() + 30_000))
     evidence.nativeCancel = await nativeHelper(home, environment, { action: 'cancel', ownership }, helperLifecycle,
       boundedWorkDeadline(performance.now() + 90_000))
@@ -825,16 +830,16 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     evidence.afterCancelIdentity = await nativeHelper(home, environment, { action: 'verify', ownership }, helperLifecycle,
       boundedWorkDeadline(performance.now() + 90_000))
     assert.equal(win32.pollProcessExit(api, owned.process), undefined, 'Cancel must retain the exact Job-created root')
-    assert.equal(page.url(), APPLICATION_URL)
+    assert.equal(firstPage.url(), APPLICATION_URL)
     const afterCancelDocumentIdentity = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000),
-      () => page!.evaluate(() => performance.timeOrigin))
+      () => firstPage.evaluate(() => performance.timeOrigin))
     assert.equal(afterCancelDocumentIdentity, documentIdentity, 'Cancel must not reload the app document')
     assert.equal(navigations, 0, 'Cancel must not navigate to startup/error or reload')
     const visibleErrors = await withinDeadline(boundedWorkDeadline(performance.now() + 10_000),
-      () => page!.locator('#error:visible').count())
+      () => firstPage.locator('#error:visible').count())
     assert.equal(visibleErrors, 0)
-    page.off('domcontentloaded', onNavigation)
-    evidence.transcript = await exportTranscript(page, home, sessionId, expected,
+    firstPage.off('domcontentloaded', onNavigation)
+    evidence.transcript = await exportTranscript(firstPage, home, sessionId, expected,
       boundedWorkDeadline(performance.now() + 30_000))
     evidence.transcriptInferenceAbsent = true
     evidence.commands = expected
@@ -845,18 +850,20 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     const closeDeadline = boundedWorkDeadline(performance.now() + 60_000)
     evidence.firstNormalClose = await nativeHelper(home, environment, { action: 'close', ownership }, helperLifecycle, closeDeadline)
     const firstExitCode = await waitForOwnedJobExit(closeDeadline,
-      () => win32.pollProcessExit(api, owned!.process), () => win32.isJobEmpty(api, owned!.job))
+      () => win32.pollProcessExit(api, firstOwned.process), () => win32.isJobEmpty(api, firstOwned.job))
     assert.equal(firstExitCode, 0, 'First application teardown must exit successfully')
     quiescent = true
-    await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), async () => { await browser!.close() })
-    win32.closeHandleChecked(api, owned.process, 'first fixture root process')
+    await withinDeadline(boundedWorkDeadline(performance.now() + 10_000), async () => { await firstBrowser.close() })
+    win32.closeHandleChecked(api, firstOwned.process, 'first fixture root process')
     processHandleClosed = true
-    win32.closeHandleChecked(api, owned.job, 'first fixture Job')
+    win32.closeHandleChecked(api, firstOwned.job, 'first fixture Job')
     jobHandleClosed = true
     owned = undefined; browser = undefined; page = undefined; ownership = undefined
 
     const coldLaunch = await launchOwnedRoot()
-    browser = coldLaunch.browser; owned = coldLaunch.owned; page = coldLaunch.page; ownership = coldLaunch.ownership
+    const coldOwned = coldLaunch.owned
+    const coldPage = coldLaunch.page
+    browser = coldLaunch.browser; owned = coldOwned; page = coldPage; ownership = coldLaunch.ownership
     launchIdentity = coldLaunch.launchIdentity; mainIdentity = coldLaunch.main
     assert.notDeepEqual(ownership.main, firstMainIdentity,
       'Cold start must have a distinct process generation after epoch-A Job quiescence')
@@ -866,16 +873,16 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     assert.deepEqual(auditNames(home), preColdAudits, 'Cold startup fast reuse must create no profile transaction audit')
     const coldDeadline = boundedWorkDeadline(performance.now() + 120_000)
     const coldSessionId = `desktop-plugin-cold-${randomUUID()}`
-    const coldCreated = await remote<{ sessionId: string }>(page, 'session/create',
+    const coldCreated = await remote<{ sessionId: string }>(coldPage, 'session/create',
       { request: { cwd: workspace, sessionId: coldSessionId } }, coldDeadline)
     assert.equal(coldCreated.sessionId, coldSessionId)
-    const coldRegistry = await remote<readonly CommandDescriptor[]>(page, 'commands/list', { agentId: coldSessionId }, coldDeadline)
+    const coldRegistry = await remote<readonly CommandDescriptor[]>(coldPage, 'commands/list', { agentId: coldSessionId }, coldDeadline)
     assert(coldRegistry.some(command => command.name === 'desktop-plugin'))
-    const coldExecution = await remote<CommandExecution>(page, 'commands/execute', {
+    const coldExecution = await remote<CommandExecution>(coldPage, 'commands/execute', {
       agentId: coldSessionId, line: '/desktop-plugin list', submittedAttachments: [],
     }, coldDeadline)
     assert.deepEqual(coldExecution.result, { kind: 'success', text: overrideListText })
-    evidence.coldTranscript = await exportTranscript(page, home, coldSessionId,
+    evidence.coldTranscript = await exportTranscript(coldPage, home, coldSessionId,
       [{ line: '/desktop-plugin list', execution: coldExecution }],
       Math.min(coldDeadline, boundedWorkDeadline(performance.now() + 30_000)))
     const coldOverride = assertOverrideEvidence()
@@ -890,7 +897,7 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     const secondCloseDeadline = Math.min(performance.now() + 60_000, fixtureCleanupDeadline)
     evidence.secondNormalClose = await nativeHelper(home, environment, { action: 'close', ownership }, helperLifecycle, secondCloseDeadline)
     const secondExitCode = await waitForOwnedJobExit(secondCloseDeadline,
-      () => win32.pollProcessExit(api, owned!.process), () => win32.isJobEmpty(api, owned!.job))
+      () => win32.pollProcessExit(api, coldOwned.process), () => win32.isJobEmpty(api, coldOwned.job))
     quiescent = true
     assert.equal(secondExitCode, 0, 'Cold-start application teardown must exit successfully')
     evidence.quiescent = { firstExitCode, secondExitCode, jobEmpty: true, normalClose: true, helperTreeUncertain: false }
@@ -908,11 +915,12 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     const errors: unknown[] = []
     if (!quiescent && owned !== undefined) {
       // Covers every post-spawn failure, including absent CDP, app-ready or native identity capture.
+      const cleanupOwned = owned
       try {
-        win32.terminateJob(api, owned.job, 1)
+        win32.terminateJob(api, cleanupOwned.job, 1)
         const cleanupDeadline = Math.min(performance.now() + 60_000, fixtureCleanupDeadline)
         await waitForOwnedJobExit(cleanupDeadline,
-          () => win32.pollProcessExit(api, owned!.process), () => win32.isJobEmpty(api, owned!.job))
+          () => win32.pollProcessExit(api, cleanupOwned.process), () => win32.isJobEmpty(api, cleanupOwned.job))
         quiescent = true
       } catch (error) { errors.push(error) }
     } else if (owned === undefined && !spawnAttempted) quiescent = true
