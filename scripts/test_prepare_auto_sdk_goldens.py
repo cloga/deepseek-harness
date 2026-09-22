@@ -223,12 +223,14 @@ class PnpmInvocationTests(unittest.TestCase):
         package_bin.mkdir(parents=True)
         entry = package_bin / 'pnpm.cjs'
         entry.write_text('owned fixture')
+        self.assertTrue(entry.is_file())
         for environment in ({'PNPM_HOME': str(home)}, {'PNPM_HOME': str(home), 'npm_execpath': str(home / 'pnpm.cmd')}):
-            self.assertEqual(module['pnpm_invocation'](['--version'], environment, node), [node, str(entry), '--version'])
+            self.assertEqual(module['pnpm_invocation'](['--version'], environment, node), [node, str(entry.resolve()), '--version'])
         preferred = package_bin / 'pnpm.mjs'
         preferred.write_text('owned fixture')
+        self.assertTrue(preferred.is_file())
         self.assertEqual(module['pnpm_invocation'](['--version'], {'PNPM_HOME': str(home)}, node),
-                         [node, str(preferred), '--version'])
+                         [node, str(preferred.resolve()), '--version'])
 
     def test_missing_and_invalid_entries_refuse_windows_fallbacks(self):
         root, node = self.setup_paths()
