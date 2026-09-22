@@ -95,7 +95,10 @@ export async function inspectDesktopPluginRuntimeIdentity(
   }
   const before = inspectPhysical()
   const digest = createHash('sha256')
-  for await (const chunk of createReadStream(before.archive)) digest.update(chunk)
+  for await (const chunk of createReadStream(before.archive)) {
+    assert(Buffer.isBuffer(chunk), 'Archive inspection requires original binary chunks')
+    digest.update(chunk)
+  }
   assert.deepEqual(inspectPhysical(), before, 'Packaged archive changed during identity inspection')
   const identity = { archive: before.archive, archiveSha256: digest.digest('hex'), runtimeDir: join(before.archive, 'dsh') }
   if (expected !== undefined) assert.deepEqual(identity, expected, 'Packaged runtime archive changed after verification')
