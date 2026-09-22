@@ -582,6 +582,9 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     writeFileSync(archivePath, archiveBytes, { flag: 'wx', mode: 0o600 })
     const context = browser.contexts()[0]!
     const managerDeadline = boundedWorkDeadline(performance.now() + 30_000)
+    await withinDeadline(managerDeadline, async () => { await firstPage.bringToFront() })
+    const rootFocused = await withinDeadline(managerDeadline, () => firstPage.evaluate(() => document.hasFocus()))
+    assert.equal(rootFocused, true, 'Main application must own focus before invoking the plugin-manager accelerator')
     const managerPagePromise = context.waitForEvent('page', { timeout: remainingDeadline(managerDeadline) })
     void managerPagePromise.catch(() => undefined)
     await withinDeadline(managerDeadline, async () => { await firstPage.keyboard.press('Control+,') })
