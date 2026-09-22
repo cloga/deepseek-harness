@@ -326,6 +326,7 @@ jobs:
         shell: bash
     env:
       DSH_TELEMETRY_DISABLED: '1'
+      TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -347,6 +348,7 @@ jobs:
         id: setup-evidence
         run: |
           set -euo pipefail
+          test -d "$TMPDIR" && test -w "$TMPDIR"
           evidence="$(mktemp -d "$RUNNER_TEMP/auto-web-setup-XXXXXX")"
           echo "path=$evidence" >> "$GITHUB_OUTPUT"
           echo "AUTO_WEB_SETUP_DIR=$evidence" >> "$GITHUB_ENV"
