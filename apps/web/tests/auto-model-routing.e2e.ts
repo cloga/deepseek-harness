@@ -136,7 +136,9 @@ describe.skipIf(webSnapshotMode() === 'record')('web e2e: Auto model routing', (
     world.ctx.effect(() => world.ctx.llm.registerAdapter([PROVIDER], adapter), 'Auto routing browser fixture adapter')
     await world.ctx.settings.replace('model-routing', routingConfig())
     await world.ctx.agentDefaultModel.saveSelection({ provider: PROVIDER, model: 'large', reasoningEffort: ReasoningEffortId('high') })
-    browser = await chromium.launch()
+    // CI uses pinned Chromium; local acceptance may use an explicitly selected installed browser.
+    const executablePath = process.env.DSH_PLAYWRIGHT_EXECUTABLE_PATH
+    browser = await chromium.launch(executablePath === undefined ? {} : { executablePath })
     page = await newEnglishPage(browser)
     observation = observeBrowser(page)
     await page.goto(world.authenticatedUrl, { waitUntil: 'load' })
