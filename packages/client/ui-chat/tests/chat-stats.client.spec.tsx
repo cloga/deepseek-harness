@@ -174,9 +174,9 @@ describe('StatsPills', () => {
     const owner = view.getByTestId('native-dock-owner')
     const outlet = owner.querySelector<HTMLElement>('[data-slot="conversation.composer.dock"]')!
     expect(outlet.querySelector('[data-composer-stats]')).toBeNull()
-    const time = within(outlet).queryByRole('button', { name: '1 turns 1 steps', exact: true })
-    const usage = within(outlet).getByRole('button', { name: '105 tok · Cache hit 90%', exact: true })
-    const companion = within(outlet).getByRole('button', { name: 'Owned companion fixture', exact: true })
+    const time = within(outlet).queryByRole('button', { name: '1 turns 1 steps' })
+    const usage = within(outlet).getByRole('button', { name: '105 tok · Cache hit 90%' })
+    const companion = within(outlet).getByRole('button', { name: 'Owned companion fixture' })
     // jsdom supplies no layout: stub only rectangles. The actual component owns markup, roles and dialog behavior.
     for (const [element, x, width] of [[owner, 10, 700], [time, 30, 100], [usage, 142, 180], [companion, 334, 160]] as const) {
       if (element !== null) vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(new DOMRect(x, 100, width, 22))
@@ -193,11 +193,11 @@ describe('StatsPills', () => {
       copilot: { x: 334, y: 100, width: 160, height: 22 },
     })
     fireEvent.click(time!)
-    expect(view.getByRole('dialog', { name: 'Session statistics', exact: true }).textContent).toContain('LLM time0.5s')
+    expect(view.getByRole('dialog', { name: 'Session statistics' }).textContent).toContain('LLM time0.5s')
     fireEvent.keyDown(document, { key: 'Escape' })
-    expect(view.queryByRole('dialog', { name: 'Session statistics', exact: true })).toBeNull()
+    expect(view.queryByRole('dialog', { name: 'Session statistics' })).toBeNull()
     fireEvent.click(usage)
-    const details = view.getByRole('dialog', { name: 'Token usage', exact: true })
+    const details = view.getByRole('dialog', { name: 'Token usage' })
     expect(within(details).getByText('Cache hit', { exact: true })).toBeTruthy()
     expect(details.textContent).toContain('90%')
   })
