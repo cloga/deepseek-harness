@@ -126,8 +126,14 @@ function record(value: unknown): asserts value is Record<string, unknown> {
  * @param values - Parsed, untrusted audit records created during the operation.
  * @param target - Installed plugin selected for the cancelled toggle.
  * @param manifestNames - Nonempty known dependency names from the baseline manifest.
+ * @param operation - Cancelled mutation kind; plugin-toggle retains the historical target-on-start contract.
  */
-export function validateDesktopPluginCancelAudit(values: readonly unknown[], target: string, manifestNames: readonly string[]): void {
+export function validateDesktopPluginCancelAudit(
+  values: readonly unknown[],
+  target: string,
+  manifestNames: readonly string[],
+  operation: 'plugin-toggle' | 'plugin-install' = 'plugin-toggle',
+): void {
   assert(manifestNames.length > 0 && manifestNames.every(name => typeof name === 'string' && name.length > 0), 'Known manifest dependencies required')
   const names = [...manifestNames].sort()
   assert.equal(new Set(names).size, names.length)
@@ -145,10 +151,14 @@ export function validateDesktopPluginCancelAudit(values: readonly unknown[], tar
     assert.equal(value.schemaVersion, 1, 'Audit schemaVersion required')
     assert(typeof value.recordedAt === 'string' && Number.isFinite(Date.parse(value.recordedAt)), 'Audit recordedAt required')
     assert(typeof value.transaction === 'string' && /^\.desktop-transaction-[a-zA-Z0-9]+$/u.test(value.transaction), 'Audit transaction required')
-    assert.equal(value.operation, 'plugin-toggle')
-    assert.equal(value.target, target)
+    assert.equal(value.operation, operation)
     assert.equal(value.phase, 'preparation')
     assert(value.outcome === 'started' || value.outcome === 'failed', 'Cancel must not commit')
+    if (operation === 'plugin-install' && value.outcome === 'started') {
+      assert.equal(Object.hasOwn(value, 'target'), false, 'Install start must not invent a target before acquisition')
+    } else {
+      assert.equal(value.target, target)
+    }
     inventory(value.before)
   }
   const started = records.filter(value => value.outcome === 'started')

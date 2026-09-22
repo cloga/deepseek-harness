@@ -58,6 +58,15 @@ function cancellationAudit(): Record<string, unknown>[] {
     { ...common, recordedAt: '2026-01-01T00:00:01.000Z', outcome: 'failed', after: inventory },
   ]
 }
+function installCancellationAudit(): Record<string, unknown>[] {
+  const inventory = { sha256: 'a'.repeat(64), names: ['@example/a'] }
+  const common = { schemaVersion: 1, transaction: '.desktop-transaction-Ab1234',
+    operation: 'plugin-install', phase: 'preparation', before: inventory }
+  return [
+    { ...common, recordedAt: '2026-01-01T00:00:00.000Z', outcome: 'started', after: null },
+    { ...common, target: '@example/a', recordedAt: '2026-01-01T00:00:01.000Z', outcome: 'failed', after: inventory },
+  ]
+}
 const auditNames = ['@example/a', '@example/b']
 const validateAudit = (values: unknown[]): void => { validateDesktopPluginCancelAudit(values, '@example/a', auditNames) }
 
@@ -224,16 +233,30 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
   })
 
   it('binds targetless started audits to exact committed targets and rejects failure or rollback', () => {
-    const started = { operation: 'plugin-add', outcome: 'started', phase: 'preparation', transaction: 'tx' }
-    const committed = { operation: 'plugin-add', outcome: 'committed', phase: 'activation', transaction: 'tx', target: 'plugin' }
-    expect(validateCommittedAudit([started, committed], 'plugin-add', 'plugin')).toEqual({
+    const started = { operation: 'plugin-install', outcome: 'started', phase: 'preparation', transaction: 'tx' }
+    const committed = { operation: 'plugin-install', outcome: 'committed', phase: 'activation', transaction: 'tx', target: 'plugin' }
+    expect(validateCommittedAudit([started, committed], 'plugin-install', 'plugin')).toEqual({
       transaction: 'tx', records: [started, committed],
     })
     for (const extra of [
-      { operation: 'plugin-add', outcome: 'failed', phase: 'preparation', transaction: 'tx' },
-      { operation: 'plugin-add', outcome: 'started', phase: 'rollback', transaction: 'tx' },
-    ]) expect(() => validateCommittedAudit([started, committed, extra], 'plugin-add', 'plugin')).toThrow()
-    expect(() => validateCommittedAudit([started, { ...committed, target: 'other' }], 'plugin-add', 'plugin')).toThrow()
+      { operation: 'plugin-install', outcome: 'failed', phase: 'preparation', transaction: 'tx' },
+      { operation: 'plugin-install', outcome: 'started', phase: 'rollback', transaction: 'tx' },
+    ]) expect(() => validateCommittedAudit([started, committed, extra], 'plugin-install', 'plugin')).toThrow()
+    expect(() => validateCommittedAudit([started, { ...committed, target: 'other' }], 'plugin-install', 'plugin')).toThrow()
+  })
+
+  it('validates targetless verified-install cancellation without weakening toggle audits', () => {
+    const records = installCancellationAudit()
+    expect(() => validateDesktopPluginCancelAudit(records, '@example/a', ['@example/a'], 'plugin-install')).not.toThrow()
+    const started = records[0]!, failed = records[1]!
+    for (const values of [
+      [{ ...started, target: '@example/a' }, failed],
+      [{ ...started, operation: 'plugin-toggle' }, failed],
+      [started, { ...failed, target: '@example/b' }],
+      [started, { ...failed, after: { sha256: 'b'.repeat(64), names: ['@example/a'] } }],
+      [started, failed, { ...failed, outcome: 'committed' }],
+    ]) expect(() => validateDesktopPluginCancelAudit(values, '@example/a', ['@example/a'], 'plugin-install')).toThrow()
+    expect(() => validateAudit(cancellationAudit())).not.toThrow()
   })
 
   it('requires a same-transaction started/failed pair retaining known nonempty inventory', () => {
@@ -350,13 +373,14 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
     expect(() => validateDesktopPluginTranscript('session.v2.jsonl', transcript().replace('"version":2', '"version":2,"parentSession":{}'), sessionId, expected)).toThrow()
   })
 
-  it('pins manager accelerator, Apply ownership, alpha36 descriptor, and work/cleanup deadline partition', () => {
+  it('pins slash override actions, alpha36 descriptor, and work/cleanup deadline partition', () => {
     const fixture = readFileSync(new URL('./fixtures/desktop-plugin-command-smoke.ts', import.meta.url), 'utf8')
     const helper = readFileSync(new URL('./fixtures/desktop-plugin-native-cancel.ps1', import.meta.url), 'utf8')
     const workflow = readFileSync(new URL('../../../.github/workflows/desktop-fork-release.yml', import.meta.url), 'utf8')
     const alpha36 = JSON.parse(readFileSync(new URL('./fixtures/copilot-alpha36-source.json', import.meta.url), 'utf8')) as Record<string, unknown>
-    expect(fixture).toContain("keyboard.press('Control+,')")
-    expect(fixture).not.toContain("keyboard.press('Alt+a')")
+    expect(fixture).not.toContain('keyboard.press(')
+    expect(fixture).not.toContain('plugin-manager.html')
+    expect(fixture).toContain('/desktop-plugin install release')
     expect(desktopPluginAcceptanceDeadlines(1000)).toEqual({ work: 961_000, cleanup: 1_141_000 })
     expect(fixture).toContain('started + 16 * 60_000')
     expect(fixture).toContain('Math.min(deadline, performance.now() + 90_000)')
@@ -365,7 +389,7 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
     expect(fixture.match(/Math\.min\(performance\.now\(\) \+ 60_000, fixtureCleanupDeadline\)/gu)).toHaveLength(2)
     for (const field of ['installedInstallerUpgradeVerified: false', 'differentRuntimeUpgradeVerified: false',
       'liveOAuthOrModelVerified: false']) expect(fixture).toContain(field)
-    expect(helper).toContain("$request.action -ne 'cancel' -and $request.action -ne 'apply'")
+    expect(helper).toContain('$request.action -ne \'cancel\' -and $request.action -ne \'apply\'')
     expect(helper).toContain('defaultFocusAsserted = $false')
     expect(fixture).toContain('receipt.releaseId, 393317125')
     expect(fixture).toContain('boundedFileTail(path)')
@@ -390,16 +414,18 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
     expect(helper).toContain('if ($request.action -eq \'cancel\')')
     expect(helper).toContain('Owned root identity changed after Apply')
     expect(helper).toContain('Read-VerifiedRoot $mainProcess $ownership.mainWindow.title')
-    expect(fixture.indexOf('evidence.beforeOverrideApplyTranscript = await exportTranscript'))
-      .toBeLessThan(fixture.indexOf('evidence.nativeApplyOverride = await nativeHelper'))
-    const navigationObserver = fixture.indexOf('const onApplyNavigation = (): void => { applyNavigations++ }')
-    const documentIdentity = fixture.indexOf('const documentIdentity = await withinDeadline')
-    const nativeCancel = fixture.indexOf('evidence.nativeCancel = await nativeHelper')
-    expect(navigationObserver).toBeGreaterThanOrEqual(0)
-    expect(documentIdentity).toBeGreaterThanOrEqual(0)
-    expect(nativeCancel).toBeGreaterThanOrEqual(0)
-    expect(navigationObserver).toBeLessThan(documentIdentity)
-    expect(documentIdentity).toBeLessThan(nativeCancel)
+    const cancelTranscript = fixture.indexOf('evidence.beforeOverrideCancelTranscript = await exportTranscript')
+    const nativeCancel = fixture.indexOf('evidence.nativeCancelOverride = await nativeHelper')
+    const applyTranscript = fixture.indexOf('evidence.beforeOverrideApplyTranscript = await exportTranscript')
+    const applyObserver = fixture.indexOf('const onApplyNavigation = (): void => { applyNavigations++ }')
+    const nativeApply = fixture.indexOf('evidence.nativeApplyOverride = await nativeHelper')
+    for (const position of [cancelTranscript, nativeCancel, applyTranscript, applyObserver, nativeApply]) {
+      expect(position).toBeGreaterThanOrEqual(0)
+    }
+    expect(cancelTranscript).toBeLessThan(nativeCancel)
+    expect(nativeCancel).toBeLessThan(applyTranscript)
+    expect(applyTranscript).toBeLessThan(applyObserver)
+    expect(applyObserver).toBeLessThan(nativeApply)
     expect(fixture).not.toContain('catch (_error) {\n        // Host replacement')
   })
 
