@@ -25,7 +25,7 @@ async function withProxy<T>(reply: (operation: string) => unknown, action: (ctx:
       const operation = String(message.operation)
       operations.push(operation)
       process.emit('message', { type: 'package-transaction-result', protocolVersion: 1, rpcId: message.rpcId,
-        ok: true, value: operation === 'hello' ? 1 : reply(operation) })
+        ok: true, value: operation === 'hello' ? 1 : reply(operation) }, undefined)
       callback(null)
       return true
     } })

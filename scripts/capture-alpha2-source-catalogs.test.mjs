@@ -168,6 +168,46 @@ test('actual workflow source expression never substitutes GITHUB_SHA for empty o
   assert.throws(() => bindSource(observed, { ...environment, GITHUB_EVENT_NAME: 'pull_request' }, derive('pull_request', head)))
 })
 
+test('runner.temp appears only in step env or with, never the job env validation context', () => {
+  const workflow = readFileSync(join(root, '.github/workflows/alpha2-source-catalogs.yml'), 'utf8')
+  const allowedJobContexts = new Set(['github', 'needs', 'strategy', 'matrix', 'vars', 'secrets', 'inputs'])
+  const checkJobEnv = (source) => {
+    const jobEnv = source.match(/^    env:\n([\s\S]*?)^    steps:/mu)?.[1]
+    assert(jobEnv, 'Missing owning job env block')
+    for (const expression of jobEnv.matchAll(/\$\{\{([\s\S]*?)\}\}/gu)) {
+      for (const context of expression[1].matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\./gu)) {
+        assert(allowedJobContexts.has(context[1]), `Unavailable job env context: ${context[1]}`)
+      }
+    }
+    assert(!/^      CAPTURE_ROOT:/mu.test(jobEnv), 'Runner path must be resolved at step scope')
+    assert.match(jobEnv, /^      CAPTURE_NAME: alpha2-source-catalogs-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}$/mu)
+  }
+  checkJobEnv(workflow)
+  // The exact previously rejected placement must fail even though it remains valid YAML.
+  const oldPlacement = workflow.replace(/^      CAPTURE_NAME: .+$/mu,
+    '      CAPTURE_ROOT: ${{ runner.temp }}/alpha2-source-catalogs-${{ github.run_id }}-${{ github.run_attempt }}')
+  assert.throws(() => checkJobEnv(oldPlacement), /Unavailable job env context: runner/u)
+  const steps = workflow.split(/^      - /mu).slice(1)
+  const captureSteps = steps.filter(step => step.includes('--output $env:CAPTURE_ROOT'))
+  assert.equal(captureSteps.length, 3)
+  for (const step of captureSteps) {
+    assert.match(step, /^        env:\n          CAPTURE_ROOT: \$\{\{ runner\.temp \}\}\/\$\{\{ env\.CAPTURE_NAME \}\}\n        run:/mu)
+  }
+  let runnerReferences = 0
+  for (const step of steps) {
+    let section
+    for (const line of step.split('\n')) {
+      const key = /^        (\w+):/u.exec(line)
+      if (key) section = key[1]
+      if (!line.includes('${{ runner.')) continue
+      runnerReferences++
+      assert(['env', 'with'].includes(section), `Runner context outside allowed step env/with: ${line}`)
+      assert.match(line, /^          /u)
+    }
+  }
+  assert.equal(runnerReferences, 5) // pnpm destination, three capture-step environments and artifact upload.
+})
+
 test('workflow is branch-fixed, read-only, frozen-install and artifact-only with all owner tasks', () => {
   const workflow = readFileSync(join(root, '.github/workflows/alpha2-source-catalogs.yml'), 'utf8')
   assert.match(workflow, /branches: \[cloga-official-first-016a2\]/u)
@@ -178,7 +218,7 @@ test('workflow is branch-fixed, read-only, frozen-install and artifact-only with
   assert.match(workflow, /node-version: '24\.13\.0'/u)
   assert.match(workflow, /version: '11\.7\.0'/u)
   assert.match(workflow, /pnpm install --frozen-lockfile/u)
-  assert.match(workflow, /path: \$\{\{ env\.CAPTURE_ROOT \}\}\/artifact/u)
+  assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/\$\{\{ env\.CAPTURE_NAME \}\}\/artifact/u)
   assert(!/pull_request:|workflow_run:|cancel-in-progress:|contents: write|git push|npm publish|gh release|gen-cordis-api/u.test(workflow))
   for (const task of [...GENERATORS, ...CHECKS]) assert(workflow.includes(`'${task}'`))
   for (const phase of ['begin', 'baseline', 'capture', 'verify']) assert(workflow.includes(`--phase ${phase}`))

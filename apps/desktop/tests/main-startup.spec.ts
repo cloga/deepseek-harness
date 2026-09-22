@@ -1878,8 +1878,8 @@ describe('desktop main startup', () => {
       const urls = [...window.urls]
       window.setEnabled.mockClear()
       harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
-      packageReview.run = async (options) => {
-        await options.acquireAdmission()
+      packageReview.run = async (options, input) => {
+        await options.acquireAdmission(input)
         throw new Error('failed admission must not proceed')
       }
       f.host.updateTasks.mockImplementation(async (action) => {

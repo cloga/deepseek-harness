@@ -26,7 +26,7 @@ jobs:
     env:
       DSH_TELEMETRY_DISABLED: '1'
       EXPECTED_SOURCE: ${{ github.event_name == 'push' && github.sha || inputs.expected_source }}
-      CAPTURE_ROOT: ${{ runner.temp }}/alpha2-source-catalogs-${{ github.run_id }}-${{ github.run_attempt }}
+      CAPTURE_NAME: alpha2-source-catalogs-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -64,6 +64,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Bind original source bytes before frozen installation
+        env:
+          CAPTURE_ROOT: ${{ runner.temp }}/${{ env.CAPTURE_NAME }}
         run: |
           $pnpmVersion = pnpm --version
           if ($LASTEXITCODE -ne 0 -or $pnpmVersion -cne '11.7.0') { throw 'Unexpected pnpm version' }
@@ -71,6 +73,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install normal frozen dependencies
+        env:
+          CAPTURE_ROOT: ${{ runner.temp }}/${{ env.CAPTURE_NAME }}
         run: |
           pnpm install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -87,6 +91,8 @@ jobs:
           }
 
       - name: Capture only approved changed outputs and recheck late changes
+        env:
+          CAPTURE_ROOT: ${{ runner.temp }}/${{ env.CAPTURE_NAME }}
         run: |
           node scripts/capture-alpha2-source-catalogs.mjs --phase capture --expected-source $env:EXPECTED_SOURCE --pnpm-version '11.7.0' --output $env:CAPTURE_ROOT
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -97,6 +103,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: alpha2-source-catalogs-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.CAPTURE_ROOT }}/artifact
+          path: ${{ runner.temp }}/${{ env.CAPTURE_NAME }}/artifact
           if-no-files-found: error
           retention-days: 7
