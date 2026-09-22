@@ -1,11 +1,16 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, within } from '@testing-library/react'
 import type {
   AssistantMessageNode, ChatSnapshot, LegacyConversationSlice, ToolResultNode,
 } from '@deepseek-ai/dsh-client-ui-chat/client'
-import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
+import { bindSnapshotSelector, makeTranslate, SlotTestRuntime } from '@deepseek-ai/dsh-client-test-runtime'
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import { runInNewContext } from 'node:vm'
+import { spawnSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
+import { resolve } from 'node:path'
 import { en as commonEn } from '@deepseek-ai/dsh-client-locale/src/locales/en.ts'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import { StatsPills, deriveStats, formatDuration, type StatsPillsProps } from '../src/client/chat/StatsPills.tsx'
@@ -156,6 +161,68 @@ describe('StatsPills', () => {
   const timedStep = (): AssistantMessageNode => ({
     ...assistant(1, 1, { outputTokens: 60 }),
     timing: { stepStartTime: 1_000, firstTokenTime: 1_800, completedTime: 4_800 },
+  })
+
+  it('binds marker-free actual seeded StatsPills buttons through the real public Slot renderer and serialized measurement', async () => {
+    const runtime = await SlotTestRuntime.create()
+    try {
+      const id = await runtime.sessions.add({ id: 'native-composer-contract' })
+      const reference = runtime.sessions.retainFor(runtime.ctx, id)
+      await reference.ready
+      const { source } = makeSource({ nodes: [assistant(1, 1)] })
+      // Same whole-session observations as the persisted fixture: one timed step, no decode TPS, 10+90+5 tokens.
+      const nativeProps = props(source, { tokenUsage: USAGE, sessionStats: sessionStats({ turns: 1, steps: 1, llmMs: 500 }) })
+      const slot = 'conversation.composer.dock'
+      await runtime.root.declare({ [slot]: { kind: 'list', scope: 'session' } }, ({ renderSlot, SessionProvider }) => (
+        <SessionProvider session={reference}>
+          <div data-testid="native-physical-owner" style={{ display: 'flex' }}>
+            {renderSlot(slot, {})}<button type="button" aria-label="Context occupancy">Context</button>
+          </div>
+        </SessionProvider>
+      ))
+      await runtime.mount({ inject: ['slots'], apply(ctx) {
+        ctx.slots.register({ name: slot, id: 'actual-native-statistics' }, () => <StatsPills {...nativeProps} />)
+        // Only the independent released-plugin sibling is synthetic here; native buttons are the actual component.
+        ctx.slots.register({ name: slot, id: 'copilot-contract-sibling' }, () => <button type="button" data-copilot-usage-trigger>Credits</button>)
+      } })
+      const view = runtime.renderRoot()
+      expect(view.container.querySelector('[data-composer-stats]')).toBeNull()
+      const outlets = view.container.querySelectorAll<HTMLElement>('[data-slot="conversation.composer.dock"]')
+      expect(outlets).toHaveLength(1)
+      const outlet = outlets[0]!
+      expect(getComputedStyle(outlet).display).toBe('contents')
+      const time = within(outlet).getByRole('button', { name: '1 turns 1 steps', exact: true })
+      const usage = within(outlet).getByRole('button', { name: '105 tok · Cache hit 90%', exact: true })
+      expect(time).not.toBe(usage)
+      expect(time.getAttribute('aria-haspopup')).toBe('dialog')
+      expect(usage.getAttribute('aria-haspopup')).toBe('dialog')
+      const copilot = outlet.querySelector<HTMLElement>('[data-copilot-usage-trigger]')!
+      const owner = view.getByTestId('native-physical-owner')
+      // jsdom has no layout: these bounded boxes test binding/serialization, not real geometry acceptance.
+      for (const [element, box] of [
+        [owner, new DOMRect(0, 0, 1000, 40)], [time, new DOMRect(10, 4, 100, 22)],
+        [usage, new DOMRect(122, 4, 180, 22)], [copilot, new DOMRect(314, 4, 140, 22)],
+      ] as const) vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(box)
+      // Use the declared source launcher without importing Host types into this Client project.
+      // jsdom rewrites import.meta.url, so resolve the source from the test runner's repository cwd.
+      const moduleUrl = pathToFileURL(resolve('apps/desktop/tests/fixtures/native-composer-dock-browser.ts')).href
+      const result = spawnSync(process.execPath, ['--import', 'tsx/esm', '--input-type=module', '--eval',
+        `import { measureNativeComposerDock } from ${JSON.stringify(moduleUrl)}; process.stdout.write(measureNativeComposerDock.toString())`], {
+        cwd: resolve('.'), encoding: 'utf8', timeout: 10_000,
+      })
+      expect(result.error).toBeUndefined()
+      expect(result.signal).toBeNull()
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).not.toContain('__name')
+      const serialized = runInNewContext(`(${result.stdout})`, {
+        document, window, getComputedStyle: getComputedStyle.bind(window),
+      }) as (anchor: Element) => unknown
+      expect(serialized(outlet)).toMatchObject({ time: { x: 10 }, usage: { x: 122 }, copilot: { x: 314 } })
+      fireEvent.click(time)
+      expect(view.getByRole('dialog', { name: 'Session statistics', exact: true })).toBeTruthy()
+      fireEvent.click(usage)
+      expect(view.getByRole('dialog', { name: 'Token usage', exact: true })).toBeTruthy()
+    } finally { await runtime.dispose() }
   })
 
   it('renders the counts reading and usage pill and hides a brand-new empty session', () => {

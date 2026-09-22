@@ -138,15 +138,17 @@ export async function openNativeComposerFixture(page: Page): Promise<void> {
  */
 export async function inspectNativeComposerGeometry(page: Page, output: string): Promise<NativeComposerInspection> {
   await openNativeComposerFixture(page)
-  const stats = page.locator('[data-composer-stats]')
-  const time = stats.getByRole('button', { name: '1 turns 1 steps', exact: true })
-  const usage = stats.getByRole('button', { name: '105 tok · Cache hit 90%', exact: true })
-  const copilot = page.locator('[data-copilot-usage-trigger]')
+  const outlet = page.locator('[data-slot="conversation.composer.dock"]')
+  assert.equal(await outlet.count(), 1, 'Native statistics must belong to one public composer dock outlet')
+  const time = outlet.getByRole('button', { name: '1 turns 1 steps', exact: true })
+  const usage = outlet.getByRole('button', { name: '105 tok · Cache hit 90%', exact: true })
+  const copilot = outlet.locator('[data-copilot-usage-trigger]')
   await time.waitFor({ state: 'visible' })
   await usage.waitFor({ state: 'visible' })
   await copilot.waitFor({ state: 'visible' })
-  const outlet = page.locator('[data-slot="conversation.composer.dock"]')
-  assert.equal(await outlet.count(), 1, 'Native statistics must belong to one public composer dock outlet')
+  assert.equal(await time.count(), 1, 'Expected exactly one native Session statistics button')
+  assert.equal(await usage.count(), 1, 'Expected exactly one native Token usage button')
+  assert.equal(await copilot.count(), 1, 'Expected exactly one released Copilot usage trigger')
   const result: NativeComposerGeometry[] = []
   for (const viewportWidth of [1280, 400]) {
     await page.setViewportSize({ width: viewportWidth, height: 900 })
