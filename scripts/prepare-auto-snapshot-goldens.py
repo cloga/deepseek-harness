@@ -30,7 +30,7 @@ INFRASTRUCTURE = {WORKFLOW, DRIVER, TEST, ".github/workflows/build-exe-for-pytho
                   "scripts/prepare-auto-sdk-goldens.py", "scripts/test_prepare_auto_sdk_goldens.py",
                   "scripts/test_prepare_auto_sdk_golden_commands.py", "scripts/ci-workflow.spec.ts"}
 VERSION_SOURCE = "packages/core/session/src/types.ts"
-SUITE = ["node", "node_modules/vitest/vitest.mjs", "run", "--config", "vitest.snapshot.config.ts"]
+SUITE = ["pnpm", "run", "test:snapshot"]
 STAGE_SECONDS = 1200
 REPLAY_SECONDS = 600
 

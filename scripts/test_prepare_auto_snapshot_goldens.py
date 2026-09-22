@@ -102,10 +102,19 @@ class Guards(unittest.TestCase):
                 self.assertNotIn("DSH_ARBITRARY_OVERRIDE", child)
 
     def test_exact_commands_and_budgets(self):
-        self.assertEqual(d.SUITE, ["node", "node_modules/vitest/vitest.mjs", "run", "--config",
-                                  "vitest.snapshot.config.ts"])
+        self.assertEqual(d.SUITE, ["pnpm", "run", "test:snapshot"])
         self.assertEqual(d.STAGE_SECONDS, 1200)
         self.assertEqual(d.REPLAY_SECONDS, 600)
+
+    def test_package_script_owns_resolution_without_forwarding_node_path(self):
+        manifest = json.loads((DRIVER.parent.parent / "package.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["scripts"][d.SUITE[2]],
+                         "vitest run --config vitest.snapshot.config.ts")
+        for mode in ("refresh", "replay"):
+            child = d.child_environment({**environment(), "NODE_PATH": "/untrusted/override"}, mode)
+            self.assertNotIn("NODE_PATH", child)
+            self.assertEqual(child["DSH_EXAMPLE_MODE"], "lib")
+            self.assertEqual(child["DSH_SNAPSHOT"], mode)
 
     def test_version_is_derived_and_pinned(self):
         self.assertEqual(d.current_version("export const SESSION_FORMAT_VERSION = 3\n"), 3)
