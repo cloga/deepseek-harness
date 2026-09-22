@@ -140,7 +140,13 @@ export function fingerprintAdaptiveBasePolicy(policy: ModelRoutingPolicy): Adapt
   return brandString<AdaptiveBasePolicyFingerprint>(createHash('sha256').update(JSON.stringify(owned)).digest('hex'))
 }
 
-function parseInput(value: unknown, config: AdaptivePolicyConfig): AdaptiveEvaluationInput {
+/**
+ * Validate and freeze a bounded local evidence snapshot without evaluating it.
+ * @param value - Unknown stored or queued evaluation input.
+ * @param config - Validated limits for the evidence snapshot.
+ * @returns Detached records with deterministic order and unique task/observation identities.
+ */
+export function parseAdaptiveEvaluationInput(value: unknown, config: AdaptivePolicyConfig): AdaptiveEvaluationInput {
   const input = inputSchema.parse(value)
   if (!Array.isArray(input.observations) || input.observations.length > config.maxObservations) {
     throw new Error('adaptive observations must be an array within maxObservations')
@@ -157,6 +163,15 @@ function parseInput(value: unknown, config: AdaptivePolicyConfig): AdaptiveEvalu
   observations.sort((left, right) => left.completedAt - right.completedAt
     || (left.observationId < right.observationId ? -1 : left.observationId > right.observationId ? 1 : 0))
   return deepFreeze({ ...input, observations })
+}
+
+/**
+ * Validate a stored proposal's closed fields without granting publication authority.
+ * @param value - Unknown persisted or transported proposal.
+ * @returns A detached frozen proposal; application still requires authoritative evidence reevaluation.
+ */
+export function parseAdaptivePolicyProposal(value: unknown): AdaptivePolicyProposal {
+  return deepFreeze(proposalSchema.parse(value))
 }
 
 interface ComparableObservation {
@@ -323,7 +338,7 @@ export function evaluateAdaptivePolicy(
   config: AdaptivePolicyConfig,
   value: unknown,
 ): AdaptiveEvaluationResult {
-  return evaluate(base, config, parseInput(value, config))
+  return evaluate(base, config, parseAdaptiveEvaluationInput(value, config))
 }
 
 /**
@@ -345,9 +360,9 @@ export function applyAdaptivePolicyPatch(
   inputValue: unknown,
   proposalValue: unknown,
 ): ModelRoutingPolicy {
-  const proposal = proposalSchema.parse(proposalValue)
+  const proposal = parseAdaptivePolicyProposal(proposalValue)
   if (proposal.basePolicyFingerprint !== fingerprintAdaptiveBasePolicy(base)) throw new Error('adaptive patch has a stale base policy')
-  const input = parseInput(inputValue, config)
+  const input = parseAdaptiveEvaluationInput(inputValue, config)
   const change = proposal.changes[0]
   const candidate = base.candidates.find(candidate => candidate.id === change.candidateId)
   if (candidate === undefined || candidate.relativeCost !== change.before

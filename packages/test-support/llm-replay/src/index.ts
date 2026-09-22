@@ -3,7 +3,8 @@
  * recorded session from embedded Assistant streams, audited task classifiers,
  * and marked local compaction calls, then binds fresh live sessions to scripts
  * by first-call order. Calls whose retained data cannot reproduce the observed
- * outcome require an explicit override at their recorded call position.
+ * outcome require an explicit override; ambiguous mixed-call order requires a
+ * whole-script replacement rather than inferred positional indexes.
  * @module @deepseek-ai/dsh-llm-replay
  */
 
@@ -561,11 +562,45 @@ function classifierEntry(result: RoutingClassifierResultEvent): RecordedReplayEn
   return { kind: 'chunks', chunks }
 }
 
+/** Refuse mixed calls whose durable records do not establish a positional dispatch order. */
+function assertUnambiguousMixedCallOrder(events: readonly SessionEvent[]): void {
+  let classifierRequests = 0
+  const stepBounds = new Map<string, number>()
+  for (const event of events) {
+    if (event.type === 'model/routing-request') {
+      classifierRequests += 1
+      continue
+    }
+    if (event.type === 'step/start') {
+      stepBounds.set(`${event.data.turn}/${event.data.step}`, classifierRequests)
+      continue
+    }
+    if ((event.type === 'assistant/message' || event.type === 'assistant/attempt') && event.data.stream.length === 0) {
+      throw new Error('llm-replay: ambiguous empty conversation settlement among classifier calls; use an explicit whole-script override array')
+    }
+    if (classifierRequests === 0) continue
+    if (event.type === 'compaction/summary' && event.data.llmStreamCall === true) {
+      throw new Error('llm-replay: ambiguous classifier/compaction call order; this Session requires an explicit whole-script override array')
+    }
+    if (event.type !== 'assistant/message' && event.type !== 'assistant/attempt') continue
+    const key = `${event.data.turn}/${event.data.step}`
+    // A step is only a lower bound: request preparation can await before dispatch,
+    // and retries can dispatch again within it. Never place a call at this bound.
+    if (stepBounds.get(key) !== classifierRequests) {
+      throw new Error(
+        `llm-replay: ambiguous classifier/conversation call order for step ${key}; `
+        + 'this Session requires an explicit whole-script override array',
+      )
+    }
+  }
+}
+
 /**
  * Reconstruct ordinary, compaction and audited classifier calls without provider I/O.
  * Classifier slots follow request order and pair results by callId. Unpaired or
  * contradictory audit records reject. Incomplete ordinary streams and lossy
  * classifier outcomes require explicit overrides; direct derivation refuses them.
+ * Ambiguous mixed-call order requires a whole-script replacement, not positional patches.
  * @param events - the recorded session's events.
  * @returns executable entries in recorded call order.
  */
@@ -633,6 +668,7 @@ function deriveRecordedScript(events: SessionEvent[]): RecordedReplayEntry[] {
   for (const [callId, request] of routing) {
     if (!request.settled) throw new Error(`llm-replay: classifier request ${callId} has no result`)
   }
+  if (routing.size > 0) assertUnambiguousMixedCallOrder(events)
   return script
 }
 

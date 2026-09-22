@@ -60,7 +60,11 @@ jobs:
           "AUTO_ROUTING_PREPARE_DIR=$artifactRoot" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
           "path=$artifactRoot" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
           $inputHashes = [ordered]@{}
-          foreach ($path in @('package.json', 'packages/llm/model-routing/package.json', 'pnpm-workspace.yaml', '.github/workflows/auto-routing-prepare.yml')) {
+          # Bind every tracked resolver manifest, not only the new routing package.
+          $manifestPaths = @(& git ls-files -- 'package.json' '**/package.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot enumerate tracked dependency manifests.' }
+          $generatorInputs = @($manifestPaths) + @('pnpm-workspace.yaml', '.github/workflows/auto-routing-prepare.yml')
+          foreach ($path in ($generatorInputs | Sort-Object -Unique)) {
             $inputHashes[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
           }
           $inputs = [ordered]@{
