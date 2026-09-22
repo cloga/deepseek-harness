@@ -1,11 +1,11 @@
-/** Packaged command-only acceptance. Independent of the no-Session Copilot account smoke.
+/** Packaged command-only acceptance. Independent of combined Copilot/native-composer acceptance.
  * Run only on an interactive Windows CI desktop with a freshly packaged application.
  * No model prompt/sign-in/settings mutation; staging CAN use frozen pnpm and network.
  */
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { closeSync, createReadStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -21,6 +21,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import { parseSessionFormatLogFilename } from '@deepseek-ai/dsh-session-format'
 import { desktopSmokeEnvironment } from '../../scripts/smoke-environment.ts'
 import { removeOwnedDirectory } from '../../src/owned-directory.ts'
+import { ownedUpgradePath } from './windows-installed-upgrade-contract.mjs'
 
 const APPLICATION_URL = 'dsh-app://app/'
 const repository = fileURLToPath(new URL('../../../../', import.meta.url))
@@ -51,6 +52,55 @@ interface Ownership {
 }
 interface ExpectedCommand { readonly line: string; readonly execution: CommandExecution }
 interface HelperLifecycle { helperTreeUncertain: boolean; nativeObservations: string[] }
+
+/** Fixture expectation derived from physical archive bytes, never from a transaction's self-reported owner. */
+export interface DesktopPluginRuntimeIdentity {
+  readonly archive: string
+  readonly archiveSha256: string
+  readonly runtimeDir: string
+}
+
+/**
+ * Bind the fixed virtual dsh path without asking ordinary Node to traverse the ASAR file.
+ * Caller must first run verifyPackagedDesktopRuntime: this helper does not validate archive entries or runtime contents.
+ * @param application - Exact independently verified packaged executable.
+ * @param runtimeRoot - Fixed resources/app.asar/dsh path selected by the maintained packaged-runtime helper.
+ * @param expected - Earlier owned observation, when rechecking for archive substitution.
+ * @returns Canonical physical archive plus literal dsh, and a streaming raw-byte archive hash.
+ */
+export async function inspectDesktopPluginRuntimeIdentity(
+  application: string, runtimeRoot: string, expected?: DesktopPluginRuntimeIdentity,
+): Promise<DesktopPluginRuntimeIdentity> {
+  assert.equal(application, resolve(application), 'Packaged executable must be an absolute normalized path')
+  assert.equal(runtimeRoot, join(dirname(application), 'resources', 'app.asar', 'dsh'), 'Unexpected packaged runtime path')
+  const inspectPhysical = () => {
+    const root = dirname(application)
+    for (let parent = root; ; parent = dirname(parent)) {
+      const stat = lstatSync(parent)
+      assert(stat.isDirectory() && !stat.isSymbolicLink(), 'Packaged application ancestors must be physical directories')
+      if (dirname(parent) === parent) break
+    }
+    const executable = ownedUpgradePath(root, application)
+    const resources = ownedUpgradePath(root, join(root, 'resources'))
+    const archive = ownedUpgradePath(root, join(resources, 'app.asar'))
+    for (const path of [executable, archive]) {
+      const stat = lstatSync(path)
+      assert(stat.isFile() && !stat.isSymbolicLink(), 'Packaged executable and archive must be regular physical files')
+    }
+    const resourceStat = lstatSync(resources)
+    assert(resourceStat.isDirectory() && !resourceStat.isSymbolicLink(), 'Packaged resources must be a physical directory')
+    const stat = lstatSync(archive)
+    return { archive: realpathSync(archive), size: stat.size, modified: stat.mtimeMs, changed: stat.ctimeMs,
+      device: stat.dev, inode: stat.ino }
+  }
+  const before = inspectPhysical()
+  const digest = createHash('sha256')
+  for await (const chunk of createReadStream(before.archive)) digest.update(chunk)
+  assert.deepEqual(inspectPhysical(), before, 'Packaged archive changed during identity inspection')
+  const identity = { archive: before.archive, archiveSha256: digest.digest('hex'), runtimeDir: join(before.archive, 'dsh') }
+  if (expected !== undefined) assert.deepEqual(identity, expected, 'Packaged runtime archive changed after verification')
+  return identity
+}
 
 /**
  * Provide EOF stdin without depending on Windows device-name normalization.
@@ -334,6 +384,7 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
   let ownership: Ownership | undefined
   const failure = createDesktopPluginCommandOutcome()
   let cleanupVerified = false
+  let runtimeIdentity: DesktopPluginRuntimeIdentity | undefined
   const descriptors: number[] = []
   const stderrPath = join(home, 'electron.stderr')
   let page: Page | undefined
@@ -362,8 +413,10 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     writeFileSync(join(home, '.env'), '', { flag: 'wx', mode: 0o600 })
     // Every verifier child is synchronous/awaited and receives this fixture's private environment.
     await verifyPackagedDesktopRuntime(application, runtimeRoot, reviewed.upstreamVersion, { platform: 'win32', arch: 'x64' }, environment)
+    runtimeIdentity = await inspectDesktopPluginRuntimeIdentity(application, runtimeRoot)
     const runtimeBytes = readPackagedDesktopRuntimeDescriptor(application, runtimeRoot, environment)
     evidence.runtimeSha256 = createHash('sha256').update(runtimeBytes).digest('hex')
+    evidence.runtimeArchiveSha256 = runtimeIdentity.archiveSha256
     mkdirSync(userData)
     const descriptor = (path: string, flags: string): number => {
       const fd = openSync(path, flags, 0o600)
@@ -501,8 +554,9 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
       prepared: readJournal(join(transaction, 'PREPARED.json')),
       discarded: readJournal(join(transaction, 'DISCARDED.json')), retainedEntries: readdirSync(transaction).sort() }
     assert.deepEqual(records.prepared, preparedBeforeCancel, 'Cancel must not rewrite the prepared command identity')
+    await inspectDesktopPluginRuntimeIdentity(application, runtimeRoot, runtimeIdentity)
     validateDesktopPluginCancelAudit(records, { transactionId, commandId: disable.commandId, target: target.name,
-      profile: realpathSync(profile), runtimeDir: realpathSync(runtimeRoot), manifestText, baseline })
+      profile: realpathSync(profile), runtimeDir: runtimeIdentity.runtimeDir, manifestText, baseline })
     evidence.afterCancelIdentity = await nativeHelper(home, environment, { action: 'verify', ownership }, helperLifecycle)
     assert.equal(win32.pollProcessExit(api, owned.process), undefined, 'Cancel must retain the exact Job-created root')
     assert.equal(page.url(), APPLICATION_URL)
@@ -585,6 +639,12 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     }
     try {
       cleanupVerified = quiescent && !helperLifecycle.helperTreeUncertain && errors.length === 0 && !existsSync(home)
+    } catch (error) { failure.retain(error) }
+  }
+  if (!failure.failed && cleanupVerified) {
+    try {
+      assert(runtimeIdentity !== undefined, 'Verified packaged runtime identity is missing')
+      await inspectDesktopPluginRuntimeIdentity(application, runtimeRoot, runtimeIdentity)
     } catch (error) { failure.retain(error) }
   }
   finalizeDesktopPluginCommandAcceptance(failure, cleanupVerified,

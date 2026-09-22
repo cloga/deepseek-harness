@@ -1,8 +1,8 @@
 /** Non-GUI guards for the independent packaged command acceptance fixture. */
 import { createHash } from 'node:crypto'
-import { closeSync, fstatSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readSync, writeFileSync } from 'node:fs'
+import { closeSync, fstatSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { CommandExecution } from '@deepseek-ai/dsh-commands/types'
 import { removeOwnedDirectory } from '../src/owned-directory.ts'
@@ -22,6 +22,7 @@ vi.mock('node:child_process', () => ({
 
 import {
   canRemoveDesktopPluginHome,
+  inspectDesktopPluginRuntimeIdentity,
   openDesktopPluginInput,
   readDesktopPluginNativeObservations,
   runPackagedDesktopPluginCommandAcceptance,
@@ -83,6 +84,115 @@ const rehashAudit = (value: ReturnType<typeof cancellationAudit>): void => {
   discarded.requestFingerprint = prepared.requestFingerprint
   discarded.ownerFingerprint = hash(JSON.stringify(owner))
 }
+
+function physicalArchiveFixture() {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'desktop-command-asar-')))
+  const app = join(root, 'app'), resources = join(app, 'resources')
+  mkdirSync(resources, { recursive: true })
+  const application = join(app, 'cloga-deepseek-harness.exe'), archive = join(resources, 'app.asar')
+  writeFileSync(application, 'inert executable bytes; never launched')
+  // Only physical identity is under test. These are not ASAR contents and do not qualify an embedded runtime.
+  writeFileSync(archive, 'raw archive bytes\r\n')
+  return { root, app, application, resources, archive, runtimeRoot: join(archive, 'dsh') }
+}
+
+describe('command fixture physical archive identity (no Electron)', () => {
+  it('derives fixed virtual dsh from a real archive file where ordinary Node cannot traverse the child', async () => {
+    const f = physicalArchiveFixture()
+    try {
+      expect(lstatSync(f.archive).isFile()).toBe(true)
+      expect(() => realpathSync(f.runtimeRoot)).toThrow()
+      const identity = await inspectDesktopPluginRuntimeIdentity(f.application, f.runtimeRoot)
+      expect(identity).toEqual({ archive: realpathSync(f.archive), runtimeDir: join(realpathSync(f.archive), 'dsh'),
+        archiveSha256: hash('raw archive bytes\r\n') })
+      await expect(inspectDesktopPluginRuntimeIdentity(f.application, f.runtimeRoot, identity)).resolves.toEqual(identity)
+    } finally { removeOwnedDirectory(f.root) }
+  })
+
+  it.each(['missing-archive', 'archive-directory', 'exe-directory', 'resources-file', 'missing-exe'])(
+    'rejects physical package identity defect %s', async (kind) => {
+      const f = physicalArchiveFixture()
+      try {
+        if (kind === 'missing-archive' || kind === 'archive-directory') rmSync(f.archive)
+        if (kind === 'archive-directory') mkdirSync(f.archive)
+        if (kind === 'exe-directory' || kind === 'missing-exe') rmSync(f.application)
+        if (kind === 'exe-directory') mkdirSync(f.application)
+        if (kind === 'resources-file') { rmSync(f.resources, { recursive: true }); writeFileSync(f.resources, 'not a directory') }
+        await expect(inspectDesktopPluginRuntimeIdentity(f.application, f.runtimeRoot)).rejects.toThrow()
+      } finally { removeOwnedDirectory(f.root) }
+    },
+  )
+
+  it('rejects alternate archives, virtual suffixes and normalized traversal instead of accepting mere resolve output', async () => {
+    const f = physicalArchiveFixture()
+    try {
+      for (const runtimeRoot of [join(f.resources, 'other.asar', 'dsh'), join(f.resources, 'app.asar.unpacked', 'dsh'),
+        join(f.archive, 'other'), f.archive, `${f.archive}${sep}..${sep}app.asar${sep}dsh`, `${f.runtimeRoot}${sep}`]) {
+        await expect(inspectDesktopPluginRuntimeIdentity(f.application, runtimeRoot)).rejects.toThrow('Unexpected packaged runtime path')
+      }
+      await expect(inspectDesktopPluginRuntimeIdentity('relative.exe', 'relative-runtime')).rejects.toThrow('absolute normalized')
+    } finally { removeOwnedDirectory(f.root) }
+  })
+
+  it.each(['archive-link', 'executable-link', 'resources-junction', 'app-junction', 'ancestor-junction'])(
+    'refuses redirected physical package path %s', async (kind) => {
+      const f = physicalArchiveFixture()
+      try {
+        let application = f.application, runtimeRoot = f.runtimeRoot
+        if (kind === 'archive-link' || kind === 'executable-link') {
+          const path = kind === 'archive-link' ? f.archive : f.application
+          const target = join(f.root, kind + '-target')
+          renameSync(path, target)
+          symlinkSync(target, path, 'file')
+        } else if (kind === 'resources-junction') {
+          const target = join(f.root, 'physical-resources')
+          renameSync(f.resources, target)
+          symlinkSync(target, f.resources, process.platform === 'win32' ? 'junction' : 'dir')
+        } else {
+          const alias = join(f.root, 'alias')
+          symlinkSync(kind === 'app-junction' ? f.app : f.root, alias, process.platform === 'win32' ? 'junction' : 'dir')
+          const app = kind === 'app-junction' ? alias : join(alias, 'app')
+          application = join(app, 'cloga-deepseek-harness.exe')
+          runtimeRoot = join(app, 'resources', 'app.asar', 'dsh')
+        }
+        await expect(inspectDesktopPluginRuntimeIdentity(application, runtimeRoot)).rejects.toThrow()
+      } finally { removeOwnedDirectory(f.root) }
+    },
+  )
+
+  it('rejects changed archive bytes against the independently observed pre-command digest', async () => {
+    const f = physicalArchiveFixture()
+    try {
+      const before = await inspectDesktopPluginRuntimeIdentity(f.application, f.runtimeRoot)
+      writeFileSync(f.archive, 'raw archive bytes\n')
+      await expect(inspectDesktopPluginRuntimeIdentity(f.application, f.runtimeRoot, before)).rejects.toThrow('archive changed')
+      writeFileSync(f.archive, 'raw archive bytes\r\n')
+      await expect(inspectDesktopPluginRuntimeIdentity(f.application, f.runtimeRoot, before)).resolves.toEqual(before)
+      await expect(inspectDesktopPluginRuntimeIdentity(f.application, f.runtimeRoot, { ...before, runtimeDir: 'journal-owned-guess' }))
+        .rejects.toThrow('archive changed')
+    } finally { removeOwnedDirectory(f.root) }
+  })
+
+  it('requires real runtime verification before observation and rechecks before audit and after cleanup before success publication', () => {
+    const source = readFileSync(new URL('./fixtures/desktop-plugin-command-smoke.ts', import.meta.url), 'utf8')
+    const verify = source.indexOf('await verifyPackagedDesktopRuntime(application, runtimeRoot,')
+    const bind = source.indexOf('runtimeIdentity = await inspectDesktopPluginRuntimeIdentity(application, runtimeRoot)')
+    const auditCheck = source.indexOf('await inspectDesktopPluginRuntimeIdentity(application, runtimeRoot, runtimeIdentity)')
+    const audit = source.indexOf('validateDesktopPluginCancelAudit(records,')
+    const cleanup = source.indexOf('cleanupVerified = quiescent')
+    const finalCheck = source.lastIndexOf('await inspectDesktopPluginRuntimeIdentity(application, runtimeRoot, runtimeIdentity)')
+    const publish = source.indexOf('finalizeDesktopPluginCommandAcceptance(failure, cleanupVerified,')
+    expect(verify).toBeGreaterThan(0)
+    expect(bind).toBeGreaterThan(verify)
+    expect(auditCheck).toBeGreaterThan(bind)
+    expect(audit).toBeGreaterThan(auditCheck)
+    expect(cleanup).toBeGreaterThan(audit)
+    expect(finalCheck).toBeGreaterThan(cleanup)
+    expect(publish).toBeGreaterThan(finalCheck)
+    expect(source).toContain('runtimeDir: runtimeIdentity.runtimeDir')
+    expect(source).not.toContain('realpathSync(runtimeRoot)')
+  })
+})
 
 describe('packaged desktop-plugin command fixture (no GUI)', () => {
   const rootWindow = { hwnd: '1234', pid: 123, title: 'Actual app title', owner: '0', rootOwner: '1234',
