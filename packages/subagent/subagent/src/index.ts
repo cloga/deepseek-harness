@@ -197,8 +197,9 @@ interface BrowserPromptSource {
   readonly clientTimeZone?: string
 }
 
-/** Host-owned deterministic parent route rules; omitted rules preserve inheritance. */
+/** Host-owned deterministic parent route rules for implicit native delegation. */
 export interface Config {
+  /** Exact parent-to-child mappings; omitted rules leave Auto or inheritance unchanged. */
   readonly modelRules?: SubagentModelRule[]
 }
 

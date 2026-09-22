@@ -6,6 +6,14 @@
 
 源码：[`packages/llm/llm/src/types.ts`](../../packages/llm/llm/src/types.ts)
 
+<a id="task-aware-routing-types"></a>
+
+## 任务感知路由类型
+
+[`model-routing/src/types.ts`](../../packages/llm/model-routing/src/types.ts) 将 `ModelRoutingMode` 声明为 `efficiency`、`balanced` 或 `intelligence`，表示用户选择的取舍，其质量下限由部署提供。`ctx.modelRouting` 拥有已捕获的路由偏好与任务感知的路由解析。
+
+[`model-routing/src/delegation-types.ts`](../../packages/llm/model-routing/src/delegation-types.ts) 声明三个创建时类型。`DelegationRoutingCapture` 保存精确直接父级的 Session 身份、父级本地意图序号与已捕获的 Auto 选择。`ResolveDelegationRoutingRequest` 携带该捕获、父 Agent、独立子级提示、已获授权的合格候选 ID、可选输出上限与子级启动取消信号。`ResolvedDelegationRouting` 返回包含已具体化推理强度的选择提议、候选 ID、原因及可选分类器调用 ID。原生所有者在发布子级前验证提议；它不是实际调用证据，也不为子级自身对话启用 Auto。
+
 <a id="content-blocks-and-messages"></a>
 
 ## 内容块与消息
@@ -624,7 +632,7 @@ interface GenerateOptions {
    * map the purpose to model-hidden transport metadata or purpose-specific
    * generation policy. Ordinary conversation requests leave it unset.
    */
-  purpose?: 'compaction' | 'session-title'
+  purpose?: 'compaction' | 'session-title' | 'model-routing'
 }
 ```
 
@@ -1052,6 +1060,49 @@ stream(options: GenerateOptions): AsyncIterable<StreamChunk>
 Types: [FileAttachmentRef](attachment.zh.md)
 
 Source: [`packages/llm/llm/src/index.ts`](../../packages/llm/llm/src/index.ts)
+
+<a id="ctxmodelrouting--modelroutingruntime"></a>
+
+### `ctx.modelRouting` — `ModelRoutingRuntime`
+
+Host service whose durable policies change only through an explicit Session choice.
+
+```ts cordis-catalog
+/**
+ * Report configuration readiness without network access or predicting a model.
+ * @returns Whether future explicit Auto selections have the required configuration.
+ */
+isAvailable(): boolean
+
+/**
+ * Validate classifier/conservative routes, then capture the current policy for one Session.
+ * Subsequent settings edits do not replace this durable selection.
+ * @param agent - Exact live top-level Agent receiving the user's opt-in.
+ * @param mode - Selected policy tradeoff.
+ * @param signal - Optional cancellation before the intent commit.
+ * @returns Fulfillment after the Auto intent is appended; no model call is made.
+ */
+async enable(agent: Agent, mode: ModelRoutingMode, signal?: AbortSignal): Promise<void>
+
+/**
+ * Capture an ordinary parent's Auto intent or a child's creation-owned delegation preference.
+ * @param parent - Exact live direct parent of the proposed delegation.
+ * @returns Detached policy and parent-local identity, or undefined when Auto is inapplicable.
+ */
+captureDelegation(parent: Agent): DelegationRoutingCapture | undefined
+
+/**
+ * Resolve an isolated child proposal without changing the parent's conversation route.
+ * The native owner separately enforces authorization and child-creation admission.
+ * @param request - Captured parent policy, authorized IDs and isolated child input.
+ * @returns A materialized model/effort proposal with classifier-audit attribution.
+ */
+resolveDelegation(request: ResolveDelegationRoutingRequest): Promise<ResolvedDelegationRouting>
+```
+
+Types: [Agent](core.zh.md)
+
+Source: [`packages/llm/model-routing/src/runtime.ts`](../../packages/llm/model-routing/src/runtime.ts)
 
 <a id="llm-events"></a>
 

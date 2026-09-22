@@ -14,6 +14,8 @@ Child delegation already has route defaults, explicit user-authorized selection,
 
 Issue #113 proposes Host-owned Auto modes `efficiency`, `balanced`, and `intelligence`, with explicit manual override, task-scoped route affinity, truthful model-and-reason presentation, and coordinated child routing. The foundation contains an asynchronous selection hook, deterministic candidate policy, bounded audited classifier, configuration parsers, and initial routing-state types. These pieces do not establish a shipped end-to-end Auto feature. Recovery, independent review, and personalization below remain design requirements, not implemented capabilities.
 
+The immediate minimal release includes only the three Auto preferences, joint model/effort selection, manual priority, captured task affinity, configured eligibility and quality floors, the existing parent-rule/native Auto chain, and necessary classifier accounting, replay and selector correctness. Adaptive evaluation and storage, expert/recovery execution, manual paid labels, general operation/destination metadata, profile-identity changes and new SDK review workflows are excluded. This subset must pass its normal source, snapshot, browser, packaging and release checks; delivering it does not complete the broader recovery and personalization proposal below.
+
 A Host owner should resolve task routing before prompt assembly captures provider/model variables. The existing selection helper should apply that same resolved route to the request and route-change notice. The browser should submit intent and render committed facts; it must not choose a model independently. The LLM runtime should retain exact-route validation and registration-bound preparation.
 
 ### Durable intent and actual use

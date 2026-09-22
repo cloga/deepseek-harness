@@ -11,8 +11,11 @@ export const MODEL_ROUTING_SETTINGS_NAMESPACE = 'model-routing'
 
 /** Auto is unavailable until both a candidate policy and classifier are configured. */
 export interface Config {
+  /** Allow new explicit Session Auto selections; enabling requires both policy and classifier configuration. */
   readonly enabled: boolean
+  /** Curated model/effort candidates and hard selection rules, captured when a Session opts into Auto. */
   readonly policy?: ModelRoutingPolicy
+  /** Independent auxiliary classifier route and explicit budgets; required when routing is enabled. */
   readonly classifier?: RoutingClassifierConfig
 }
 

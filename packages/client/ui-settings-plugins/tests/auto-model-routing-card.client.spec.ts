@@ -65,6 +65,17 @@ async function ready(h: ReturnType<typeof harness>): Promise<void> {
 describe('Auto routing form validation', () => {
   const options = autoRoutingModelOptions(GROUPS, [])
 
+  it('rejects blank confidence and unsupported classifier effort independently of candidate validity', () => {
+    const draft = autoRoutingDraft(complete())
+    draft.minConfidence = '  '
+    expect(resolveAutoRoutingDraft(draft, options)).toEqual({ error: 'confidence' })
+    draft.minConfidence = '0.8'
+    draft.classifierSelection = { provider: 'alpha', model: 'smart', reasoningEffort: 'unsupported' }
+    expect(resolveAutoRoutingDraft(draft, options)).toEqual({ error: 'effort' })
+    draft.classifierSelection = { provider: 'alpha', model: 'smart', reasoningEffort: 'low' }
+    expect(resolveAutoRoutingDraft(draft, options).settings?.classifier?.selection.reasoningEffort).toBe('low')
+  })
+
   it('keeps missing configuration blank and permits disabled-empty settings only', () => {
     const draft = autoRoutingDraft({ enabled: false })
     expect(draft.budgets).toEqual({ maxInputBytes: '', maxOutputTokens: '', maxOutputBytes: '', timeoutMs: '' })
@@ -143,6 +154,144 @@ describe('Auto routing form validation', () => {
 })
 
 describe('AutoModelRoutingCardController', () => {
+  it('ignores stale candidate keys, removes retained candidates, and preserves classifier effort on unchanged routes', async () => {
+    const h = harness(complete())
+    try {
+      await ready(h)
+      const initial = h.state().draft
+      h.face.editCandidate('removed-key', 'id', 'ignored')
+      h.face.selectCandidateModel('removed-key', modelKey('plain'))
+      h.face.selectCandidateEffort('removed-key', 'high')
+      expect(h.state().draft).toEqual(initial)
+      h.face.selectClassifierEffort('unsupported')
+      expect(h.state().draft.classifierSelection).toEqual(initial.classifierSelection)
+      h.face.selectClassifierModel(modelKey('smart'))
+      h.face.selectClassifierEffort('high')
+      h.face.selectClassifierModel(modelKey('smart'))
+      expect(h.state().draft.classifierSelection.reasoningEffort).toBe('high')
+      h.face.selectClassifierEffort('')
+      expect(h.state().draft.classifierSelection).toEqual({ provider: 'alpha', model: 'smart' })
+      const removed = h.state().draft.candidates[1]!.key
+      h.face.removeCandidate(removed)
+      expect(h.state().draft.candidates.map(candidate => candidate.id)).toEqual(['economy'])
+      expect(h.state().error).toBe('conservative')
+      h.face.save()
+      expect(h.host.mutate).not.toHaveBeenCalled()
+      h.face.removeCandidate(h.state().draft.candidates[0]!.key)
+      expect(h.state().error).toBe('required')
+    } finally {
+      h.controller.dispose()
+    }
+  })
+
+  it.each(['resolve', 'reject'] as const)('ignores an old save %s after reconnect without disturbing the new draft', async (settlement) => {
+    const h = harness(complete())
+    const write = deferred<undefined>()
+    try {
+      await ready(h)
+      h.host.mutate.mockImplementationOnce(() => write.promise)
+      h.face.toggleEnabled()
+      h.face.save()
+      h.controller.resetConnection()
+      await ready(h)
+      h.face.editPolicy('minConfidence', '0.9')
+      const current = h.state()
+      if (settlement === 'resolve') write.resolve(undefined)
+      else write.reject(new Error('old connection private error'))
+      await Promise.allSettled([write.promise])
+      await Promise.resolve()
+      expect(h.state()).toBe(current)
+      expect(h.state()).toMatchObject({ saving: false, failed: false, dirty: true, draft: { minConfidence: '0.9' } })
+    } finally {
+      write.resolve(undefined)
+      h.controller.dispose()
+    }
+  })
+
+  it('ignores a rejected save after disposal without publishing private diagnostics', async () => {
+    const h = harness(complete())
+    const write = deferred<undefined>()
+    try {
+      await ready(h)
+      h.host.mutate.mockImplementationOnce(() => write.promise)
+      h.face.toggleEnabled()
+      h.face.save()
+      const pending = h.state()
+      h.controller.dispose()
+      h.face.discard()
+      h.face.retryCatalog()
+      write.reject(new Error('disposed private error'))
+      await Promise.allSettled([write.promise])
+      await Promise.resolve()
+      expect(h.state()).toBe(pending)
+      expect(h.models).toHaveBeenCalledTimes(1)
+    } finally {
+      write.resolve(undefined)
+      h.controller.dispose()
+    }
+  })
+
+  it('waits for readiness on refresh and rejects writes without a Host revision', async () => {
+    const host = autoRoutingSettingsScope()
+    const models = vi.fn().mockResolvedValue({ ok: true, value: { groups: GROUPS, failures: [] } })
+    const controller = new AutoModelRoutingCardController(host.scope, { remote: { session: { modelCatalog: models } } } as never)
+    const face = controller.inject()
+    try {
+      controller.refreshCatalog()
+      face.retryCatalog()
+      expect(models).not.toHaveBeenCalled()
+      host.publish({ status: 'ready', writable: true, value: complete() })
+      await vi.waitFor(() => { expect(face.hooks.autoModelRoutingCard.getSnapshot().catalogStatus).toBe('ready') })
+      face.toggleEnabled()
+      face.save()
+      expect(face.hooks.autoModelRoutingCard.getSnapshot()).toMatchObject({ conflicted: true, dirty: true, saving: false })
+      expect(host.mutate).not.toHaveBeenCalled()
+    } finally {
+      controller.dispose()
+    }
+  })
+
+  it('ignores a settings notification already captured when an earlier subscriber disposes the card', () => {
+    const host = autoRoutingSettingsScope()
+    const dispose = vi.fn<() => void>()
+    const unsubscribe = host.scope.subscribe(dispose)
+    const models = vi.fn()
+    const controller = new AutoModelRoutingCardController(host.scope, { remote: { session: { modelCatalog: models } } } as never)
+    dispose.mockImplementation(() => { controller.dispose() })
+    const state = controller.inject().hooks.autoModelRoutingCard
+    const before = state.getSnapshot()
+    try {
+      host.publish({ status: 'ready', writable: true, revision: 1, value: complete() })
+      expect(state.getSnapshot()).toBe(before)
+      expect(models).not.toHaveBeenCalled()
+      expect(host.listenerCount()).toBe(1)
+    } finally {
+      unsubscribe()
+      controller.dispose()
+    }
+  })
+
+  it('stops the remaining publication when the loading snapshot subscriber disposes the card', async () => {
+    const host = autoRoutingSettingsScope()
+    const models = vi.fn().mockResolvedValue({ ok: true, value: { groups: GROUPS, failures: [] } })
+    const controller = new AutoModelRoutingCardController(host.scope, { remote: { session: { modelCatalog: models } } } as never)
+    const state = controller.inject().hooks.autoModelRoutingCard
+    const observe = vi.fn(() => { controller.dispose() })
+    const unsubscribe = state.subscribe(observe)
+    try {
+      host.publish({ status: 'ready', writable: true, revision: 1, value: complete() })
+      const disposed = state.getSnapshot()
+      await Promise.resolve()
+      expect(disposed.catalogStatus).toBe('loading')
+      expect(state.getSnapshot()).toBe(disposed)
+      expect(observe).toHaveBeenCalledTimes(1)
+      expect(host.listenerCount()).toBe(0)
+    } finally {
+      unsubscribe()
+      controller.dispose()
+    }
+  })
+
   it('stages every basic field and writes exact complete settings with the captured revision', async () => {
     const h = harness()
     try {

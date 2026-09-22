@@ -145,12 +145,14 @@ export async function startInProcessRun(
     signal: creationSignal,
     setup,
   })
-  try {
-    creationSignal.throwIfAborted()
-  } catch (_error: unknown) {
-    // Keep the pre-publication diagnostic while joining a factory handle that lost the cancellation race.
-    await handle.dispose()
-    throw prePublicationAbort()
+  if (request.resolvedCreationSignal !== undefined) {
+    try {
+      creationSignal.throwIfAborted()
+    } catch (_error: unknown) {
+      // The registry still owns admission; join a factory handle that lost its publication race.
+      await handle.dispose()
+      throw prePublicationAbort()
+    }
   }
   return drivePublishedRun(
     handle,

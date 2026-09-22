@@ -41,6 +41,12 @@ interface PendingDecision {
   readonly input: ClaimedInput | undefined
 }
 
+interface DispatchExpectation {
+  readonly intentSeq: SessionSeq
+  readonly selection: Readonly<ModelSelection>
+  readonly signal: AbortSignal
+}
+
 interface OwnedWork {
   readonly agent: Agent
   readonly lifetime: 'turn' | 'agent'
@@ -69,6 +75,7 @@ export class ModelRoutingRuntime extends Service {
   private readonly work = new Map<AbortController, OwnedWork>()
   private readonly claimed = new Map<Agent, ClaimedInput>()
   private readonly pending = new Map<Agent, PendingDecision>()
+  private readonly expectedDispatch = new Map<Agent, DispatchExpectation>()
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'modelRouting')
@@ -99,10 +106,22 @@ export class ModelRoutingRuntime extends Service {
     ctx.on('llm/stream', (options, next) => this.observeDispatch(options, next), { global: true, prepend: true })
     ctx.on('agent/turn-stopping', ({ agent }) => { this.clearAgent(agent) })
     ctx.on('agent/disposed', ({ agent }) => { this.clearAgent(agent, true) })
+    ctx.on('session/event', (session, event) => {
+      if (event.type !== 'model/selection' && event.type !== 'model/auto-selection' && event.type !== 'turn/end') return
+      const agent = ctx.agents.get(session.id)
+      if (agent === undefined || agent.session !== session) return
+      // Failed turns may not reach turn-stopping. New intent retires the earlier admission immediately.
+      if (event.type === 'turn/end') this.clearAgent(agent)
+      else {
+        this.expectedDispatch.delete(agent)
+        this.pending.delete(agent)
+      }
+    })
     ctx.effect(() => async () => {
       this.lifetime.abort(new Error('model routing disposed'))
       this.claimed.clear()
       this.pending.clear()
+      this.expectedDispatch.clear()
       await Promise.allSettled([...this.work.values()].map(item => item.promise))
       this.work.clear()
     }, 'model-routing: cancel and join resolution')
@@ -114,7 +133,8 @@ export class ModelRoutingRuntime extends Service {
    */
   isAvailable(): boolean {
     const current = this.source()
-    return !this.lifetime.signal.aborted && current.enabled && current.policy !== undefined && current.classifier !== undefined
+    // Constructor and settings commits validate both required sections before enabled can be true.
+    return !this.lifetime.signal.aborted && current.enabled
   }
 
   /**
@@ -222,6 +242,7 @@ export class ModelRoutingRuntime extends Service {
   private clearAgent(agent: Agent, includeAgentLifetime = false): void {
     this.claimed.delete(agent)
     this.pending.delete(agent)
+    this.expectedDispatch.delete(agent)
     for (const [controller, item] of this.work) {
       if (item.agent === agent && (includeAgentLifetime || item.lifetime === 'turn')) {
         controller.abort(new Error('model routing Agent activity ended'))
@@ -269,28 +290,34 @@ export class ModelRoutingRuntime extends Service {
   ): Promise<ModelSelection> {
     const agent = payload.agent
     this.pending.delete(agent)
+    this.expectedDispatch.delete(agent)
     const available = await this.candidates(agent, intent.selection, input, signal)
     signal.throwIfAborted()
     const priorCandidate = active === null ? undefined
       : intent.selection.policy.candidates.find(candidate => candidate.id === active.candidateId)
     const latest = agent.session.requestHeader()?.config
+    // Headers precede dispatch and may describe a refused effort; they do not replace the task's confirmed effort.
     let priorStillActual = false
     if (active !== null && priorCandidate !== undefined && available.has(active.candidateId)
       && active.selection.provider === priorCandidate.selection.provider && active.selection.model === priorCandidate.selection.model
       && (priorCandidate.selection.reasoningEffort === undefined
         || active.selection.reasoningEffort === priorCandidate.selection.reasoningEffort)
-      && (latest === undefined || sameSelection(active.selection, latest))) {
+      && (latest === undefined || (active.selection.provider === latest.provider && active.selection.model === latest.model))) {
       try {
         // A captured provider default may now differ; validate and pin the already-used actual effort.
         const pinned = await this.ctx.llm.resolveCallConfig({ ...active.selection }, signal)
         signal.throwIfAborted()
-        priorStillActual = sameSelection(active.selection, pinned)
+        // Absence is also task-owned; a newly introduced default must pass the exact prepared-dispatch guard.
+        priorStillActual = active.selection.reasoningEffort === undefined || sameSelection(active.selection, pinned)
       } catch (_error: unknown) {
         signal.throwIfAborted()
       }
     }
     if (input === undefined && priorStillActual && active !== null) {
       // Tool/plugin continuations do not classify or create a new task boundary.
+      this.expectedDispatch.set(agent, {
+        intentSeq: intent.seq, selection: { ...active.selection }, signal: payload.signal as AbortSignal,
+      })
       return { ...active.selection }
     }
     const classified = input?.text !== undefined && input.text.length > 0
@@ -312,15 +339,15 @@ export class ModelRoutingRuntime extends Service {
     })
     const retainsBinding = active !== null && priorStillActual
       && (selected.reason === 'same-task' || selected.reason === 'uncertain-current')
-    const proposal = retainsBinding ? active.selection : selected.selection
-    const resolved = retainsBinding ? active.selection : available.get(selected.candidateId) as ModelSelection
+    // Preserve the exact admitted tuple through later preparation and same-step retries.
+    const proposal = retainsBinding ? active.selection : available.get(selected.candidateId) as ModelSelection
     const sameTask = active !== null && classification !== undefined
       && classification.confidence >= intent.selection.policy.minConfidence
       && classification.reasonCode !== 'uncertain' && classification.continuity === 'same-task'
     const decision: RoutingTaskDecision = {
       taskId: sameTask ? active.taskId : brandString<RoutingTaskId>(randomUUID()),
       intentSeq: intent.seq,
-      selection: { ...resolved },
+      selection: { ...proposal },
       candidateId: selected.candidateId,
       reason: selected.reason,
       ...classified?.callId === undefined ? {} : { classifierCallId: classified.callId },
@@ -332,12 +359,26 @@ export class ModelRoutingRuntime extends Service {
     this.assertLive(agent)
     // signal was required by the event entry before resolution started.
     this.pending.set(agent, { proposal, decision, signal: payload.signal as AbortSignal, input })
+    this.expectedDispatch.set(agent, {
+      intentSeq: intent.seq, selection: { ...proposal }, signal: payload.signal as AbortSignal,
+    })
     return { ...proposal }
   }
 
   private async * observeDispatch(options: GenerateOptions, next: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk> {
     if (!this.lifetime.signal.aborted && isAgentLoopRequest(options) && options.sessionId !== undefined) {
       const agent = this.ctx.agents.get(options.sessionId)
+      const expected = agent === undefined ? undefined : this.expectedDispatch.get(agent)
+      if (agent !== undefined && expected !== undefined && options.signal === expected.signal) {
+        const intent = this.state(agent).intent
+        if (intent.kind !== 'auto' || intent.seq !== expected.intentSeq) {
+          this.expectedDispatch.delete(agent)
+          this.pending.delete(agent)
+        } else if (!sameSelection(expected.selection, selectionOf(options))) {
+          // Shipping AgentLoop prepares these marked requests before entering the stream. Retain the guard for retries.
+          throw new Error('Auto routing selection changed before prepared dispatch')
+        }
+      }
       const pending = agent === undefined ? undefined : this.pending.get(agent)
       if (agent !== undefined && pending !== undefined && options.signal === pending.signal) {
         this.pending.delete(agent)

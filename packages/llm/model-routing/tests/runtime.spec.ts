@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, symbols } from '@deepseek-ai/cordis'
 import AgentRegistry, { agentEvents, installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, { createUserMessage, LlmAdapter, markAgentLoopRequest, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, ImageBlock, LlmResolvedModelInfo, MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import SessionStore, { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import SessionStore, { Session, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -16,6 +16,7 @@ import { resolveRoutingConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import ModelRoutingRuntime from '../src/runtime.ts'
 import type { ResolveDelegationRoutingRequest } from '../src/delegation-types.ts'
+import { prepareDelegationRouting, resolvePreparedDelegationRouting } from '../src/delegation.ts'
 import type { AutoSelection } from '../src/routing-state.ts'
 
 const roots: Context[] = []
@@ -298,7 +299,7 @@ describe('ModelRoutingRuntime opt-in and routing', () => {
     expect(h.decisions()).toHaveLength(1)
   })
 
-  it('does not claim that a proposal applied when another resolver changes model or explicit effort', async () => {
+  it('refuses changed model or effort before dispatch and retires the admission at the turn boundary', async () => {
     for (const changed of [
       { provider: 'test', model: 'small' },
       { provider: 'test', model: 'big', reasoningEffort: ReasoningEffortId('low') },
@@ -308,8 +309,10 @@ describe('ModelRoutingRuntime opt-in and routing', () => {
       h.claim('complex work')
       const chosen = await h.resolve()
       expect(chosen.selection?.reasoningEffort).toBe('high')
-      await h.dispatch(changed, chosen.signal)
+      await expect(h.dispatch(changed, chosen.signal)).rejects.toThrow('Auto routing selection changed before prepared dispatch')
+      expect(h.seen.filter(call => call.purpose === undefined)).toEqual([])
       expect(h.decisions()).toHaveLength(0)
+      await agentEvents(h.ctx, h.agent).serial('agent/turn-stopping', { turn: 1, signal: chosen.signal })
       await h.dispatch(requireSelection(chosen.selection), chosen.signal)
       expect(h.decisions()).toHaveLength(0)
     }
@@ -436,7 +439,7 @@ describe('ModelRoutingRuntime opt-in and routing', () => {
     await h.ctx.modelRouting.enable(h.agent, 'balanced')
     h.claim('routine task')
     const first = await h.resolve()
-    expect(first.selection).toEqual({ provider: 'test', model: 'big' })
+    expect(first.selection).toEqual({ provider: 'test', model: 'big', reasoningEffort: ReasoningEffortId('low') })
     await h.dispatch(requireSelection(first.selection), first.signal)
     expect(h.decisions()[0]).toMatchObject({ candidateId: 'small', selection: { provider: 'test', model: 'big', reasoningEffort: 'low' } })
     h.answer(classification('complex', 'same-task'))
@@ -979,7 +982,7 @@ describe('ModelRoutingRuntime races and disposal', () => {
     h.answer(classification())
     h.claim('new routine task')
     const next = await h.resolve()
-    expect(next.selection).toEqual({ provider: 'test', model: 'big' })
+    expect(next.selection).toEqual({ provider: 'test', model: 'big', reasoningEffort: ReasoningEffortId('high') })
     await h.dispatch(requireSelection(next.selection), next.signal)
     expect(h.decisions()[2]?.selection.reasoningEffort).toBe('high')
   })
@@ -1004,7 +1007,7 @@ describe('ModelRoutingRuntime races and disposal', () => {
       const chosen = await pending
       expect(chosen.selection?.model).toBe('small')
       await h.dispatch(requireSelection(chosen.selection), chosen.signal)
-      expect(h.decisions()).toHaveLength(1)
+      expect(h.decisions()).toHaveLength(0)
       expect(h.state()).toEqual({ intent: { kind: 'manual' }, activeTask: null })
       expect((await h.resolve()).selection).toEqual(manual)
       expect(h.calls()).toHaveLength(1)
@@ -1104,5 +1107,148 @@ describe('ModelRoutingRuntime races and disposal', () => {
     await h.dispatch(requireSelection(first.selection), first.signal)
     expect(h.decisions()).toHaveLength(0)
     await expect(h.ctx.modelRouting.enable(h.agent, 'balanced')).rejects.toThrow('exact live Agent')
+  })
+})
+
+describe('core routing edge cases', () => {
+  it('rejects incomplete enabled settings before a Session can capture them', () => {
+    const config = configuration()
+    expect(() => resolveRoutingConfig({ enabled: true })).toThrow('requires a candidate policy and classifier')
+    expect(() => resolveRoutingConfig({ enabled: true, policy: config.policy! })).toThrow('requires a candidate policy and classifier')
+    expect(() => resolveRoutingConfig({ enabled: true, classifier: config.classifier! })).toThrow('requires a candidate policy and classifier')
+    expect(resolveRoutingConfig({ enabled: false, policy: config.policy! })).toEqual({ enabled: false, policy: config.policy })
+    expect(resolveRoutingConfig({ enabled: false, classifier: config.classifier! }))
+      .toEqual({ enabled: false, classifier: config.classifier })
+  })
+
+  it('contains parent-effect cleanup rejection after successful enable without exposing its diagnostics', async () => {
+    const h = await harness()
+    const effect = h.agent.ctx.effect.bind(h.agent.ctx)
+    const warned = Promise.withResolvers<undefined>()
+    const warnings = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => { warned.resolve(undefined) })
+    const spy = vi.spyOn(h.agent.ctx, 'effect').mockImplementationOnce((execute, label) => effect(async () => {
+      const dispose = execute()
+      if (typeof dispose !== 'function') throw new Error('fixture requires a synchronous effect body')
+      return async () => {
+        await dispose()
+        throw new Error('private cleanup diagnostic')
+      }
+    }, label))
+    await h.ctx.modelRouting.enable(h.agent, 'balanced')
+    await warned.promise
+    expect(h.state()?.intent.kind).toBe('auto')
+    expect(warnings).toHaveBeenCalledWith('model routing operation cleanup failed')
+    expect(warnings.mock.calls.flat()).not.toContain('private cleanup diagnostic')
+    spy.mockRestore()
+    warnings.mockRestore()
+  })
+
+  it('refuses an unavailable routing projection rather than inventing manual or Auto state', async () => {
+    const h = await harness()
+    const state = vi.spyOn(h.ctx.sessionProjections, 'stateOf').mockReturnValueOnce(undefined)
+    await expect(h.ctx.modelRouting.enable(h.agent, 'balanced')).rejects.toThrow('model routing projection is unavailable')
+    state.mockRestore()
+    expect(h.events).toEqual([])
+    expect(h.calls()).toEqual([])
+  })
+
+  it('ignores intent events from an unowned or stale same-id Session without retiring the live admission', async () => {
+    const h = await harness()
+    await h.ctx.modelRouting.enable(h.agent, 'intelligence')
+    h.claim('a task with an exact high-effort admission')
+    const chosen = await h.resolve()
+    for (const session of [Session.create(SessionId('unowned-session')), Session.create(h.session.id)]) {
+      const event = session.append('model/selection', { provider: 'test', model: 'small' })
+      h.ctx.emit('session/event', session, event)
+    }
+    await expect(h.dispatch({ provider: 'test', model: 'small' }, chosen.signal))
+      .rejects.toThrow('Auto routing selection changed before prepared dispatch')
+    expect(h.decisions()).toEqual([])
+    await h.dispatch(requireSelection(chosen.selection), chosen.signal)
+    expect(h.decisions()).toHaveLength(1)
+    expect(h.decisions()[0]?.selection.reasoningEffort).toBe('high')
+  })
+
+  it('joins separately claimed text blocks in order without dropping a newer claim at dispatch', async () => {
+    const h = await harness()
+    await h.ctx.modelRouting.enable(h.agent, 'balanced')
+    h.claim('first fragment')
+    h.claim('second fragment')
+    const chosen = await h.resolve()
+    expect(classifierTask(h.calls()[0]!)).toEqual({ task: 'first fragment\nsecond fragment' })
+    h.claim('arrived after assembly')
+    await h.dispatch(requireSelection(chosen.selection), chosen.signal)
+    const next = await h.resolve()
+    expect(classifierTask(h.calls()[1]!).task).toContain('arrived after assembly')
+    await h.dispatch(requireSelection(next.selection), next.signal)
+    expect(h.decisions()).toHaveLength(2)
+  })
+
+  it.each(['unavailable', 'aborted'] as const)('does not trust a previously pinned route after revalidation is %s', async (failure) => {
+    let revalidating = false
+    let smallLookups = 0
+    const abort = new AbortController()
+    const reason = new Error('pin revalidation cancelled')
+    const h = await harness({ metadata: async (provider, model) => {
+      if (revalidating && model === 'small' && ++smallLookups === 2) {
+        if (failure === 'aborted') abort.abort(reason)
+        throw new Error('previous pinned selection disappeared')
+      }
+      return modelInfo(provider, model)
+    } })
+    await h.ctx.modelRouting.enable(h.agent, 'balanced')
+    h.claim('initial task')
+    const initial = await h.resolve()
+    await h.dispatch(requireSelection(initial.selection), initial.signal)
+    revalidating = true
+    h.answer('invalid classification')
+    h.claim('later task')
+    if (failure === 'aborted') {
+      await expect(h.resolve(abort.signal)).rejects.toBe(reason)
+      expect(h.calls()).toHaveLength(1)
+    } else {
+      expect((await h.resolve()).selection).toEqual({ provider: 'test', model: 'big', reasoningEffort: ReasoningEffortId('high') })
+      expect(h.calls()).toHaveLength(2)
+    }
+    expect(h.decisions()).toHaveLength(1)
+  })
+
+  it.each(['main', 'delegation'] as const)('refuses capture when the %s projection is unavailable', async (missing) => {
+    const h = await harness()
+    const original = h.ctx.sessionProjections.stateOf.bind(h.ctx.sessionProjections)
+    const state = vi.spyOn(h.ctx.sessionProjections, 'stateOf').mockImplementation((session, key) => {
+      if (key === (missing === 'main' ? 'modelRouting' : 'modelRoutingDelegation')) return undefined
+      return original(session, key)
+    })
+    expect(() => h.ctx.modelRouting.captureDelegation(h.agent)).toThrow('routing projection is unavailable')
+    state.mockRestore()
+    expect(h.calls()).toEqual([])
+  })
+
+  it('joins isolated multi-block prompt text without copying non-text blocks into the classifier', async () => {
+    const h = await harness()
+    await h.ctx.modelRouting.enable(h.agent, 'balanced')
+    await h.ctx.modelRouting.resolveDelegation(delegationRequest(h, {
+      prompt: [{ type: 'text', text: 'first fragment' }, imageBlock(), { type: 'text', text: 'second fragment' }],
+    }))
+    expect(classifierTask(h.calls()[0]!)).toEqual({ task: 'first fragment\nsecond fragment' })
+  })
+
+  it.each([false, true])('checks the identity of an unwrapped LLM capability with disappearance=%s', async (disappear) => {
+    const h = await harness()
+    await h.ctx.modelRouting.enable(h.agent, 'balanced')
+    const prepared = prepareDelegationRouting(delegationRequest(h))
+    // Cordis metadata contexts may expose an already-unwrapped capability; identity is still mandatory.
+    const raw = Reflect.get(h.ctx.llm, symbols.original) as LlmRuntime
+    expect(raw).toBeDefined()
+    const direct = h.ctx.extend({ llm: raw, get: () => disappear ? undefined : raw })
+    const pending = resolvePreparedDelegationRouting(direct, prepared, new AbortController().signal)
+    if (disappear) {
+      await expect(pending).rejects.toThrow('LLM routing changed')
+      expect(h.calls()).toEqual([])
+    } else {
+      expect((await pending).selection).toEqual({ provider: 'test', model: 'small' })
+      expect(h.calls()).toHaveLength(1)
+    }
   })
 })

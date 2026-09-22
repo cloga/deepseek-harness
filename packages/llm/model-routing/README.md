@@ -18,6 +18,7 @@ Use `ctx.modelRouting` to opt an ordinary Session into task-aware model-and-effo
 - [Further Exploration](#further-exploration)
 - [Model Experience](#model-experience)
 - [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
+- [Dev Note](#dev-note)
 
 -----
 
@@ -142,3 +143,8 @@ Classification is an independent request with a stable instruction and variable 
 - **Pre-step rewriting follows classification** — classification sees claimed human input, not later plugin rewrites. Exact assembled context capacity remains the LLM/compaction owner's responsibility.
 - **Recovery and personalization require separate policy operations** — bounded assistance, independent read-only reviewers, outcome evaluation, versioned promotion, and rollback remain covered by the proposal rather than these runtime methods.
 - **No price or quality oracle** — configured quality and cost weights require evaluation; this package does not establish a statistically validated savings claim.
+
+<a id="dev-note"></a>
+### Dev Note
+
+Keep routing opt-in and captured task bindings separate from any future learning or review owner. A prepared header is not a new manual selection or proof that a different effort was used.

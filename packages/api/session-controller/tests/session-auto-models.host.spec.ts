@@ -12,6 +12,7 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { createSessionTestRemote } from './test-remote.ts'
 
 function configuration(): RoutingConfig {
@@ -85,6 +86,40 @@ async function harness(options: { routing?: 'enabled' | 'disabled' | 'absent'; c
 }
 
 describe('Session Auto model selection', () => {
+  it('preserves a typed route-validation failure without replacing it with Auto unavailability', async () => {
+    const h = await harness()
+    try {
+      const failure = new RemoteError('gateway/internal', 'The route lookup was rejected', {})
+      h.lookup.mockRejectedValueOnce(failure)
+      expect(await h.remote.selectAutoModel({ sessionId: h.session.id, mode: 'balanced' })).toMatchObject({
+        ok: false, error: { code: 'gateway/internal', message: 'The route lookup was rejected', details: {} },
+      })
+      expect(h.events).toEqual([])
+      expect(h.saveDefault).not.toHaveBeenCalled()
+    } finally {
+      await h.ctx.fiber.dispose()
+    }
+  })
+
+  it('projects a durable Auto selection after the Agent detaches without consuming a live selection', async () => {
+    const h = await harness()
+    try {
+      await h.detach()
+      expect(h.ctx.agents.get(h.session.id)).toBeUndefined()
+      const { policy, classifier } = configuration()
+      if (policy === undefined || classifier === undefined) throw new Error('fixture requires complete Auto settings')
+      expect(() => h.session.append('model/auto-selection', {
+        mode: 'balanced', policy, classifier,
+      })).not.toThrow()
+      expect(h.routing()).toEqual({ mode: 'balanced', lastDecision: null })
+      expect(h.events.map(event => event.type)).toEqual(['model/auto-selection'])
+      expect(h.saveDefault).not.toHaveBeenCalled()
+      expect(h.lookup).not.toHaveBeenCalled()
+    } finally {
+      await h.ctx.fiber.dispose()
+    }
+  })
+
   it.each(['efficiency', 'balanced', 'intelligence'] as const)(
     'captures %s intent without a fake model, actual request, or global-default write', async (mode) => {
       const h = await harness()
@@ -263,7 +298,7 @@ describe('Session Auto model selection', () => {
         if (signal === undefined) throw new Error('missing signal')
         signal.throwIfAborted()
         await new Promise((_resolve, reject) => {
-          signal.addEventListener('abort', () => { reject(signal.reason) }, { once: true })
+          signal.addEventListener('abort', () => { reject(new Error('validation cancelled', { cause: signal.reason })) }, { once: true })
         })
       }
       return { provider, id: model, name: model }
@@ -285,7 +320,7 @@ describe('Session Auto model selection', () => {
     const h = await harness()
     try {
       expect((await h.remote.selectAutoModel({ sessionId: h.session.id, mode: 'efficiency' })).ok).toBe(true)
-      h.detach()
+      await h.detach()
       await h.scope.dispose()
       const resume = vi.fn(async (owner: Context, options: ResumeAgentOptions): Promise<AgentHandle> => {
         expect(options.resumeSessionId).toBe(h.session.id)
@@ -295,7 +330,7 @@ describe('Session Auto model selection', () => {
         Object.assign(resumed, { ctx: scope.ctx })
         await options.setup?.(scope.ctx, resumed)
         const detach = await h.ctx.agents.register(resumed)
-        return { agent: resumed, dispose: async () => { detach(); await scope.dispose() } }
+        return { agent: resumed, dispose: async () => { await detach(); await scope.dispose() } }
       })
       h.ctx.agents.setFactory({
         createAgent: () => Promise.reject(new Error('test does not create Agents')),

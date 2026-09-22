@@ -6,6 +6,7 @@ import { parseRoutingClassifierConfig } from '../src/classifier.ts'
 import { applyModelRoutingState, initialModelRoutingState } from '../src/routing-state.ts'
 import type { AutoSelection, RoutingTaskDecision, RoutingTaskId } from '../src/routing-state.ts'
 import { modelRoutingProjection, modelRoutingView } from '../src/projection.ts'
+import type { RoutingCallId } from '../src/types.ts'
 
 function autoSelection(): AutoSelection {
   const floors = { routine: 1, standard: 2, complex: 3 }
@@ -97,5 +98,18 @@ describe('durable Auto routing state', () => {
     }
     expect(() => modelRoutingProjection.stateSchema.parse(badPolicy)).toThrow()
     expect(() => modelRoutingProjection.stateSchema.parse(badClassifier)).toThrow()
+  })
+})
+
+describe('core routing edge cases', () => {
+  it('preserves the classifier audit identity without transporting its private input', () => {
+    const { session, state, decision } = selectedSession()
+    const classifierCallId = brandString<RoutingCallId>('audited-classifier-call')
+    const bound = applyModelRoutingState(state, session.append('model/routing-decision', { ...decision, classifierCallId }))
+    const view = modelRoutingView(bound)
+    expect(view.lastDecision?.classifierCallId).toBe(classifierCallId)
+    expect(view.lastDecision?.selection).not.toBe(bound.activeTask?.selection)
+    expect(view.lastDecision).not.toHaveProperty('taskText')
+    expect(modelRoutingProjection.wire.viewSchema.parse(view)).toEqual(view)
   })
 })

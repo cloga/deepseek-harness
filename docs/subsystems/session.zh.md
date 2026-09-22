@@ -6,6 +6,12 @@
 
 源码：[`packages/core/session/src/types.ts`](../../packages/core/session/src/types.ts)
 
+<a id="session-auto-selection"></a>
+
+## Session Auto 选择
+
+`SessionSelectAutoModelRequest` 和 `SessionSelectAutoModelValue` 由 [`api/session-controller/src/types.ts`](../../packages/api/session-controller/src/types.ts) 声明。请求携带 `sessionId` 与 [`ModelRoutingMode`](llm-streaming.zh.md#task-aware-routing-types)；接受后的返回值仅携带 `mode`。接受操作记录 Session 本地的 Auto 意图，不是对具体模型的预测，也不是模型实际使用的证据。Host 在任务工作时选择具体路由。
+
 ## `SessionEventMap`：事件词汇
 
 仅追加的事件类型。可通过声明合并扩展：插件通过 declaration merging 声明额外的事件类型。例如[压缩（compaction） seam](compaction.zh.md) 添加了 `compaction/start` / `compaction/summary` / `compaction/end`，`@deepseek-ai/dsh-hook-protocol` 为钩子桥接添加了仅记录日志的 `hook/invoked` / `hook/result` 记录。与 `compaction/*` 一样，这些都不是 `SurfaceEventType`（没有 `surfaceOp`）。生成的[持久化日志事件目录](../persistence-catalog.zh.md)列举了所有成员（核心与合并扩展的），包含其 payload、surface 标记与声明位置。
@@ -802,6 +808,14 @@ inspect( sessionId: SessionId, signal?: AbortSignal, ): Promise<SessionInspectio
  * @returns the normalized selection installed for the Session.
  */
 @Remote('selectModel') selectModel(request: SessionSelectModelRequest): Promise<SessionSelectModelValue>
+
+/**
+ * Select a Session-local Auto mode without changing the deployment's concrete default.
+ * @param request - Ordinary Session identity and requested Auto tradeoff.
+ * @param signal - Caller cancellation before intent commitment.
+ * @returns The accepted mode; actual model use remains a durable request fact.
+ */
+@Remote('selectAutoModel') selectAutoModel(request: SessionSelectAutoModelRequest, signal: AbortSignal): Promise<SessionSelectAutoModelValue>
 
 /**
  * Describe every currently routable model for Host-generation selectors.

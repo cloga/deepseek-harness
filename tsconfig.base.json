@@ -115,8 +115,6 @@
       "@deepseek-ai/dsh-goal/client": ["./packages/goal/goal/src/client.ts"],
       "@deepseek-ai/dsh-llm/types": ["./packages/llm/llm/src/types.ts"],
       "@deepseek-ai/dsh-model-routing/types": ["./packages/llm/model-routing/src/types.ts"],
-      "@deepseek-ai/dsh-model-routing/adaptive": ["./packages/llm/model-routing/src/adaptive-policy.ts"],
-      "@deepseek-ai/dsh-model-routing/adaptive-types": ["./packages/llm/model-routing/src/adaptive-types.ts"],
       "@deepseek-ai/dsh-llm/brand": ["./packages/llm/llm/src/brand.ts"],
       "@deepseek-ai/dsh-llm/assistant-stream": ["./packages/llm/llm/src/assistant-stream.ts"],
       "@deepseek-ai/dsh-deepseek-llm-api-extensions/types": ["./packages/llm/deepseek-llm-api-extensions/src/types.ts"],

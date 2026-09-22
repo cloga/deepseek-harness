@@ -14,8 +14,6 @@
   "exports": {
     ".": { "types": "./lib/types/index.d.ts", "default": "./lib/index.js" },
     "./types": { "types": "./lib/types/types.d.ts", "default": "./lib/types/types.js" },
-    "./adaptive": { "types": "./lib/types/adaptive-policy.d.ts", "default": "./lib/types/adaptive-policy.js" },
-    "./adaptive-types": { "types": "./lib/types/adaptive-types.d.ts", "default": "./lib/types/adaptive-types.js" },
     "./package.json": "./package.json"
   },
   "files": ["lib/index.js", "lib/types/**/*.js", "lib/types/**/*.d.ts"],

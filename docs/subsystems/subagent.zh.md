@@ -74,6 +74,8 @@ interface SubagentStartRequest {
    * before initializing the separate child runtime.
    */
   readonly agentOptions?: AgentOptions
+  /** Deny-only consumer opt-out; omission never grants authority absent the captured parent allowlist. */
+  readonly disableAutoModelSelection?: true
   /**
    * Object-rooted JSON Schema within `assertObjectJsonSchema`'s enforced subset. Start rejects
    * unsupported schemas or providers without the capability. Data must be plain host-realm JSON;
@@ -106,7 +108,7 @@ interface SubagentStartRequest {
 }
 ```
 
-`signal` 是就绪前后唯一的取消通道。[subagent 组合控制 Agent Note](../../.agents/notes/implemented/feature/2026-07-12-subagent-persona-tool-filter-and-depth.zh.md)规定 persona、live 全局工具过滤、绝对深度以及「可见性而非权限」的设计理由。
+调用方的 `signal` 在就绪前后始终是其取消通道。原生注册表的 `resolvedCreationSignal` 只控制创建准入；已发布的 run 保留原始调用方信号。`disableAutoModelSelection` 只能选择禁用 Auto 选模，不会授予超出已捕获父级允许列表的权限。[subagent 组合控制 Agent Note](../../.agents/notes/implemented/feature/2026-07-12-subagent-persona-tool-filter-and-depth.zh.md)规定 persona、live 全局工具过滤、绝对深度以及「可见性而非权限」的设计理由。
 
 面向调用方的请求不携带目录格式细节或继续执行状态。`SubagentRuntime.start()` 会在能力检查后解析分离的一次性描述符，再将以下面向提供方的请求传给所选传输；可继续子 agent 绝不会到达 `SubagentProvider.start()`：
 
@@ -118,6 +120,14 @@ interface SubagentStartRequest {
 interface ResolvedSubagentStartRequest extends SubagentStartRequest {
   /** Detached descriptor a session-backed provider persists in the child log. */
   readonly descriptor: SubagentDescriptorData
+  /** Registry-owned complete native options; an omitted effort must not inherit again. */
+  readonly resolvedAgentOptions?: AgentOptions
+  /** Registry-owned permission snapshot captured before asynchronous native selection. */
+  readonly resolvedDelegatedPolicies?: DelegatedPolicyOverrides
+  /** Registry-owned creation evidence and child delegation context. */
+  readonly resolvedModelSelection?: NativeChildModelSelection
+  /** Creation-only registry cancellation; a published run retains the original caller signal. */
+  readonly resolvedCreationSignal?: AbortSignal
 }
 ```
 
@@ -425,6 +435,8 @@ interface SubagentProvider {
    * is detached immutable data and requires `agentOptions` support.
    */
   readonly agentRouteDefaults?: Readonly<{ provider: string; model: string }>
+  /** Trusted provider-side native creation ownership; external AgentOptions support alone does not enable Auto. */
+  readonly nativeModelSelection?: 'spawn' | 'fork'
   /**
    * Establish a ONE-SHOT child and return its handle after publication.
    * The service has already validated that every requested start-time

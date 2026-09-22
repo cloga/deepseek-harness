@@ -133,19 +133,19 @@ Read these pages when the package-level contract is not enough; they move from t
 
 The generated default [`subagent` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-subagent) under this instance's configured name while its provider exists. An enabled Session policy adds `provider`, `model`, and `reasoning_effort` plus inheritance and selection guidance; the provider must support `agentOptions`. Provider context inheritance changes the tool and prompt descriptions. Enabled background mode adds `run_in_background`: continuable mode documents its `true` default, runtime settlement notice, and explicit foreground override, while one-shot mode documents its `false` default and the job id collected with `job_output` or stopped with `job_kill`. While the tool is visible in an assembly's scope, a `tool:<toolName>` system-prompt section tells the model to start independent continuable delegations together, keep working while they run, and choose foreground only when its next action depends on the result; a tool restriction removes both its schema and this guidance.
 
-For a model-selectable native spawn instance, the description includes:
+##### Model-selectable native spawn description
 
 ```markdown
 Implicit child model choice uses configured tool/provider defaults, matching exact parent-model rules, authorized Auto when captured by the parent, then compatible parent defaults.
 ```
 
-Native tools without Auto admission, including fork tools, instead include:
+##### Native tool description without Auto admission, including fork tools
 
 ```markdown
 Child model choice uses configured tool/provider defaults or matching exact parent-model rules, then compatible parent defaults. Auto selection is disabled for this tool.
 ```
 
-When native model-facing selection fields are enabled, their guidance includes:
+##### Enabled native model-facing selection fields
 
 ```markdown
 Child LLM selection is optional. Supply `provider` and `model` together after using `list_subagent_models` to inspect advertised routes and efforts. Explicit provider, model, or reasoning effort suppresses parent rules and Auto; changing the route without naming an effort uses the selected model's default effort.

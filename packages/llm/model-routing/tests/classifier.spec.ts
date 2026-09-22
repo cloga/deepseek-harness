@@ -370,3 +370,34 @@ describe('classifyRoutingTask', () => {
     }
   })
 })
+
+describe('core routing edge cases', () => {
+  it('rejects a tool-call terminal outcome even without an advertised or emitted tool block', async () => {
+    const h = await harness(() => scripted([{ type: 'finish', reason: { kind: 'tool-calls' } }]))
+    try {
+      expect(await h.run()).toMatchObject({ outcome: 'non-text' })
+      expect(resultEvent(h).outcome).toBe('non-text')
+      expect(resultEvent(h)).not.toHaveProperty('classification')
+      expect(h.closed()).toBe(true)
+    } finally {
+      await h.ctx.fiber.dispose()
+    }
+  })
+
+  it('contains middleware stream failure while preserving usage and omitting private diagnostics', async () => {
+    const h = await harness()
+    h.ctx.on('llm/stream', async function* () {
+      yield { type: 'usage', usage: USAGE }
+      throw new Error(SECRET)
+    })
+    try {
+      expect(await h.run()).toMatchObject({ outcome: 'provider-error', usage: USAGE })
+      expect(h.seen).toEqual([])
+      expect(resultEvent(h).outcome).toBe('provider-error')
+      expect(JSON.stringify(resultEvent(h))).not.toContain(SECRET)
+      expect(expandAssistantStream(resultEvent(h).stream).map(value => value.chunk)).toEqual([{ type: 'usage', usage: USAGE }])
+    } finally {
+      await h.ctx.fiber.dispose()
+    }
+  })
+})

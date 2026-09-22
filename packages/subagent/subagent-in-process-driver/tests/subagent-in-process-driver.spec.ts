@@ -382,6 +382,93 @@ describe('startInProcessRun', () => {
     expect(ctx.sessions.list()).toHaveLength(beforeSessions)
   })
 
+  it.each([false, true])('joins rejected registry creation at handoff, shared signal=%s', async (sharedSignal) => {
+    const { ctx, parent, adapter } = await setup([])
+    const caller = new AbortController()
+    const creation = sharedSignal ? caller : new AbortController()
+    const disposing = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const beforeAgents = ctx.agents.list().length
+    const beforeSessions = ctx.sessions.list().length
+    let joined = false
+    let settled = false
+    const owner = {
+      options: parent.options,
+      session: parent.session,
+      ctx: {
+        get: () => undefined,
+        agents: {
+          create: async (options: Parameters<typeof ctx.agents.create>[0]) => {
+            const handle = await ctx.agents.create(options)
+            creation.abort('registry handoff race')
+            return {
+              agent: handle.agent,
+              dispose: async () => {
+                disposing.resolve(undefined)
+                await release.promise
+                await handle.dispose()
+                joined = true
+              },
+            }
+          },
+        },
+      },
+    } as unknown as Agent
+    const pending = startInProcessRun({
+      ...request(owner, caller.signal), resolvedCreationSignal: creation.signal,
+    }, {})
+    const outcome = pending.then(
+      result => ({ result }),
+      (error: unknown) => ({ error }),
+    ).then((value) => { settled = true; return value })
+    try {
+      await disposing.promise
+      expect(settled).toBe(false)
+      expect(joined).toBe(false)
+      expect(caller.signal.aborted).toBe(sharedSignal)
+      expect(adapter.requests).toEqual([])
+      release.resolve(undefined)
+      const ending = await outcome
+      expect(ending).toHaveProperty('error')
+      if (!('error' in ending)) throw new Error('registry-aborted creation unexpectedly returned a run')
+      expect(ending.error).toMatchObject({ message: 'subagent request was aborted before child publication' })
+      expect(joined).toBe(true)
+      expect(ctx.agents.list()).toHaveLength(beforeAgents)
+      expect(ctx.sessions.list()).toHaveLength(beforeSessions)
+    } finally {
+      release.resolve(undefined)
+      await outcome
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps a published run when only its ordinary signal aborts while registry admission stays live', async () => {
+    const { ctx, parent, adapter } = await setup([])
+    const caller = new AbortController()
+    const creation = new AbortController()
+    const owner = {
+      options: parent.options,
+      session: parent.session,
+      ctx: {
+        get: () => undefined,
+        agents: {
+          create: async (options: Parameters<typeof ctx.agents.create>[0]) => {
+            const handle = await ctx.agents.create(options)
+            caller.abort('ordinary handoff race')
+            return handle
+          },
+        },
+      },
+    } as unknown as Agent
+    const run = await startInProcessRun({ ...request(owner, caller.signal), resolvedCreationSignal: creation.signal }, {})
+    try {
+      expect(creation.signal.aborted).toBe(false)
+      expect(ctx.agents.get(run.id)).toBeDefined()
+      await expect(run.result).resolves.toEqual({ output: [], stopReason: 'aborted' })
+      expect(adapter.requests).toEqual([])
+    } finally { await run.dispose(); await ctx.fiber.dispose() }
+  })
+
   it('treats abort after factory publication as a cancelled run with an id', async () => {
     const { ctx, parent } = await setup([])
     const controller = new AbortController()

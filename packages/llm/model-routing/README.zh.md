@@ -18,6 +18,7 @@ kind: "package-reference"
 - [进一步探索](#further-exploration)
 - [模型体验](#model-experience)
 - [已知限制与待办工作](#known-limitations-and-deferred-work)
+- [开发备注](#dev-note)
 
 -----
 
@@ -142,3 +143,8 @@ Do not return Markdown, explanations, tool calls, provider names, model names, o
 - **pre-step 重写发生在分类之后** — 分类看到的是已领取的人类输入，而非插件之后的重写。精确的完整组装上下文容量仍由 LLM／压缩所有者负责。
 - **恢复和个性化需要独立策略操作** — 有界协助、独立只读评审、结果评估、版本化晋升和回滚由提案覆盖，而不是由这些运行时方法提供。
 - **没有价格或质量真源** — 配置的质量和成本权重需要评估；本包不提供经统计验证的节省保证。
+
+<a id="dev-note"></a>
+### 开发备注
+
+将路由的显式启用和已捕获任务绑定，与任何未来学习或评审所有者分开。准备后的请求头不代表新的手动选择，也不能证明已使用不同的推理强度。
