@@ -5,8 +5,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 /**
- * Built-artifact smoke for the first generated Remote: plain Node boots the
- * Host and Browser bundle handoffs, then crosses the shared `/api` HTTP route.
+ * Built-artifact regressions: plain Node boots the Host and Browser bundle
+ * handoffs, then crosses the authenticated shared `/api` HTTP route. Pending
+ * records use the real PluginManager and parser, not handwritten wire schemas.
  */
 
 const packageDir = fileURLToPath(new URL('..', import.meta.url))
@@ -29,8 +30,17 @@ const requiredArtifacts = [
   'packages/session/session-projection/lib/index.js',
 ].every(path => existsSync(artifact(path)))
 
-describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
-  it('runs root and Agent-scoped calls through generated bundles and real HTTP', async () => {
+describe.skipIf(!requiredArtifacts)('Goal and pending-package Remote built LIB chain', () => {
+  it('runs scoped goals and validated pending inventory through generated bundles and real HTTP', async () => {
+    // Once the existing LIB lane is available, missing new artifacts must fail,
+    // not silently turn this regression into an additional skip.
+    for (const path of [
+      'packages/boot/plugin-manager/lib/index.js',
+      'packages/boot/plugin-manager/lib/typert.host.js',
+      'packages/boot/app-boot/lib/index.js',
+    ]) {
+      expect(existsSync(artifact(path)), `Built pending-package codec requires ${path}`).toBe(true)
+    }
     const urls = Object.fromEntries(Object.entries({
       agent: 'packages/core/agent/lib/index.js',
       apiGatewayClient: 'packages/api/gateway/lib/client.js',
@@ -39,6 +49,9 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
       connectionHost: 'packages/client/connection/lib/index.js',
       goal: 'packages/goal/goal/lib/index.js',
       goalTypert: 'packages/goal/goal/lib/typert.host.js',
+      pluginManager: 'packages/boot/plugin-manager/lib/index.js',
+      pluginManagerTypert: 'packages/boot/plugin-manager/lib/typert.host.js',
+      appBoot: 'packages/boot/app-boot/lib/index.js',
       registryClient: 'packages/typert/registry/lib/client.js',
       registryHost: 'packages/typert/registry/lib/index.js',
       remotesClient: 'packages/api/remotes/lib/client.js',
@@ -46,6 +59,7 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
       sessionProjections: 'packages/session/session-projection/lib/index.js',
     }).map(([key, path]) => [key, artifactUrl(path)]))
     const script = `
+      import assert from 'node:assert/strict'
       import { createServer } from 'node:http'
       import * as cordis from '@deepseek-ai/cordis'
       import * as zod from 'zod'
@@ -58,12 +72,21 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
       const { default: GoalService } = await import(urls.goal)
       const { default: SessionProjectionRegistry } = await import(urls.sessionProjections)
       const { TYPERT } = await import(urls.goalTypert)
+      const { default: PluginManager } = await import(urls.pluginManager)
+      const { TYPERT: pluginManagerTypes } = await import(urls.pluginManagerTypert)
+      const { parseProfilePendingChange } = await import(urls.appBoot)
       const { default: TypertRegistry } = await import(urls.registryHost)
       const { Session, SessionId } = await import(urls.session)
 
       const routes = []
       const credentialRecords = new Map()
       const host = new Context()
+      let client
+      let server
+      let result
+      let primaryFailed = false
+      const hostFetch = globalThis.fetch
+      try {
       host.provide('webServer', {
         register(route) {
           routes.push(route)
@@ -88,6 +111,103 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
       await host.plugin(SessionProjectionRegistry)
       await host.plugin(GoalService)
       host.typert.register(TYPERT)
+
+      const legacy = {
+        transactionId: '11111111-1111-4111-8111-111111111111',
+        state: 'prepared', packageName: '@fixture/legacy',
+        baseFingerprint: 'a'.repeat(64), health: 'passed',
+      }
+      const selection = {
+        schemaVersion: 2, kind: 'selection',
+        transactionId: '22222222-2222-4222-8222-222222222222',
+        state: 'prepared', packageNames: ['@fixture/alpha', '@fixture/beta'],
+        baseFingerprint: 'b'.repeat(64), health: 'pending',
+      }
+      let pendingRecord = legacy
+      let pendingRecords = [legacy]
+      let backendReads = 0
+      let mutationCalls = 0
+      // Only pending readers are exercised: no Loader, filesystem, package
+      // mutation, launcher activation, or native-consent execution is claimed.
+      host.provide('loader', {})
+      host.provide('profileContext', { stagedPackageTransactions: true })
+      host.provide('profilePackageTransactions', {
+        protocolVersion: 1,
+        async status() { backendReads++; return pendingRecord },
+        async listPending() { backendReads++; return pendingRecords },
+        async stage() { mutationCalls++; throw new Error('unexpected stage') },
+        async cancel() { mutationCalls++; throw new Error('unexpected cancel') },
+      })
+      await host.plugin(PluginManager)
+      host.typert.register(pluginManagerTypes)
+
+      const pendingSchema = method => {
+        const matches = pluginManagerTypes.invocations.filter(
+          descriptor => descriptor.namespace === 'pluginManager' && descriptor.method === method,
+        )
+        assert.equal(matches.length, 1, 'missing or duplicate built pending descriptor: ' + method)
+        assert.equal(matches[0].result.mode, 'strict', 'LIB must use the generated result codec')
+        return matches[0].result.create()
+      }
+      const statusSchema = pendingSchema('pendingPackageChange')
+      const listSchema = pendingSchema('listPendingPackageChanges')
+      for (const record of [legacy, selection, { ...selection, health: 'passed' }]) {
+        assert.deepEqual(parseProfilePendingChange(record), record)
+        assert.deepEqual(statusSchema.parse(record), record)
+        assert.deepEqual(listSchema.parse([record]), [record])
+      }
+      assert.deepEqual(listSchema.parse([legacy, selection]), [legacy, selection])
+      assert.equal(statusSchema.parse(undefined), undefined)
+      assert.deepEqual(listSchema.parse([]), [])
+
+      const malformed = [
+        { ...selection, schemaVersion: 1 },
+        { ...selection, kind: 'install' },
+        { ...selection, state: 'active' },
+        { ...selection, health: 'healthy' },
+        { ...selection, packageNames: '@fixture/alpha' },
+        { ...selection, packageNames: [1] },
+        { ...selection, baseFingerprint: 1 },
+        Object.fromEntries(Object.entries(selection).filter(([key]) => key !== 'kind')),
+      ]
+      for (const record of malformed) {
+        assert.equal(statusSchema.safeParse(record).success, false)
+        assert.equal(listSchema.safeParse([legacy, record]).success, false)
+        assert.throws(() => parseProfilePendingChange(record), /profile packages:/)
+      }
+      assert.equal(listSchema.safeParse({ records: [selection] }).success, false)
+      assert.equal(listSchema.safeParse([null]).success, false)
+
+      // Generated z.object schemas normalize unknown fields; they are NOT the
+      // exact-key business validator. Pin this distinction so a future refactor
+      // cannot "validate" a hybrid by stripping it before the strict parser.
+      const extraLegacy = { ...legacy, unexpected: true }
+      const extraSelection = { ...selection, unexpected: true }
+      const hybrid = { ...selection, packageName: legacy.packageName }
+      const partialHybrid = { ...legacy, kind: 'selection' }
+      assert.deepEqual(statusSchema.parse(extraLegacy), legacy)
+      assert.deepEqual(statusSchema.parse(extraSelection), selection)
+      assert.deepEqual(statusSchema.parse(partialHybrid), legacy)
+      const normalizedHybrid = statusSchema.parse(hybrid)
+      assert.ok(!('packageName' in normalizedHybrid && 'packageNames' in normalizedHybrid))
+      assert.deepEqual(parseProfilePendingChange(normalizedHybrid), normalizedHybrid)
+      assert.deepEqual(listSchema.parse([extraLegacy, extraSelection]), [legacy, selection])
+      const semanticInvalid = [
+        { ...selection, packageNames: [] },
+        { ...selection, packageNames: ['@fixture/beta', '@fixture/alpha'] },
+        { ...selection, packageNames: ['@fixture/alpha', '@fixture/alpha'] },
+        { ...selection, packageNames: ['Not-A-Package'] },
+        { ...selection, transactionId: 'invalid-id' },
+        { ...selection, baseFingerprint: 'invalid-hash' },
+      ]
+      for (const record of semanticInvalid) {
+        assert.equal(statusSchema.safeParse(record).success, true)
+        assert.equal(listSchema.safeParse([record]).success, true)
+      }
+      const businessInvalid = [...malformed, extraLegacy, extraSelection, hybrid, partialHybrid, ...semanticInvalid]
+      for (const record of businessInvalid) {
+        assert.throws(() => parseProfilePendingChange(record), /profile packages:/)
+      }
 
       const makeAgent = rawId => {
         const session = new Session(SessionId(rawId))
@@ -116,7 +236,7 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
       if (routes.length !== 1 || routes[0].path !== '/api') {
         throw new Error('Connection did not register exactly one /api route')
       }
-      const server = createServer((request, response) => {
+      server = createServer((request, response) => {
         if ((request.url ?? '/').startsWith('/?')) {
           if (host.connection.authorizeIndex(request, response)) {
             response.writeHead(200, { 'content-type': 'text/html' })
@@ -134,7 +254,6 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
       const setCookie = login.headers.get('set-cookie')
       if (login.status !== 303 || setCookie === null) throw new Error('browser token exchange failed')
       const cookie = setCookie.split(';', 1)[0]
-      const hostFetch = globalThis.fetch
       globalThis.fetch = (input, init = {}) => {
         const headers = new Headers(init.headers)
         headers.set('cookie', cookie)
@@ -162,7 +281,7 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
           throw new Error('unexpected Client external ' + specifier)
         })
       }
-      const client = new Context()
+      client = new Context()
       for (const id of [
         '@deepseek-ai/dsh-typert-registry',
         '@deepseek-ai/dsh-client-connection',
@@ -176,12 +295,49 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
         identity: candidate => candidate.builtAgentId,
       })
 
-      let invalidRejected = false
-      try {
-        await client.remote.goals.create(rootAgent.id, { objective: 1 })
-      } catch {
-        invalidRejected = true
+      let roundTrips = 0
+      for (const record of [legacy, selection, { ...selection, health: 'passed' }]) {
+        pendingRecord = record
+        pendingRecords = [record]
+        assert.deepEqual(await client.remote.pluginManager.pendingPackageChange(record.transactionId),
+          { ok: true, value: record })
+        assert.deepEqual(await client.remote.pluginManager.listPendingPackageChanges(),
+          { ok: true, value: [record] })
+        roundTrips += 2
       }
+      pendingRecords = [legacy, selection]
+      assert.deepEqual(await client.remote.pluginManager.listPendingPackageChanges(),
+        { ok: true, value: [legacy, selection] })
+      roundTrips++
+      pendingRecord = undefined
+      pendingRecords = []
+      const absent = await client.remote.pluginManager.pendingPackageChange(legacy.transactionId)
+      assert.equal(absent.ok, true)
+      assert.equal(absent.value, undefined)
+      assert.deepEqual(await client.remote.pluginManager.listPendingPackageChanges(), { ok: true, value: [] })
+      roundTrips += 2
+
+      let rejectedCalls = 0
+      for (const record of businessInvalid) {
+        pendingRecord = record
+        pendingRecords = [legacy, record]
+        // Keep the request id valid, including when the backend returns a bad
+        // identity. This must reach the real business parser, not fail input.
+        for (const response of [
+          await client.remote.pluginManager.pendingPackageChange(selection.transactionId),
+          await client.remote.pluginManager.listPendingPackageChanges(),
+        ]) {
+          assert.equal(response.ok, false, 'malformed backend record crossed the wire')
+          assert.equal(response.error.code, 'gateway/internal')
+          assert.match(response.error.message, /profile packages:/)
+          rejectedCalls++
+        }
+      }
+      assert.equal(backendReads, roundTrips + rejectedCalls)
+      assert.equal(mutationCalls, 0)
+      const pending = { roundTrips, rejectedCalls, structuralRejections: malformed.length, mutationCalls }
+
+      const invalidResult = await client.remote.goals.create(rootAgent.id, { objective: 1 })
       // Every generated method resolves to the RemoteResult envelope; the
       // business values below are what the assertions pin.
       const rootResult = await client.remote.goals.create(rootAgent.id, { objective: 'root goal' })
@@ -192,8 +348,9 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
       )
       const agentContext = client.extend({ builtAgentId: scopedAgent.id })
       const scopedResult = await agentContext.remote.goals.create({ objective: 'scoped goal', maxGoalRounds: 3 })
-      const result = {
-        invalidRejected,
+      result = {
+        pending,
+        invalidResult,
         rootResult: rootResult.value,
         rootEdit: rootEdit.value,
         scopedResult: scopedResult.value,
@@ -203,19 +360,38 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
         scopedEvents: scopedAgent.session.snapshotEvents().length,
       }
 
-      await client.fiber.dispose()
-      await new Promise((resolveClose, rejectClose) => server.close(error => {
-        if (error === undefined) resolveClose()
-        else rejectClose(error)
-      }))
-      await host.fiber.dispose()
+      } catch (error) {
+        primaryFailed = true
+        throw error
+      } finally {
+        // New negative assertions must not bypass teardown or replace their
+        // primary failure with a later cleanup error.
+        const cleanupErrors = []
+        try { await client?.fiber.dispose() } catch (error) { cleanupErrors.push(error) }
+        try {
+          if (server?.listening) {
+            await new Promise((resolveClose, rejectClose) => server.close(error => {
+              if (error === undefined) resolveClose()
+              else rejectClose(error)
+            }))
+          }
+        } catch (error) { cleanupErrors.push(error) }
+        try { await host.fiber.dispose() } catch (error) { cleanupErrors.push(error) }
+        globalThis.fetch = hostFetch
+        if (cleanupErrors.length > 0) {
+          const failure = new AggregateError(cleanupErrors, 'built Remote cleanup failed')
+          if (!primaryFailed) throw failure
+          console.error(failure)
+        }
+      }
       console.log(JSON.stringify(result))
     `
 
     const result = await runPlainNode(script)
     expect(result.exitCode, `stderr:\n${result.stderr}`).toBe(0)
     const output = JSON.parse(result.stdout.trim().split('\n').at(-1) ?? '{}') as {
-      invalidRejected: boolean
+      pending: { roundTrips: number; rejectedCalls: number; structuralRejections: number; mutationCalls: number }
+      invalidResult: { ok: boolean; error?: { code: string } }
       rootResult: { ref: { id: string; revision: number } }
       rootEdit: { objective: string; revision: number }
       scopedResult: { ref: { id: string; revision: number } }
@@ -225,7 +401,8 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
       scopedEvents: number
     }
     expect(output).toMatchObject({
-      invalidRejected: true,
+      pending: { roundTrips: 9, rejectedCalls: 36, structuralRejections: 8, mutationCalls: 0 },
+      invalidResult: { ok: false, error: { code: 'gateway/input-invalid' } },
       rootResult: { ref: { revision: 1 } },
       rootEdit: { objective: 'edited root goal', revision: 2 },
       scopedResult: { ref: { revision: 1 } },

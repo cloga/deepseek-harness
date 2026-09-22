@@ -22,11 +22,11 @@ describe('Client Cordis inspect catalog', () => {
       ])
     expect(SERVICE_API.find(service => service.key === 'uiWorkspace')?.methods.map(method => method.signature))
       .toEqual([
-        'openSession(sessionId: SessionId): void',
+        'openSession(target: SessionTarget): void',
         'openWorkspace(workspaceId: WorkspaceId, beforeOpen?: (sessionId: SessionId) => void): Promise<void>',
         'forkSession(sessionId: SessionId): Promise<void>',
         'connectWorkspace(workspaceId: WorkspaceId): Promise<SessionId>',
-        'startSession(workspaceId?: WorkspaceId): void',
+        'startSession(workspaceId?: WorkspaceId, options?: { readonly agentPreset?: string }): Promise<SessionId | undefined>',
         'archiveSession(sessionId: SessionId): Promise<void>',
         'unarchiveSession(sessionId: SessionId): Promise<void>',
         'pickDirectory(): Promise<string | null>',

@@ -22,6 +22,9 @@ interface Receipt {
   preferences: { sandbox: boolean; contextIsolation: boolean; nodeIntegration: boolean }
   initialDocument: DocumentObservation
   ownedDocument: DocumentObservation
+  httpInitialDocument: DocumentObservation
+  httpOwnedDocument: DocumentObservation
+  httpDocuments: string[]
   cases: {
     name: string
     externalUrls: string[]
@@ -33,7 +36,6 @@ interface Receipt {
   createdWindows: number
   blockedRequests: string[]
   openFailures: number
-  recoveries: string[]
   remainingWindows: number
   error?: string
 }
@@ -175,6 +177,7 @@ it.skipIf(process.platform !== 'win32')('dispatches real Electron navigation thr
     ]
     expect(receipt.cases.map(result => result.name)).toEqual([
       ...externalCases.map(([name]) => name), 'popup-about', 'popup-data', 'blocked-self',
+      'http-cross-origin', 'http-owned',
     ])
     for (const [name, url] of externalCases) {
       const result = receipt.cases.find(result => result.name === name)!
@@ -182,7 +185,9 @@ it.skipIf(process.platform !== 'win32')('dispatches real Electron navigation thr
       expect(result.navigationEvents).toEqual(name!.startsWith('oauth-') ? [{ url, prevented: true }] : [])
     }
     for (const result of receipt.cases) {
-      expect(result.document, `${result.name}: preserve the app document`).toEqual(receipt.initialDocument)
+      const expectedDocument = result.name === 'http-owned' ? receipt.httpOwnedDocument
+        : result.name === 'http-cross-origin' ? receipt.httpInitialDocument : receipt.initialDocument
+      expect(result.document, `${result.name}: retain or navigate the owned app document`).toEqual(expectedDocument)
       expect(result.windowCount).toBe(1)
       if (result.name.startsWith('window-open-') || result.name.startsWith('popup-')) {
         expect(result.rendererResult, `${result.name}: Chromium must receive a denied popup`).toBe(true)
@@ -195,10 +200,28 @@ it.skipIf(process.platform !== 'win32')('dispatches real Electron navigation thr
     expect(receipt.ownedDocument).toEqual({
       url: 'dsh-app://navigation-test/next.html', documentId: '2', nodeAvailable: false,
     })
+    expect(receipt.httpInitialDocument).toEqual({
+      url: 'http://navigation-test.invalid/index.html', documentId: '3', nodeAvailable: false,
+    })
+    expect(receipt.httpOwnedDocument).toEqual({
+      url: 'http://navigation-test.invalid/next.html', documentId: '4', nodeAvailable: false,
+    })
+    expect(receipt.httpDocuments, 'Only the two allowlisted HTTP documents are served in-process').toEqual([
+      'http://navigation-test.invalid/index.html', 'http://navigation-test.invalid/next.html',
+    ])
+    expect(receipt.cases.find(result => result.name === 'http-cross-origin')).toMatchObject({
+      externalUrls: ['http://example.invalid/cross-origin'],
+      navigationEvents: [{ url: 'http://example.invalid/cross-origin', prevented: true }],
+      document: receipt.httpInitialDocument,
+    })
+    expect(receipt.cases.find(result => result.name === 'http-owned')).toMatchObject({
+      externalUrls: [],
+      navigationEvents: [{ url: 'http://navigation-test.invalid/next.html', prevented: false }],
+      document: receipt.httpOwnedDocument,
+    })
     expect(receipt.createdWindows).toBe(0)
-    expect(receipt.blockedRequests, 'No network request should reach even the fixture safety net').toEqual([])
+    expect(receipt.blockedRequests, 'No rejected navigation should reach even the fixture safety net').toEqual([])
     expect(receipt.openFailures).toBe(0)
-    expect(receipt.recoveries).toEqual([])
     expect(receipt.remainingWindows).toBe(0)
   } finally {
     await cleanup()

@@ -1,0 +1,164 @@
+name: Alpha2 native source diagnostic (internal evidence only)
+
+on:
+  push:
+    branches: [cloga-official-first-016a2]
+  workflow_dispatch:
+    inputs:
+      expected_source:
+        description: Exact reviewed task-branch commit (40 lowercase hexadecimal characters)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Diagnostic only: not product qualification or an additional release gate.
+# No concurrency cancellation, application launch, build, packaging or publication.
+jobs:
+  diagnose:
+    if: github.repository == 'cloga/deepseek-harness' && github.ref == 'refs/heads/cloga-official-first-016a2'
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DSH_TELEMETRY_DISABLED: '1'
+      EXPECTED_SOURCE: ${{ github.event_name == 'push' && github.sha || inputs.expected_source }}
+      DIAGNOSTIC_NAME: alpha2-native-source-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          clean: true
+
+      - name: Guard exact reviewed source before dependency setup
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_EVENT_NAME -cnotin @('push', 'workflow_dispatch')) { throw 'Unsupported diagnostic event' }
+          if ($env:EXPECTED_SOURCE -cnotmatch '\A[a-f0-9]{40}\z') { throw 'Invalid expected source' }
+          if ($env:GITHUB_SHA -cne $env:EXPECTED_SOURCE) { throw 'Dispatch source differs from workflow source' }
+          if ($env:GITHUB_REF -cne 'refs/heads/cloga-official-first-016a2') { throw 'Not the reviewed task branch' }
+          if ($env:GITHUB_REPOSITORY -cne 'cloga/deepseek-harness') { throw 'Wrong repository' }
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows') { throw 'Hosted Windows required' }
+          foreach ($id in @($env:GITHUB_RUN_ID, $env:GITHUB_RUN_ATTEMPT)) {
+            if ($id -cnotmatch '\A[1-9][0-9]{0,19}\z') { throw 'Invalid run identity' }
+          }
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:EXPECTED_SOURCE) { throw 'Checkout source mismatch' }
+          $dirty = git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0 -or $dirty) { throw 'Fresh clean checkout required' }
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.7.0'
+          dest: ${{ runner.temp }}/alpha2-native-source-pnpm
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.13.0'
+          package-manager-cache: false
+
+      - name: Verify inert diagnostic workflow guards
+        run: |
+          node --test scripts/alpha2-native-source-diagnostic.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Bind original source and tool identities
+        env:
+          DIAGNOSTIC_ROOT: ${{ runner.temp }}/${{ env.DIAGNOSTIC_NAME }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nodeVersion = node --version
+          if ($LASTEXITCODE -ne 0 -or $nodeVersion -cne 'v24.13.0') { throw 'Unexpected Node version' }
+          $pnpmVersion = pnpm --version
+          if ($LASTEXITCODE -ne 0 -or $pnpmVersion -cne '11.7.0') { throw 'Unexpected pnpm version' }
+          $availableParallelism = node -p "require('node:os').availableParallelism()"
+          if ($LASTEXITCODE -ne 0 -or $availableParallelism -cnotmatch '\A[1-9][0-9]{0,8}\z') { throw 'Invalid available parallelism' }
+          $tree = git rev-parse 'HEAD^{tree}'
+          if ($LASTEXITCODE -ne 0 -or $tree -cnotmatch '\A[a-f0-9]{40}\z') { throw 'Invalid source tree' }
+          New-Item -ItemType Directory -Path $env:DIAGNOSTIC_ROOT -ErrorAction Stop | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $env:DIAGNOSTIC_ROOT 'artifact') -ErrorAction Stop | Out-Null
+          $files = @('pnpm-lock.yaml', '.github/workflows/alpha2-native-source-diagnostic.yml',
+            'scripts/alpha2-native-source-diagnostic.test.mjs', 'apps/desktop/tests/windows-installed-upgrade.test.mjs',
+            'apps/desktop/tests/windows-packaged-package-acceptance.test.mjs', 'apps/desktop/tests/windows-desktop-ui.ps1')
+          $hashes = @($files | ForEach-Object { @{ path = $_; sha256 = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant() } })
+          [ordered]@{ schemaVersion = 1; purpose = 'source-diagnostic-only'; productQualification = $false;
+            sourceCommit = $env:EXPECTED_SOURCE; sourceTree = $tree; repository = $env:GITHUB_REPOSITORY;
+            sourceRef = $env:GITHUB_REF; event = $env:GITHUB_EVENT_NAME; runId = $env:GITHUB_RUN_ID;
+            runAttempt = $env:GITHUB_RUN_ATTEMPT; nodeVersion = $nodeVersion; pnpmVersion = $pnpmVersion;
+            powerShellVersion = $PSVersionTable.PSVersion.ToString(); runnerOS = $env:RUNNER_OS;
+            availableParallelism = [int]$availableParallelism; effectiveFileConcurrency = 1; testIsolation = 'process';
+            runnerEnvironment = $env:RUNNER_ENVIRONMENT; files = $hashes } |
+            ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $env:DIAGNOSTIC_ROOT 'artifact/identity.json') -Encoding utf8
+
+      - name: Install normal frozen dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Diagnose existing early native source guards
+        id: probe
+        env:
+          DIAGNOSTIC_ROOT: ${{ runner.temp }}/${{ env.DIAGNOSTIC_NAME }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $artifact = Join-Path $env:DIAGNOSTIC_ROOT 'artifact'
+          $identityPath = Join-Path $artifact 'identity.json'
+          $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+          foreach ($file in $identity.files) {
+            if ((Get-FileHash -LiteralPath $file.path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) {
+              throw 'Source bytes changed during frozen installation'
+            }
+          }
+          $rawLog = Join-Path $env:DIAGNOSTIC_ROOT 'original-node-output.log'
+          $started = [DateTime]::UtcNow.ToString('O')
+          $testExitCode = -1
+          $phase = 'invocation-failed'
+          $captureFailed = $false
+          try {
+            node --test --test-concurrency=1 apps/desktop/tests/windows-installed-upgrade.test.mjs apps/desktop/tests/windows-packaged-package-acceptance.test.mjs *> $rawLog
+            $testExitCode = $LASTEXITCODE
+            $phase = if ($testExitCode -eq 0) { 'tests-passed' } else { 'tests-failed' }
+          } finally {
+            try {
+              $logBytes = if (Test-Path -LiteralPath $rawLog) { (Get-Item -LiteralPath $rawLog).Length } else { 0 }
+              $logSha256 = if (Test-Path -LiteralPath $rawLog) { (Get-FileHash -LiteralPath $rawLog -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
+              $logStatus = 'absent'
+              if (Test-Path -LiteralPath $rawLog) {
+                if ($logBytes -le 4194304) {
+                  Copy-Item -LiteralPath $rawLog -Destination (Join-Path $artifact 'node-output.log') -ErrorAction Stop
+                  $logStatus = 'complete-original-capture'
+                } else { $logStatus = 'over-limit-retained-runner-only'; $captureFailed = $true }
+              } else { $captureFailed = $true }
+              [ordered]@{ schemaVersion = 1; purpose = 'source-diagnostic-only'; productQualification = $false;
+                identitySha256 = (Get-FileHash -LiteralPath $identityPath -Algorithm SHA256).Hash.ToLowerInvariant();
+                sourceCommit = $env:EXPECTED_SOURCE; runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT;
+                phase = $phase; testExitCode = $testExitCode; startedAt = $started; completedAt = [DateTime]::UtcNow.ToString('O');
+                log = @{ status = $logStatus; bytes = $logBytes; sha256 = $logSha256; maximumBytes = 4194304 } } |
+                ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $artifact 'outcome.json') -Encoding utf8
+              'evidence_ready=true' >> $env:GITHUB_OUTPUT
+            } catch {
+              $captureFailed = $true
+              Write-Warning 'Diagnostic evidence capture failed; original test failure retains precedence'
+            }
+          }
+          if ($testExitCode -ne 0) { exit $testExitCode }
+          if ($captureFailed) { exit 1 }
+
+      # The only post-failure step: exact owned evidence, never a private home or whole checkout.
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.probe.outputs.evidence_ready == 'true' }}
+        with:
+          name: alpha2-native-source-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/${{ env.DIAGNOSTIC_NAME }}/artifact/identity.json
+            ${{ runner.temp }}/${{ env.DIAGNOSTIC_NAME }}/artifact/outcome.json
+            ${{ runner.temp }}/${{ env.DIAGNOSTIC_NAME }}/artifact/node-output.log
+          if-no-files-found: error
+          retention-days: 7

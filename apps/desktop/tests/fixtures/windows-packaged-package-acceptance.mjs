@@ -1,0 +1,987 @@
+/** Real installed Desktop package UI acceptance, exclusively on disposable hosted Windows runners. */
+import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { createHash, randomUUID } from 'node:crypto'
+import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs'
+import { dirname, join, relative, resolve, sep } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
+import { fileURLToPath } from 'node:url'
+import { parseArgs } from 'node:util'
+import { assertUpgradeRunner, installedUpgradeApplication, ownedUpgradePath, upgradeFileHash } from './windows-installed-upgrade-contract.mjs'
+import { inspectInstalledDesktopIdentity, installedDesktopProcessIds, installedLauncherExited, readInstalledDesktopRuntimeDescriptor } from './windows-installed-runtime.mjs'
+
+const repository = fileURLToPath(new URL('../../../../', import.meta.url))
+const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u
+const fixtureName = '@fixture/bundle'
+const fixtureFiles = ['package.json', 'index.js', 'cordis.patch.yml']
+const dialogUrl = 'dsh-app://shell/update-dialog.html'
+const plannedCopilot = 'dsh-github-copilot'
+const diagnosticFiles = ['package.json', 'desktop-plugin-provisioning-state.json', 'desktop-plugin-receipts.json',
+  'desktop-plugin-package-locks.json', 'desktop-plugin-user-intents.json']
+const readJson = path => JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/u, ''))
+const hash = bytes => createHash('sha256').update(bytes).digest('hex')
+const save = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + '\n', { flag: 'wx' })
+const safeError = error => String(error).replace(/(https?:\/\/[^?\s"'<>]+)\?[^\s"'<>]*/gu, '$1?[redacted]')
+
+/** Allocate only the private home and Desktop required by the native workspace picker.
+ * @param {string} root - Existing, validated qualification root owned by this run.
+ * @returns {string} Newly created home; the outer fixture owns its eventual cleanup.
+ */
+export function preparePackageAcceptanceHome(root) {
+  const home = ownedUpgradePath(root, join(root, 'package-home'))
+  assert.equal(existsSync(home), false, 'Package acceptance requires a new isolated home')
+  mkdirSync(home)
+  const desktop = ownedUpgradePath(root, join(home, 'Desktop'))
+  assert.equal(existsSync(desktop), false, 'Private Desktop must be newly created')
+  mkdirSync(desktop)
+  return home
+}
+
+function record(value) { return value !== null && typeof value === 'object' && !Array.isArray(value) }
+function boundedDiagnosticJson(profile, name) {
+  const path = join(profile, name)
+  const stat = lstatSync(path, { throwIfNoEntry: false })
+  if (stat === undefined) return { file: { exists: false }, value: undefined }
+  assert(stat.isFile() && !stat.isSymbolicLink() && stat.size <= 8 * 1024 * 1024, `Unsafe baseline diagnostic file: ${name}`)
+  const bytes = readFileSync(path)
+  assert.equal(bytes.length, stat.size, `Baseline diagnostic file changed while reading: ${name}`)
+  let value
+  try { value = JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/u, '')) }
+  catch { throw new Error(`Invalid baseline diagnostic JSON: ${name}`) }
+  return { file: { exists: true, bytes: bytes.length, sha256: hash(bytes) }, value }
+}
+function boundedStringHash(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128 && !/[\u0000-\u001f\u007f]/u.test(value)
+    ? hash(value) : undefined
+}
+function safeSource(value, packageName) {
+  if (!record(value) || value.packageName !== packageName) return undefined
+  const versionSha256 = boundedStringHash(value.version)
+  const tagSha256 = boundedStringHash(value.tag)
+  return { packageName, versionPresent: value.version !== undefined,
+    ...(versionSha256 === undefined ? {} : { versionSha256 }),
+    ...(typeof value.targetCommit === 'string' && /^[a-f0-9]{40}$/u.test(value.targetCommit) ? { targetCommit: value.targetCommit } : {}),
+    ...(tagSha256 === undefined ? {} : { tagSha256 }) }
+}
+
+/**
+ * Capture only bounded physical evidence explaining why a fresh required baseline is absent.
+ * Raw bytes are represented only by length/hash; credentials, URLs, error messages and whole records never leave the owned profile.
+ */
+export function packageBaselineDiagnostic(home, profile, packageName = plannedCopilot) {
+  assert.match(packageName, /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/u)
+  const homeStat = lstatSync(home, { throwIfNoEntry: false })
+  assert(homeStat?.isDirectory() && !homeStat.isSymbolicLink()
+    && realpathSync.native(home).toLowerCase() === resolve(home).toLowerCase(), 'Baseline diagnostic requires a physical home')
+  assert.equal(profile, ownedUpgradePath(home, join(home, 'profiles', 'desktop')), 'Unexpected baseline diagnostic profile')
+  const profileStat = lstatSync(profile, { throwIfNoEntry: false })
+  assert(profileStat?.isDirectory() && !profileStat.isSymbolicLink(), 'Baseline diagnostic requires a physical profile')
+  const documents = Object.fromEntries(diagnosticFiles.map((name) => [name, boundedDiagnosticJson(profile, name)]))
+  const manifest = documents['package.json'].value
+  assert(record(manifest) && record(manifest.dsh) && record(manifest.dsh.profile)
+    && Array.isArray(manifest.dsh.profile.bundles) && (manifest.dependencies === undefined || record(manifest.dependencies)),
+  'Malformed package baseline manifest')
+  const dependency = manifest.dependencies?.[packageName]
+  const state = documents['desktop-plugin-provisioning-state.json'].value
+  let provisioning
+  if (state !== undefined) {
+    assert(record(state) && state.schemaVersion === 1 && Array.isArray(state.plugins), 'Malformed package baseline provisioning state')
+    const item = state.plugins.find(entry => record(entry) && entry.name === packageName)
+    if (item !== undefined) {
+      assert(record(item) && typeof item.version === 'string' && item.version.length <= 128
+        && !/[\u0000-\u001f\u007f]/u.test(item.version) && typeof item.required === 'boolean'
+        && (item.status === 'active' || item.status === 'optional-failed'), 'Malformed planned provisioning result')
+      provisioning = { versionSha256: hash(item.version), required: item.required, status: item.status,
+        ...(typeof item.phase === 'string' && ['download', 'validation', 'install', 'graph', 'health'].includes(item.phase)
+          ? { phase: item.phase } : {}), source: safeSource(item.source, packageName) }
+    }
+  }
+  const receipts = documents['desktop-plugin-receipts.json'].value
+  let receipt
+  if (receipts !== undefined) {
+    assert(record(receipts) && receipts.schemaVersion === 1 && record(receipts.receipts)
+      && (receipts.owners === undefined || record(receipts.owners)), 'Malformed package baseline receipt store')
+    const value = receipts.receipts[packageName]
+    const owner = receipts.owners?.[packageName]
+    assert(owner === undefined || owner === 'user' || owner === 'release', 'Malformed planned receipt owner')
+    receipt = { present: value !== undefined, owner,
+      ...(record(value) && typeof value.artifactSha256 === 'string' && /^[a-f0-9]{64}$/u.test(value.artifactSha256)
+        ? { artifactSha256: value.artifactSha256, source: safeSource(value.source, packageName) } : {}) }
+  }
+  const locks = documents['desktop-plugin-package-locks.json'].value
+  let packageLock
+  if (locks !== undefined) {
+    assert(record(locks) && locks.schemaVersion === 1 && record(locks.packages), 'Malformed package baseline lock store')
+    const value = locks.packages[packageName]
+    packageLock = { present: value !== undefined,
+      ...(record(value) && typeof value.version === 'string' && value.version.length <= 128
+        && !/[\u0000-\u001f\u007f]/u.test(value.version) && typeof value.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(value.sha256)
+        ? { versionSha256: hash(value.version), sha256: value.sha256,
+          ...(typeof value.commit === 'string' && /^[a-f0-9]{40}$/u.test(value.commit) ? { commit: value.commit } : {}) } : {}) }
+  }
+  const intents = documents['desktop-plugin-user-intents.json'].value
+  let removalIntent
+  if (intents !== undefined) {
+    assert(record(intents) && intents.schemaVersion === 1 && record(intents.removed), 'Malformed package baseline user intents')
+    const value = intents.removed[packageName]
+    removalIntent = { present: value !== undefined,
+      ...(record(value) && typeof value.observedPlanSha256 === 'string' && /^[a-f0-9]{64}$/u.test(value.observedPlanSha256)
+        ? { observedPlanSha256: value.observedPlanSha256 } : {}) }
+  }
+  const pending = readdirSync(dirname(profile)).filter(name => name.startsWith('.desktop.package-stage-')).sort()
+  assert(pending.length <= 32, 'Too many pending package transactions for bounded diagnostics')
+  for (const name of pending) assert(uuid.test(name.slice('.desktop.package-stage-'.length)), 'Malformed pending transaction name')
+  return { schemaVersion: 1, scope: 'fresh-package-baseline-diagnostic', packageName,
+    profilePhysical: true, files: Object.fromEntries(diagnosticFiles.map(name => [name, documents[name].file])),
+    manifest: { dependencyPresent: dependency !== undefined,
+      dependencyKind: typeof dependency === 'string' && dependency.startsWith('file:.desktop-plugin-artifacts/') ? 'verified-artifact' : dependency === undefined ? 'absent' : 'other',
+      selected: manifest.dsh.profile.bundles.includes(packageName) },
+    provisioning, receipt, packageLock, removalIntent, pendingTransactions: pending }
+}
+
+/** Read the product's public baseline presentation without serializing a live API object. */
+export async function packageBaselinePresentation(page, milliseconds = 10_000) {
+  assert(Number.isSafeInteger(milliseconds) && milliseconds > 0 && milliseconds <= 10_000, 'Invalid baseline diagnostic deadline')
+  const operation = page.evaluate(async () => {
+    const api = globalThis.dshDesktop
+    if (api === undefined || api.protocolVersion !== 1 || typeof api.updates?.status !== 'function') {
+      throw new Error('Desktop update presentation API is unavailable')
+    }
+    const status = await api.updates.status()
+    if (status === null || typeof status !== 'object' || Array.isArray(status)
+      || !['idle', 'checking', 'available', 'downloading', 'verifying', 'installing', 'ready', 'error'].includes(status.phase)) {
+      throw new Error('Invalid Desktop update status')
+    }
+    const baseline = status.baseline
+    return { phase: status.phase,
+      baseline: baseline === undefined ? null : { status: baseline.status, packageName: baseline.packageName } }
+  })
+  let timer
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => { reject(new Error('Desktop baseline diagnostic deadline')) }, milliseconds) })
+  let value
+  try { value = await Promise.race([operation, timeout]) }
+  finally { clearTimeout(timer) }
+  assert(record(value) && Object.keys(value).sort().join(',') === 'baseline,phase'
+    && ['idle', 'checking', 'available', 'downloading', 'verifying', 'installing', 'ready', 'error'].includes(value.phase),
+  'Invalid Desktop baseline presentation')
+  if (value.baseline !== null) {
+    assert(record(value.baseline) && Object.keys(value.baseline).sort().join(',') === 'packageName,status'
+      && (value.baseline.status === 'pending' || value.baseline.status === 'preserved-user-choice')
+      && typeof value.baseline.packageName === 'string' && value.baseline.packageName.length <= 214
+      && /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/u.test(value.baseline.packageName),
+    'Invalid Desktop baseline presentation')
+  }
+  return value
+}
+
+/** Record only public counts from the initial Models view; absence remains an observation, never success. */
+export async function initialCopilotUiDiagnostic(settings) {
+  const root = settings.locator('[data-dsh-github-copilot-compact-account]')
+  return { schemaVersion: 1, baselineRequired: true, settingsDialogs: await settings.count(),
+    copilotAccountRoots: await root.count(),
+    copilotSignInButtons: await root.getByRole('button', { name: 'Sign in with GitHub', exact: true }).count() }
+}
+
+/** Own only the public first-run credential choice while initial keyless setup completes.
+ * @param {object} page - Owned initial application page; its existing action timeout remains authoritative.
+ * @param {Function} action - Settings/bootstrap actions ending in positive provider readiness.
+ * @param {object[]} secondaryErrors - Owned failure observations; cleanup cannot replace the primary rejection.
+ * @returns {Promise<unknown>} The action result after the exact handler is removed.
+ */
+export async function withInitialKeylessOnboarding(page, action, secondaryErrors) {
+  const dialog = page.getByRole('dialog', { name: 'Add an API key to get started', exact: true })
+  let failed = false
+  let failure
+  let result
+  let handled = false
+  try {
+    await page.addLocatorHandler(dialog, async () => {
+      assert.equal(handled, false, 'Initial provider choice must occur at most once')
+      handled = true
+      await dialog.getByRole('button', { name: 'Configure later', exact: true }).click()
+      await dialog.waitFor({ state: 'detached' })
+    }, { times: 1 })
+    result = await action()
+  } catch (error) {
+    failed = true
+    failure = error
+  } finally {
+    // Removal is attempted even if registration rejected after a partial transport operation.
+    // The outer owner still closes the page if the transport cannot acknowledge removal.
+    try { await page.removeLocatorHandler(dialog) }
+    catch (error) {
+      if (!failed) { failed = true; failure = error }
+      else secondaryErrors.push({ stage: 'initial-onboarding-handler-removal', error: safeError(error) })
+    }
+  }
+  if (failed) throw failure
+  return result
+}
+
+/** Validate the user-written keyless loopback profile, not a derived display row or a fake credential.
+ * @param {object} settings - Parsed private settings document written by the actual Models UI.
+ * @param {string} baseURL - The owned empty-response mock provider's exact address.
+ */
+export function assertKeylessPackageProvider(settings, baseURL) {
+  assert.ok(settings !== null && typeof settings === 'object' && !Array.isArray(settings))
+  assert.deepEqual(settings['llm-pi-ai']?.providers?.['desktop-acceptance'], {
+    displayName: 'Desktop acceptance (local test)', api: 'openai-completions', baseURL,
+    models: [{ id: 'acceptance-local' }],
+  }, 'The actual UI must persist only the reviewed keyless loopback provider')
+}
+
+/** Select the fixture's legitimate local model and observe the settled public selection twice.
+ * @param {object} page - Owned application page with the real provider catalog.
+ * @returns {Promise<void>} Resolves only after current selection and checked model agree and the menu closes.
+ */
+export async function selectPackageAcceptanceModel(page) {
+  const trigger = page.getByRole('button', { name: /^Select model, current/ })
+  const menu = page.getByRole('menu', { name: 'Model and reasoning effort', exact: true })
+  const option = () => menu.getByRole('group', { name: 'Desktop acceptance (local test)', exact: true })
+    .getByRole('menuitemradio', { name: 'acceptance-local', exact: true })
+  await trigger.click()
+  await menu.getByRole('menuitem', { name: /^Model\b/ }).click()
+  await option().click()
+  await menu.waitFor({ state: 'hidden' })
+  const selected = page.getByRole('button', { name: 'Select model, current acceptance-local', exact: true })
+  await selected.waitFor({ state: 'visible' })
+  await selected.click()
+  await menu.getByRole('menuitem', { name: /^Model\b/ }).click()
+  assert.equal(await option().getAttribute('aria-checked'), 'true', 'The local model selection did not settle')
+  await selected.click()
+  await menu.waitFor({ state: 'hidden' })
+}
+
+/** Observe one Electron page through its business lifetime, including same-page Host replacement.
+ * @param {object} page - Owned page whose deliberate close is outside the observation interval.
+ * @returns {object} Read-only snapshots and an idempotent seal which disables collection before removing its listener.
+ */
+export function observePackagePageErrors(page) {
+  const errors = []
+  let active = true
+  let sealed
+  const onError = error => {
+    if (!active) return
+    try { errors.push(safeError(error)) }
+    catch { errors.push('Unprintable product page error') }
+  }
+  const seal = () => {
+    if (sealed !== undefined) return sealed
+    active = false
+    sealed = Object.freeze([...errors])
+    page.off('pageerror', onError)
+    return sealed
+  }
+  try { page.on('pageerror', onError) }
+  catch (error) {
+    active = false
+    // A partially registered listener cannot collect after admission failed;
+    // the existing outer page owner still closes its transport.
+    throw error
+  }
+  return Object.freeze({ snapshot: () => sealed ?? Object.freeze([...errors]), seal })
+}
+
+/** Hash files and link spellings without following package junctions. This reader never repairs a graph.
+ * @param {string} root - Real profile or private candidate directory.
+ * @returns {{fingerprint: string, entries: object[]}} Bounded ordered inventory and its exact digest.
+ */
+export function packageGraphSnapshot(root) {
+  assert.ok(lstatSync(root).isDirectory() && !lstatSync(root).isSymbolicLink(), 'Graph root must be an owned real directory')
+  const entries = []
+  let bytes = 0
+  const visit = directory => {
+    for (const name of readdirSync(directory).sort()) {
+      const path = join(directory, name)
+      const key = relative(root, path).split(sep).join('/')
+      const stat = lstatSync(path)
+      assert.ok(entries.length < 100_000, 'Graph inventory exceeds its entry bound')
+      if (stat.isSymbolicLink()) entries.push({ path: key, kind: 'link', target: readlinkSync(path) })
+      else if (stat.isDirectory()) { entries.push({ path: key, kind: 'directory' }); visit(path) }
+      else {
+        assert.ok(stat.isFile(), 'Graph contains a special file')
+        bytes += stat.size
+        assert.ok(bytes <= 512 * 1024 * 1024, 'Graph inventory exceeds its byte bound')
+        entries.push({ path: key, kind: 'file', sha256: hash(readFileSync(path)) })
+      }
+    }
+  }
+  visit(root)
+  return { fingerprint: hash(JSON.stringify(entries)), entries }
+}
+
+/** Require one UUID in the official pending notice, not an unrelated toast.
+ * @param {string} text - Actual pending notice rendered by Plugin Manager.
+ * @returns {string} Exactly one lowercase transaction UUID.
+ */
+export function preparedTransactionId(text) {
+  const ids = [...text.matchAll(/Transaction ([a-f0-9-]{36}) is staged privately\./gu)].map(match => match[1])
+  assert.equal(ids.length, 1, 'Expected exactly one official prepared transaction notice')
+  assert.match(ids[0], uuid)
+  return ids[0]
+}
+
+/** Same numerical PID is not sufficient to identify a process incarnation.
+ * @param {object | undefined} left - Earlier owned process observation.
+ * @param {object | undefined} right - Later owned process observation.
+ * @returns {boolean} Whether PID, parent, executable and exact start time match.
+ */
+export function sameProcess(left, right) {
+  return left !== undefined && right !== undefined && left.pid === right.pid && left.parentPid === right.parentPid && left.created === right.created
+    && typeof left.executable === 'string' && left.executable.toLowerCase() === right.executable?.toLowerCase()
+}
+
+/** Keep graph promotion and enabled target health separate, and never synthesize unexercised acceptance claims.
+ * @param {string} sourceCommit - Reviewed candidate source identity.
+ * @returns {object} An entirely unverified report; assertions advance individual flags.
+ */
+export function initialPackageAcceptance(sourceCommit) {
+  return {
+    schemaVersion: 1, sourceCommit, scope: 'candidate-installed-desktop-same-version-isolated-home',
+    succeeded: false, preparedGraphVerified: false, declinePreservedGraphVerified: false, discardPreservedGraphVerified: false,
+    liveDraftAttachmentVetoVerified: false, attachmentOnlyVetoVerified: false, draftOnlyVetoVerified: false,
+    consentGraphPromotionVerified: false, newHostGenerationVerified: false, installedDisabledAfterConsentVerified: false,
+    enabledFixtureRunningAfterSeparateRestartVerified: false,
+    copilotDisabledChoiceAcrossRestartVerified: false, copilotRemovalChoiceAcrossRestartVerified: false,
+    zeroModelRequestsVerified: false, cleanupVerified: false,
+    newlyInstalledTargetHealthyAtFirstConsent: false, verifiedGithubReleaseReceiptForFixture: false,
+    choicesAcrossInstallerUpgradeVerified: false, draftPersistedAcrossQuitVerified: false,
+    promotionFailureRollbackVerified: false, managedHandoffVerified: false,
+  }
+}
+
+/** Require qualified ownership and observed exit for every attempted launch, including rejected launches.
+ * @param {object[]} launches - Records allocated before each Electron launch request.
+ * @param {number} activeHelpers - Native helpers whose close event has not arrived.
+ * @param {string[]} cleanupErrors - Failures encountered while reaching quiescence.
+ * @returns {boolean} Whether cleanup is positively established, never vacuously true after an unclaimed launch.
+ */
+export function packageCleanupVerified(launches, activeHelpers, cleanupErrors) {
+  return launches.length > 0 && launches.every(launch => launch.launchReturned === true && launch.bound === true && launch.exited === true
+    && launch.launcherExited === true && Number.isSafeInteger(launch.pid) && launch.pid > 0 && Number.isSafeInteger(launch.launcherPid) && launch.launcherPid > 0)
+    && activeHelpers === 0 && cleanupErrors.length === 0
+}
+
+/** Preserve the first failure while recording a later cleanup or evidence failure separately.
+ * @param {unknown} primary - First failure, or undefined before any failure.
+ * @param {unknown} error - Later failure.
+ * @param {string} stage - Bounded fixture-owned operation label.
+ * @param {object[]} secondary - Mutable fixture-owned diagnostic list.
+ * @param {boolean} primaryPresent - Explicit presence when undefined itself was thrown.
+ * @returns {unknown} The original primary, or the new error if no primary existed.
+ */
+export function retainPrimaryFailure(primary, error, stage, secondary, primaryPresent = primary !== undefined) {
+  secondary.push({ stage, error: safeError(error) })
+  return primaryPresent ? primary : error
+}
+
+/** Only the unchanged, explicitly private inert Web fixture may be archived by this lane.
+ * @param {object} manifest - Existing fixture package metadata; never a replacement official package.
+ */
+export function validatePackageFixture(manifest) {
+  assert.equal(manifest.name, fixtureName)
+  assert.equal(manifest.version, '0.0.1')
+  assert.equal(manifest.private, true)
+  assert.equal(manifest.type, 'module')
+  assert.equal(manifest.dsh?.bundle?.patch, './cordis.patch.yml')
+  for (const field of ['scripts', 'dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+    assert.equal(manifest[field], undefined, `Acceptance fixture must not declare ${field}`)
+  }
+}
+
+async function until(label, observe, predicate, milliseconds = 120_000) {
+  const deadline = Date.now() + milliseconds
+  let value
+  do {
+    value = await observe()
+    if (predicate(value)) return value
+    await delay(150)
+  } while (Date.now() < deadline)
+  throw new Error(`Acceptance deadline: ${label}`)
+}
+
+/** Execute the actual UI scenario. Imports which can start providers/browsers occur only after the runner guard.
+ * @param {string} runRoot - Existing phase1-owned root containing exact candidate validation and installation.
+ * @returns {Promise<object>} Separately scoped evidence after all owned process exits are checked.
+ */
+export async function runPackagedPackageAcceptance(runRoot) {
+  assertUpgradeRunner(process.env)
+  assert.match(process.env.GITHUB_SHA ?? '', /^[a-f0-9]{40}$/u)
+  const root = ownedUpgradePath(process.env.RUNNER_TEMP, runRoot)
+  const owner = readJson(join(root, 'owner.json'))
+  const validated = readJson(join(root, 'validated.json'))
+  assert.equal(owner.runId, process.env.GITHUB_RUN_ID)
+  assert.equal(owner.runAttempt, process.env.GITHUB_RUN_ATTEMPT)
+  assert.match(owner.token, uuid)
+  assert.equal(validated.ownerToken, owner.token)
+  const expected = validated.candidate.manifest
+  assert.equal(expected.source.commit, process.env.GITHUB_SHA)
+  assert.equal(expected.upstreamVersion, '0.1.6-alpha.2')
+  const application = installedUpgradeApplication(root)
+  assert.equal(upgradeFileHash(application), expected.installedEvidence.executableSha256)
+  assert.equal(upgradeFileHash(validated.candidate.manifestPath), validated.candidate.manifestFileSha256)
+  const home = preparePackageAcceptanceHome(root)
+  const userData = ownedUpgradePath(root, join(root, 'package-electron-user-data'))
+  const workspace = ownedUpgradePath(root, join(root, 'package-workspace'))
+  const data = ownedUpgradePath(root, join(root, 'package-fixture-data'))
+  const evidence = ownedUpgradePath(root, join(root, 'evidence'))
+  for (const directory of [userData, workspace, data]) {
+    assert.equal(existsSync(directory), false, 'Package acceptance requires new isolated state')
+    mkdirSync(directory)
+  }
+  writeFileSync(join(home, '.env'), '# Hosted package acceptance: no credentials\n', { flag: 'wx' })
+  writeFileSync(join(home, 'settings.yaml'), 'ui-onboarding:\n  welcomeNoticeVersion: "2026-08-13.1"\n', { flag: 'wx' })
+  const profile = join(home, 'profiles', 'desktop')
+  const report = initialPackageAcceptance(expected.source.commit)
+  const checkpoints = []
+  const shells = []
+  const launchers = new Map()
+  const children = new Set()
+  const secondaryErrors = []
+  let app
+  let page
+  let boundPid
+  let mock
+  const pageErrorObservers = []
+  let activePageErrors
+  const observedPageErrors = () => pageErrorObservers.flatMap(observer => observer.snapshot())
+  let failure
+  let failed = false
+  const retainError = (error, stage) => {
+    if (failed) failure = retainPrimaryFailure(failure, error, stage, secondaryErrors, true)
+    else { failed = true; failure = error }
+  }
+  let navigationCount = 0
+  const { desktopSmokeEnvironment } = await import('../../scripts/smoke-environment.ts')
+  const environment = { ...desktopSmokeEnvironment(home), DSH_TELEMETRY_DISABLED: '1' }
+  const nativeEnvironment = { ...environment }
+  for (const key of ['GITHUB_ACTIONS', 'RUNNER_OS', 'RUNNER_ENVIRONMENT', 'RUNNER_TEMP', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_SHA']) nativeEnvironment[key] = process.env[key]
+  const native = async (action, pid = boundPid) => {
+    assert.equal(children.size, 0, 'A previous native helper has not acknowledged exit')
+    assert.ok(Number.isSafeInteger(pid) && pid > 0, 'Native action requires the observed Electron main PID')
+    const records = shells.filter(shell => shell.pid === pid)
+    assert.equal(records.length, 1, 'Native action requires one retained launch binding')
+    const launcherPid = records[0].launcherPid
+    assert.ok(Number.isSafeInteger(launcherPid) && launcherPid > 0, 'Native action requires the retained launch transport PID')
+    const requestId = randomUUID()
+    const path = join(evidence, `package-native-${requestId}.json`)
+    const executable = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    const diagnostic = openSync(join(evidence, `package-native-${requestId}.stderr.txt`), 'wx', 0o600)
+    let child
+    let nativeStartFailure
+    try {
+      child = spawn(executable, ['-NoProfile', '-NonInteractive', '-File', join(repository, 'apps/desktop/tests/windows-desktop-ui.ps1'),
+        '-Action', action, '-RunRoot', root, '-OwnerToken', owner.token, '-RequestId', requestId,
+        '-ShellPid', String(pid), '-LauncherPid', String(launcherPid), '-FixturePid', String(process.pid)], { env: nativeEnvironment, windowsHide: true, stdio: ['ignore', 'ignore', diagnostic] })
+      children.add(child)
+    } catch (error) { nativeStartFailure = error }
+    try { closeSync(diagnostic) }
+    catch (error) { nativeStartFailure = retainPrimaryFailure(nativeStartFailure, error, 'native-diagnostic-close', secondaryErrors) }
+    if (child === undefined) throw nativeStartFailure
+    await new Promise((resolveExit, reject) => {
+      let timedOut = false
+      let spawnError
+      let terminationDeadline
+      const timer = setTimeout(() => {
+        timedOut = true
+        try { child.kill() }
+        catch (error) { secondaryErrors.push({ stage: 'native-timeout-stop', error: safeError(error) }) }
+        terminationDeadline = setTimeout(() => { reject(new Error(`Native ${action} termination is unconfirmed; no competing native action is allowed`)) }, 10_000)
+      }, 60_000)
+      child.once('error', error => { spawnError = error })
+      child.once('close', code => {
+        children.delete(child)
+        clearTimeout(timer)
+        clearTimeout(terminationDeadline)
+        if (timedOut) reject(new Error(`Native ${action} timed out and its exit was acknowledged; inspect ${path}`))
+        else if (spawnError !== undefined) reject(spawnError)
+        else if (code === 0) resolveExit()
+        else reject(new Error(`Native ${action} failed (${code}); inspect ${path} and its stderr file`))
+      })
+    }).catch(error => { throw retainPrimaryFailure(nativeStartFailure, error, 'native-helper-completion', secondaryErrors) })
+    if (nativeStartFailure !== undefined) throw nativeStartFailure
+    const response = readJson(path)
+    assert.equal(response.ownerToken, owner.token)
+    assert.equal(response.requestId, requestId)
+    assert.equal(response.action, action)
+    assert.equal(response.succeeded, true)
+    return response.result
+  }
+  const checkpoint = async (name, facts) => {
+    assert.deepEqual(observedPageErrors(), [], 'Real product page reported JavaScript errors')
+    assert.equal(mock.requests.length, 0, 'An unsent-input acceptance must not request model output')
+    assert.equal(mock.paths.length, 0, 'The declared local catalog must not need discovery or model requests')
+    await page.screenshot({ path: join(evidence, `package-${name}.png`) })
+    const record = { name, ...facts }
+    checkpoints.push(record)
+    save(join(evidence, `package-${name}.json`), record)
+  }
+  const currentHost = async () => {
+    const observed = await native('Observe')
+    assert.equal(observed.hosts.length, 1, 'Expected one actual Desktop Host')
+    return { shell: observed.shell, host: observed.hosts[0] }
+  }
+  const launch = async label => {
+    assert.equal(app, undefined)
+    // A launcher may spawn Electron and reject before returning its handle. Such an attempt remains unqualified.
+    const shellRecord = { launchId: randomUUID(), label, launchReturned: false, launcherPid: null, launcherExited: false, pid: null, bound: false, exited: false }
+    shells.push(shellRecord)
+    app = await (await import('playwright'))._electron.launch({ executablePath: application, args: [`--user-data-dir=${userData}`], env: environment, timeout: 120_000 })
+    shellRecord.launchReturned = true
+    const launcher = app.process()
+    launchers.set(shellRecord.launchId, launcher)
+    shellRecord.launcherPid = launcher.pid ?? null
+    const identity = await app.evaluate(inspectInstalledDesktopIdentity)
+    assert.equal(resolve(identity.executable).toLowerCase(), application.toLowerCase())
+    assert.equal(resolve(identity.userData).toLowerCase(), userData.toLowerCase())
+    assert.equal(identity.packaged, true)
+    assert.equal(identity.version, expected.version)
+    const processIds = installedDesktopProcessIds(launcher, identity, process.pid)
+    boundPid = processIds.pid
+    shellRecord.pid = boundPid
+    const bindingPath = join(root, `package-shell-${boundPid}.json`)
+    const bindingAlreadyExisted = existsSync(bindingPath)
+    let bindFailure
+    try { await native('Bind') }
+    catch (error) { bindFailure = error }
+    try {
+      // A partial Bind can have established an exact shell handle identity before a later observation failed.
+      if (!bindingAlreadyExisted && existsSync(bindingPath)) {
+        const recorded = readJson(bindingPath)
+        assert.equal(recorded.ownerToken, owner.token)
+        assert.equal(recorded.fixture.pid, process.pid)
+        assert.equal(recorded.shell.pid, boundPid)
+        assert.equal(recorded.launcher.pid, shellRecord.launcherPid)
+        shellRecord.bound = true
+      }
+    } catch (error) { bindFailure = retainPrimaryFailure(bindFailure, error, 'bind-evidence-read', secondaryErrors) }
+    if (bindFailure !== undefined) throw bindFailure
+    const runtime = readInstalledDesktopRuntimeDescriptor(application, identity.resourcesPath, expected.installedEvidence.executableSha256)
+    assert.equal(hash(runtime), expected.installedEvidence.runtimeSha256)
+    page = await app.firstWindow()
+    page.setDefaultTimeout(120_000)
+    activePageErrors = observePackagePageErrors(page)
+    pageErrorObservers.push(activePageErrors)
+    const launchedPage = page
+    page.on('framenavigated', frame => { if (frame === launchedPage.mainFrame()) navigationCount++ })
+    await page.waitForFunction(() => location.href === 'dsh-app://app/' || Boolean(document.querySelector('#error:not([hidden])')?.textContent?.trim()), undefined, { timeout: 300_000 })
+    assert.equal(page.url(), 'dsh-app://app/', `Actual installed product startup failed in ${label}`)
+    await page.getByRole('button', { name: 'Settings', exact: true }).waitFor()
+    assert.equal(await page.locator('html').getAttribute('lang'), 'en', 'Native acceptance currently qualifies English Windows/UI copy only')
+    await until('one real Host', () => native('Observe'), value => value.hosts.length === 1)
+    return currentHost()
+  }
+  const openNativeMenu = async action => {
+    const trigger = page.locator('[data-windows-menu]').getByRole('menubar', { name: 'Application menu' }).getByRole('menuitem', { name: 'Application', exact: true })
+    // Native modal loops can delay the renderer click acknowledgement; arm the owned control waiter first.
+    const [, clickError] = await Promise.all([native(action), trigger.click().then(() => undefined, error => error)])
+    if (clickError !== undefined) {
+      if (action !== 'Exit' || !/Target.*closed|page.*closed/iu.test(String(clickError))) throw clickError
+      // Transport exit explains the closed click target; VerifyExited separately checks Electron and its Host family.
+      await until('launch transport exited after native menu selection', () => installedLauncherExited(app.process()), Boolean, 60_000)
+    }
+  }
+  const closeNormally = async () => {
+    await native('Observe')
+    activePageErrors.seal()
+    assert.deepEqual(observedPageErrors(), [], 'Product page errors cannot be discarded by a restart')
+    const launcher = app.process()
+    await openNativeMenu('Exit')
+    await until('owned launch transport exit', () => installedLauncherExited(launcher), Boolean, 60_000)
+    await native('VerifyExited')
+    const shell = shells.find(shell => shell.pid === boundPid)
+    shell.launcherExited = true
+    shell.exited = true
+    app = undefined
+    page = undefined
+    boundPid = undefined
+  }
+  const openPlugins = async () => {
+    await page.getByRole('navigation', { name: 'Global panels' }).getByRole('button', { name: 'Plugins', exact: true }).click()
+    const panel = page.locator('[data-plugin-panel]')
+    await panel.getByRole('heading', { name: 'Plugins', exact: true }).waitFor()
+    return panel
+  }
+  const card = name => page.locator(`[data-plugin-package="${name}"]`)
+  const pendingNotice = () => page.locator('[data-plugin-panel]').getByRole('status').filter({ hasText: ' is staged privately.' })
+  const prepared = id => {
+    assert.match(id, uuid)
+    const directory = ownedUpgradePath(home, join(home, 'profiles', `.desktop.package-stage-${id}`))
+    const value = readJson(join(directory, 'PREPARED.json'))
+    assert.equal(value.owner.profile.toLowerCase(), profile.toLowerCase())
+    assert.equal(value.result.transactionId, id)
+    assert.equal(value.result.state, 'prepared')
+    assert.equal(value.result.health, 'pending')
+    return { directory, value }
+  }
+  const stageFixture = async archive => {
+    const panel = await openPlugins()
+    await panel.getByRole('button', { name: 'Add plugin', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Add plugin', exact: true })
+    await dialog.getByRole('textbox', { name: 'Package name or address', exact: true }).fill(archive)
+    await dialog.getByRole('button', { name: 'Install', exact: true }).click()
+    const done = page.getByRole('dialog', { name: 'Prepared, not activated', exact: true })
+    await done.waitFor({ timeout: 300_000 })
+    const id = preparedTransactionId(await done.getByRole('status').filter({ hasText: ' is staged privately.' }).innerText())
+    await done.getByRole('button', { name: 'Done', exact: true }).click()
+    await pendingNotice().filter({ hasText: id }).waitFor()
+    return id
+  }
+  const review = async () => {
+    await openNativeMenu('ReviewPackages')
+    return until('real shell consent document', async () => {
+      for (const window of app.windows()) if (window.url() === dialogUrl) return window
+      return undefined
+    }, window => window !== undefined, 30_000)
+  }
+  const decline = async id => {
+    const window = await review()
+    await window.getByText(`Transaction: ${id}`, { exact: false }).waitFor()
+    await window.getByRole('button', { name: 'Update later', exact: true }).click()
+    await until('consent closed', () => window.isClosed(), Boolean, 30_000)
+  }
+  const accept = async (id, before, expectedName) => {
+    const window = await review()
+    await window.getByText(`Transaction: ${id}`, { exact: false }).waitFor()
+    await window.getByText(`Review ${expectedName}`, { exact: false }).waitFor()
+    const previousNavigation = navigationCount
+    await window.getByRole('button', { name: 'Activate and restart Host', exact: true }).click()
+    const transaction = prepared(id)
+    await until('health-qualified activation commit', () => {
+      const path = join(transaction.directory, 'ACTIVATION.json')
+      return existsSync(path) ? readJson(path) : undefined
+    }, journal => journal?.phase === 'committed', 300_000)
+    await until('replacement document navigation', () => navigationCount, value => value > previousNavigation)
+    await page.getByRole('button', { name: 'Settings', exact: true }).waitFor()
+    const after = await currentHost()
+    assert.ok(sameProcess(before.shell, after.shell), 'Package activation must retain the shell incarnation')
+    assert.equal(sameProcess(before.host, after.host), false, 'Package activation must replace the real Host incarnation')
+    assert.equal(packageGraphSnapshot(profile).fingerprint, transaction.value.candidateFingerprint)
+    assert.equal(existsSync(join(transaction.directory, 'rollback')), true, 'Activation must retain its rollback graph')
+    return after
+  }
+  const writeDraft = async text => {
+    const input = page.locator('[data-composer-input][contenteditable="true"]').first()
+    await input.waitFor()
+    await input.click()
+    await page.keyboard.press('Control+A')
+    if (text === '') await page.keyboard.press('Backspace')
+    else await page.keyboard.type(text)
+    await until('real draft text', () => input.innerText(), value => value.trim() === text)
+    return input
+  }
+  const assertPreserved = async (id, snapshot, host, candidateHash) => {
+    assert.equal(packageGraphSnapshot(profile).fingerprint, snapshot.fingerprint)
+    assert.ok(sameProcess(host.host, (await currentHost()).host), 'Refusal/discard changed the live Host')
+    const transaction = prepared(id)
+    assert.equal(packageGraphSnapshot(join(transaction.directory, 'profile')).fingerprint, candidateHash)
+    assert.equal(existsSync(join(transaction.directory, 'ACTIVATION.json')), false)
+  }
+  try {
+    const { mockServer } = await import('../../../../packages/llm/llm-pi-ai/tests/mock-server.ts')
+    mock = await mockServer([])
+    await launch('initial')
+    const baselinePresentation = await packageBaselinePresentation(page)
+    let baselineDiagnosticFailure
+    try {
+      save(join(evidence, 'package-initial-baseline.json'), baselinePresentation)
+      save(join(evidence, 'package-initial-profile-diagnostic.json'), packageBaselineDiagnostic(home, profile))
+    } catch (error) {
+      baselineDiagnosticFailure = error
+      secondaryErrors.push({ stage: 'initial-baseline-diagnostic', error: safeError(error) })
+    }
+    assert.equal(baselinePresentation.baseline, null,
+      `Required packaged baseline is not ready: ${baselinePresentation.baseline?.status ?? 'unknown'}`)
+    if (baselineDiagnosticFailure !== undefined) throw baselineDiagnosticFailure
+    const settings = await withInitialKeylessOnboarding(page, async () => {
+      await page.getByRole('button', { name: 'Settings', exact: true }).click()
+      const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
+      await settings.getByRole('button', { name: 'Models', exact: true }).click()
+      const copilotRoot = settings.locator('[data-dsh-github-copilot-compact-account]')
+      save(join(evidence, 'package-initial-models.json'), await initialCopilotUiDiagnostic(settings))
+      // A deferred credential prompt is not a healthy packaged Copilot baseline.
+      await copilotRoot.getByRole('button', { name: 'Sign in with GitHub', exact: true }).waitFor()
+      await settings.getByRole('button', { name: 'Add a custom provider', exact: true }).click()
+      await settings.getByLabel('Provider ID', { exact: true }).fill('desktop-acceptance')
+      await settings.getByLabel('Display name', { exact: true }).fill('Desktop acceptance (local test)')
+      await settings.getByLabel('API protocol', { exact: true }).selectOption('openai-completions')
+      await settings.getByLabel('Base URL', { exact: true }).fill(mock.url)
+      await settings.getByRole('button', { name: 'Add model', exact: true }).click()
+      await settings.getByLabel('Model ID 1', { exact: true }).fill('acceptance-local')
+      await settings.getByRole('button', { name: 'Create provider', exact: true }).click()
+      await settings.getByRole('button', { name: 'Edit Desktop acceptance (local test) (desktop-acceptance)', exact: true }).waitFor()
+      const { load } = await import('js-yaml')
+      assertKeylessPackageProvider(load(readFileSync(join(home, 'settings.yaml'), 'utf8')), mock.url)
+      // The separate Models setup card was never dismissed. Its ordinary DeepSeek
+      // row therefore witnesses the same joined any-usable-provider decision as onboarding.
+      await settings.getByRole('button', { name: 'Edit DeepSeek (deepseek-official)', exact: true }).waitFor()
+      assert.equal(await settings.getByRole('alert').count(), 0, 'Provider setup reported an error')
+      await page.getByRole('dialog', { name: 'Add an API key to get started', exact: true }).waitFor({ state: 'detached' })
+      await page.waitForFunction(() => {
+        const root = document.getElementById('root')
+        return root !== null && !root.inert
+      })
+      assert.equal(mock.requests.length, 0)
+      assert.equal(mock.paths.length, 0)
+      return settings
+    }, secondaryErrors)
+    await page.keyboard.press('Escape')
+    await settings.waitFor({ state: 'hidden' })
+    await Promise.all([native('ChooseWorkspace'), page.getByRole('textbox', { name: 'Choose workspace', exact: true }).click()])
+    await selectPackageAcceptanceModel(page)
+    await page.locator('[data-composer-input][contenteditable="true"]').first().waitFor()
+    assert.ok(readFileSync(join(home, 'settings.yaml'), 'utf8').includes('desktop-acceptance'))
+    await checkpoint('keyless-composer', { legitimateProviderConfiguration: true, realWorkspacePicker: true, provider: 'desktop-acceptance', model: 'acceptance-local', providerRequests: 0 })
+
+    const source = join(repository, 'apps/web/tests/fixtures/plugins/fixture-bundle')
+    validatePackageFixture(readJson(join(source, 'package.json')))
+    const archiveSource = join(data, 'package')
+    mkdirSync(archiveSource)
+    const fileHashes = {}
+    for (const name of fixtureFiles) {
+      copyFileSync(join(source, name), join(archiveSource, name))
+      fileHashes[name] = upgradeFileHash(join(source, name))
+      assert.equal(upgradeFileHash(join(archiveSource, name)), fileHashes[name])
+    }
+    const archive = join(data, 'local-web-e2e-fixture-bundle-0.0.1.tgz')
+    await (await import('tar')).c({ gzip: true, file: archive, cwd: data, portable: true }, ['package'])
+    save(join(evidence, 'package-local-fixture.json'), { name: fixtureName, version: '0.0.1', private: true, localTestFixtureOnly: true,
+      upstreamRelease: false, scripts: false, dependencies: false, source: 'apps/web/tests/fixtures/plugins/fixture-bundle', files: fileHashes, archiveSha256: upgradeFileHash(archive) })
+    const original = packageGraphSnapshot(profile)
+    const originalHost = await currentHost()
+    const first = await stageFixture(archive)
+    const firstPrepared = prepared(first)
+    assert.equal(firstPrepared.value.mutation.enabled, false)
+    assert.equal(firstPrepared.value.result.packageName, fixtureName)
+    assert.equal(firstPrepared.value.baseGraphFingerprint, original.fingerprint)
+    const firstCandidate = packageGraphSnapshot(join(firstPrepared.directory, 'profile'))
+    assert.equal(firstCandidate.fingerprint, firstPrepared.value.candidateFingerprint)
+    assert.equal(readJson(join(profile, 'package.json')).dependencies?.[fixtureName], undefined)
+    assert.equal(await card(fixtureName).count(), 0)
+    await assertPreserved(first, original, originalHost, firstCandidate.fingerprint)
+    report.preparedGraphVerified = true
+    await checkpoint('prepared-disabled', { transactionId: first, activeFingerprint: original.fingerprint, candidateFingerprint: firstCandidate.fingerprint, host: originalHost, newlyInstalledTargetEnabled: false })
+    await decline(first)
+    await assertPreserved(first, original, originalHost, firstCandidate.fingerprint)
+    report.declinePreservedGraphVerified = true
+    await checkpoint('declined', { transactionId: first, activeFingerprint: original.fingerprint, host: originalHost })
+    await pendingNotice().filter({ hasText: first }).getByRole('button', { name: 'Discard prepared change', exact: true }).click()
+    await until('private candidate discarded', () => existsSync(join(firstPrepared.directory, 'DISCARDED.json')) ? readJson(join(firstPrepared.directory, 'DISCARDED.json')) : undefined, value => value?.state === 'discarded')
+    assert.equal(existsSync(join(firstPrepared.directory, 'profile')), false)
+    assert.equal(packageGraphSnapshot(profile).fingerprint, original.fingerprint)
+    assert.ok(sameProcess(originalHost.host, (await currentHost()).host))
+    await pendingNotice().filter({ hasText: first }).waitFor({ state: 'hidden' })
+    report.discardPreservedGraphVerified = true
+    await checkpoint('discarded', { transactionId: first, activeFingerprint: original.fingerprint })
+
+    const second = await stageFixture(archive)
+    assert.notEqual(second, first)
+    const secondPrepared = prepared(second)
+    const candidateHash = packageGraphSnapshot(join(secondPrepared.directory, 'profile')).fingerprint
+    await page.getByRole('button', { name: 'New session', exact: true }).first().click()
+    await page.getByRole('button', { name: 'Select model, current acceptance-local', exact: true }).waitFor()
+    const text = `Unsent package acceptance draft ${owner.token}`
+    const attachmentName = 'package-acceptance-unsent.txt'
+    const attachmentBytes = Buffer.from('Local unsent attachment; never sent to a model.\n')
+    const input = await writeDraft(text)
+    await page.locator('input[type="file"]').setInputFiles({ name: attachmentName, mimeType: 'text/plain', buffer: attachmentBytes })
+    const rail = page.getByRole('group', { name: 'Pending attachments', exact: true })
+    await rail.getByTitle(attachmentName, { exact: true }).waitFor()
+    await until('real attachment upload receipt', () => page.getByRole('button', { name: 'Send message', exact: true }).isEnabled(), Boolean)
+    const attachmentView = await rail.innerText()
+    const stableNavigation = navigationCount
+    const veto = async (name, expectedDraft, attachment) => {
+      const window = await review()
+      await window.getByText('Package activation needs attention.', { exact: false }).waitFor()
+      await window.getByText('Restart is blocked by unsent or unconfirmed input.', { exact: false }).waitFor()
+      assert.equal(await window.getByRole('button', { name: 'Activate and restart Host', exact: true }).count(), 0)
+      await window.getByRole('button', { name: 'OK', exact: true }).click()
+      await until('refusal closed', () => window.isClosed(), Boolean, 30_000)
+      assert.equal((await input.innerText()).trim(), expectedDraft)
+      assert.equal(await rail.getByTitle(attachmentName, { exact: true }).count(), attachment ? 1 : 0)
+      if (attachment) assert.equal(await rail.innerText(), attachmentView, 'Refusal changed the live attachment card')
+      assert.equal(navigationCount, stableNavigation, 'Refusal navigated the live draft document')
+      await assertPreserved(second, original, originalHost, candidateHash)
+      await checkpoint(name, { transactionId: second, draftPreserved: expectedDraft !== '', attachmentPreserved: attachment, attachmentName: attachment ? attachmentName : undefined, host: originalHost, activeFingerprint: original.fingerprint, mainDocumentUnchanged: true })
+    }
+    await veto('draft-and-attachment-refused', text, true)
+    report.liveDraftAttachmentVetoVerified = true
+    await writeDraft('')
+    await veto('attachment-only-refused', '', true)
+    report.attachmentOnlyVetoVerified = true
+    await rail.getByRole('button', { name: `Remove file ${attachmentName}`, exact: true }).click()
+    await writeDraft(text)
+    await veto('draft-only-refused', text, false)
+    report.draftOnlyVetoVerified = true
+    await writeDraft('')
+    const promoted = await accept(second, originalHost, fixtureName)
+    const activeManifest = readJson(join(profile, 'package.json'))
+    assert.ok(Object.hasOwn(activeManifest.dependencies, fixtureName))
+    assert.equal(activeManifest.dsh.profile.bundles.includes(fixtureName), false)
+    await openPlugins()
+    const fixtureSwitch = card(fixtureName).getByRole('switch')
+    await until('installed fixture disabled', () => fixtureSwitch.getAttribute('aria-checked'), value => value === 'false')
+    report.consentGraphPromotionVerified = true
+    report.newHostGenerationVerified = true
+    report.installedDisabledAfterConsentVerified = true
+    await checkpoint('graph-promoted-disabled', { transactionId: second, before: originalHost, after: promoted, candidateFingerprint: candidateHash, targetRunningClaim: false })
+    await fixtureSwitch.click()
+    await until('official enabled selection persisted', () => readJson(join(profile, 'package.json')).dsh.profile.bundles.includes(fixtureName), Boolean)
+    await closeNormally()
+    const enabledHost = await launch('enabled-fixture')
+    await openPlugins()
+    assert.equal(await card(fixtureName).getByRole('switch').getAttribute('aria-checked'), 'true')
+    await card(fixtureName).getByRole('button', { name: /^View / }).click()
+    const row = page.locator('[data-plugin-row]').filter({ hasText: 'fixture-row' })
+    await row.getByText('Running', { exact: true }).waitFor()
+    report.enabledFixtureRunningAfterSeparateRestartVerified = true
+    await checkpoint('enabled-row-running-after-restart', { host: enabledHost, packageName: fixtureName, version: '0.0.1', row: 'fixture-row', state: 'Running', separateFromFirstConsent: true })
+
+    await page.getByRole('button', { name: 'Back to plugins', exact: true }).click()
+    const copilot = () => card('dsh-github-copilot')
+    assert.equal(await copilot().getByRole('switch').getAttribute('aria-checked'), 'true')
+    await copilot().getByRole('switch').click()
+    await until('Copilot selection disabled', () => readJson(join(profile, 'package.json')).dsh.profile.bundles.includes('dsh-github-copilot'), value => value === false)
+    const selected = readJson(join(profile, 'package.json'))
+    assert.ok(Object.hasOwn(selected.dependencies, 'dsh-github-copilot'))
+    await closeNormally()
+    const disabledHost = await launch('disabled-copilot')
+    await openPlugins()
+    await until('Copilot remains disabled after startup', () => copilot().getByRole('switch').getAttribute('aria-checked'), value => value === 'false')
+    assert.ok(Object.hasOwn(readJson(join(profile, 'package.json')).dependencies, 'dsh-github-copilot'))
+    report.copilotDisabledChoiceAcrossRestartVerified = true
+    await checkpoint('copilot-disabled-preserved', { host: disabledHost, scope: 'same-version-restart', dependencyRetained: true, selected: false })
+    await copilot().getByRole('button', { name: /^View / }).click()
+    await page.locator('[data-plugin-panel]').getByRole('button', { name: /^Uninstall / }).click()
+    const uninstall = page.getByRole('dialog', { name: /^Uninstall / })
+    await uninstall.getByRole('button', { name: 'Uninstall', exact: true }).click()
+    await pendingNotice().waitFor({ timeout: 300_000 })
+    const removal = preparedTransactionId(await pendingNotice().innerText())
+    const removalPrepared = prepared(removal)
+    assert.equal(removalPrepared.value.mutation.kind, 'remove')
+    assert.equal(removalPrepared.value.result.packageName, 'dsh-github-copilot')
+    assert.ok(Object.hasOwn(readJson(join(profile, 'package.json')).dependencies, 'dsh-github-copilot'))
+    await accept(removal, disabledHost, 'dsh-github-copilot')
+    assert.equal(readJson(join(profile, 'package.json')).dependencies?.['dsh-github-copilot'], undefined)
+    assert.ok(Object.hasOwn(readJson(join(profile, 'desktop-plugin-user-intents.json')).removed, 'dsh-github-copilot'))
+    await closeNormally()
+    const removedHost = await launch('removed-copilot')
+    const removedPanel = await openPlugins()
+    // Absence is meaningful only after this generation supplies a positive, healthy retained inventory witness.
+    const retainedFixture = card(fixtureName)
+    await retainedFixture.waitFor({ state: 'visible' })
+    await until('retained fixture enabled in loaded inventory', () => retainedFixture.getByRole('switch').getAttribute('aria-checked'), value => value === 'true')
+    assert.equal(await removedPanel.getByRole('alert').count(), 0, 'Plugin inventory reported a load failure')
+    assert.equal(await removedPanel.getByText('This deployment runs without a manageable profile, so plugins cannot be installed or switched here.', { exact: true }).count(), 0)
+    await retainedFixture.getByRole('button', { name: /^View / }).click()
+    await page.locator('[data-plugin-row]').filter({ hasText: 'fixture-row' }).getByText('Running', { exact: true }).waitFor()
+    await page.getByRole('button', { name: 'Back to plugins', exact: true }).click()
+    await retainedFixture.waitFor({ state: 'visible' })
+    assert.equal(await removedPanel.getByRole('alert').count(), 0)
+    assert.equal(await copilot().count(), 0)
+    assert.equal(readJson(join(profile, 'package.json')).dependencies?.['dsh-github-copilot'], undefined)
+    assert.ok(Object.hasOwn(readJson(join(profile, 'desktop-plugin-user-intents.json')).removed, 'dsh-github-copilot'))
+    report.copilotRemovalChoiceAcrossRestartVerified = true
+    await checkpoint('copilot-removal-preserved', { host: removedHost, scope: 'same-version-restart', dependencyRetained: false, removalIntent: true, retainedFixtureRunningInLoadedInventory: true })
+    assert.equal(mock.requests.length, 0)
+    assert.equal(mock.paths.length, 0)
+    report.zeroModelRequestsVerified = true
+    await closeNormally()
+  } catch (error) {
+    retainError(error, 'package-scenario')
+    try {
+      const baseline = page !== undefined && !page.isClosed() ? await packageBaselinePresentation(page) : { unavailable: true }
+      const dom = page !== undefined && !page.isClosed() ? {
+        settingsDialogs: await page.getByRole('dialog', { name: 'Settings', exact: true }).count(),
+        copilotAccountRoots: await page.locator('[data-dsh-github-copilot-compact-account]').count(),
+        copilotSignInButtons: await page.getByRole('button', { name: 'Sign in with GitHub', exact: true }).count(),
+      } : { unavailable: true }
+      save(join(evidence, 'package-baseline-failure-diagnostic.json'), {
+        schemaVersion: 1, scope: 'failed-fresh-baseline-observation', qualification: false,
+        baseline, dom, profile: packageBaselineDiagnostic(home, profile), pageErrors: observedPageErrors(),
+        hostStderr: { status: 'unavailable-through-current-launch-transport' },
+      })
+    } catch (captureError) { retainError(captureError, 'failure-baseline-diagnostic') }
+    if (page !== undefined && !page.isClosed()) {
+      try { await page.screenshot({ path: join(evidence, 'package-failure.png') }) }
+      catch (captureError) { retainError(captureError, 'failure-screenshot') }
+    }
+  } finally {
+    const cleanupErrors = []
+    const cleanupFailure = (stage, error) => {
+      cleanupErrors.push(`${stage}: ${safeError(error)}`)
+      retainError(error, stage)
+    }
+    for (const observer of pageErrorObservers) {
+      try { observer.seal() }
+      catch (error) { cleanupFailure('page-error-observer-remove', error) }
+    }
+    if (shells.some(shell => !shell.launchReturned || !shell.bound)) {
+      cleanupFailure('unqualified-launch', new Error('A requested launch has no qualified owned-process exit; retain installation and profiles'))
+    }
+    // Do not race a timed-out UIA invocation or its family-ledger writer with another native action.
+    for (const child of children) {
+      if (child.exitCode === null) {
+        try { child.kill() } catch (error) { cleanupFailure('native-helper-stop', error) }
+      }
+    }
+    try { await until('native helper processes closed', () => children.size, value => value === 0, 10_000) }
+    catch (error) { cleanupFailure('native-helper-exit', error) }
+    if (children.size === 0) {
+      if (app !== undefined) {
+        if (!installedLauncherExited(app.process()) && shells.some(shell => shell.pid === boundPid && shell.bound)) {
+          try { await native('Observe') }
+          catch (error) { cleanupFailure('final-pre-close-observation', error) }
+        }
+        try { await app.close() }
+        catch (error) { cleanupFailure('graceful-owned-close', error) }
+      }
+      for (const shell of shells.filter(item => item.bound && !item.exited)) {
+        try {
+          await native('StopOwned', shell.pid)
+          const launcher = launchers.get(shell.launchId)
+          assert.ok(launcher, 'Owned cleanup requires the retained launch transport handle')
+          await until('owned launch transport exit', () => installedLauncherExited(launcher), Boolean, 60_000)
+          shell.launcherExited = true
+          await native('VerifyExited', shell.pid)
+          shell.exited = true
+        } catch (error) { cleanupFailure('owned-family-exit', error) }
+      }
+    } else {
+      cleanupFailure('native-helper-unconfirmed', new Error('Native helper exit is unconfirmed; retain the application and state for the outer owned-process deadline/VM teardown'))
+    }
+    if (mock !== undefined) {
+      if (mock.requests.length !== 0 || mock.paths.length !== 0) {
+        report.zeroModelRequestsVerified = false
+        retainError(new Error('The local provider observed an unexpected request'), 'unexpected-provider-request')
+      }
+      try { await (await import('../../../../packages/llm/llm-pi-ai/tests/mock-server.ts')).closeMockServers() }
+      catch (error) { cleanupFailure('loopback-provider-close', error) }
+    }
+    const errors = Object.freeze(observedPageErrors())
+    if (errors.length !== 0) retainError(new Error('Product page errors were observed'), 'product-page-errors')
+    for (const shell of shells) {
+      const launcher = launchers.get(shell.launchId)
+      if (launcher !== undefined) shell.launcherExited = installedLauncherExited(launcher)
+    }
+    report.cleanupVerified = packageCleanupVerified(shells, children.size, cleanupErrors)
+    if (!failed && !report.cleanupVerified) retainError(new Error('Package acceptance cleanup is incomplete'), 'incomplete-cleanup')
+    report.succeeded = !failed && report.cleanupVerified
+    try {
+      save(join(evidence, 'package-acceptance.json'), { ...report, checkpoints: checkpoints.map(item => item.name), shellIncarnations: shells,
+        ...(!failed ? {} : { error: safeError(failure) }), pageErrors: errors, cleanupErrors, secondaryErrors })
+    } catch (error) {
+      retainError(error, 'package-acceptance-write')
+      console.error('Package acceptance evidence failure:', safeError(failure), secondaryErrors)
+    }
+  }
+  if (failed) throw failure
+  return report
+}
+
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  // Refuse workstation invocation before parse, imports, file writes, servers or browser startup.
+  assertUpgradeRunner(process.env)
+  const { values } = parseArgs({ options: { 'run-root': { type: 'string' } } })
+  runPackagedPackageAcceptance(values['run-root']).catch(error => { console.error(safeError(error)); process.exitCode = 1 })
+}

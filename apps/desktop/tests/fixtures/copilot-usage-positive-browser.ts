@@ -1,9 +1,7 @@
 /** Acceptance-only browser code, type-stripped from source rather than serialized through tsx. */
 import type { PositiveCopilotUsageEvidence } from './copilot-usage-positive-smoke.ts'
 
-// This Host-runner fixture loads browser exports at runtime. Local structural views
-// keep React/JSX and Client project declarations out of the Host compiler program.
-// They describe public calls only; all renderer, selector, and Slot code stays shipped code.
+// Public structural views keep Client declaration merges out of the Host-runner program.
 interface FixtureModules {
   import(id: string, parent: string, attributes: Record<string, unknown>): Promise<unknown>
 }
@@ -27,24 +25,28 @@ interface FixtureObservable {
   subscribe(listener: () => void): () => void
 }
 interface FixtureBinding {
-  key: string
-  ctx: FixtureContext
-  hooks: Record<string, FixtureObservable>
-  keyedHooks: Record<string, (key: string) => FixtureObservable | undefined>
+  key: string | undefined
+  ctx?: FixtureContext
+  hooks: Record<string, FixtureObservable | undefined>
+  keyedHooks: Record<string, ((key: string) => FixtureObservable | undefined) | undefined>
   props: Record<string, unknown>
+}
+interface FixtureAreaProps {
+  children?: unknown
+  empty?: () => unknown
 }
 interface FixtureScope {
   current: FixtureObservable
-  resolve(key: string): FixtureBinding | undefined
-  renderArea(binding: FixtureBinding, props: { children?: unknown }): unknown
+  bindingSource(target: unknown): FixtureObservable
+  renderArea(binding: FixtureBinding, props: FixtureAreaProps): unknown
 }
 interface FixtureSlots {
-  installScope(name: string, adapter: FixtureScope): unknown
+  installScope(name: string, adapter: FixtureScope): void
   register(
     definition: { name: string; children: Record<string, { kind: string; scope: string }> },
     component: (props: { renderSlot: (name: string, props: object) => unknown; SessionProvider: unknown }) => unknown,
   ): unknown
-  entriesOfSlot(name: string): readonly unknown[]
+  entries(name: string): readonly unknown[]
 }
 interface FixtureReact {
   createElement(type: unknown, props: object, ...children: unknown[]): unknown
@@ -52,38 +54,89 @@ interface FixtureReact {
 
 type AcceptanceWindow = Window & {
   __desktopUsageModules?: FixtureModules
+  __desktopUsageRestore?: () => void
 }
 
-/** Capture one public bootstrap call and restore the original facade even when boot fails. */
+/** Capture a fresh public bootstrap call without leaving a replaced facade or fixture globals behind. */
 export function captureUsageModulesInBrowser(): void {
   const target = window as AcceptanceWindow
+  if (Object.hasOwn(target, '__ModuleLoader__') || Object.hasOwn(target, '__desktopUsageRestore')
+    || Object.hasOwn(target, '__desktopUsageModules')) throw new Error('Usage capture must precede a fresh application bootstrap')
   let facade: FixtureFacade | undefined
-  Object.defineProperty(target, '__ModuleLoader__', {
+  let originalCreate: FixtureFacade['create'] | undefined
+  let createDescriptor: PropertyDescriptor | undefined
+  const restoreCreate = (): void => {
+    if (facade !== undefined && originalCreate !== undefined) {
+      if (createDescriptor === undefined) {
+        if (!Reflect.deleteProperty(facade, 'create')) throw new Error('Usage capture could not restore the inherited bootstrap method')
+      } else Object.defineProperty(facade, 'create', createDescriptor)
+      originalCreate = undefined
+    }
+  }
+  const restoreFacade = (): void => {
+    if (facade === undefined) {
+      if (!Reflect.deleteProperty(target, '__ModuleLoader__')) throw new Error('Usage capture could not restore the bootstrap global')
+    } else Object.defineProperty(target, '__ModuleLoader__', { configurable: true, enumerable: true, writable: true, value: facade })
+  }
+  Object.defineProperty(target, '__desktopUsageRestore', {
     configurable: true,
-    get: () => facade,
-    set(value: FixtureFacade) {
-      const create = value.create
-      value.create = function (options) {
-        try {
-          const modules = create.call(this, options)
-          target.__desktopUsageModules = modules
-          return modules
-        } finally {
-          value.create = create
-          Object.defineProperty(target, '__ModuleLoader__', { configurable: true, writable: true, value })
-        }
+    value() {
+      let failed = false
+      let failure: unknown
+      for (const restore of [restoreCreate, restoreFacade,
+        () => { if (!Reflect.deleteProperty(target, '__desktopUsageModules')) throw new Error('Usage module capture could not be removed') },
+        () => { if (!Reflect.deleteProperty(target, '__desktopUsageRestore')) throw new Error('Usage capture disposer could not be removed') },
+      ]) {
+        try { restore() } catch (error) { if (!failed) { failed = true; failure = error } }
       }
-      facade = value
+      if (failed) throw failure
     },
   })
+  Object.defineProperty(target, '__ModuleLoader__', {
+    configurable: true, enumerable: true,
+    get: () => facade,
+    set(value: FixtureFacade) {
+      facade = value
+      const create = value.create
+      originalCreate = create
+      createDescriptor = Object.getOwnPropertyDescriptor(value, 'create')
+      value.create = function (options) {
+        let modules: FixtureModules | undefined
+        let failed = false
+        let failure: unknown
+        try {
+          modules = create.call(this, options)
+          target.__desktopUsageModules = modules
+        } catch (error) { failed = true; failure = error }
+        finally {
+          for (const restore of [restoreCreate, restoreFacade]) {
+            try { restore() } catch (error) { if (!failed) { failed = true; failure = error } }
+          }
+        }
+        if (failed) throw failure
+        if (modules === undefined) throw new Error('Bootstrap did not provide its module loader')
+        return modules
+      }
+    },
+  })
+}
+
+/** Remove only this capture's globals, retaining the normal boot-installed module facade. */
+export function restoreUsageModulesInBrowser(): void {
+  const target = window as AcceptanceWindow
+  target.__desktopUsageRestore?.()
+  if (Object.hasOwn(target, '__desktopUsageModules') || Object.hasOwn(target, '__desktopUsageRestore')) {
+    throw new Error('Usage capture restoration is incomplete')
+  }
 }
 
 /**
  * Exercise released modules inside a fixture-owned Cordis context with no Host transport.
  * @param route - Synthetic eligible provider selection; no model request is made.
- * @returns Positive DOM and lifecycle observations, not live account evidence.
+ * @returns Positive DOM and lifecycle observations only after all owned cleanup succeeds.
  */
 export async function runPositiveUsageInBrowser(route: string): Promise<PositiveCopilotUsageEvidence> {
+  if (!['github-copilot', 'github-copilot-preview'].includes(route)) throw new Error('Unsupported positive usage route')
   const modules = (window as AcceptanceWindow).__desktopUsageModules
   if (modules === undefined) throw new Error('Packaged module loader was not captured')
   const load = (id: string) => modules.import(id, '', {})
@@ -110,17 +163,16 @@ export async function runPositiveUsageInBrowser(route: string): Promise<Positive
   const client = clientModule as FixturePlugin
   const application = document.getElementById('root')
   if (application === null) throw new Error('Packaged application mount is missing')
-  const context = new Context()
+  let context: FixtureContext | undefined
   const container = document.createElement('section')
   container.setAttribute('data-desktop-usage-acceptance', route)
-  document.body.append(container)
   const source = <T>(initial: T) => {
     let value = initial
     const listeners = new Set<() => void>()
     return {
       getSnapshot: () => value,
       subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
-      set(next: T) { value = next; for (const listener of listeners) listener() },
+      set(next: T) { value = next; for (const listener of [...listeners]) listener() },
       subscribers: () => listeners.size,
     }
   }
@@ -128,6 +180,7 @@ export async function runPositiveUsageInBrowser(route: string): Promise<Positive
   let forbiddenRemoteCalls = 0
   const errors: unknown[][] = []
   const originalError = console.error
+  const onError = (event: Event): void => { errors.push([event.type]) }
   class RemoteRoot extends Service {
     constructor(ctx: FixtureContext) { super(ctx, 'remote') }
     async $mount() { return async () => {} }
@@ -152,78 +205,140 @@ export async function runPositiveUsageInBrowser(route: string): Promise<Positive
   const session = source({ sessionId: 'desktop-usage-fixture', removed: false, openState: 'open' })
   const selection = (provider: string) => ({ provider, model: 'synthetic-account-model' })
   const projection = source({ lastUsed: selection('other-provider'), next: selection(route) })
+  const absentBinding: FixtureBinding = {
+    key: undefined, hooks: { session: undefined }, keyedHooks: { projection: undefined }, props: { sessionId: undefined },
+  }
+  const absent = source<FixtureBinding>(absentBinding)
+  const current = source<FixtureBinding>(absentBinding)
   let unmount = () => {}
   let disposeClient: (() => Promise<void>) | undefined
+  let slots: FixtureSlots | undefined
+  let evidence: Omit<PositiveCopilotUsageEvidence, 'subscriptionsReleased' | 'syntheticContextDisposed'> | undefined
+  let subscriptionsReleased = false
+  let syntheticContextDisposed = false
+  let failed = false
+  let failure: unknown
+  const retain = (error: unknown): void => { if (!failed) { failed = true; failure = error } }
   const waitFor = async (predicate: () => boolean) => {
     const deadline = performance.now() + 10_000
     while (!predicate()) {
+      if (errors.length > 0) throw new Error('Packaged usage fixture reported renderer errors')
       if (performance.now() >= deadline) throw new Error('Packaged usage fixture timed out')
       await new Promise<void>((resolve) => { requestAnimationFrame(() => { resolve() }) })
     }
   }
-  const trigger = () => container.querySelector('[data-copilot-usage-trigger]')
+  const frame = async (): Promise<void> => {
+    await new Promise<void>((resolve) => { requestAnimationFrame(() => { resolve() }) })
+  }
+  const trigger = () => container.querySelector('[data-fixture-inherited] [data-copilot-usage-trigger]')
+  const dock = 'conversation.composer.dock'
   try {
-    console.error = (...args: unknown[]) => { errors.push(args); originalError(...args) }
-    await context.plugin({ inject: renderer.inject, apply: renderer.apply })
-    await context.plugin({ apply(ctx) { new RemoteRoot(ctx); new AccountNamespace(ctx); new UsageRemote(ctx) } })
-    const slotService = context.get('slots')
-    requireMethods(slotService, ['installScope', 'register', 'entriesOfSlot'], 'SlotRegistry')
-    const slots = slotService as FixtureSlots
+    context = new Context()
     const binding: FixtureBinding = {
       key: 'desktop-usage-fixture', ctx: context,
       hooks: { session }, keyedHooks: { projection: key => key === 'modelSelection' ? projection : undefined },
       props: { sessionId: 'desktop-usage-fixture' },
     }
-    const current = source(binding)
+    document.body.append(container)
+    console.error = (...args: unknown[]) => { errors.push(args); originalError(...args) }
+    window.addEventListener('error', onError)
+    window.addEventListener('unhandledrejection', onError)
+    await context.plugin({ inject: renderer.inject, apply: renderer.apply })
+    await context.plugin({ apply(ctx) { new RemoteRoot(ctx); new AccountNamespace(ctx); new UsageRemote(ctx) } })
+    const slotService = context.get('slots')
+    requireMethods(slotService, ['installScope', 'register', 'entries'], 'SlotRegistry')
+    slots = slotService as FixtureSlots
     const adapter: FixtureScope = {
-      current, resolve: key => key === binding.key ? binding : undefined,
-      renderArea: (_binding, props) => props.children,
+      current,
+      bindingSource(target) {
+        if (target !== undefined) throw new Error('Unsupported explicit fixture Session reference')
+        return absent
+      },
+      renderArea: (value, props) => value.key === undefined ? props.empty?.() ?? null : props.children,
     }
     slots.installScope('session', adapter)
-    const dock = 'conversation.composer.dock'
     slots.register({ name: 'root', children: { [dock]: { kind: 'list', scope: 'session' } } },
-      ({ renderSlot, SessionProvider }) => React.createElement(SessionProvider, {},
-        React.createElement('div', {}, renderSlot(dock, {}),
-          React.createElement('span', { 'data-fixture-sibling': true }, 'Synthetic sibling'))))
+      ({ renderSlot, SessionProvider }) => React.createElement('div', {},
+        React.createElement('div', { 'data-fixture-inherited': true },
+          React.createElement(SessionProvider, { empty: () => React.createElement('span', { 'data-fixture-current-absent': true }, '') },
+            renderSlot(dock, {}))),
+        React.createElement('div', { 'data-fixture-explicit-absence': true },
+          React.createElement(SessionProvider, { session: undefined, empty: () => React.createElement('span', { 'data-fixture-absent': true }, '') },
+            renderSlot(dock, {}))),
+        React.createElement('span', { 'data-fixture-sibling': true }, 'Synthetic sibling')))
     const fiber = context.plugin(client)
-    await fiber
     disposeClient = async () => { await fiber.dispose() }
+    await fiber
     const uiRenderer = context.get('uiRenderer')
     requireMethods(uiRenderer, ['mount'], 'UiRenderer service')
     unmount = (uiRenderer as { mount(container: HTMLElement): () => void }).mount(container)
-    await waitFor(() => trigger()?.textContent?.includes('7 used') === true)
+    await frame()
+    if (container.querySelector('[data-fixture-current-absent]') === null || trigger() !== null || quotaReads !== 0) {
+      throw new Error('Absent current binding must not expose usage or read quota')
+    }
+    current.set(binding)
+    await waitFor(() => trigger()?.textContent?.includes('7 used') === true && quotaReads === 1)
     const usageText = trigger()!.textContent
     const sibling = container.querySelector('[data-fixture-sibling]')
     const sessionSubscribed = session.subscribers() > 0 && projection.subscribers() > 0
+      && current.subscribers() > 0 && absent.subscribers() > 0
+    if (container.querySelector('[data-fixture-absent]') === null
+      || container.querySelector('[data-fixture-explicit-absence] [data-copilot-usage-trigger]') !== null) {
+      throw new Error('Explicit absence must not inherit the current live Session')
+    }
     session.set({ sessionId: 'desktop-usage-fixture', removed: true, openState: 'open' })
     await waitFor(() => trigger() === null)
     session.set({ sessionId: 'desktop-usage-fixture', removed: false, openState: 'open' })
-    await waitFor(() => trigger() !== null && quotaReads === 2)
+    await waitFor(() => trigger()?.textContent?.includes('7 used') === true && quotaReads === 2)
+    session.set({ sessionId: 'desktop-usage-fixture', removed: false, openState: 'closed' })
+    await waitFor(() => trigger() === null)
+    session.set({ sessionId: 'desktop-usage-fixture', removed: false, openState: 'open' })
+    await waitFor(() => trigger()?.textContent?.includes('7 used') === true && quotaReads === 3)
     projection.set({ lastUsed: selection(route), next: selection('other-provider') })
     await waitFor(() => trigger() === null)
+    projection.set({ lastUsed: selection('other-provider'), next: selection(route) })
+    await waitFor(() => trigger()?.textContent?.includes('7 used') === true && quotaReads === 4)
     await disposeClient()
     disposeClient = undefined
-    await waitFor(() => session.subscribers() === 0 && projection.subscribers() === 0)
-    return {
+    await waitFor(() => trigger() === null && session.subscribers() === 0 && projection.subscribers() === 0)
+    if (slots.entries(dock).length !== 0) throw new Error('Disposed Client left a raw Slot registration')
+    evidence = {
       scope: 'packaged-renderer-released-client-synthetic-session-and-quota',
       provider: route, usageText, quotaReads, sessionSubscribed,
-      removedSessionHidesUsage: true, otherProviderHidesUsage: true,
-      clientDisposalRemovesUsage: slots.entriesOfSlot(dock).length === 0,
+      removedSessionHidesUsage: true, otherProviderHidesUsage: true, clientDisposalRemovesUsage: true,
       selectorErrors: errors.length, forbiddenRemoteCalls,
       hostTransport: 'not-provided-to-isolated-fixture',
       applicationMountPreserved: document.getElementById('root') === application && application.isConnected,
       syntheticSiblingPreserved: sibling !== null && container.querySelector('[data-fixture-sibling]') === sibling,
+      inheritedSessionScopeVerified: true, explicitUndefinedSessionScopeAbsent: true,
+      removedSessionRestoresUsage: true, closedSessionHidesUsage: true, closedSessionRestoresUsage: true,
+      restoredProviderShowsUsage: true,
     }
+  } catch (error) {
+    retain(error)
   } finally {
+    try { unmount() } catch (error) { retain(error) }
+    try { await disposeClient?.() } catch (error) { retain(error) }
+    try { await context?.fiber.dispose(); syntheticContextDisposed = context !== undefined } catch (error) { retain(error) }
     try {
-      unmount()
-    } finally {
-      try { await disposeClient?.() } finally {
-        try { await context.fiber.dispose() } finally {
-          console.error = originalError
-          container.remove()
-        }
+      if ([session, projection, current, absent].some(observable => observable.subscribers() !== 0)) {
+        throw new Error('Usage fixture left a source subscription')
       }
+      if (slots !== undefined && slots.entries(dock).length !== 0) throw new Error('Usage fixture left raw Slot registrations')
+      subscriptionsReleased = true
+    } catch (error) { retain(error) }
+    try { window.removeEventListener('error', onError) } catch (error) { retain(error) }
+    try { window.removeEventListener('unhandledrejection', onError) } catch (error) { retain(error) }
+    try { console.error = originalError } catch (error) { retain(error) }
+    try { container.remove() } catch (error) { retain(error) }
+    if (container.isConnected || document.getElementById('root') !== application || !application.isConnected) {
+      retain(new Error('Usage fixture did not restore its original application mount'))
     }
+    if (errors.length > 0) retain(new Error('Usage fixture observed renderer errors'))
   }
+  if (failed) throw failure
+  if (evidence === undefined || !subscriptionsReleased || !syntheticContextDisposed) {
+    throw new Error('Positive usage evidence or cleanup is incomplete')
+  }
+  return { ...evidence, subscriptionsReleased, syntheticContextDisposed }
 }

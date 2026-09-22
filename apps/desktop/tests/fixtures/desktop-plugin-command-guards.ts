@@ -1,5 +1,79 @@
 /** Pure acceptance guards; importing these must never load native bindings or start a process. */
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+
+/** First failure presence is independent of its value, including thrown undefined. */
+export interface DesktopPluginCommandOutcome {
+  readonly failed: boolean
+  readonly primary: unknown
+  readonly secondary: readonly unknown[]
+  retain(error: unknown): void
+}
+
+/** @returns One fixture-owned failure ledger; later diagnostics never replace its first error. */
+export function createDesktopPluginCommandOutcome(): DesktopPluginCommandOutcome {
+  let failed = false
+  let primary: unknown
+  const secondary: unknown[] = []
+  return {
+    get failed() { return failed },
+    get primary() { return primary },
+    secondary,
+    retain(error) {
+      if (failed) secondary.push(error)
+      else { failed = true; primary = error }
+    },
+  }
+}
+
+/**
+ * Publish command acceptance only after the caller has completed all owned cleanup.
+ * @param outcome - Actual owner failure ledger.
+ * @param cleanupVerified - Complete Job, helper, handle, connection and home cleanup observation.
+ * @param publish - Exclusive final success writer.
+ * @param reportFailure - Best-effort failure writer; errors remain secondary.
+ */
+export function finalizeDesktopPluginCommandAcceptance(
+  outcome: DesktopPluginCommandOutcome, cleanupVerified: boolean, publish: () => void,
+  reportFailure: (primary: unknown, secondary: readonly unknown[]) => void,
+): void {
+  if (!cleanupVerified) outcome.retain(new Error('Command acceptance cleanup is unconfirmed'))
+  if (!outcome.failed) {
+    try { publish() } catch (error) { outcome.retain(error) }
+  }
+  if (outcome.failed) {
+    try { reportFailure(outcome.primary, outcome.secondary) } catch (error) { outcome.retain(error) }
+    throw outcome.primary
+  }
+}
+
+/**
+ * Admit only the exact hosted checkout identity before any fixture allocation or application launch.
+ * @param sourceCommit - Independently observed checkout HEAD.
+ * @param sourceTree - Independently observed checkout tree.
+ * @param environment - Workflow environment, never the child application environment.
+ * @returns Owned source and workflow identity leaves.
+ */
+export function validateDesktopPluginCommandRun(sourceCommit: string, sourceTree: string, environment: NodeJS.ProcessEnv): {
+  sourceCommit: string
+  sourceTree: string
+  runId: string
+  runAttempt: string
+} {
+  assert.equal(environment.GITHUB_ACTIONS, 'true')
+  assert.equal(environment.GITHUB_REPOSITORY, 'cloga/deepseek-harness')
+  assert.equal(environment.RUNNER_ENVIRONMENT, 'github-hosted')
+  assert.equal(environment.RUNNER_OS, 'Windows')
+  for (const value of [sourceCommit, sourceTree]) assert(value.length === 40 && /^[a-f0-9]{40}$/u.test(value))
+  assert.equal(environment.GITHUB_SHA, sourceCommit, 'Command fixture must identify the exact workflow source')
+  const runId = environment.GITHUB_RUN_ID
+  const runAttempt = environment.GITHUB_RUN_ATTEMPT
+  for (const value of [runId, runAttempt]) {
+    assert(typeof value === 'string' && value.length <= 20 && value.trim() === value && /^[1-9]\d*$/u.test(value))
+  }
+  assert(runId !== undefined && runAttempt !== undefined)
+  return { sourceCommit, sourceTree, runId, runAttempt }
+}
 
 /**
  * Calculate the remaining monotonic-time budget.
@@ -121,46 +195,98 @@ function record(value: unknown): asserts value is Record<string, unknown> {
   assert(value !== null && typeof value === 'object' && !Array.isArray(value), 'Expected audit object')
 }
 
+/** Cancellation evidence from the real alpha2 private staging journal, not a legacy manager audit. */
+export interface DesktopPluginCancelAudit {
+  readonly owner: unknown
+  readonly prepared: unknown
+  readonly discarded: unknown
+  readonly retainedEntries: readonly string[]
+}
+/** Independently observed pre-command identity and exact active-profile metadata bytes. */
+export interface DesktopPluginCancelContext {
+  readonly transactionId: string
+  readonly commandId: string
+  readonly target: string
+  readonly profile: string
+  readonly runtimeDir: string
+  readonly manifestText: string
+  readonly baseline: Readonly<Record<string, string | null>>
+}
 /**
- * Validate a complete started/failed preparation pair against the known inventory.
- * @param values - Parsed, untrusted audit records created during the operation.
- * @param target - Installed plugin selected for the cancelled toggle.
- * @param manifestNames - Nonempty known dependency names from the baseline manifest.
+ * Bind the explicit discard to one actual native command-owned selection preparation.
+ * @param audit - Journals retained after native Cancel and preparation quiescence.
+ * @param expected - Pre-command observations, never values inferred from those journals.
  */
-export function validateDesktopPluginCancelAudit(values: readonly unknown[], target: string, manifestNames: readonly string[]): void {
-  assert(manifestNames.length > 0 && manifestNames.every(name => typeof name === 'string' && name.length > 0), 'Known manifest dependencies required')
-  const names = [...manifestNames].sort()
-  assert.equal(new Set(names).size, names.length)
-  assert(names.includes(target), 'Target must be a known manifest dependency')
-  assert.equal(values.length, 2, 'Cancel requires exactly one started and one failed preparation receipt')
-  const records = values.map((value) => { record(value); return value })
-  const inventory = (value: unknown): void => {
-    record(value)
-    assert.deepEqual(Object.keys(value).sort(), ['names', 'sha256'], 'Inventory schema mismatch')
-    assert(typeof value.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(value.sha256), 'Inventory digest must be SHA-256')
-    assert(Array.isArray(value.names) && value.names.length > 0, 'Inventory names must be nonempty')
-    assert.deepEqual(value.names, names, 'Inventory names must be sorted known manifest dependencies')
+export function validateDesktopPluginCancelAudit(audit: DesktopPluginCancelAudit, expected: DesktopPluginCancelContext): void {
+  const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
+  const keys = (value: Record<string, unknown>, names: string[]): void => { assert.deepEqual(Object.keys(value).sort(), names.sort()) }
+  const digest = (value: unknown): void => { assert(typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value)) }
+  const uuid = (value: unknown): void => { assert(typeof value === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(value)) }
+  uuid(expected.transactionId)
+  const { owner, prepared, discarded } = audit
+  record(owner); record(prepared); record(discarded)
+  keys(owner, ['profile', 'runtimeDir', 'installAnchor', 'runtimeFingerprint', 'dependencyRegistry', 'configPaths',
+    ...(Object.hasOwn(owner, 'provisioningPlanResource') ? ['provisioningPlanResource'] : [])])
+  assert.equal(owner.profile, expected.profile)
+  assert.equal(owner.runtimeDir, expected.runtimeDir)
+  assert(typeof owner.installAnchor === 'string' && owner.installAnchor.length > 0)
+  digest(owner.runtimeFingerprint)
+  assert(typeof owner.dependencyRegistry === 'string' && owner.dependencyRegistry.length > 0)
+  assert(Array.isArray(owner.configPaths) && owner.configPaths.every(path => typeof path === 'string'))
+  keys(prepared, ['schemaVersion', 'owner', 'requestFingerprint', 'result', 'baseFiles', 'baseInputs',
+    'baseGraphFingerprint', 'candidateFingerprint', 'mutation', 'commandOrigin', 'commandRequest', 'selectionBaseManifest'])
+  assert.equal(prepared.schemaVersion, 2)
+  assert.deepEqual(prepared.owner, owner)
+  const { commandOrigin, commandRequest, mutation, result } = prepared
+  record(commandOrigin); record(commandRequest); record(mutation); record(result)
+  keys(commandOrigin, ['kind', 'generation', 'requestId', 'commandId'])
+  assert.equal(commandOrigin.kind, 'desktop-command')
+  uuid(commandOrigin.generation)
+  assert(Number.isSafeInteger(commandOrigin.requestId) && (commandOrigin.requestId as number) > 0)
+  assert.equal(commandOrigin.commandId, expected.commandId)
+  assert.deepEqual(commandRequest, { kind: 'selection', names: [expected.target], enabled: false })
+  assert.deepEqual(mutation, { kind: 'selection', packageNames: [expected.target], enabled: false })
+  keys(result, ['schemaVersion', 'kind', 'transactionId', 'state', 'packageNames', 'baseFingerprint', 'health'])
+  assert.deepEqual(result, { schemaVersion: 2, kind: 'selection', transactionId: expected.transactionId,
+    state: 'prepared', packageNames: [expected.target], baseFingerprint: result.baseFingerprint, health: 'pending' })
+  assert.equal(prepared.selectionBaseManifest, expected.manifestText, 'Selection must bind exact original manifest bytes')
+  const manifest: unknown = JSON.parse(expected.manifestText)
+  record(manifest); record(manifest.dependencies); record(manifest.dsh); record(manifest.dsh.profile)
+  assert(Object.hasOwn(manifest.dependencies, expected.target), 'Target must be an actual installed dependency')
+  assert(Array.isArray(manifest.dsh.profile.bundles) && manifest.dsh.profile.bundles.includes(expected.target), 'Disable target must be selected')
+  assert(Array.isArray(prepared.baseFiles) && prepared.baseFiles.length > 0 && prepared.baseFiles.length <= 100_000)
+  const files = new Map<string, Record<string, unknown>>()
+  for (const item of prepared.baseFiles) {
+    record(item)
+    assert(typeof item.path === 'string' && item.path.length > 0 && !files.has(item.path))
+    assert(item.kind === 'file' || item.kind === 'directory')
+    keys(item, item.kind === 'file' ? ['path', 'kind', 'sha256'] : ['path', 'kind'])
+    if (item.kind === 'file') digest(item.sha256)
+    files.set(item.path, item)
   }
-  for (const value of records) {
-    assert.equal(value.schemaVersion, 1, 'Audit schemaVersion required')
-    assert(typeof value.recordedAt === 'string' && Number.isFinite(Date.parse(value.recordedAt)), 'Audit recordedAt required')
-    assert(typeof value.transaction === 'string' && /^\.desktop-transaction-[a-zA-Z0-9]+$/u.test(value.transaction), 'Audit transaction required')
-    assert.equal(value.operation, 'plugin-toggle')
-    assert.equal(value.target, target)
-    assert.equal(value.phase, 'preparation')
-    assert(value.outcome === 'started' || value.outcome === 'failed', 'Cancel must not commit')
-    inventory(value.before)
+  assert.equal(files.get('package.json')?.sha256, hash(expected.manifestText))
+  for (const [path, sha256] of Object.entries(expected.baseline)) {
+    const actual = files.get(path.endsWith('/') ? path.slice(0, -1) : path)
+    if (sha256 === null) assert.equal(actual, undefined, `Unexpected baseline file ${path}`)
+    else if (sha256 === 'directory') assert.equal(actual?.kind, 'directory')
+    else { assert(actual !== undefined); assert.equal(actual.kind, 'file'); assert.equal(actual.sha256, sha256, `Baseline bytes differ: ${path}`) }
   }
-  const started = records.filter(value => value.outcome === 'started')
-  const failed = records.filter(value => value.outcome === 'failed')
-  assert.equal(started.length, 1, 'One started receipt required')
-  assert.equal(failed.length, 1, 'One failed receipt required')
-  assert.equal(started[0]!.transaction, failed[0]!.transaction, 'Preparation transaction mismatch')
-  assert.equal(started[0]!.after, null, 'Started preparation has explicit null after')
-  inventory(failed[0]!.after)
-  assert.deepEqual(started[0]!.before, failed[0]!.before)
-  assert.deepEqual(failed[0]!.before, failed[0]!.after, 'Cancel must retain the inventory')
-  assert(Date.parse(started[0]!.recordedAt as string) <= Date.parse(failed[0]!.recordedAt as string), 'Failed receipt must follow started')
+  assert(Array.isArray(prepared.baseInputs))
+  for (const input of prepared.baseInputs) {
+    record(input); keys(input, ['path', 'sha256'])
+    assert(typeof input.path === 'string' && input.path.length > 0)
+    if (input.sha256 !== null) digest(input.sha256)
+  }
+  for (const value of [prepared.baseGraphFingerprint, prepared.candidateFingerprint,
+    prepared.requestFingerprint, result.baseFingerprint]) digest(value)
+  assert.equal(result.baseFingerprint, hash(JSON.stringify({ owner, files: prepared.baseFiles, inputs: prepared.baseInputs })))
+  assert.equal(prepared.requestFingerprint, hash(JSON.stringify({ mutation, commandOrigin, commandRequest })))
+  keys(discarded, ['schemaVersion', 'transactionId', 'ownerFingerprint', 'requestFingerprint', 'candidateFingerprint', 'state'])
+  assert.deepEqual(discarded, { schemaVersion: 1, transactionId: expected.transactionId,
+    ownerFingerprint: hash(JSON.stringify(owner)), requestFingerprint: prepared.requestFingerprint,
+    candidateFingerprint: prepared.candidateFingerprint, state: 'discarded' })
+  assert.deepEqual([...audit.retainedEntries].sort(), ['DISCARDED.json', 'PREPARED.json', 'owner.json'],
+    'Cancel must retain only bound journals: no candidate, acquisition cache or activation/rollback state')
 }
 
 /**

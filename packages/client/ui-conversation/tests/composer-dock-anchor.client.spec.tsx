@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import type { ReactNode } from 'react'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SlotTestRuntime } from '@deepseek-ai/dsh-client-test-runtime'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -10,14 +11,16 @@ afterEach(async () => { for (const runtime of runtimes.splice(0)) await runtime.
 const slot = 'conversation.composer.dock'
 const empty = `.${css.dock}:empty, .${css.dock}:has(> [data-slot="${slot}"]:only-child:empty)`
 
-async function bench() {
+async function bench(sibling: ReactNode = null) {
   const runtime = await SlotTestRuntime.create()
   runtimes.push(runtime)
-  await runtime.sessions.add({ id: 'composer-dock-anchor' }, { current: true })
-  // The production renderer, not a mocked renderSlot, owns the stable outlet.
+  await runtime.sessions.add({ id: 'composer-dock-anchor' })
+  const reference = runtime.sessions.retainFor(runtime.ctx, 'composer-dock-anchor' as SessionId)
+  await reference.ready
+  // The production renderer owns the outlet; the runtime's Fiber owns the Session reference.
   await runtime.root.declare({ [slot]: { kind: 'list', scope: 'session' } }, ({ renderSlot, SessionProvider }) => (
-    <SessionProvider>
-      <div className={css.dock} data-testid="dock-owner">{renderSlot(slot, {})}</div>
+    <SessionProvider session={reference}>
+      <div className={css.dock} data-testid="dock-owner">{renderSlot(slot, {})}{sibling}</div>
     </SessionProvider>
   ))
   const view = runtime.renderRoot()
@@ -60,6 +63,13 @@ describe('composer empty spacing with the actual Slot outlet', () => {
     await feature.dispose()
     expect(owner.querySelector(`[data-slot="${slot}"]`)).toBe(anchor)
     expect(owner.matches(empty)).toBe(true)
+  })
+
+  it('preserves a context-meter sibling beside an empty layout-neutral outlet', async () => {
+    const { owner, anchor } = await bench(<span data-testid="context-meter">25%</span>)
+    expect(anchor.childNodes).toHaveLength(0)
+    expect(owner.querySelector('[data-testid="context-meter"]')).not.toBeNull()
+    expect(owner.matches(empty)).toBe(false)
   })
 
   it('does not hide the actual renderer crash marker', async () => {

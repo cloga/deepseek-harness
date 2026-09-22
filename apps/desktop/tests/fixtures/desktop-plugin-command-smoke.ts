@@ -1,34 +1,38 @@
-/** Packaged command-only acceptance. Independent of the no-Session Copilot account smoke.
+/** Packaged command-only acceptance. Independent of combined Copilot/native-composer acceptance.
  * Run only on an interactive Windows CI desktop with a freshly packaged application.
  * No model prompt/sign-in/settings mutation; staging CAN use frozen pnpm and network.
  */
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { closeSync, createReadStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import type { Browser, Page } from 'playwright'
 import type { SpawnedJobProcess } from '@deepseek-ai/dsh-win32-process/src/index.ts'
 import {
+  createDesktopPluginCommandOutcome, finalizeDesktopPluginCommandAcceptance,
   parseDesktopDevToolsPort, remainingDeadline, validateDesktopPageTitle, validateDesktopPluginCancelAudit,
-  validateDesktopWindowCapture, waitForOwnedJobExit, withinDeadline,
+  validateDesktopPluginCommandRun, validateDesktopWindowCapture, waitForOwnedJobExit, withinDeadline,
 } from './desktop-plugin-command-guards.ts'
 import type { CommandDescriptor, CommandExecution } from '@deepseek-ai/dsh-commands/types'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
-import { parseSessionFormatLogFilename } from '@deepseek-ai/dsh-session-format/src/filename.ts'
+import { parseSessionFormatLogFilename } from '@deepseek-ai/dsh-session-format'
 import { desktopSmokeEnvironment } from '../../scripts/smoke-environment.ts'
 import { removeOwnedDirectory } from '../../src/owned-directory.ts'
+import { ownedUpgradePath } from './windows-installed-upgrade-contract.mjs'
 
-const APPLICATION_URL = 'dsh-app://app/index.html'
+const APPLICATION_URL = 'dsh-app://app/'
+const repository = fileURLToPath(new URL('../../../../', import.meta.url))
 const PREPARED = 'Plugin change prepared. Review the native confirmation to restart the Desktop Host.'
 const SAFE_FAILURE = 'Desktop could not prepare the plugin change. Review Desktop diagnostics for details.'
 const BUSY = 'Another Desktop plugin, recovery, or update operation is in progress.'
 const METADATA = [
   'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'desktop.cordis.yml',
   'desktop-runtime-state.json', 'desktop-plugin-receipts.json', 'desktop-plugin-package-locks.json',
-  'desktop-plugin-provisioning-state.json', '.env', 'profile.env', 'desktop-packages-pending',
+  'desktop-plugin-provisioning-state.json', 'desktop-plugin-user-intents.json',
+  'cordis.yml', 'cordis.patch.yml', '.env', 'profile.env', 'desktop-packages-pending',
 ] as const
 
 /** Only a packaged executable and caller-selected evidence destination are accepted. */
@@ -48,6 +52,58 @@ interface Ownership {
 }
 interface ExpectedCommand { readonly line: string; readonly execution: CommandExecution }
 interface HelperLifecycle { helperTreeUncertain: boolean; nativeObservations: string[] }
+
+/** Fixture expectation derived from physical archive bytes, never from a transaction's self-reported owner. */
+export interface DesktopPluginRuntimeIdentity {
+  readonly archive: string
+  readonly archiveSha256: string
+  readonly runtimeDir: string
+}
+
+/**
+ * Bind the fixed virtual dsh path without asking ordinary Node to traverse the ASAR file.
+ * Caller must first run verifyPackagedDesktopRuntime: this helper does not validate archive entries or runtime contents.
+ * @param application - Exact independently verified packaged executable.
+ * @param runtimeRoot - Fixed resources/app.asar/dsh path selected by the maintained packaged-runtime helper.
+ * @param expected - Earlier owned observation, when rechecking for archive substitution.
+ * @returns Canonical physical archive plus literal dsh, and a streaming raw-byte archive hash.
+ */
+export async function inspectDesktopPluginRuntimeIdentity(
+  application: string, runtimeRoot: string, expected?: DesktopPluginRuntimeIdentity,
+): Promise<DesktopPluginRuntimeIdentity> {
+  assert.equal(application, resolve(application), 'Packaged executable must be an absolute normalized path')
+  assert.equal(runtimeRoot, join(dirname(application), 'resources', 'app.asar', 'dsh'), 'Unexpected packaged runtime path')
+  const inspectPhysical = () => {
+    const root = dirname(application)
+    for (let parent = root; ; parent = dirname(parent)) {
+      const stat = lstatSync(parent)
+      assert(stat.isDirectory() && !stat.isSymbolicLink(), 'Packaged application ancestors must be physical directories')
+      if (dirname(parent) === parent) break
+    }
+    const executable = ownedUpgradePath(root, application)
+    const resources = ownedUpgradePath(root, join(root, 'resources'))
+    const archive = ownedUpgradePath(root, join(resources, 'app.asar'))
+    for (const path of [executable, archive]) {
+      const stat = lstatSync(path)
+      assert(stat.isFile() && !stat.isSymbolicLink(), 'Packaged executable and archive must be regular physical files')
+    }
+    const resourceStat = lstatSync(resources)
+    assert(resourceStat.isDirectory() && !resourceStat.isSymbolicLink(), 'Packaged resources must be a physical directory')
+    const stat = lstatSync(archive)
+    return { archive: realpathSync(archive), size: stat.size, modified: stat.mtimeMs, changed: stat.ctimeMs,
+      device: stat.dev, inode: stat.ino }
+  }
+  const before = inspectPhysical()
+  const digest = createHash('sha256')
+  for await (const chunk of createReadStream(before.archive)) {
+    assert(Buffer.isBuffer(chunk), 'Archive inspection requires original binary chunks')
+    digest.update(chunk)
+  }
+  assert.deepEqual(inspectPhysical(), before, 'Packaged archive changed during identity inspection')
+  const identity = { archive: before.archive, archiveSha256: digest.digest('hex'), runtimeDir: join(before.archive, 'dsh') }
+  if (expected !== undefined) assert.deepEqual(identity, expected, 'Packaged runtime archive changed after verification')
+  return identity
+}
 
 /**
  * Provide EOF stdin without depending on Windows device-name normalization.
@@ -180,6 +236,8 @@ async function nativeHelper<T>(
   let stderr: number | undefined
   let spawnAttempted = false
   let closedNormally = false
+  const failure = createDesktopPluginCommandOutcome()
+  let result!: T
   try {
     stderr = openSync(`${prefix}.stderr`, 'wx', 0o600)
     const executable = join(environment.SystemRoot ?? environment.SYSTEMROOT ?? 'C:\\Windows',
@@ -203,19 +261,28 @@ async function nativeHelper<T>(
     if (timedOut || spawnError !== undefined || outcome.signal !== null || outcome.code !== 0) {
       throw new Error(`Native helper failed after awaiting close: ${JSON.stringify({ timedOut,
         exitCode: outcome.code, signal: outcome.signal, spawnError: spawnError === undefined ? undefined : safeDiagnostic(spawnError),
-        stderr: safeDiagnostic(readFileSync(`${prefix}.stderr`, 'utf8')) })}`)
+        stderr: readDesktopPluginNativeObservations(`${prefix}.stderr`) })}`)
     }
     remainingDeadline(deadline)
-    const result = JSON.parse(readFileSync(`${prefix}.stdout`, 'utf8').replace(/^\uFEFF/u, '')) as T
+    result = JSON.parse(readFileSync(`${prefix}.stdout`, 'utf8').replace(/^\uFEFF/u, '')) as T
     closedNormally = true
-    return result
+  } catch (error) {
+    failure.retain(error)
   } finally {
     // Add-Type may own a compiler child outside the app Job. Only normal helper completion
     // admits its synchronous compiler lifecycle; an abnormal parent close is NOT tree quiescence.
     if (spawnAttempted && !closedNormally) lifecycle.helperTreeUncertain = true
-    closeSync(stdout)
-    if (stderr !== undefined) closeSync(stderr)
+    for (const fd of [stdout, stderr]) {
+      if (fd !== undefined) {
+        try { closeSync(fd) } catch (error) {
+          lifecycle.helperTreeUncertain = true
+          failure.retain(error)
+        }
+      }
+    }
   }
+  if (failure.failed) throw failure.primary
+  return result
 }
 
 /** POST only known, supported generated unary routes; no prompt fallback. */
@@ -240,9 +307,14 @@ async function remote<T>(page: Page, method: 'session/create' | 'commands/list' 
   return body.result.value as T
 }
 
-function auditNames(home: string): string[] {
-  const directory = join(home, 'desktop', 'profile-operations')
-  return existsSync(directory) ? readdirSync(directory).filter(name => name.endsWith('.json')).sort() : []
+function transactionNames(profile: string): string[] {
+  return readdirSync(dirname(profile)).filter(name => name.startsWith('.desktop.package-stage-')).sort()
+}
+
+function readJournal(path: string): unknown {
+  const stat = lstatSync(path)
+  assert(stat.isFile() && !stat.isSymbolicLink() && stat.size <= 16 * 1024 * 1024, 'Expected bounded regular private journal')
+  return JSON.parse(readFileSync(path, 'utf8')) as unknown
 }
 
 async function exportTranscript(page: Page, home: string, sessionId: string, expected: readonly ExpectedCommand[]) {
@@ -276,6 +348,9 @@ async function exportTranscript(page: Page, home: string, sessionId: string, exp
  */
 export async function runPackagedDesktopPluginCommandAcceptance(options: PackagedDesktopPluginCommandOptions): Promise<void> {
   assert.equal(process.platform, 'win32', 'Native Cancel acceptance requires interactive Windows')
+  const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim()
+  const sourceTree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repository, encoding: 'utf8' }).trim()
+  const identity = validateDesktopPluginCommandRun(sourceCommit, sourceTree, process.env)
   const application = resolve(options.application)
   const outputRoot = resolve(options.output)
   mkdirSync(outputRoot, { recursive: true })
@@ -285,20 +360,24 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
   const win32 = await import('@deepseek-ai/dsh-win32-process/src/index.ts')
   const { buildCommandLine } = await import('@deepseek-ai/dsh-win32-process/src/process.ts')
   const api = win32.loadWin32ProcessBindings()
-  const { parseDesktopForkReleasePlan } = await import('../../scripts/fork-release.ts')
+  const { parseDesktopForkReleasePlan, createDesktopForkReleaseCapability } = await import('../../scripts/fork-release.ts')
   const { readDesktopPluginProvisioningPlan } = await import('../../src/plugin-provisioning.ts')
-  const { assertDesktopProvisioningInventory } = await import('../../src/project-manager.ts')
+  const { assertDesktopProvisioningInventory } = await import('../../src/plugin-receipts.ts')
   const { packagedDesktopRuntimeRoot, verifyPackagedDesktopRuntime, readPackagedDesktopRuntimeDescriptor } =
     await import('../../scripts/packaged-runtime.mjs')
-  const reviewed = parseDesktopForkReleasePlan(JSON.parse(readFileSync(new URL('../../release/cloga-windows-x64.json', import.meta.url), 'utf8')))
+  const planBytes = readFileSync(new URL('../../release/cloga-windows-x64.json', import.meta.url))
+  const lockBytes = readFileSync(join(repository, 'pnpm-lock.yaml'))
+  const reviewed = parseDesktopForkReleasePlan(JSON.parse(planBytes.toString('utf8')))
   const resources = join(dirname(application), 'resources')
+  const capabilityBytes = readFileSync(join(resources, 'managed-update', 'capability.json'))
+  assert.deepEqual(JSON.parse(capabilityBytes.toString('utf8')), createDesktopForkReleaseCapability(reviewed))
   const runtimeRoot = packagedDesktopRuntimeRoot(resources)
   const plan = readDesktopPluginProvisioningPlan(join(resources, 'desktop-provisioning', 'plan.json'))
   assert.deepEqual(plan, reviewed.desktopProvisioning)
   assert.equal(plan.mode, 'exact', 'Deterministic clean-profile inventory requires an exact plan')
   const executableSha256 = createHash('sha256').update(readFileSync(application)).digest('hex')
   const provisioningPlanSha256 = createHash('sha256').update(readFileSync(join(resources, 'desktop-provisioning', 'plan.json'))).digest('hex')
-  const scratch = resolve('.desktop-smoke')
+  const scratch = join(repository, '.desktop-smoke')
   mkdirSync(scratch, { recursive: true })
   const home = mkdtempSync(join(scratch, 'packaged-plugin-command-'))
   let browser: Browser | undefined
@@ -306,7 +385,9 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
   let spawnAttempted = false
   const helperLifecycle: HelperLifecycle = { helperTreeUncertain: false, nativeObservations: [] }
   let ownership: Ownership | undefined
-  let failure: unknown
+  const failure = createDesktopPluginCommandOutcome()
+  let cleanupVerified = false
+  let runtimeIdentity: DesktopPluginRuntimeIdentity | undefined
   const descriptors: number[] = []
   const stderrPath = join(home, 'electron.stderr')
   let page: Page | undefined
@@ -316,7 +397,13 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
   const profile = join(home, 'profiles', 'desktop')
   const workspace = join(home, 'workspace')
   const userData = join(home, 'electron-user-data')
-  const evidence: Record<string, unknown> = { desktopVersion: reviewed.version, sequence: reviewed.sequence,
+  const evidence: Record<string, unknown> = {
+    schemaVersion: 1, scope: 'independent-packaged-plugin-command-and-native-cancel',
+    sourceRepository: 'cloga/deepseek-harness', ...identity,
+    desktopVersion: reviewed.version, upstreamVersion: reviewed.upstreamVersion, sequence: reviewed.sequence,
+    planSha256: createHash('sha256').update(planBytes).digest('hex'),
+    lockfileSha256: createHash('sha256').update(lockBytes).digest('hex'),
+    capabilitySha256: createHash('sha256').update(capabilityBytes).digest('hex'),
     executableSha256, provisioningPlanSha256,
     isolatedHome: true, modelPromptSubmitted: false, realOAuth: false, networkFreeClaimed: false,
     nativeObservations: helperLifecycle.nativeObservations }
@@ -324,13 +411,15 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     writeFileSync(join(output, name), `${JSON.stringify(value, undefined, 2)}\n`, { flag: 'wx', mode: 0o600 })
   }
   try {
-    mkdirSync(profile, { recursive: true })
+    assert.equal(existsSync(profile), false, 'The shell must create the fresh Desktop profile')
     mkdirSync(workspace)
-    for (const path of [join(home, '.env'), join(profile, '.env')]) writeFileSync(path, '', { flag: 'wx', mode: 0o600 })
+    writeFileSync(join(home, '.env'), '', { flag: 'wx', mode: 0o600 })
     // Every verifier child is synchronous/awaited and receives this fixture's private environment.
     await verifyPackagedDesktopRuntime(application, runtimeRoot, reviewed.upstreamVersion, { platform: 'win32', arch: 'x64' }, environment)
+    runtimeIdentity = await inspectDesktopPluginRuntimeIdentity(application, runtimeRoot)
     const runtimeBytes = readPackagedDesktopRuntimeDescriptor(application, runtimeRoot, environment)
     evidence.runtimeSha256 = createHash('sha256').update(runtimeBytes).digest('hex')
+    evidence.runtimeArchiveSha256 = runtimeIdentity.archiveSha256
     mkdirSync(userData)
     const descriptor = (path: string, flags: string): number => {
       const fd = openSync(path, flags, 0o600)
@@ -378,10 +467,14 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     }
     await page.waitForFunction(() => {
       const error = document.querySelector<HTMLElement>('#error')
-      return location.href === 'dsh-app://app/index.html' || Boolean(error && !error.hidden && error.textContent?.trim())
+      return location.href === 'dsh-app://app/' || Boolean(error && !error.hidden && error.textContent?.trim())
     }, undefined, { timeout: remainingDeadline(startupDeadline) })
     remainingDeadline(startupDeadline)
     assert.equal(page.url(), APPLICATION_URL, 'Packaged application did not reach app-ready')
+    await page.getByRole('button', { name: 'Settings', exact: true }).waitFor({
+      state: 'visible', timeout: remainingDeadline(startupDeadline),
+    })
+    remainingDeadline(startupDeadline)
     const pageTitle = await withinDeadline(startupDeadline, () => page!.title())
     validateDesktopPageTitle(pageTitle)
     evidence.pageTitle = pageTitle
@@ -396,9 +489,9 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     evidence.ownership = ownership
     assertDesktopProvisioningInventory(profile, plan)
     const baseline = snapshotDesktopPluginProfile(profile)
-    const manifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')) as { dependencies?: unknown }
+    const manifestText = readFileSync(join(profile, 'package.json'), 'utf8')
+    const manifest = JSON.parse(manifestText) as { dependencies?: unknown; dsh: { profile: { bundles: string[] } } }
     assert(manifest.dependencies !== null && typeof manifest.dependencies === 'object' && !Array.isArray(manifest.dependencies))
-    const manifestNames = Object.keys(manifest.dependencies).sort()
     const expectedRows = plan.plugins.map(entry => ({ name: entry.source.packageName, version: entry.source.version }))
       .sort((a, b) => a.name.localeCompare(b.name))
     assert(expectedRows.length > 0, 'Release plan must provide an installed plugin to disable')
@@ -422,15 +515,30 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
       return execution
     }
     assert.deepEqual((await execute('/desktop-plugin list')).result, { kind: 'success', text: listText })
-    const auditsBeforeInvalid = auditNames(home)
     const profilesBeforeInvalid = readdirSync(dirname(profile)).sort()
     assert.deepEqual((await execute('/desktop-plugin install release {}')).result, { kind: 'error', text: SAFE_FAILURE })
-    assert.deepEqual(auditNames(home), auditsBeforeInvalid, 'Invalid release descriptor must fail before transaction/acquisition')
-    assert.deepEqual(readdirSync(dirname(profile)).sort(), profilesBeforeInvalid, 'Invalid release must create no staged profile')
+    assert.deepEqual(readdirSync(dirname(profile)).sort(), profilesBeforeInvalid, 'Invalid release must create no transaction/acquisition')
     assert.deepEqual(snapshotDesktopPluginProfile(profile), baseline)
-    const auditsBeforeToggle = auditNames(home)
+    const transactionsBeforeToggle = transactionNames(profile)
     // Stage preparation may reconstruct dependencies with bundled frozen pnpm. This is NOT a zero-network smoke.
-    assert.deepEqual((await execute(`/desktop-plugin disable ${target.name}`)).result, { kind: 'success', text: PREPARED })
+    const disable = await execute(`/desktop-plugin disable ${target.name}`)
+    assert.deepEqual(disable.result, { kind: 'success', text: PREPARED })
+    const createdTransactions = transactionNames(profile).filter(name => !transactionsBeforeToggle.includes(name))
+    assert.equal(createdTransactions.length, 1, 'Exactly one command-owned candidate must be prepared')
+    const transactionName = createdTransactions[0]!
+    const transactionId = transactionName.slice('.desktop.package-stage-'.length)
+    const transaction = join(dirname(profile), transactionName)
+    const preparedBeforeCancel = readJournal(join(transaction, 'PREPARED.json'))
+    const candidate = join(transaction, 'profile')
+    const candidateSnapshot = snapshotDesktopPluginProfile(candidate)
+    assert.deepEqual({ ...candidateSnapshot, 'package.json': baseline['package.json'] }, baseline,
+      'Selection may change only bundle selection, not retained metadata/artifacts')
+    const candidateManifest: unknown = JSON.parse(readFileSync(join(candidate, 'package.json'), 'utf8'))
+    assert(manifest.dsh.profile.bundles.includes(target.name))
+    assert.deepEqual(candidateManifest, { ...manifest, dsh: { ...manifest.dsh, profile: { ...manifest.dsh.profile,
+      bundles: manifest.dsh.profile.bundles.filter(name => name !== target.name) } } })
+    assert.equal(existsSync(join(transaction, 'DISCARDED.json')), false)
+    assert.equal(existsSync(join(transaction, 'ACTIVATION.json')), false)
     evidence.beforeCancelTranscript = await exportTranscript(page, home, sessionId, expected)
     // Export flush proves prepared command/done durability before Cancel invocation, NOT independent native-dialog ordering.
     evidence.nativeCancel = await nativeHelper(home, environment, { action: 'cancel', ownership }, helperLifecycle)
@@ -444,9 +552,14 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     }
     const after = snapshotDesktopPluginProfile(profile)
     assert.deepEqual(after, baseline, 'Cancel must retain actual profile metadata and artifact bytes')
-    const newAudits = auditNames(home).filter(name => !auditsBeforeToggle.includes(name))
-    const records = newAudits.map(name => JSON.parse(readFileSync(join(home, 'desktop', 'profile-operations', name), 'utf8')) as unknown)
-    validateDesktopPluginCancelAudit(records, target.name, manifestNames)
+    assert.deepEqual(transactionNames(profile), [...transactionsBeforeToggle, transactionName].sort())
+    const records = { owner: readJournal(join(transaction, 'owner.json')),
+      prepared: readJournal(join(transaction, 'PREPARED.json')),
+      discarded: readJournal(join(transaction, 'DISCARDED.json')), retainedEntries: readdirSync(transaction).sort() }
+    assert.deepEqual(records.prepared, preparedBeforeCancel, 'Cancel must not rewrite the prepared command identity')
+    await inspectDesktopPluginRuntimeIdentity(application, runtimeRoot, runtimeIdentity)
+    validateDesktopPluginCancelAudit(records, { transactionId, commandId: disable.commandId, target: target.name,
+      profile: realpathSync(profile), runtimeDir: runtimeIdentity.runtimeDir, manifestText, baseline })
     evidence.afterCancelIdentity = await nativeHelper(home, environment, { action: 'verify', ownership }, helperLifecycle)
     assert.equal(win32.pollProcessExit(api, owned.process), undefined, 'Cancel must retain the exact Job-created root')
     assert.equal(page.url(), APPLICATION_URL)
@@ -469,16 +582,26 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
     assert(canRemoveDesktopPluginHome({ spawnAttempted, jobOwned: true, jobQuiescent: quiescent,
       helperTreeUncertain: helperLifecycle.helperTreeUncertain }), 'Independent helper tree is uncertain')
     evidence.quiescent = { rootExitCode: exitCode, jobEmpty: true, normalClose: true, helperTreeUncertain: false }
-    save('acceptance.json', evidence)
+    assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim(), sourceCommit)
+    assert.equal(execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repository, encoding: 'utf8' }).trim(), sourceTree)
+    for (const [path, sha256] of [
+      [fileURLToPath(new URL('../../release/cloga-windows-x64.json', import.meta.url)), evidence.planSha256],
+      [join(repository, 'pnpm-lock.yaml'), evidence.lockfileSha256],
+      [join(resources, 'managed-update', 'capability.json'), evidence.capabilitySha256],
+      [join(resources, 'desktop-provisioning', 'plan.json'), provisioningPlanSha256],
+      [application, executableSha256],
+    ] as const) assert.equal(createHash('sha256').update(readFileSync(path)).digest('hex'), sha256, 'Acceptance inputs changed during the run')
   } catch (error) {
-    failure = error
-    save('failure.json', { ...evidence, quiescent: false, spawnAttempted,
-      helperTreeUncertain: helperLifecycle.helperTreeUncertain, error: safeDiagnostic(error),
-      stderrTail: existsSync(stderrPath) ? safeDiagnostic(readFileSync(stderrPath, 'utf8').slice(-32_768)) : '',
-      commands: expected, pageUrl: page?.url(), retainedHomeOnCleanupFailure: home })
-    throw error
+    failure.retain(error)
+    try {
+      save('failure.json', { ...evidence, quiescent: false, spawnAttempted,
+        helperTreeUncertain: helperLifecycle.helperTreeUncertain, error: safeDiagnostic(error),
+        stderrTail: existsSync(stderrPath) ? safeDiagnostic(readFileSync(stderrPath, 'utf8').slice(-32_768)) : '',
+        commands: expected, pageUrl: page?.url(), retainedHomeOnCleanupFailure: home })
+    } catch (diagnosticError) { failure.retain(diagnosticError) }
   } finally {
     const errors: unknown[] = []
+    const cleanupFailure = (error: unknown): void => { errors.push(error); failure.retain(error) }
     if (!quiescent && owned !== undefined) {
       // Covers every post-spawn failure, including absent CDP, app-ready or native identity capture.
       try {
@@ -486,36 +609,52 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
         await waitForOwnedJobExit(performance.now() + 60_000,
           () => win32.pollProcessExit(api, owned!.process), () => win32.isJobEmpty(api, owned!.job))
         quiescent = true
-      } catch (error) { errors.push(error) }
+      } catch (error) { cleanupFailure(error) }
     } else if (owned === undefined && !spawnAttempted) quiescent = true
     if (spawnAttempted && owned === undefined) {
-      errors.push(new Error(`Spawn threw without returned handles; child cleanup is unknown; retained private home: ${home}`))
+      cleanupFailure(new Error(`Spawn threw without returned handles; child cleanup is unknown; retained private home: ${home}`))
     }
     if (helperLifecycle.helperTreeUncertain) {
-      errors.push(new Error(`Native helper tree is uncertain after abnormal completion; retained private home: ${home}`))
+      cleanupFailure(new Error(`Native helper tree is uncertain after abnormal completion; retained private home: ${home}`))
     }
     // Never use a Playwright launcher or its PID-kill tree logic. A CDP connection is disconnected only
     // AFTER the retained Job proves quiescence (browser.close on connectOverCDP disconnects the client).
     if (quiescent) {
-      try { await withinDeadline(performance.now() + 10_000, async () => { await browser?.close() }) } catch (error) { errors.push(error) }
+      try { await withinDeadline(performance.now() + 10_000, async () => { await browser?.close() }) }
+      catch (error) { cleanupFailure(error) }
       if (owned !== undefined) {
-        try { win32.closeHandleChecked(api, owned.process, 'fixture root process') } catch (error) { errors.push(error) }
-        try { win32.closeHandleChecked(api, owned.job, 'fixture Job') } catch (error) { errors.push(error) }
+        try { win32.closeHandleChecked(api, owned.process, 'fixture root process') } catch (error) { cleanupFailure(error) }
+        try { win32.closeHandleChecked(api, owned.job, 'fixture Job') } catch (error) { cleanupFailure(error) }
       }
-    } else errors.push(new Error(`Cannot prove process exit AND empty Job; retained handles and private home: ${home}`))
+    } else cleanupFailure(new Error(`Cannot prove process exit AND empty Job; retained handles and private home: ${home}`))
     for (const fd of descriptors) {
-      try { closeSync(fd) } catch (error) { errors.push(error) }
+      try { closeSync(fd) } catch (error) { cleanupFailure(error) }
     }
     if (canRemoveDesktopPluginHome({ spawnAttempted, jobOwned: owned !== undefined,
       jobQuiescent: quiescent, helperTreeUncertain: helperLifecycle.helperTreeUncertain }) && errors.length === 0) {
-      try { removeOwnedDirectory(home) } catch (error) { errors.push(error) }
+      try { removeOwnedDirectory(home) } catch (error) { cleanupFailure(error) }
     }
     if (errors.length > 0) {
-      save('cleanup-failure.json', { errors: errors.map(safeDiagnostic), home, quiescent: false,
-        appJobQuiescent: quiescent, spawnAttempted, helperTreeUncertain: helperLifecycle.helperTreeUncertain })
-      throw new AggregateError([...(failure === undefined ? [] : [failure]), ...errors], 'Packaged command acceptance cleanup failed')
+      try {
+        save('cleanup-failure.json', { errors: errors.map(safeDiagnostic), home, quiescent: false,
+          appJobQuiescent: quiescent, spawnAttempted, helperTreeUncertain: helperLifecycle.helperTreeUncertain })
+      } catch (diagnosticError) { failure.retain(diagnosticError) }
     }
+    try {
+      cleanupVerified = quiescent && !helperLifecycle.helperTreeUncertain && errors.length === 0 && !existsSync(home)
+    } catch (error) { failure.retain(error) }
   }
+  if (!failure.failed && cleanupVerified) {
+    try {
+      assert(runtimeIdentity !== undefined, 'Verified packaged runtime identity is missing')
+      await inspectDesktopPluginRuntimeIdentity(application, runtimeRoot, runtimeIdentity)
+    } catch (error) { failure.retain(error) }
+  }
+  finalizeDesktopPluginCommandAcceptance(failure, cleanupVerified,
+    () => { save('acceptance.json', { ...evidence, cleanupVerified: true, ownedHomeRemoved: true }) },
+    (primary, secondary) => { save('final-failure.json', {
+      ...evidence, cleanupVerified, error: safeDiagnostic(primary), secondaryErrors: secondary.map(safeDiagnostic),
+    }) })
 }
 
 if (import.meta.main) {

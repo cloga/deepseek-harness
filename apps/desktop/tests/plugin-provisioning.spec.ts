@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import {
   DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+  buildDesktopProvisioningState,
   desktopPluginProvisioningPlanSha256,
   parseDesktopPluginProvisioningPlan,
   parseDesktopPluginProvisioningState,
@@ -58,6 +59,25 @@ function receipt(value = source()) {
 }
 
 describe('Desktop plugin provisioning descriptors', () => {
+  it('builds only matching required singleton evidence without changing its input receipt', () => {
+    const plan = parseDesktopPluginProvisioningPlan({ schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source: source() }] })
+    const activeReceipt = receipt()
+    const before = JSON.stringify(activeReceipt)
+    const state = buildDesktopProvisioningState(plan, activeReceipt)
+    expect(state).toMatchObject({ schemaVersion: 1, composition: 'active', planSha256: desktopPluginProvisioningPlanSha256(plan),
+      removed: [], rolledBack: false, verified: true })
+    expect(state.plugins[0]?.receipt).toEqual(activeReceipt)
+    expect(JSON.stringify(activeReceipt)).toBe(before)
+    for (const invalid of [
+      { ...plan, plugins: [] },
+      { ...plan, plugins: [{ required: false, source: source() }] },
+      { ...plan, plugins: [...plan.plugins, { required: true, source: source('another') }] },
+      { ...plan, plugins: [{ required: true, source: source('another') }] },
+    ]) expect(() => buildDesktopProvisioningState(invalid, activeReceipt)).toThrow('singleton receipt')
+    expect(() => buildDesktopProvisioningState(plan, receipt({ ...source(), targetCommit: 'c'.repeat(40) })))
+      .toThrow('singleton receipt')
+  })
+
   it('records an optional failure without inventing a receipt and rejects incomplete results', () => {
     const plugin = {
       name: 'neutral-auth-provider', version: '1.0.0', required: false,

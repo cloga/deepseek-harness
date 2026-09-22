@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-20-desktop-external-links.md
-2026-09-20-desktop-external-links.md: cc6de785489ffb9ae29a9b506f4a6d53c505f3ba
-2026-09-20-desktop-external-links.zh.md: b61ac590c21ee3d84745bbfc8f354f16a3de7c06
+2026-09-20-desktop-external-links.md: 49e8f4c991202f6d9c7979b3c8b877bbd7fa71d2
+2026-09-20-desktop-external-links.zh.md: c02b0857bedfd5dae9b56d2915942bddb6073026

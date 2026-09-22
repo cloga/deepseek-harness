@@ -3,16 +3,16 @@ import type { WebContents } from 'electron'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { installDesktopWindowNavigation } from '../src/window-navigation.ts'
 
-function fixture() {
+function fixture(currentUrl = 'dsh-app://app/index.html') {
   const events = new EventEmitter()
   const setWindowOpenHandler = vi.fn<WebContents['setWindowOpenHandler']>()
   const actions = {
     openExternal: vi.fn<(url: string) => Promise<void>>(async () => {}),
     openFailed: vi.fn<() => void>(),
-    recover: vi.fn<(url: URL) => void>(),
   }
   installDesktopWindowNavigation({
     setWindowOpenHandler,
+    getURL: () => currentUrl,
     on: (event, listener) => events.on(event, listener),
   }, actions)
   return {
@@ -45,7 +45,6 @@ describe('Desktop window navigation', () => {
     expect(view.popup(url)).toEqual({ action: 'deny' })
     await settledTurn()
     expect(view.actions.openExternal).toHaveBeenCalledExactlyOnceWith(url)
-    expect(view.actions.recover).not.toHaveBeenCalled()
     expect(view.actions.openFailed).not.toHaveBeenCalled()
   })
 
@@ -54,7 +53,6 @@ describe('Desktop window navigation', () => {
     expect(view.navigate(url).preventDefault).toHaveBeenCalledOnce()
     await settledTurn()
     expect(view.actions.openExternal).toHaveBeenCalledExactlyOnceWith(url)
-    expect(view.actions.recover).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -66,7 +64,6 @@ describe('Desktop window navigation', () => {
     expect(view.navigate(url).preventDefault).toHaveBeenCalledOnce()
     await settledTurn()
     expect(view.actions.openExternal).not.toHaveBeenCalled()
-    expect(view.actions.recover).not.toHaveBeenCalled()
     expect(view.actions.openFailed).not.toHaveBeenCalled()
   })
 
@@ -76,19 +73,47 @@ describe('Desktop window navigation', () => {
     expect(view.popup('dsh-app://app/session/one')).toEqual({ action: 'deny' })
     await settledTurn()
     expect(view.actions.openExternal).not.toHaveBeenCalled()
-    expect(view.actions.recover).not.toHaveBeenCalled()
   })
 
-  it('delegates only recovery navigation to the existing guarded owner, never to the OS', async () => {
+  it.each(['restart', 'plugins', 'reset'])('blocks recovery URL %s without granting navigation any recovery authority', async (action) => {
     const view = fixture()
-    const url = 'dsh-recovery://restart/?'
+    const url = `dsh-recovery://${action}/`
     expect(view.popup(url)).toEqual({ action: 'deny' })
-    expect(view.actions.recover).not.toHaveBeenCalled()
     expect(view.navigate(url).preventDefault).toHaveBeenCalledOnce()
-    expect(view.actions.recover).toHaveBeenCalledExactlyOnceWith(new URL(url))
     await settledTurn()
     expect(view.actions.openExternal).not.toHaveBeenCalled()
+    expect(view.actions.openFailed).not.toHaveBeenCalled()
   })
+
+  it('preserves same-origin HTTP application navigation while still denying its popup', async () => {
+    const view = fixture('http://127.0.0.1:19387/app/')
+    const destination = 'http://127.0.0.1:19387/session/one'
+    expect(view.navigate(destination).preventDefault).not.toHaveBeenCalled()
+    await settledTurn()
+    expect(view.actions.openExternal).not.toHaveBeenCalled()
+    expect(view.popup(destination)).toEqual({ action: 'deny' })
+    await settledTurn()
+    expect(view.actions.openExternal).toHaveBeenCalledExactlyOnceWith(destination)
+  })
+
+  it.each(['http://127.0.0.1:19388/app/', 'http://localhost:19387/app/', 'https://127.0.0.1:19387/app/'])(
+    'does not extend the owned HTTP origin to %s', async (destination) => {
+      const view = fixture('http://127.0.0.1:19387/app/')
+      expect(view.navigate(destination).preventDefault).toHaveBeenCalledOnce()
+      await settledTurn()
+      expect(view.actions.openExternal).toHaveBeenCalledExactlyOnceWith(destination)
+    },
+  )
+
+  it.each(['', 'not a URL', 'about:blank', 'https://127.0.0.1:19387/app/'])(
+    'does not treat current URL %j as an owned HTTP origin', async (currentUrl) => {
+      const view = fixture(currentUrl)
+      const destination = 'http://127.0.0.1:19387/session/one'
+      expect(view.navigate(destination).preventDefault).toHaveBeenCalledOnce()
+      await settledTurn()
+      expect(view.actions.openExternal).toHaveBeenCalledExactlyOnceWith(destination)
+    },
+  )
 
   it('dispatches the parsed canonical HTTP URL rather than a differently interpreted input', async () => {
     const view = fixture()

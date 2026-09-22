@@ -1066,7 +1066,7 @@ test('performs no lifecycle requests for removed signals or title-only edits', a
   assert.deepEqual(fixture.requests, [])
 })
 
-test('keeps trusted preflight before token minting and required policy unconditional', () => {
+test('keeps the required job unconditional and scopes trusted preflight to supported repositories', () => {
   const source = readFileSync(new URL('../workflows/issue-policy.yml', import.meta.url), 'utf8')
   const job = source.slice(source.indexOf('  policy:'))
   assert.ok(job.includes('    name: Issue policy'))
@@ -1096,7 +1096,14 @@ test('keeps trusted preflight before token minting and required policy unconditi
   assert.ok(steps[1].includes('GITHUB_TOKEN: ${{ github.token }}'))
   assert.ok(steps[1].includes('node .github/issue-management/policy.mjs pr-preflight'))
   assert.ok(steps[1].includes('if [ -f .github/issue-management/selective-preflight.json ]; then'))
-  assert.doesNotMatch(steps[1], /secrets\.|PROJECT_TOKEN|if:/)
+  assert.doesNotMatch(steps[1], /secrets\.|PROJECT_TOKEN/)
+  // The reviewed fork uses its validated namespace; unrelated forks must remain inert.
+  const preflightCondition = steps[1].match(/^        if: (.+)$/m)?.[1]
+  assert.equal(preflightCondition, "(github.repository == 'deepseek-ai/deepseek-harness' || github.repository == 'cloga/deepseek-harness')")
+  for (const repository of ['cloga/deepseek-harness', 'deepseek-ai/deepseek-harness', 'deepseek-harness/deepseek-harness', 'cloga/other', 'other/deepseek-harness']) {
+    assert.equal(runInNewContext(preflightCondition, { github: { repository } }, { timeout: 1000 }),
+      repository === 'cloga/deepseek-harness' || repository === 'deepseek-ai/deepseek-harness')
+  }
   assert.ok(steps[2].includes("github.repository == 'deepseek-ai/deepseek-harness'"))
   assert.ok(steps[2].includes("steps.preflight.outputs.needs-project == 'true'"))
   assert.ok(steps[2].includes('permission-organization-projects: read'))

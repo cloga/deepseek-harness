@@ -18,6 +18,8 @@ fork 身份为 `io.github.cloga.deepseek-harness.desktop`，产品为 `DeepSeek 
 
 经过评审的 plan 推进语义化 channel version 与整数 sequence。第一个由源码拥有的版本高于 `0.1.5-rc.2.local.1` 过渡构建，并使用 sequence 2。Tag 使用 `dsh-desktop-v<version>`，绝不覆盖历史。
 
+Fork 在包含自定义 Core 改动期间保留自己的 Desktop/Core 升级通道。复用官方更新交互、调度或安全机制不代表选择官方二进制制品。每次普通更新仍绑定 cloga 自编译制品；迁回官方发行版需要单独授权。
+
 ## 发布记录
 
 Manifest schema 3 对规范 JSON 进行 self-hash，并记录源码 repository、commit、tree、tag、upstream version、sequence、workflow path、lockfile hash、plan hash、固定 Node 与 pnpm 版本、依赖物化 registry、fork identities、installer filename、byte size、SHA-256、SHA-512、未签名 Authenticode 状态、build-receipt hashes、已安装 executable 与 runtime hashes、网络策略和交互式重启后 completion 语义。
@@ -28,7 +30,7 @@ Manifest schema 3 对规范 JSON 进行 self-hash，并记录源码 repository�
 
 经过评审的 release plan schema 2 携带通用精确状态 Desktop 插件 plan；schema 1 会规范化为空 plan，使现有且版本中立的 release 定义仍然可读。Build receipt 独立 self-hash，并记录相同的 source、build inputs、identity、artifact evidence、helper 与 capability hashes、已发布 provisioning plan 的文件 hash 与规范 hash、native-updater exclusion、network policy、installation policy 与通用插件 schema 兼容性。`SHA256SUMS` 与 `SHA512SUMS` 覆盖 installer、provisioning plan、manifest 与 receipt。
 
-仅构建使用的元数据发现可以通过 [release fetch adapter](../../../../apps/desktop/scripts/desktop-release-github-fetch.ts) 显式接收 `DSH_DESKTOP_RELEASE_GITHUB_TOKEN`。CI 只向 preparation 与 remote verification 提供其只读 Actions token，不传给 packaging 或应用。仅固定 GitHub API repository 的规范 release-list 与 tag-resolution GET 请求携带认证。带认证的重定向会失败关闭；下载及其他 origin 保持匿名，并移除调用方的 authorization/cookie。传输和响应错误不输出任意远端文本，只保留安全的取消分类或数字 HTTP 状态。未提供 token 时仍匿名发现；不会读取凭据存储或环境中的 `GH_TOKEN`，receipt 也绝不包含 token。已发布应用的行为保持不变。
+仅构建使用的元数据发现可以通过 [release fetch adapter](../../../../apps/desktop/scripts/desktop-release-github-fetch.ts) 显式接收 `DSH_DESKTOP_RELEASE_GITHUB_TOKEN`。CI 向 preparation 与 remote verification 提供该适配器的只读 Actions token，不传给 packaging 或应用；独立的基线获取凭据在“发布”一节说明。仅固定 GitHub API repository 的规范 release-list 与 tag-resolution GET 请求携带认证。带认证的重定向会失败关闭；下载及其他 origin 保持匿名，并移除调用方的 authorization/cookie。传输和响应错误不输出任意远端文本，只保留安全的取消分类或数字 HTTP 状态。未提供 token 时仍匿名发现；不会读取凭据存储或环境中的 `GH_TOKEN`，receipt 也绝不包含 token。已发布应用的行为保持不变。
 
 ## 发现与安装
 
@@ -40,23 +42,29 @@ Check 列出固定 repository 的 GitHub Releases。每个匹配 release 必须�
 
 独立 helper 是自包含 bundle：因为 launcher 不复制依赖目录，所以只有 Node builtin 可以保留为 external。Finalization 检查模块语法，强制执行的打包字节 smoke 在安全取消前证明隔离启动与有效合成 handoff acknowledgement。仅相对 import 检查或源码 runner 测试不能证明不依赖 workspace 包。确认前 stderr 在持久化前进行限量与脱敏；发现更新成功不构成 helper 启动证据。
 
+Helper 下载仍最多尝试三次，退避为 500/1000 毫秒。每次元数据请求的总期限为 60 秒、无活动期限为 15 秒；每次安装器请求的总期限为 30 分钟、无活动期限为 60 秒。Launcher 的 185 秒 acknowledgement 预算容纳 manifest 传输预算，但不证明 helper 已退出。只有封闭枚举且由模块拥有的传输类别才能控制重试及持久化 helper 诊断。未知错误保留原始拒绝对象身份；受保护的字段探测不能替换错误，也不能在持久化诊断中暴露原始消息、cause 或 URL。完整性与重定向错误仍是终止性失败，传输层绝不重试安装器执行。
+
+普通退出与原生恢复会等待已获准的插件激活和托管更新交接，再关闭最终 Host。尚未完成的确认会取消；已获准的候选启动或回滚可以完成，但不会重新开放请求准入，也不会导航正在关闭的窗口。Launcher 用确认未启动 helper 或确认 helper 已退出的证据标识失败；任意 Promise 拒绝、终止请求或超时都不证明 helper 已停止。Helper 清理未获确认时，普通退出仍被阻止，并恢复仍可用的壳窗口显示，避免父进程 PID 消失意外授权安装。经过验证、由安装器拥有的交接保留独立退出路径。
+
+保留事务的协调在接受取消标记前，先验证新版 helper 的阶段、错误类别、安装状态与退出证据；取消文件不能掩盖格式错误或相互矛盾的安装器证据。旧 schema-2 handoff 只作为历史身份读取，绝不授权新的启动。失败或中断的 stage 本身不能获得完成资格。候选必须匹配已安装 executable、runtime、capability sequence、无冲突的 release 身份及打包 plan。基线尚待处理或保留用户选择时，在 `baseline-outcome.json` 中记录 `baseline-not-qualified`：写入所选候选的证据目录，或在没有 helper operation 的独立手动恢复中写到 `completion.json` 旁。此诊断不会虚构 helper operation、推进 completion 或触发重新安装；只有后续通过清单验证的复查才可完成。
+
+打包的 `--recover-managed-update` 入口向拥有应用的 Electron 实例请求一次新的、串行化的证据复查。它与持续生效的原生致命恢复状态分离，绝不清除致命状态或当前 helper 是否已停止的不确定性。只有就绪 Host 与 completion 所拥有的启动准入 token 仍精确匹配时，可用结果才能释放门控。因门控等待的初始文档通过原有 boot Promise 继续，不重新加载。退出会等待已获准的复查；检查保留证据不会停止或重启 Host、改写 profile、授权安装或绕过请求准入。普通第二实例启动只聚焦应用。尚待处理或保留用户选择的基线仍可用，但不视为已认证。
+
 加载后的配置区分打包的 discovery 下限与持久完成的 sequence。Discovery 与 handoff 使用打包和已完成 sequence 中的较大值；completion 只使用持久 receipt 的 sequence，缺失时为零。若 completion 使用打包下限，就会跳过新安装 release 自身的待完成结果及清单检查。重复 completion 是幂等的，清单验证失败会保留先前 receipt，较高的已完成 sequence 绝不降低。
 
 不可变 `cloga/dsh-windows-ops` `dsh-local-0.1.5-rc.2.local.1` manifest 仅在源码 repository 没有匹配 release 时作为精确 sequence-zero migration 保留。Migration record 固定 manifest 与 installer hash，并固定 build receipt 的 `dsh-v0.1.5-rc.2` source tag；由 manifest 固定的 receipt 仍保留 source commit 与 tree。任何格式错误、可变、冲突或不可达的 source release 都会 fail closed，不会 fallback。一旦 source release 存在，Windows Ops 不能充当第二通道。
 
-## 失败事务与恢复
+## 保留历史与手动安装恢复
 
-最终 stage 提升前的 helper 失败不可能已经启动 installer：旧版和当前 helper 都先提升 stage。Completion 验证 operation 身份、acknowledgement、cancellation 与结果证据，然后才将此类失败归为终态，不推进已完成 sequence。当前 helper 在 acknowledgement 前保留已验证 manifest，并在调用 launcher 前标记安装可能开始。Cancellation 绝不覆盖最终 stage 或 installer 证据。保留的记录仍可用于诊断。Completion 将历史 handoff 身份读取与当前启动资格分开：schema 2 和早期 schema 3 都包含字段严格为 `version`/`commit` 的迁移源。只读规范化先验证 commit，再构造仅供 parser 使用的 tag 元数据，保留 schema-3 provisioning 验证，并丢弃规范化的 capability，不授权安装，也不改写保留文件。仅按 capability schema 判断兼容性会拒绝已发布的 schema-3 历史，因为迁移字段在该 schema 内发生过变化。未知 schema 和格式错误记录仍然 fail closed。
+Completion 将历史 handoff 身份读取与当前启动资格分开：schema 2 和早期 schema 3 都包含字段严格为 `version`/`commit` 的迁移源。只读规范化先验证 commit，再构造仅供 parser 使用的 tag 元数据，保留 schema-3 provisioning 验证，并丢弃规范化的 capability，不授权安装，也不改写保留文件。仅按 capability schema 判断兼容性会拒绝已发布的 schema-3 历史，因为迁移字段在该 schema 内发生过变化。未知 schema 和格式错误记录仍然 fail closed。
 
 已经暂存的失败保持未解决状态，除非独立候选核验了同一或更高版本的实际安装。已确认但尚未记录终态的 helper 若仍存活，则不允许取代该事务；存活检查不会结束它。Completion 将保留的 manifest 字节绑定到 handoff asset hash，检查 executable/runtime hash，要求当前打包 sequence 与插件清单匹配，并拒绝更高序号或同序号冲突的已暂存事务。补充的安装前 manifest 只能标识当前打包 release；未开始安装的未来下载不能阻止有效的当前安装完成。验证已完成历史时，不会追溯应用后来提高的 discovery 下限。
 
-传输时限涵盖响应头、重定向及响应体读取，元数据与 installer 使用不同预算。有界重试仅适用于已分类的临时传输/HTTP 失败，不适用于身份或完整性校验。Installer 取消会先关闭由 Node 包装的 Web stream 与输出，再删除其私有部分文件。持久诊断保留阶段、已验证资产文件名、错误类别及安装是否可能开始，不保留远程消息、凭据、签名 URL 参数或 operation token。
-
-已安装 executable 提供 `--recover-managed-update`。后续启动将恢复请求转交单实例持有者；重新核验证据不停止 Host 或重置 profile。显式恢复可通过不可变发现与 manifest 验证的 build receipt，独立于历史 handoff 验证当前安装的 release。精确 version 和 sequence 选择允许在更新 release 已发布时恢复，而不安装它。Receipt 绑定源码身份、executable/runtime hash、打包 capability 字节，以及 provisioning-plan 字节与规范 hash。Completion 仍要求最终位置 Host 就绪及实际清单，在网络访问后重新读取历史 operation，并拒绝并发推进的 completion。历史 operation 保持不变。普通启动只使用本地证据；离线或无法验证的发布元数据不能授权手动安装恢复。此入口不能修复无法启动的 Host。结果仍阻塞时，提供保留活动工作确认的现有更新流程。[Desktop README](../../../../apps/desktop/README.zh.md) 说明恢复用法与传输限制。
+显式恢复可通过不可变发现与 manifest 验证的 build receipt，独立于历史 handoff 验证当前安装的 release。精确 version 和 sequence 选择允许在更新 release 已发布时恢复，而不安装它。Receipt 绑定源码身份、executable/runtime hash、打包 capability 字节，以及 provisioning-plan 字节与规范 hash。Completion 仍要求最终位置 Host 就绪及实际清单，在网络访问后重新读取历史 operation，并拒绝并发推进的 completion。历史 operation 保持不变。普通启动只使用本地 completion 证据；离线或无法验证的发布元数据不能授权手动安装恢复。此入口不能修复无法启动的 Host。结果仍阻塞时，提供保留活动工作确认的现有更新流程。[Desktop README](../../../../apps/desktop/README.zh.md) 说明恢复用法。
 
 ## 发布
 
-手动 Windows workflow 通过必填的 `confirm_version` 和 `expected_source_sha` 输入要求经过评审的 plan version 与源码 commit。在安装依赖或打包之前，步骤局部的 `EXPECTED_SOURCE_SHA` 必须恰好包含 40 个小写十六进制字符，并与检出的 `HEAD` 完全一致。即使 plan 相同，较新的 commit 也会被拒绝，而不是悄然改变经过评审的源码。Rehearsal 仍要求 checkout 等于所选远端分支的当前 head，使用 build job 与干净 checkout、固定 Node 和 pnpm、冻结 lockfile、focused Desktop tests 及未签名 packaging，然后完成 finalization，并上传保留七天且经过 checksum 验证的 asset set。只有元数据准备步骤获得只读 GitHub 凭据；打包与验收进程仍不带凭据。它绝不运行 release 或 remote-check job。
+手动 Windows workflow 通过必填的 `confirm_version` 和 `expected_source_sha` 输入要求经过评审的 plan version 与源码 commit。在安装依赖或打包之前，步骤局部的 `EXPECTED_SOURCE_SHA` 必须恰好包含 40 个小写十六进制字符，并与检出的 `HEAD` 完全一致。即使 plan 相同，较新的 commit 也会被拒绝，而不是悄然改变经过评审的源码。Rehearsal 仍要求 checkout 等于所选远端分支的当前 head，使用 build job 与干净 checkout、固定 Node 和 pnpm、冻结 lockfile、focused Desktop tests 及未签名 packaging，然后完成 finalization，并上传保留七天且经过 checksum 验证的 asset set。元数据准备步骤接收步骤专属的只读 `DSH_DESKTOP_RELEASE_GITHUB_TOKEN`；独立的已验证安装器基线获取步骤接收步骤专属的只读 `GH_TOKEN`，用于读取元数据与资产。两种凭据均不传入打包或应用启动步骤。这是限定作用域的凭据使用，而不是无凭据的构建或验收 workflow。Rehearsal 绝不运行 release 或 remote-check job。
 
 Publication run 必须使用当前 `master`。受保护 release job 是唯一具有 `contents: write` 的 job。它下载 build artifact，交叉检查完整 asset set，以精确 source commit tag 创建 draft，上传每个 asset，并只在 asset set 完整后发布。随后它要求 GitHub 报告 release immutable，tag 与 release target 解析到 build commit，并且每个 remote asset digest 匹配本地 bytes。最后一个只读 job 通过仅用于构建的元数据适配器针对 GitHub 运行已发布 discovery，并要求它选择经过评审的 version、sequence、commit 与 tree。
 
@@ -66,7 +74,7 @@ Publication run 必须使用当前 `master`。受保护 release job 是唯一具
 
 未登录页面没有用量控件，不能证明符合条件的 Session 能成功渲染：Core 的 Slot 错误边界可能停用崩溃的贡献，而应用仍可使用。因此打包 smoke 保留启动负向检查，并新增独立的合成 Session context，使用实际打包的 module loader、renderer、Session selector、Slot registry 及已安装的已发布 Client。它委托并恢复公开 bootstrap 方法，不修改 Core 实现或应用服务。浏览器 fixture 源码先移除类型再求值，而不是经可能引入闭包 helper 的 source loader 序列化。
 
-合成 quota 响应与 model-selection observable 只属于验收 context，该 context 没有 Host transport 或凭据服务。两条 Copilot route 都必须通过正向渲染、删除与重新打开、provider 切换、兄弟节点保留及释放检查；错误不能变成仅凭缺失的成功。Runtime 清单与 Client hash 标识实际验收产物。此方案明确舍弃 live account 和原生持久化 Session 覆盖，以保持 release qualification 不需要凭据。[Desktop 验收文档](../../../../apps/desktop/README.zh.md#isolated-provisioning-acceptance) 说明限制；真实账户使用与操作者安装仍是独立资格检查。
+合成 quota 响应与 model-selection observable 只属于验收 context，该 context 没有 Host transport 或凭据服务。官方 alpha2 的 observable Session binding 保留继承与显式缺席语义，而非模拟旧版仅 resolve 的 API。两条 Copilot route 都必须通过正向渲染、删除与重新打开、provider 切换、兄弟节点保留、原始 Slot 注册移除及订阅释放检查；成功前必须恢复 bootstrap／全局／错误监听器和原始未登录应用。错误不能变成仅凭缺失的成功。经过评审的 Copilot alpha.33 来源／产物元组与原始 Client hash，连同 runtime 清单，绑定实际验收字节。此方案明确将 live account 和原生持久化 Session 覆盖排除在正向 context 之外，但不表示完整发布 workflow 不需要凭据。[Desktop 验收文档](../../../../apps/desktop/README.zh.md#isolated-provisioning-acceptance) 说明限制；真实账户使用与操作者安装仍是独立资格检查。
 
 ## Workflow 发布策略
 
@@ -84,11 +92,7 @@ Desktop 只允许一个 publisher step，使用经过评审的旧版单行命令
 
 **仅按标题或 checksum 批准 release。** 两者都不能识别可安装的 Desktop 产品。Workflow 权限清单与 publisher 的精确资产清单分别检查不同义务；两者都不能替代打包后验收。
 
-**禁用 upstream workflow 或增加 dispatch 覆盖开关。** 禁用会丢弃有效的 upstream 分发与不带凭据的 rehearsal。Dispatch 覆盖会将操作输入变成新 fork 通道的授权。固定 repository 排除条件保留 upstream 行为，同时禁止这种覆盖。
-
-**忽略所有 blocked 结果或删除 operation 历史。** 两者都会丢失安装中断保护与诊断证据。只有经过验证、未开始安装的失败不阻塞启动；已经暂存的失败需要独立核验的替代证据。
-
-**根据已安装版本推进 completion，或重试所有错误。** 版本不能证明文件 hash 或插件激活，重试完整性失败也不会修复字节，只会削弱诊断。Completion 使用已验证证据；重试排除校验与 installer 执行。
+**禁用 upstream workflow 或增加 dispatch 覆盖开关。** 禁用会丢弃有效的 upstream 分发与仅输出 CI artifact 的 rehearsal。Dispatch 覆盖会将操作输入变成新 fork 通道的授权。固定 repository 排除条件保留 upstream 行为，同时禁止这种覆盖。
 
 **只确认版本与当前分支。** 从控制器评审到 workflow dispatch 之间，分支可能推进到未经评审的 commit，而 plan version 未变。在 workflow 内锁定预期源码 commit 可消除这一缺口，同时保留当前分支与版本检查。
 

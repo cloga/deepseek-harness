@@ -1,6 +1,8 @@
+import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative, resolve, sep } from 'node:path'
+import ts from 'typescript'
 import { afterEach, describe, expect, it } from 'vitest'
 import { collectProjectReferenceFaceViolations } from './project-reference-faces.ts'
 
@@ -47,7 +49,69 @@ function workspaceFixture(options: {
   return root
 }
 
+const rendererUsageTest = 'packages/client/ui-renderer/tests/desktop-copilot-usage-positive.client.spec.ts'
+const nativeStatsTest = 'packages/client/ui-chat/tests/chat-stats.client.spec.tsx'
+const nativeBrowserFixture = 'apps/desktop/tests/fixtures/native-composer-dock-browser.ts'
+const sharedUsageFixtures = [
+  'apps/desktop/tests/fixtures/copilot-usage-positive-browser.ts',
+  'apps/desktop/tests/fixtures/copilot-usage-positive-smoke.ts',
+] as const
+
+function clientUsageRoots(omitted?: string): string[] {
+  const repository = resolve(import.meta.dirname, '..')
+  const configPath = join(repository, 'tsconfig.client.json')
+  const read = ts.readConfigFile(configPath, path => ts.sys.readFile(path))
+  if (read.error !== undefined) throw new Error(ts.flattenDiagnosticMessageText(read.error.messageText, '\n'))
+  const value: unknown = read.config
+  assert(typeof value === 'object' && value !== null && !Array.isArray(value))
+  const config = value as Record<string, unknown>
+  assert(Array.isArray(config.include))
+  const include = config.include.map((entry: unknown) => { assert(typeof entry === 'string'); return entry })
+  if (omitted !== undefined) assert(include.includes(omitted), 'Negative control must remove an actual explicit include')
+  const parsed = ts.parseJsonConfigFileContent(
+    { ...config, include: include.filter(entry => entry !== omitted) }, ts.sys, repository, undefined, configPath,
+  )
+  assert.deepEqual(parsed.errors, [])
+  assert.equal(parsed.options.composite, true, 'The real Client aggregate must retain composite checking')
+  assert.equal(parsed.options.strict, true, 'The real Client aggregate must retain strict checking')
+  return parsed.fileNames.map(file => relative(repository, file).split(sep).join('/'))
+}
+
+function assertClientUsageRoots(files: readonly string[]): void {
+  for (const file of [rendererUsageTest, ...sharedUsageFixtures]) {
+    assert(files.includes(file), `Client aggregate must list ${file}`)
+  }
+}
+
 describe('Project Reference compiler faces', () => {
+  it('lists the real native statistics test and its dependency-free browser measurement leaf', () => {
+    const files = clientUsageRoots()
+    expect(files).toContain(nativeStatsTest)
+    expect(files).toContain(nativeBrowserFixture)
+    expect(files).not.toContain('apps/desktop/tests/fixtures/native-composer-geometry.ts')
+    expect(files).not.toContain('apps/desktop/tests/fixtures/native-composer-errors.ts')
+  })
+
+  it('detects omission of the native browser leaf without losing the real component or positive fixtures', () => {
+    const files = clientUsageRoots(nativeBrowserFixture)
+    expect(files).toContain(nativeStatsTest)
+    expect(files).not.toContain(nativeBrowserFixture)
+    assertClientUsageRoots(files)
+    expect(() => { assert(files.includes(nativeBrowserFixture), 'Missing native browser root') }).toThrow('Missing native browser root')
+  })
+
+  it('lists the real renderer test and both shared Desktop leaves in the actual composite Client aggregate', () => {
+    assertClientUsageRoots(clientUsageRoots())
+  })
+
+  it.each(sharedUsageFixtures)('detects the missing composite Client root when %s is removed', (omitted) => {
+    const files = clientUsageRoots(omitted)
+    expect(files).toContain(rendererUsageTest)
+    expect(files).not.toContain(omitted)
+    for (const retained of sharedUsageFixtures.filter(file => file !== omitted)) expect(files).toContain(retained)
+    expect(() => { assertClientUsageRoots(files) }).toThrow(`Client aggregate must list ${omitted}`)
+  })
+
   it('allows neutral projects in either graph and matching split leaves', () => {
     const root = workspaceFixture({
       host: ['./packages/core/shared', './packages/api/split/tsconfig.host.json'],

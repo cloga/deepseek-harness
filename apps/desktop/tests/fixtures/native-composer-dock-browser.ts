@@ -1,5 +1,17 @@
 /** Standalone DOM measurement for the actual renderer's public, layout-neutral dock outlet. */
-import type { NativeComposerGeometry } from './native-composer-geometry.ts'
+interface Box { x: number; y: number; width: number; height: number }
+interface PillStyle { fontSize: string; lineHeight: string; color: string }
+
+/** One browser-measured viewport of the native composer; this leaf has no Host dependencies. */
+export interface NativeComposerGeometry {
+  readonly viewportWidth: number
+  readonly dock: Box
+  readonly time: Box
+  readonly usage: Box
+  readonly copilot: Box
+  readonly nativeStyle: PillStyle
+  readonly copilotStyle: PillStyle
+}
 
 /**
  * Measure one public dock's physical owner and actual statistics controls atomically.
@@ -26,15 +38,13 @@ export function measureNativeComposerDock(anchor: Element): NativeComposerGeomet
   if (ownerDisplay !== 'flex' && ownerDisplay !== 'inline-flex') {
     throw new Error('Composer dock physical owner must retain its shared flex layout')
   }
-  const stats = anchor.querySelectorAll('[data-composer-stats]')
-  const copilot = anchor.querySelectorAll('[data-copilot-usage-trigger]')
-  if (stats.length > 1 || copilot.length > 1) throw new Error('Composer dock statistics controls are ambiguous')
-  if (stats.length === 0 || copilot.length === 0) return null
-  const native = stats[0]!.querySelectorAll('button')
-  if (native.length > 2) throw new Error('Composer dock has unexpected native statistics controls')
-  if (native.length !== 2) return null
+  const time = anchor.querySelectorAll('button[aria-label="1 turns 1 steps"]')
+  const usage = anchor.querySelectorAll('button[aria-label="105 tok · Cache hit 90%"]')
+  const copilot = anchor.querySelectorAll('button[data-copilot-usage-trigger]')
+  if ([time, usage, copilot].some(matches => matches.length > 1)) throw new Error('Composer dock statistics controls are ambiguous')
+  if ([time, usage, copilot].some(matches => matches.length === 0)) return null
   const physicalOwner = owner
-  const controls = [native[0]!, native[1]!, copilot[0]!]
+  const controls = [time[0]!, usage[0]!, copilot[0]!]
   if (!controls.every(control => anchor.contains(control) && physicalOwner.contains(control))) {
     throw new Error('Composer dock owner must contain every actual statistics control')
   }
@@ -44,7 +54,7 @@ export function measureNativeComposerDock(anchor: Element): NativeComposerGeomet
     return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
   })
   if (boxes.some(box => box.width <= 0 || box.height <= 0)) return null
-  const nativeStyle = getComputedStyle(native[1]!)
+  const nativeStyle = getComputedStyle(usage[0]!)
   const copilotStyle = getComputedStyle(copilot[0]!)
   return {
     viewportWidth: window.innerWidth,

@@ -1,119 +1,87 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { DESKTOP_IPC, type DshDesktopApplicationApi, type DshDesktopStartupApi } from '../src/ipc.ts'
+import { syncWindowsAppearance } from '../src/preload-windows.ts'
+import { DESKTOP_IPC, type DshDesktopProductApi } from '../src/ipc.ts'
 
 const electron = vi.hoisted(() => ({
   contextBridge: { exposeInMainWorld: vi.fn() },
-  ipcRenderer: {
-    invoke: vi.fn(),
-    on: vi.fn<(channel: string, handler: (event: unknown, ...payload: unknown[]) => void) => void>(),
-    off: vi.fn(),
-    send: vi.fn(),
-  },
+  ipcRenderer: { invoke: vi.fn(), on: vi.fn(), off: vi.fn(), send: vi.fn() },
 }))
 vi.mock('electron', () => electron)
+vi.mock('../src/preload-platform.ts', () => ({ markDocumentPlatform: vi.fn() }))
+vi.mock('../src/preload-theme.ts', () => ({ syncNativeTheme: vi.fn() }))
+vi.mock('../src/preload-windows.ts', () => ({ syncWindowsAppearance: vi.fn() }))
 
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); vi.resetModules() })
 
-it.each(['dsh-app://app/index.html', 'https://shell/startup.html'])('exposes only fixed notification and impact operations to %s', async (url) => {
-  vi.stubGlobal('location', new URL(url))
+it('limits product documents to update status and a native confirmation action', async () => {
+  vi.stubGlobal('location', new URL('dsh-app://app/index.html'))
   await import('../src/preload-app.ts')
-  const api = electron.contextBridge.exposeInMainWorld.mock.calls[0]?.[1] as DshDesktopApplicationApi
-  expect(Object.keys(api)).toEqual(['protocolVersion', 'updates'])
-  expect(Object.keys(api.updates).sort()).toEqual(['reportImpact', 'review', 'status', 'subscribe'])
-  expect(api.protocolVersion).toBe(2)
+  const api = electron.contextBridge.exposeInMainWorld.mock.calls.find(([name]) => name === 'dshDesktop')?.[1] as DshDesktopProductApi
+  await api.updates.status()
+  await api.updates.open()
+  expect(electron.ipcRenderer.invoke.mock.calls).toEqual([[DESKTOP_IPC.updatesStatus], [DESKTOP_IPC.updatesOpen]])
   expect(api).not.toHaveProperty('plugins')
+  expect(api).not.toHaveProperty('backend')
   expect(api.updates).not.toHaveProperty('install')
-  expect(api.updates).not.toHaveProperty('check')
-  const available = { phase: 'available', version: '1.2.3' }
-  electron.ipcRenderer.invoke.mockResolvedValueOnce(available)
-  expect(await api.updates.status()).toEqual(available)
-  await api.updates.review()
-  expect(electron.ipcRenderer.invoke.mock.calls).toEqual([
-    [DESKTOP_IPC.updatesStatus], [DESKTOP_IPC.updatesInstall],
-  ])
+  const impact = { hasDraft: true, attachmentCount: 1, submitting: false }
+  expect(typeof api.updates.reportImpact).toBe('function')
+  api.updates.reportImpact!(impact)
+  expect(electron.ipcRenderer.send).not.toHaveBeenCalled()
+  const request = electron.ipcRenderer.on.mock.calls.find(([channel]) => channel === DESKTOP_IPC.updatesImpactRequest)![1] as
+    (event: unknown, generation: unknown) => void
+  request({}, 7)
+  expect(electron.ipcRenderer.send).toHaveBeenCalledExactlyOnceWith(DESKTOP_IPC.updatesImpact, 7, impact)
   const listener = vi.fn()
   const dispose = api.updates.subscribe(listener)
-  const handler = electron.ipcRenderer.on.mock.calls.find(([channel]) => channel === DESKTOP_IPC.updatesState)?.[1] as
+  const handler = electron.ipcRenderer.on.mock.calls.find(([channel]) => channel === DESKTOP_IPC.updatesPresentation)?.[1] as
     (event: unknown, state: unknown) => void
-  handler({ sender: 'not exposed' }, available)
-  expect(listener).toHaveBeenCalledExactlyOnceWith(available)
+  handler({}, { visible: false })
+  expect(listener).toHaveBeenCalledWith({ visible: false })
   dispose()
-  expect(electron.ipcRenderer.off).toHaveBeenCalledWith(DESKTOP_IPC.updatesState, handler)
-  api.updates.reportImpact({ hasDraft: true, attachmentCount: 2, submitting: false })
-  expect(electron.ipcRenderer.send).toHaveBeenCalledWith(DESKTOP_IPC.updatesImpactReport, {
-    hasDraft: true,
-    attachmentCount: 2,
-    submitting: false,
-  })
+  expect(electron.ipcRenderer.off).toHaveBeenCalledWith(DESKTOP_IPC.updatesPresentation, handler)
 })
 
-it('answers internal impact requests from the latest reported document snapshot without exposing a new page method', async () => {
-  vi.stubGlobal('location', new URL('dsh-app://app/index.html'))
-  await import('../src/preload-app.ts')
-  const api = electron.contextBridge.exposeInMainWorld.mock.calls[0]?.[1] as DshDesktopApplicationApi
-  const request = electron.ipcRenderer.on.mock.calls.find(([channel]) => channel === DESKTOP_IPC.pluginImpactRequest)?.[1]
-  expect(request).toBeDefined()
-  request!({}, 'plugin-impact-1')
-  expect(electron.ipcRenderer.send).toHaveBeenLastCalledWith(DESKTOP_IPC.pluginImpactResponse, 'plugin-impact-1', null)
-  const first = { hasDraft: true, attachmentCount: 2, submitting: false }
-  api.updates.reportImpact(first)
-  first.attachmentCount = 99
-  request!({}, 'plugin-impact-2')
-  expect(electron.ipcRenderer.send).toHaveBeenLastCalledWith(DESKTOP_IPC.pluginImpactResponse, 'plugin-impact-2', {
-    hasDraft: true, attachmentCount: 2, submitting: false,
-  })
-  api.updates.reportImpact({ hasDraft: false, attachmentCount: 0, submitting: true })
-  request!({}, 'plugin-impact-3')
-  expect(electron.ipcRenderer.send).toHaveBeenLastCalledWith(DESKTOP_IPC.pluginImpactResponse, 'plugin-impact-3', {
-    hasDraft: false, attachmentCount: 0, submitting: true,
-  })
-  const count = electron.ipcRenderer.send.mock.calls.length
-  request!({}, 'invalid')
-  request!({}, 1)
-  expect(electron.ipcRenderer.send).toHaveBeenCalledTimes(count)
-  expect(Object.keys(api.updates).sort()).toEqual(['reportImpact', 'review', 'status', 'subscribe'])
-})
-
-it.each(['dsh-app://shell/startup.html', 'https://example.invalid/'])('does not register fresh-impact requests in %s', async (url) => {
+it.each(['dsh-app://shell/plugin-manager.html', 'dsh-app://other/index.html', 'https://shell/startup.html', 'http://example.com/'])('exposes only the carrier marker to %s', async (url) => {
   vi.stubGlobal('location', new URL(url))
   await import('../src/preload-app.ts')
-  expect(electron.ipcRenderer.on.mock.calls.some(([channel]) => channel === DESKTOP_IPC.pluginImpactRequest)).toBe(false)
+  expect(electron.contextBridge.exposeInMainWorld).toHaveBeenCalledWith('dshDesktop', { protocolVersion: 1 })
 })
 
-it('contains update subscriber failures without starving another subscriber', async () => {
-  vi.stubGlobal('location', new URL('dsh-app://app/index.html'))
+it('exposes asynchronous boot only to the local application document', async () => {
+  vi.stubGlobal('location', new URL('dsh-app://app/'))
   await import('../src/preload-app.ts')
-  const api = electron.contextBridge.exposeInMainWorld.mock.calls[0]?.[1] as DshDesktopApplicationApi
-  const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
-  const failure = new Error('subscriber failed')
-  api.updates.subscribe(() => { throw failure })
-  const listener = vi.fn()
-  api.updates.subscribe(listener)
-  for (const [, handler] of electron.ipcRenderer.on.mock.calls) handler({}, { phase: 'available', version: '1.2.3' })
-  expect(diagnostic).toHaveBeenCalledWith('desktop update notification listener failed', failure)
-  expect(listener).toHaveBeenCalledOnce()
-  diagnostic.mockRestore()
+  const api = electron.contextBridge.exposeInMainWorld.mock.calls.find(([name]) => name === 'dshDesktopBoot')?.[1] as { ready(): Promise<unknown>; failed(message: string): Promise<void> }
+  await api.ready()
+  await api.failed('client mount failed')
+  expect(electron.ipcRenderer.invoke).toHaveBeenCalledWith(DESKTOP_IPC.bootFailed, 'client mount failed')
+  expect(electron.ipcRenderer.invoke).toHaveBeenCalledWith(DESKTOP_IPC.boot)
+  vi.resetModules()
+  electron.contextBridge.exposeInMainWorld.mockClear()
+  vi.stubGlobal('location', new URL('https://other.example/'))
+  await import('../src/preload-app.ts')
+  expect(electron.contextBridge.exposeInMainWorld.mock.calls.some(([name]) => name === 'dshDesktopBoot')).toBe(false)
 })
 
-it('provides startup controls and a removable state subscription to shell documents', async () => {
-  vi.stubGlobal('location', new URL('dsh-app://shell/startup.html'))
+it('exposes a directory picker only to the local application document', async () => {
+  vi.stubGlobal('location', new URL('dsh-app://app/'))
   await import('../src/preload-app.ts')
-  const api = electron.contextBridge.exposeInMainWorld.mock.calls[0]?.[1] as DshDesktopStartupApi
-  await api.locale()
-  await api.backend.status()
-  await api.disablePlugins()
-  await api.resetConfiguration()
-  await api.restart()
-  expect(electron.ipcRenderer.invoke.mock.calls).toEqual([
-    [DESKTOP_IPC.localeGet], [DESKTOP_IPC.backendStatus],
-    [DESKTOP_IPC.pluginsDisableAll], [DESKTOP_IPC.configurationReset], [DESKTOP_IPC.applicationRestart],
-  ])
-  const listener = vi.fn()
-  const dispose = api.backend.subscribe(listener)
-  const handler = electron.ipcRenderer.on.mock.calls[0]?.[1] as (event: unknown, state: unknown) => void
-  handler({}, { phase: 'error', message: 'startup failed' })
-  expect(listener).toHaveBeenCalledWith({ phase: 'error', message: 'startup failed' })
-  dispose()
-  expect(electron.ipcRenderer.off).toHaveBeenCalledWith(DESKTOP_IPC.backendState, handler)
-  expect(api).not.toHaveProperty('plugins')
+  const api = electron.contextBridge.exposeInMainWorld.mock.calls.find(([name]) => name === '__DSH_DIRECTORY_PICKER__')?.[1] as { pick(): Promise<string | null> }
+  electron.ipcRenderer.invoke.mockResolvedValue('/workspace')
+  await expect(api.pick()).resolves.toBe('/workspace')
+  expect(electron.ipcRenderer.invoke).toHaveBeenCalledExactlyOnceWith(DESKTOP_IPC.directoryPick)
+  for (const url of ['dsh-app://shell/startup.html', 'https://example.com/']) {
+    vi.resetModules()
+    electron.contextBridge.exposeInMainWorld.mockClear()
+    vi.stubGlobal('location', new URL(url))
+    await import('../src/preload-app.ts')
+    expect(electron.contextBridge.exposeInMainWorld.mock.calls.some(([name]) => name === '__DSH_DIRECTORY_PICKER__')).toBe(false)
+  }
 })
+
+it.each(['dsh-app://app/', 'dsh-app://shell/plugin-manager.html', 'https://example.com/'])(
+  'installs Windows appearance only for the application document (%s)', async (url) => {
+    vi.stubGlobal('location', new URL(url))
+    await import('../src/preload-app.ts')
+    expect(syncWindowsAppearance).toHaveBeenCalledTimes(url === 'dsh-app://app/' ? 1 : 0)
+  },
+)

@@ -19,6 +19,14 @@ export interface PositiveCopilotUsageEvidence {
   readonly hostTransport: 'not-provided-to-isolated-fixture'
   readonly applicationMountPreserved: boolean
   readonly syntheticSiblingPreserved: boolean
+  readonly inheritedSessionScopeVerified: boolean
+  readonly explicitUndefinedSessionScopeAbsent: boolean
+  readonly removedSessionRestoresUsage: boolean
+  readonly closedSessionHidesUsage: boolean
+  readonly closedSessionRestoresUsage: boolean
+  readonly restoredProviderShowsUsage: boolean
+  readonly subscriptionsReleased: boolean
+  readonly syntheticContextDisposed: boolean
 }
 
 /**
@@ -31,39 +39,74 @@ export function packagedUsageBrowserSource(): string {
 }
 
 /**
- * Capture the public boot loader on an acceptance-only reload without replacing any module exports.
+ * Capture the public boot loader on an acceptance-only reload without replacing module exports.
  * @param page - Packaged application page in the smoke runner's isolated profile.
+ * @returns Awaited disposer for the owned init script and browser capture globals.
  */
-export async function capturePackagedUsageModules(page: Page): Promise<void> {
-  await page.addInitScript(`${packagedUsageBrowserSource()}\ncaptureUsageModulesInBrowser()`)
-  await page.reload()
-  await page.waitForFunction('window.__desktopUsageModules !== undefined')
-  await page.getByRole('button', { name: 'Settings', exact: true }).waitFor({ state: 'visible' })
+export async function capturePackagedUsageModules(page: Page): Promise<() => Promise<void>> {
+  const script = packagedUsageBrowserSource()
+  const registration = await page.addInitScript(`${script}\ncaptureUsageModulesInBrowser()`)
+  const restore = async (): Promise<void> => {
+    let failed = false
+    let failure: unknown
+    try { await registration.dispose() } catch (error) { failed = true; failure = error }
+    try { await page.evaluate(`${script}\nrestoreUsageModulesInBrowser()`) } catch (error) {
+      if (!failed) { failed = true; failure = error }
+    }
+    if (failed) throw failure
+  }
+  try {
+    await page.reload()
+    await page.waitForFunction('window.__desktopUsageModules !== undefined')
+    await page.getByRole('button', { name: 'Settings', exact: true }).waitFor({ state: 'visible' })
+    return restore
+  } catch (error) {
+    // Cleanup still runs; the failed capture remains the primary exception even if its page is already gone.
+    await Promise.allSettled([restore()])
+    throw error
+  }
+}
+
+/**
+ * Check the exact v2 positive case fields returned across the browser boundary.
+ * @param evidence - Original JSON result from the isolated browser fixture.
+ * @param provider - Exact route exercised by this invocation.
+ */
+export function assertPositiveCopilotUsageEvidence(evidence: unknown, provider: string): asserts evidence is PositiveCopilotUsageEvidence {
+  assert(typeof evidence === 'object' && evidence !== null && !Array.isArray(evidence))
+  const value = evidence as Record<string, unknown>
+  const positive = [
+    'sessionSubscribed', 'removedSessionHidesUsage', 'otherProviderHidesUsage', 'clientDisposalRemovesUsage',
+    'applicationMountPreserved', 'syntheticSiblingPreserved', 'inheritedSessionScopeVerified',
+    'explicitUndefinedSessionScopeAbsent', 'removedSessionRestoresUsage', 'closedSessionHidesUsage',
+    'closedSessionRestoresUsage', 'restoredProviderShowsUsage', 'subscriptionsReleased', 'syntheticContextDisposed',
+  ]
+  assert.deepEqual(Object.keys(value).sort(), [
+    ...positive, 'scope', 'provider', 'usageText', 'quotaReads', 'selectorErrors', 'forbiddenRemoteCalls', 'hostTransport',
+  ].sort())
+  assert(['github-copilot', 'github-copilot-preview'].includes(provider))
+  assert.equal(value.scope, 'packaged-renderer-released-client-synthetic-session-and-quota')
+  assert.equal(value.provider, provider)
+  assert.equal(value.hostTransport, 'not-provided-to-isolated-fixture')
+  assert(typeof value.usageText === 'string' && value.usageText.length <= 256)
+  assert.match(value.usageText, /(?:^|[^0-9.])7\s+used(?![A-Za-z])/u)
+  assert.match(value.usageText, /(?:^|[^0-9.])13\s+left(?![A-Za-z0-9])/u)
+  assert.equal(value.quotaReads, 4)
+  for (const field of positive) assert.equal(value[field], true, `Positive usage did not establish ${field}`)
+  assert.equal(value.selectorErrors, 0)
+  assert.equal(value.forbiddenRemoteCalls, 0)
 }
 
 /**
  * Mount an isolated synthetic Session through the shipped renderer and real Slot error boundary.
- * The fixture provides only synthetic quota; it has no Host transport or credential service.
  * @param page - Packaged page whose public module loader has been captured.
  * @param provider - Eligible Copilot route to select without sending a message.
- * @returns Positive DOM, lifecycle, selector, and denied-Remote observations.
+ * @returns Positive DOM and lifecycle observations after subscriptions, context and globals are restored.
  */
 export async function inspectPositiveCopilotUsage(page: Page, provider: string): Promise<PositiveCopilotUsageEvidence> {
-  const evidence = await page.evaluate<PositiveCopilotUsageEvidence>(
+  const evidence: unknown = await page.evaluate(
     `${packagedUsageBrowserSource()}\nrunPositiveUsageInBrowser(${JSON.stringify(provider)})`,
   )
-  assert.equal(evidence.scope, 'packaged-renderer-released-client-synthetic-session-and-quota')
-  assert.equal(evidence.provider, provider)
-  assert.equal(evidence.hostTransport, 'not-provided-to-isolated-fixture')
-  assert.match(evidence.usageText, /7 used/u)
-  assert.equal(evidence.quotaReads, 2)
-  assert.equal(evidence.sessionSubscribed, true)
-  assert.equal(evidence.removedSessionHidesUsage, true)
-  assert.equal(evidence.otherProviderHidesUsage, true)
-  assert.equal(evidence.clientDisposalRemovesUsage, true)
-  assert.equal(evidence.applicationMountPreserved, true)
-  assert.equal(evidence.syntheticSiblingPreserved, true)
-  assert.equal(evidence.selectorErrors, 0)
-  assert.equal(evidence.forbiddenRemoteCalls, 0)
+  assertPositiveCopilotUsageEvidence(evidence, provider)
   return evidence
 }

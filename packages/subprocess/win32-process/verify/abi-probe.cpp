@@ -47,8 +47,8 @@ int wmain()
   static_assert(CREATE_SUSPENDED == 0x4, "suspended process flag");
   static_assert(CREATE_UNICODE_ENVIRONMENT == 0x400, "Unicode environment flag");
   static_assert(STARTF_USESTDHANDLES == 0x100, "std handles flag");
-  static_assert(STARTF_USESHOWWINDOW == 0x1, "initial visibility flag");
-  static_assert(SW_HIDE == 0, "hidden initial window");
+  static_assert(STARTF_USESHOWWINDOW == 0x1, "initial window visibility flag");
+  static_assert(SW_HIDE == 0, "hidden window value");
   static_assert(HANDLE_FLAG_INHERIT == 0x1, "inherit flag");
   static_assert(WAIT_TIMEOUT == 258, "zero-time wait timeout");
   static_assert(sizeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION) == 48, "job accounting size");

@@ -58,7 +58,7 @@ PR 预检和校验接受可选环境变量 `DSH_ISSUE_REPOSITORY_OWNER`。未设
 
 仅 `cloga/deepseek-harness` 使用[工作流检出配置](../workflows/issue-policy.yml)中另行批准的不可变版本。工作流执行完整且干净的检出，绝不从 PR head 叠加策略代码，且仅在预检和最终校验进程中启用所有者覆盖值。其他仓库仍使用默认分支代码，覆盖变量保持未设置，而不是空字符串。固定版本不会随 PR 推送前移；改变它需要维护者对精确版本另行批准。
 
-fork 加入现有 `deepseek-ai/deepseek-harness` 的最终校验及条件性 App token 创建范围；其他仓库保留原有范围。即使预检未请求 Project 凭据，fork 最终校验仍检查强制范围内 PR 的标签与 Issue 引用。仅 `needs-project=true` 请求已配置的 App token。缺少必需凭据或 Project 访问被拒仍会失败，而不是获得元数据检查豁免。
+fork 加入现有 `deepseek-ai/deepseek-harness` 的受信任预检、条件性 App token 创建及最终校验范围；其他仓库不执行这些步骤。即使预检未请求 Project 凭据，fork 最终校验仍检查强制范围内 PR 的标签与 Issue 引用。仅 `needs-project=true` 请求已配置的 App token。缺少必需凭据或 Project 访问被拒仍会失败，而不是获得元数据检查豁免。
 
 [仓库引用检查](../../scripts/verify-repository-references.ts)仅允许第一个策略检出步骤的 `with.ref` 字段中供机器使用的字面固定版本标识，且必须保留精确 fork 条件、默认分支回退、清理以及禁用凭据持久化。同一标识出现在注释、其他字段或文档中仍被禁止。此例外不批准其他版本，也不证明拥有原 Project 的访问权限。
 

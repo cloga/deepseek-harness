@@ -10,8 +10,15 @@ import { publishForkRelease } from '../scripts/publish-fork-release.mjs'
 
 const repository = 'cloga/deepseek-harness'
 const sourceSha = 'a'.repeat(40)
-const version = '0.1.6-alpha.1.cloga.7'
+const version = '0.1.6-alpha.2.cloga.1'
 const tag = `dsh-desktop-v${version}`
+const reviewedPlanBytes = await readFile(new URL('../release/cloga-windows-x64.json', import.meta.url))
+const reviewedPlan = JSON.parse(reviewedPlanBytes.toString('utf8')) as {
+  version: string
+  upstreamVersion: string
+  sequence: number
+  channel: string
+}
 const api = `https://api.github.com/repos/${repository}`
 const tagUrl = `${api}/git/ref/tags/${tag}`
 const tagReleaseUrl = `${api}/releases/tags/${tag}`
@@ -47,8 +54,11 @@ async function fixture(intercept?: Intercept) {
   const installerBytes = Buffer.from('offline installer bytes')
   const installerRecord = { file: installer, bytes: installerBytes.length, sha256: digest(installerBytes) }
   const source = { repository, commit: sourceSha, tag, version }
-  const receipt = JSON.stringify({ source, artifacts: { installer: installerRecord } })
-  const manifest = JSON.stringify({ source, version, upstreamVersion: '0.1.6-alpha.1', installer: installerRecord,
+  const planSha256 = digest(reviewedPlanBytes)
+  const receipt = JSON.stringify({ source, artifacts: { installer: installerRecord },
+    buildInputs: { planSha256 }, identity: { upstreamVersion: reviewedPlan.upstreamVersion, sequence: reviewedPlan.sequence } })
+  const manifest = JSON.stringify({ source, version, upstreamVersion: reviewedPlan.upstreamVersion,
+    channel: reviewedPlan.channel, sequence: reviewedPlan.sequence, build: { planSha256 }, installer: installerRecord,
     buildReceipt: { file: 'build-receipt.json', sha256: digest(receipt) } })
   const files: Record<string, string | Buffer> = { [installer]: installerBytes, 'desktop-provisioning.json': '{}', 'build-receipt.json': receipt, 'release.json': manifest }
   const payload = Object.entries(files)
@@ -166,7 +176,8 @@ describe('fail-closed fork publication', () => {
     await expect(publishForkRelease(options)).rejects.toThrow('owned draft')
     expect(publicWrites(state)).toEqual([])
   })
-  it('creates one lightweight tag and owned draft, streams every asset, then verifies the immutable publication', async () => {
+  it('publishes the exact alpha2 sequence-32 source plan through one owned and fully verified draft', async () => {
+    expect(reviewedPlan).toMatchObject({ version, upstreamVersion: '0.1.6-alpha.2', sequence: 32, channel: 'cloga-windows-x64' })
     const { state, options, files } = await fixture()
     expect(await publishForkRelease(options)).toEqual({
       release_url: `https://github.com/${repository}/releases/tag/${tag}`,
@@ -202,6 +213,49 @@ describe('fail-closed fork publication', () => {
     await expect(publishForkRelease({ ...options, [key]: 'wrong' })).rejects.toThrow()
     expect(state.calls).toEqual([])
   })
+
+  it.each(['0.1.6-alpha.1.cloga.7', '0.1.6-alpha.2.cloga.2'])('rejects a matching tag for unplanned version %s before networking', async (unplanned) => {
+    const { state, options } = await fixture()
+    await expect(publishForkRelease({ ...options, version: unplanned, tag: `dsh-desktop-v${unplanned}` }))
+      .rejects.toThrow('Version differs from the reviewed source plan')
+    expect(state.calls).toEqual([])
+  })
+
+  it.each(['upstreamVersion', 'channel', 'sequence', 'planSha256'] as const)(
+    'rejects a manifest %s from another plan before networking', async (field) => {
+      const { state, options, directory } = await fixture()
+      const path = join(directory, 'release.json')
+      const manifest = JSON.parse(await readFile(path, 'utf8')) as {
+        upstreamVersion: string
+        channel: string
+        sequence: number
+        build: { planSha256: string }
+      }
+      if (field === 'planSha256') manifest.build.planSha256 = digest(Buffer.concat([reviewedPlanBytes, Buffer.from('\n')]))
+      else if (field === 'sequence') manifest.sequence = 17
+      else manifest[field] = field === 'upstreamVersion' ? '0.1.6-alpha.1' : 'other-channel'
+      await writeFile(path, JSON.stringify(manifest))
+      await expect(publishForkRelease(options)).rejects.toThrow(/reviewed plan/u)
+      expect(state.calls).toEqual([])
+    },
+  )
+
+  it.each(['upstreamVersion', 'sequence', 'planSha256'] as const)(
+    'rejects a receipt %s from another plan before networking', async (field) => {
+      const { state, options, directory } = await fixture()
+      const path = join(directory, 'build-receipt.json')
+      const receipt = JSON.parse(await readFile(path, 'utf8')) as {
+        identity: { upstreamVersion: string; sequence: number }
+        buildInputs: { planSha256: string }
+      }
+      if (field === 'planSha256') receipt.buildInputs.planSha256 = digest(Buffer.concat([reviewedPlanBytes, Buffer.from('\n')]))
+      else if (field === 'sequence') receipt.identity.sequence = 17
+      else receipt.identity.upstreamVersion = '0.1.6-alpha.1'
+      await writeFile(path, JSON.stringify(receipt))
+      await expect(publishForkRelease(options)).rejects.toThrow(/reviewed plan/u)
+      expect(state.calls).toEqual([])
+    },
+  )
 
   it.each(['version', 'commit', 'tag'])('rejects a local manifest %s mismatch before mutation', async (key) => {
     const { state, options, directory } = await fixture()

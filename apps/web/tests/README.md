@@ -8,6 +8,10 @@ These tests boot the real web composition in-process and drive it with a real Ch
 
 State-sensitive cases use Workspace, admission, attachment, and model-stream barriers to separate visible intermediate states from completed operations. Details close waits for frame transitions; archive verification assigns an explicit title to the seeded Session and follows that identity across reload. See the [CI fixture synchronization decision](../../../.agents/notes/implemented/testing/2026-09-08-ci-completion-observations.md).
 
+The shared Subagent settings card commits limits and model selection independently. Its test installs both exact namespace mutation-response waiters before Save, verifies HTTP and RPC success with the submitted persisted and effective values, then checks settled UI, the settings file and reopening. One namespace's presence is not completion of the whole card; the test does not change product save ordering.
+
+The initial post-Send bottom diagnostic retains the first 64 and latest 64 observations, with the same 128-record bound. It records only scalar geometry and fixed event/state categories through passive listeners and explicit observation calls; it adds no DOM writes, timers or readiness barrier. Polling cannot evict the entire early prefix, but omitted middle observations still limit causal attribution. Diagnostic read, logging or disposal failure cannot replace the original assertion. Inert callback tests verify retention and cleanup, not browser behavior or the cause of a historical failure.
+
 ## These are Host-face tests
 
 They type-check in the root `tsconfig.host.json`, not in the Client aggregate, because they read Host services directly: `ctx.connection`, the Host `SessionStore`, and `ctx.sessionProjectionCache`. Driving a browser at runtime does not make a file part of the Client program — the two faces merge Cordis `Context` under the same keys with different services, so one program cannot see both. Moving these files into the Client aggregate makes every Host-service access fail to compile.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { en, zh } from '../src/locale.ts'
-import { describeDesktopUpdateError, withDesktopUpdateNetworkError } from '../src/update-network-error.ts'
+import { describeDesktopUpdateError, desktopUpdateNetworkDetails, withDesktopUpdateNetworkError } from '../src/update-network-error.ts'
 
 async function caught(error: unknown, stage: 'release-list' | 'release-tag' | 'manifest-download' = 'manifest-download'): Promise<unknown> {
   try { await withDesktopUpdateNetworkError(stage, async () => { throw error }) }
@@ -68,6 +68,119 @@ describe('Desktop update network error messages', () => {
     for (const error of [new Error('manifest asset digest does not match GitHub'), new SyntaxError('manifest is not JSON'), new TypeError('invalid configuration')]) {
       expect(await caught(error)).toBe(error)
       expect(describeDesktopUpdateError(error, zh)).toBe(error.message)
+    }
+  })
+
+  it('returns details only for owned network wrappers without replacing safe summaries', async () => {
+    const primary = fetchFailure('ECONNRESET')
+    const wrapped = await caught(primary)
+    expect(wrapped).not.toBe(primary)
+    expect((wrapped as Error).cause).toBe(primary)
+    expect(desktopUpdateNetworkDetails(wrapped, zh)).toBe(describeDesktopUpdateError(wrapped, zh))
+    expect(desktopUpdateNetworkDetails(wrapped, en)).toBe(describeDesktopUpdateError(wrapped, en))
+    expect(desktopUpdateNetworkDetails(primary, en)).toBeUndefined()
+    const error = wrapped as Error
+    expect(error.message).toBe(desktopUpdateNetworkDetails(wrapped, en))
+    expect(error.message).not.toMatch(/private|https:|secret|token=/u)
+    const prototype: unknown = Object.getPrototypeOf(error)
+    if (typeof prototype !== 'object' || prototype === null) throw new Error('owned wrapper must have an object prototype')
+    expect(desktopUpdateNetworkDetails(Object.create(prototype))).toBeUndefined()
+    expect(desktopUpdateNetworkDetails(new Proxy(error, {}))).toBeUndefined()
+  })
+
+  it.each(['code', 'name', 'message', 'cause'] as const)('preserves the primary failure when its %s getter throws', async (field) => {
+    const primary = new TypeError('invalid configuration')
+    Object.defineProperty(primary, field, { get() { throw new Error('private getter token=secret') } })
+    expect(await caught(primary)).toBe(primary)
+    expect(desktopUpdateNetworkDetails(primary)).toBeUndefined()
+    expect(describeDesktopUpdateError(primary)).not.toMatch(/private|secret|token=/u)
+  })
+
+  it.each(['code', 'name', 'message', 'cause'] as const)('preserves the primary failure when its %s proxy read throws', async (field) => {
+    const primary = new Proxy(new TypeError('invalid configuration'), {
+      get(target, key, receiver) {
+        if (key === field) throw new Error('private proxy token=secret')
+        const value: unknown = Reflect.get(target, key, receiver)
+        return value
+      },
+    })
+    expect(await caught(primary)).toBe(primary)
+    expect(desktopUpdateNetworkDetails(primary)).toBeUndefined()
+    expect(describeDesktopUpdateError(primary)).not.toMatch(/private|secret|token=/u)
+  })
+
+  it.each(['code', 'name', 'message'] as const)('can classify a safe nested cause after an unreadable %s', async (field) => {
+    const primary = fetchFailure('ECONNRESET')
+    Object.defineProperty(primary, field, { get() { throw new Error('private getter token=secret') } })
+    const wrapped = await caught(primary)
+    expect((wrapped as Error).cause).toBe(primary)
+    expect(desktopUpdateNetworkDetails(wrapped)).toContain('the connection was reset (ECONNRESET)')
+    expect(describeDesktopUpdateError(wrapped)).not.toMatch(/private|secret|token=/u)
+  })
+
+  it('keeps a fetch failure generic when its cause cannot be read', async () => {
+    const primary = new TypeError('fetch failed')
+    Object.defineProperty(primary, 'cause', { get() { throw new Error('private getter token=secret') } })
+    const wrapped = await caught(primary)
+    expect((wrapped as Error).cause).toBe(primary)
+    expect(desktopUpdateNetworkDetails(wrapped)).toContain('the network request failed')
+    expect(describeDesktopUpdateError(wrapped)).not.toMatch(/private|secret|token=/u)
+  })
+
+  it('does not lose a classified failure when constructor name or prototype inspection would throw', async () => {
+    const primary = new Proxy(Object.assign(new Error('private request token=secret'), { code: 'ECONNRESET' }), {
+      get(target, key, receiver) {
+        if (key === 'name') throw new Error('private constructor token=secret')
+        const value: unknown = Reflect.get(target, key, receiver)
+        return value
+      },
+      getPrototypeOf() { throw new Error('private prototype token=secret') },
+    })
+    const wrapped = await caught(primary)
+    expect(wrapped).not.toBe(primary)
+    expect((wrapped as Error).cause).toBe(primary)
+    expect(desktopUpdateNetworkDetails(wrapped)).toContain('the connection was reset (ECONNRESET)')
+    expect(describeDesktopUpdateError(wrapped)).not.toMatch(/private|secret|token=/u)
+  })
+
+  it('preserves revoked and prototype-trapping proxies without displaying their secondary failures', async () => {
+    const revoked = Proxy.revocable(new Error('invalid configuration'), {})
+    revoked.revoke()
+    const prototypeTrap = new Proxy(new Error('invalid configuration'), {
+      getPrototypeOf() { throw new Error('private prototype token=secret') },
+    })
+    const conversionTrap = { [Symbol.toPrimitive]() { throw new Error('private conversion token=secret') } }
+    for (const primary of [revoked.proxy, prototypeTrap, conversionTrap]) {
+      await withDesktopUpdateNetworkError('manifest-download', async () => { throw primary }).then(
+        () => { throw new Error('expected failure') },
+        (failure: unknown) => { expect(failure).toBe(primary) },
+      )
+      expect(desktopUpdateNetworkDetails(primary)).toBeUndefined()
+      expect(describeDesktopUpdateError(primary, en)).toBe(en.unknownError)
+      expect(describeDesktopUpdateError(primary, zh)).toBe(zh.unknownError)
+    }
+  })
+
+  it('does not coerce hostile field values or change primitive failures', async () => {
+    const hostile = { [Symbol.toPrimitive]() { throw new Error('private coercion token=secret') } }
+    const primary = { code: hostile, name: hostile, message: hostile }
+    expect(await caught(primary)).toBe(primary)
+    expect(desktopUpdateNetworkDetails(primary)).toBeUndefined()
+    for (const value of [null, undefined, 'validation failed', 7]) {
+      expect(await caught(value)).toBe(value)
+      expect(desktopUpdateNetworkDetails(value)).toBeUndefined()
+      expect(describeDesktopUpdateError(value)).toBe(String(value))
+    }
+  })
+
+  it.each([5, 6])('inspects at most five errors in a %i-node cause chain', async (depth) => {
+    let primary: Error = Object.assign(new Error('private request token=secret'), { code: 'ECONNRESET' })
+    for (let index = 1; index < depth; index++) primary = new Error('outer failure', { cause: primary })
+    const result = await caught(primary)
+    if (depth === 5) expect(desktopUpdateNetworkDetails(result)).toContain('ECONNRESET')
+    else {
+      expect(result).toBe(primary)
+      expect(desktopUpdateNetworkDetails(result)).toBeUndefined()
     }
   })
 

@@ -1,0 +1,28 @@
+{
+  "en-US": {
+    "menu": [
+      { "label": "About Desktop 1.0.0…" },
+      { "type": "separator" }
+    ],
+    "options": {
+      "applicationName": "DeepSeek Harness",
+      "applicationVersion": "1.0.0",
+      "version": "",
+      "copyright": "",
+      "iconPath": "<app icon>"
+    }
+  },
+  "zh-CN": {
+    "menu": [
+      { "label": "关于 Desktop 1.0.0…" },
+      { "type": "separator" }
+    ],
+    "options": {
+      "applicationName": "DeepSeek Harness",
+      "applicationVersion": "1.0.0",
+      "version": "",
+      "copyright": "",
+      "iconPath": "<app icon>"
+    }
+  }
+}

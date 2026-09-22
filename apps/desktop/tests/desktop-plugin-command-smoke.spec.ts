@@ -1,7 +1,8 @@
 /** Non-GUI guards for the independent packaged command acceptance fixture. */
-import { closeSync, fstatSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { closeSync, fstatSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { CommandExecution } from '@deepseek-ai/dsh-commands/types'
 import { removeOwnedDirectory } from '../src/owned-directory.ts'
@@ -14,10 +15,14 @@ vi.mock('playwright', () => { throw new Error('Import safety: Playwright must no
 vi.mock('@deepseek-ai/dsh-win32-process/src/index.ts', () => { throw new Error('Import safety: Win32/Koffi loader must remain lazy') })
 vi.mock('@deepseek-ai/dsh-win32-process/src/process.ts', () => { throw new Error('Import safety: native process module must remain lazy') })
 vi.mock('../scripts/packaged-runtime.mjs', () => { throw new Error('Import safety: packaged verifier must remain lazy') })
-vi.mock('node:child_process', () => ({ spawn: () => { throw new Error('Import safety: no subprocess may start') } }))
+vi.mock('node:child_process', () => ({
+  spawn: () => { throw new Error('Import safety: no subprocess may start') },
+  execFileSync: () => { throw new Error('Import safety: no source process may start') },
+}))
 
 import {
   canRemoveDesktopPluginHome,
+  inspectDesktopPluginRuntimeIdentity,
   openDesktopPluginInput,
   readDesktopPluginNativeObservations,
   runPackagedDesktopPluginCommandAcceptance,
@@ -26,8 +31,9 @@ import {
 } from './fixtures/desktop-plugin-command-smoke.ts'
 
 import {
+  createDesktopPluginCommandOutcome, finalizeDesktopPluginCommandAcceptance,
   parseDesktopDevToolsPort, remainingDeadline, selectOwnedDesktopWindow, validateDesktopPageTitle,
-  validateDesktopPluginCancelAudit, validateDesktopWindowCapture, waitForOwnedJobExit, withinDeadline,
+  validateDesktopPluginCommandRun, validateDesktopPluginCancelAudit, validateDesktopWindowCapture, waitForOwnedJobExit, withinDeadline,
 } from './fixtures/desktop-plugin-command-guards.ts'
 
 const sessionId = 'command-only-test'
@@ -43,17 +49,150 @@ function transcript(extra: object[] = []): string {
   ].map(value => JSON.stringify(value)).join('\n') + '\n'
 }
 
-function cancellationAudit(): Record<string, unknown>[] {
-  const inventory = { sha256: 'a'.repeat(64), names: ['@example/a', '@example/b'] }
-  const common = { schemaVersion: 1, transaction: '.desktop-transaction-Ab1234', target: '@example/a',
-    operation: 'plugin-toggle', phase: 'preparation', before: inventory }
-  return [
-    { ...common, recordedAt: '2026-01-01T00:00:00.000Z', outcome: 'started', after: null },
-    { ...common, recordedAt: '2026-01-01T00:00:01.000Z', outcome: 'failed', after: inventory },
-  ]
+const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
+const manifestText = JSON.stringify({ dependencies: { '@example/a': '1.0.0' }, dsh: { profile: { bundles: ['@example/a'] } } })
+const auditContext = { transactionId: '11111111-2222-3333-4444-555555555555', commandId: 'command-1', target: '@example/a',
+  profile: 'C:/owned/profile', runtimeDir: 'C:/owned/runtime', manifestText,
+  baseline: { 'package.json': hash(manifestText), 'pnpm-lock.yaml': 'a'.repeat(64), '.env': null } }
+function cancellationAudit() {
+  const owner = { profile: auditContext.profile, runtimeDir: auditContext.runtimeDir, installAnchor: 'C:/owned',
+    runtimeFingerprint: 'b'.repeat(64), dependencyRegistry: 'https://registry.example/', configPaths: [] }
+  const baseFiles = [{ path: 'package.json', kind: 'file', sha256: hash(manifestText) },
+    { path: 'pnpm-lock.yaml', kind: 'file', sha256: 'a'.repeat(64) }]
+  const baseInputs: unknown[] = []
+  const mutation = { kind: 'selection', packageNames: ['@example/a'], enabled: false }
+  const commandOrigin = { kind: 'desktop-command', generation: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', requestId: 3, commandId: 'command-1' }
+  const commandRequest = { kind: 'selection', names: ['@example/a'], enabled: false }
+  const prepared: Record<string, unknown> = { schemaVersion: 2, owner, baseFiles, baseInputs,
+    selectionBaseManifest: manifestText, baseGraphFingerprint: 'c'.repeat(64), candidateFingerprint: 'd'.repeat(64),
+    mutation, commandOrigin, commandRequest,
+    result: { schemaVersion: 2, kind: 'selection', transactionId: auditContext.transactionId, state: 'prepared',
+      packageNames: ['@example/a'], baseFingerprint: hash(JSON.stringify({ owner, files: baseFiles, inputs: baseInputs })), health: 'pending' },
+    requestFingerprint: hash(JSON.stringify({ mutation, commandOrigin, commandRequest })) }
+  const discarded: Record<string, unknown> = { schemaVersion: 1, transactionId: auditContext.transactionId,
+    ownerFingerprint: hash(JSON.stringify(owner)), requestFingerprint: prepared.requestFingerprint,
+    candidateFingerprint: prepared.candidateFingerprint, state: 'discarded' }
+  return { owner, prepared, discarded, retainedEntries: ['DISCARDED.json', 'PREPARED.json', 'owner.json'] }
 }
-const auditNames = ['@example/a', '@example/b']
-const validateAudit = (values: unknown[]): void => { validateDesktopPluginCancelAudit(values, '@example/a', auditNames) }
+const validateAudit = (value: ReturnType<typeof cancellationAudit>): void => { validateDesktopPluginCancelAudit(value, auditContext) }
+const rehashAudit = (value: ReturnType<typeof cancellationAudit>): void => {
+  const { prepared, discarded, owner } = value
+  prepared.requestFingerprint = hash(JSON.stringify({ mutation: prepared.mutation,
+    commandOrigin: prepared.commandOrigin, commandRequest: prepared.commandRequest }))
+  const result = prepared.result as Record<string, unknown>
+  result.baseFingerprint = hash(JSON.stringify({ owner, files: prepared.baseFiles, inputs: prepared.baseInputs }))
+  discarded.requestFingerprint = prepared.requestFingerprint
+  discarded.ownerFingerprint = hash(JSON.stringify(owner))
+}
+
+function physicalArchiveFixture() {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'desktop-command-asar-')))
+  const app = join(root, 'app'), resources = join(app, 'resources')
+  mkdirSync(resources, { recursive: true })
+  const application = join(app, 'cloga-deepseek-harness.exe'), archive = join(resources, 'app.asar')
+  writeFileSync(application, 'inert executable bytes; never launched')
+  // Only physical identity is under test. These are not ASAR contents and do not qualify an embedded runtime.
+  writeFileSync(archive, 'raw archive bytes\r\n')
+  return { root, app, application, resources, archive, runtimeRoot: join(archive, 'dsh') }
+}
+
+describe('command fixture physical archive identity (no Electron)', () => {
+  it('derives fixed virtual dsh from a real archive file where ordinary Node cannot traverse the child', async () => {
+    const f = physicalArchiveFixture()
+    try {
+      expect(lstatSync(f.archive).isFile()).toBe(true)
+      expect(() => realpathSync(f.runtimeRoot)).toThrow()
+      const identity = await inspectDesktopPluginRuntimeIdentity(f.application, f.runtimeRoot)
+      expect(identity).toEqual({ archive: realpathSync(f.archive), runtimeDir: join(realpathSync(f.archive), 'dsh'),
+        archiveSha256: hash('raw archive bytes\r\n') })
+      await expect(inspectDesktopPluginRuntimeIdentity(f.application, f.runtimeRoot, identity)).resolves.toEqual(identity)
+    } finally { removeOwnedDirectory(f.root) }
+  })
+
+  it.each(['missing-archive', 'archive-directory', 'exe-directory', 'resources-file', 'missing-exe'])(
+    'rejects physical package identity defect %s', async (kind) => {
+      const f = physicalArchiveFixture()
+      try {
+        if (kind === 'missing-archive' || kind === 'archive-directory') rmSync(f.archive)
+        if (kind === 'archive-directory') mkdirSync(f.archive)
+        if (kind === 'exe-directory' || kind === 'missing-exe') rmSync(f.application)
+        if (kind === 'exe-directory') mkdirSync(f.application)
+        if (kind === 'resources-file') { rmSync(f.resources, { recursive: true }); writeFileSync(f.resources, 'not a directory') }
+        await expect(inspectDesktopPluginRuntimeIdentity(f.application, f.runtimeRoot)).rejects.toThrow()
+      } finally { removeOwnedDirectory(f.root) }
+    },
+  )
+
+  it('rejects alternate archives, virtual suffixes and normalized traversal instead of accepting mere resolve output', async () => {
+    const f = physicalArchiveFixture()
+    try {
+      for (const runtimeRoot of [join(f.resources, 'other.asar', 'dsh'), join(f.resources, 'app.asar.unpacked', 'dsh'),
+        join(f.archive, 'other'), f.archive, `${f.archive}${sep}..${sep}app.asar${sep}dsh`, `${f.runtimeRoot}${sep}`]) {
+        await expect(inspectDesktopPluginRuntimeIdentity(f.application, runtimeRoot)).rejects.toThrow('Unexpected packaged runtime path')
+      }
+      await expect(inspectDesktopPluginRuntimeIdentity('relative.exe', 'relative-runtime')).rejects.toThrow('absolute normalized')
+    } finally { removeOwnedDirectory(f.root) }
+  })
+
+  it.each(['archive-link', 'executable-link', 'resources-junction', 'app-junction', 'ancestor-junction'])(
+    'refuses redirected physical package path %s', async (kind) => {
+      const f = physicalArchiveFixture()
+      try {
+        let application = f.application, runtimeRoot = f.runtimeRoot
+        if (kind === 'archive-link' || kind === 'executable-link') {
+          const path = kind === 'archive-link' ? f.archive : f.application
+          const target = join(f.root, kind + '-target')
+          renameSync(path, target)
+          symlinkSync(target, path, 'file')
+        } else if (kind === 'resources-junction') {
+          const target = join(f.root, 'physical-resources')
+          renameSync(f.resources, target)
+          symlinkSync(target, f.resources, process.platform === 'win32' ? 'junction' : 'dir')
+        } else {
+          const alias = join(f.root, 'alias')
+          symlinkSync(kind === 'app-junction' ? f.app : f.root, alias, process.platform === 'win32' ? 'junction' : 'dir')
+          const app = kind === 'app-junction' ? alias : join(alias, 'app')
+          application = join(app, 'cloga-deepseek-harness.exe')
+          runtimeRoot = join(app, 'resources', 'app.asar', 'dsh')
+        }
+        await expect(inspectDesktopPluginRuntimeIdentity(application, runtimeRoot)).rejects.toThrow()
+      } finally { removeOwnedDirectory(f.root) }
+    },
+  )
+
+  it('rejects changed archive bytes against the independently observed pre-command digest', async () => {
+    const f = physicalArchiveFixture()
+    try {
+      const before = await inspectDesktopPluginRuntimeIdentity(f.application, f.runtimeRoot)
+      writeFileSync(f.archive, 'raw archive bytes\n')
+      await expect(inspectDesktopPluginRuntimeIdentity(f.application, f.runtimeRoot, before)).rejects.toThrow('archive changed')
+      writeFileSync(f.archive, 'raw archive bytes\r\n')
+      await expect(inspectDesktopPluginRuntimeIdentity(f.application, f.runtimeRoot, before)).resolves.toEqual(before)
+      await expect(inspectDesktopPluginRuntimeIdentity(f.application, f.runtimeRoot, { ...before, runtimeDir: 'journal-owned-guess' }))
+        .rejects.toThrow('archive changed')
+    } finally { removeOwnedDirectory(f.root) }
+  })
+
+  it('requires real runtime verification before observation and rechecks before audit and after cleanup before success publication', () => {
+    const source = readFileSync(new URL('./fixtures/desktop-plugin-command-smoke.ts', import.meta.url), 'utf8')
+    const verify = source.indexOf('await verifyPackagedDesktopRuntime(application, runtimeRoot,')
+    const bind = source.indexOf('runtimeIdentity = await inspectDesktopPluginRuntimeIdentity(application, runtimeRoot)')
+    const auditCheck = source.indexOf('await inspectDesktopPluginRuntimeIdentity(application, runtimeRoot, runtimeIdentity)')
+    const audit = source.indexOf('validateDesktopPluginCancelAudit(records,')
+    const cleanup = source.indexOf('cleanupVerified = quiescent')
+    const finalCheck = source.lastIndexOf('await inspectDesktopPluginRuntimeIdentity(application, runtimeRoot, runtimeIdentity)')
+    const publish = source.indexOf('finalizeDesktopPluginCommandAcceptance(failure, cleanupVerified,')
+    expect(verify).toBeGreaterThan(0)
+    expect(bind).toBeGreaterThan(verify)
+    expect(auditCheck).toBeGreaterThan(bind)
+    expect(audit).toBeGreaterThan(auditCheck)
+    expect(cleanup).toBeGreaterThan(audit)
+    expect(finalCheck).toBeGreaterThan(cleanup)
+    expect(publish).toBeGreaterThan(finalCheck)
+    expect(source).toContain('runtimeDir: runtimeIdentity.runtimeDir')
+    expect(source).not.toContain('realpathSync(runtimeRoot)')
+  })
+})
 
 describe('packaged desktop-plugin command fixture (no GUI)', () => {
   const rootWindow = { hwnd: '1234', pid: 123, title: 'Actual app title', owner: '0', rootOwner: '1234',
@@ -64,6 +203,73 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
   const validateCapture = (value: unknown): void => {
     validateDesktopWindowCapture(value, rootWindow.pid, rootWindow.title, rootWindow.hwnd)
   }
+
+  it('binds the command-only evidence to its exact hosted source and run before allocation', () => {
+    const source = 'a'.repeat(40), tree = 'b'.repeat(40)
+    const environment = { GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: 'cloga/deepseek-harness',
+      RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', GITHUB_SHA: source,
+      GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2' }
+    expect(validateDesktopPluginCommandRun(source, tree, environment)).toEqual({
+      sourceCommit: source, sourceTree: tree, runId: '123', runAttempt: '2',
+    })
+    for (const [key, value] of Object.entries(environment)) {
+      expect(() => validateDesktopPluginCommandRun(source, tree, { ...environment, [key]: value + '\n' })).toThrow()
+    }
+    for (const candidate of ['', source.toUpperCase(), source + '\n', 'c'.repeat(39)]) {
+      expect(() => validateDesktopPluginCommandRun(candidate, tree, environment)).toThrow()
+      expect(() => validateDesktopPluginCommandRun(source, candidate, environment)).toThrow()
+    }
+    expect(() => validateDesktopPluginCommandRun('c'.repeat(40), tree, environment)).toThrow()
+    expect(() => validateDesktopPluginCommandRun(source, tree, { ...environment, GITHUB_RUN_ID: '0' })).toThrow()
+  })
+
+  it.each([new Error('primary'), undefined, null])('keeps the actual primary %# through diagnostics and cleanup failures', (primary) => {
+    const outcome = createDesktopPluginCommandOutcome()
+    const cleanup = new Error('owned cleanup'), diagnostics = new Error('failure report')
+    outcome.retain(primary)
+    outcome.retain(cleanup)
+    const publish = vi.fn()
+    let caught = false
+    try {
+      finalizeDesktopPluginCommandAcceptance(outcome, false, publish, (error, secondary) => {
+        expect(error).toBe(primary)
+        expect(secondary).toContain(cleanup)
+        throw diagnostics
+      })
+    } catch (error) { caught = true; expect(error).toBe(primary) }
+    expect(caught).toBe(true)
+    expect(outcome.failed).toBe(true)
+    expect(outcome.secondary).toContain(diagnostics)
+    expect(publish).not.toHaveBeenCalled()
+  })
+
+  it.each([new Error('cleanup'), undefined, null])('fails cleanup-only %# rather than publishing success', (error) => {
+    const outcome = createDesktopPluginCommandOutcome()
+    outcome.retain(error)
+    const publish = vi.fn(), report = vi.fn()
+    let rejected = false
+    try { finalizeDesktopPluginCommandAcceptance(outcome, false, publish, report) }
+    catch (caught) { rejected = true; expect(caught).toBe(error) }
+    expect(rejected).toBe(true)
+    expect(publish).not.toHaveBeenCalled()
+    expect(report).toHaveBeenCalledOnce()
+  })
+
+  it('requires positive cleanup before publication and preserves a failed exclusive success write', () => {
+    const absent = createDesktopPluginCommandOutcome()
+    const publish = vi.fn(), report = vi.fn()
+    expect(() => { finalizeDesktopPluginCommandAcceptance(absent, false, publish, report) }).toThrow('cleanup is unconfirmed')
+    expect(publish).not.toHaveBeenCalled()
+    const complete = createDesktopPluginCommandOutcome()
+    finalizeDesktopPluginCommandAcceptance(complete, true, publish, report)
+    expect(publish).toHaveBeenCalledOnce()
+    const failedWrite = createDesktopPluginCommandOutcome()
+    let rejected = false
+    try { finalizeDesktopPluginCommandAcceptance(failedWrite, true, () => { throw undefined }, () => { throw new Error('diagnostic') }) }
+    catch (error) { rejected = true; expect(error).toBeUndefined() }
+    expect(rejected).toBe(true)
+    expect(failedWrite.failed).toBe(true)
+  })
 
   it('requires bounded nonempty actual title without trimming or normalizing identity', () => {
     for (const title of [undefined, null, 123, '', '   ', '\n', 'App\u0000title', 'App\rtitle', 'a'.repeat(1025)]) {
@@ -210,36 +416,69 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
       jobQuiescent: true, helperTreeUncertain: false })).toBe(true)
   })
 
-  it('requires a same-transaction started/failed pair retaining known nonempty inventory', () => {
+  it('requires an actual command-owned PREPARED2 and completed same-transaction discard', () => {
     expect(() => { validateAudit(cancellationAudit()) }).not.toThrow()
-    expect(() => { validateAudit([]) }).toThrow()
-    expect(() => { validateAudit(cancellationAudit().slice(1)) }).toThrow()
+    const independent = cancellationAudit()
+    ;(independent.prepared.commandOrigin as Record<string, unknown>).generation = 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff'
+    ;(independent.prepared.commandOrigin as Record<string, unknown>).requestId = 9
+    rehashAudit(independent)
+    expect(() => { validateAudit(independent) }).not.toThrow()
   })
 
-  it.each(['transaction', 'before', 'after', 'schemaVersion', 'recordedAt'])(
-    'rejects missing audit field %s rather than undefined equality', (field) => {
-      const records = cancellationAudit().map(record => Object.fromEntries(Object.entries(record).filter(([key]) => key !== field)))
-      expect(() => { validateAudit(records) }).toThrow()
+  it.each(['schemaVersion', 'owner', 'requestFingerprint', 'result', 'baseFiles', 'baseInputs', 'baseGraphFingerprint',
+    'candidateFingerprint', 'mutation', 'commandOrigin', 'commandRequest', 'selectionBaseManifest'])(
+    'rejects missing prepared field %s rather than undefined equality', (field) => {
+      const value = cancellationAudit()
+      value.prepared = Object.fromEntries(Object.entries(value.prepared).filter(([key]) => key !== field))
+      expect(() => { validateAudit(value) }).toThrow()
     },
   )
 
-  it.each([undefined, null, {}, { sha256: 'not-a-digest', names: auditNames },
-    { sha256: 'a'.repeat(64), names: [] }, { names: auditNames },
-    { sha256: 'a'.repeat(64), names: [...auditNames].reverse() },
-    { sha256: 'a'.repeat(64), names: ['unknown'] }])('rejects malformed inventory %#', (inventory) => {
-    const records = cancellationAudit()
-    records[0]!.before = inventory
-    records[1]!.before = inventory
-    records[1]!.after = inventory
-    expect(() => { validateAudit(records) }).toThrow()
+  it.each([undefined, null, {}, [], [{ path: 'package.json', kind: 'file', sha256: 'invalid' }]])(
+    'rejects malformed private base inventory %#', (files) => {
+      const value = cancellationAudit()
+      value.prepared.baseFiles = files
+      expect(() => { validateAudit(value) }).toThrow()
+    },
+  )
+
+  it('rejects rehashed semantic target, origin, manifest, metadata and owner substitutions', () => {
+    const changes: ((value: ReturnType<typeof cancellationAudit>) => void)[] = [
+      (value) => { (value.prepared.mutation as Record<string, unknown>).enabled = true },
+      (value) => { (value.prepared.mutation as Record<string, unknown>).packageNames = ['@example/b'] },
+      (value) => { (value.prepared.commandRequest as Record<string, unknown>).names = 'all' },
+      (value) => { (value.prepared.commandOrigin as Record<string, unknown>).commandId = 'another-command' },
+      (value) => { (value.prepared.commandOrigin as Record<string, unknown>).requestId = 0 },
+      (value) => { value.prepared.selectionBaseManifest = manifestText + '\n' },
+      (value) => { (value.prepared.baseFiles as Record<string, unknown>[])[1]!.sha256 = 'e'.repeat(64) },
+      (value) => { value.owner.profile = 'C:/foreign/profile' },
+      (value) => { value.prepared.provisioning = { schemaVersion: 1 } },
+      (value) => { (value.prepared.result as Record<string, unknown>).packageNames = ['@example/b'] },
+    ]
+    for (const change of changes) {
+      const value = cancellationAudit()
+      change(value); rehashAudit(value)
+      expect(() => { validateAudit(value) }).toThrow()
+    }
   })
 
-  it('rejects committed, different transaction/target, missing start, and changed retained digest', () => {
-    for (const [field, value] of [['outcome', 'committed'], ['transaction', '.desktop-transaction-other'],
-      ['target', '@example/b'], ['outcome', 'started'], ['after', { sha256: 'b'.repeat(64), names: auditNames }]] as const) {
-      const records = cancellationAudit()
-      records[1]![field] = value
-      expect(() => { validateAudit(records) }).toThrow()
+  it('rejects missing, incomplete, foreign or unbound discard and retained candidate/activation state', () => {
+    for (const [field, replacement] of [['state', 'discarding'], ['state', 'committed'],
+      ['transactionId', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'], ['ownerFingerprint', 'f'.repeat(64)],
+      ['requestFingerprint', 'f'.repeat(64)], ['candidateFingerprint', 'f'.repeat(64)]]) {
+      const value = cancellationAudit()
+      value.discarded[field!] = replacement
+      expect(() => { validateAudit(value) }).toThrow()
+    }
+    for (const field of Object.keys(cancellationAudit().discarded)) {
+      const value = cancellationAudit()
+      value.discarded = Object.fromEntries(Object.entries(value.discarded).filter(([key]) => key !== field))
+      expect(() => { validateAudit(value) }).toThrow()
+    }
+    for (const entry of ['profile', 'ACTIVATION.json', 'rollback', 'store', 'acquisition', 'environment', 'registry-resolution-cache']) {
+      const value = cancellationAudit()
+      value.retainedEntries.push(entry)
+      expect(() => { validateAudit(value) }).toThrow()
     }
   })
 
@@ -294,9 +533,10 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
     expect(typeof runPackagedDesktopPluginCommandAcceptance).toBe('function')
   })
 
-  it('accepts durable prepared success without pretending that Cancel is installed success', () => {
-    expect(validateDesktopPluginTranscript('session.v2.jsonl', transcript(), sessionId, expected)).toMatchObject({
-      filename: 'session.v2.jsonl', sessionId, commands: 1, eventTypes: ['command/run', 'command/done'],
+  it.each([2, 3])('accepts canonical generation %s durable prepared success without claiming installation', (version) => {
+    const filename = `session.v${version}.jsonl`
+    expect(validateDesktopPluginTranscript(filename, transcript().replace('"version":2', `"version":${version}`), sessionId, expected)).toMatchObject({
+      filename, sessionId, commands: 1, eventTypes: ['command/run', 'command/done'],
     })
   })
 

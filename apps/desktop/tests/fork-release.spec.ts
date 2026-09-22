@@ -12,6 +12,11 @@ import {
 
 const repositoryRoot = resolve(import.meta.dirname, '..', '..', '..')
 const planPath = resolve(import.meta.dirname, '..', 'release', 'cloga-windows-x64.json')
+const sourceNativeGuardCommand = 'node --test --test-concurrency=1 apps/desktop/tests/windows-installed-upgrade.test.mjs apps/desktop/tests/windows-packaged-package-acceptance.test.mjs'
+
+function assertSourceNativeGuardRun(run: string | undefined): void {
+  deepStrictEqual(run?.trim().split(/\r?\n/u), [sourceNativeGuardCommand, 'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'])
+}
 
 function planValue(): unknown {
   return JSON.parse(readFileSync(planPath, 'utf8'))
@@ -20,17 +25,25 @@ function planValue(): unknown {
 type ReleaseWorkflow = {
   on: { workflow_dispatch: { inputs: Record<string, { required: boolean; type: string; default?: unknown }> } }
   permissions: Record<string, string>
+  concurrency: { group: string; 'cancel-in-progress': boolean }
   env?: Record<string, string>
   jobs: Record<string, {
+    'runs-on'?: string
+    needs?: string | string[]
+    if?: string
+    environment?: string
     permissions?: Record<string, string>
     env?: Record<string, string>
     steps: Array<{
       name?: string
+      id?: string
       uses?: string
-      with?: Record<string, unknown>
-      shell?: string
+      if?: string
       run?: string
+      shell?: string
+      'continue-on-error'?: boolean
       env?: Record<string, string>
+      with?: Record<string, unknown>
     }>
   }>
 }
@@ -66,26 +79,48 @@ function assertPackagedPluginCommandAcceptance(workflow: ReleaseWorkflow): void 
 function assertMetadataAuthScope(workflow: ReleaseWorkflow): void {
   expect(workflow.env ?? {}).not.toHaveProperty(metadataTokenEnv)
   const authenticatedSteps: string[] = []
+  const baselineAcquisitions: string[] = []
   for (const [jobName, job] of Object.entries(workflow.jobs)) {
     expect(job.env ?? {}).not.toHaveProperty(metadataTokenEnv)
     for (const step of job.steps) {
       const metadataStep = (jobName === 'build' && step.name === 'Prepare reviewed managed capability')
         || (jobName === 'remote-check' && step.name === 'Run the shipped source discovery against GitHub')
+      const baselineStep = jobName === 'build' && step.name === 'Acquire the verified installer-upgrade baseline'
       if (metadataStep) {
         expect(job.permissions ?? workflow.permissions).toEqual({ contents: 'read' })
-        expect(step.env?.[metadataTokenEnv]).toBe('${{ github.token }}')
+        expect(step.env).toEqual({ [metadataTokenEnv]: '${{ github.token }}' })
         authenticatedSteps.push(jobName)
+      } else if (baselineStep) {
+        expect(job.permissions ?? workflow.permissions).toEqual({ contents: 'read' })
+        expect(step.env).toEqual({ GH_TOKEN: '${{ github.token }}' })
+        expect(step.run).not.toMatch(/Start-Process|electron\.launch|ELECTRON_RUN_AS_NODE/u)
+        baselineAcquisitions.push(jobName)
       } else {
         expect(step.env ?? {}).not.toHaveProperty(metadataTokenEnv)
       }
-      // Neither packaging nor any Electron/helper/Copilot acceptance process inherits a CI credential.
-      if (!metadataStep && (jobName === 'build' || jobName === 'remote-check')) {
+      // Neither packaging nor any Electron/helper/Copilot/installer acceptance process inherits a CI credential.
+      if (!metadataStep && !baselineStep && (jobName === 'build' || jobName === 'remote-check')) {
         expect(Object.keys({ ...workflow.env, ...job.env, ...step.env }).filter(key => /token|secret|password/iu.test(key))).toEqual([])
       }
       expect(step.run ?? '').not.toMatch(/DSH_DESKTOP_RELEASE_GITHUB_TOKEN|github\.token|GITHUB_ENV/u)
     }
   }
   expect(authenticatedSteps).toEqual(['build', 'remote-check'])
+  expect(baselineAcquisitions).toEqual(['build'])
+}
+
+function assertRehearsalConcurrency(workflow: ReleaseWorkflow): void {
+  expect(workflow.concurrency).toEqual({
+    group: "${{ inputs.rehearsal && format('desktop-fork-rehearsal-{0}', github.ref) || 'desktop-fork-release' }}",
+    'cancel-in-progress': false,
+  })
+  expect(workflow.on.workflow_dispatch.inputs.rehearsal).toMatchObject({ type: 'boolean', default: false })
+  expect(workflow.permissions).toEqual({ contents: 'read' })
+  expect(workflow.jobs.build!['runs-on']).toBe('windows-2025')
+  expect(workflow.jobs.build!.permissions).toBeUndefined()
+  for (const name of ['release', 'remote-check']) {
+    expect(workflow.jobs[name]!.if).toBe("${{ !inputs.rehearsal && github.ref == 'refs/heads/master' }}")
+  }
 }
 
 function assertReviewedSourcePin(workflow: ReleaseWorkflow): string {
@@ -142,49 +177,69 @@ function assertProjectFixtureSelection(workflow: ReleaseWorkflow): void {
   expect(prepare).toBeGreaterThan(transactions)
 }
 
-function assertHiddenWindowSelection(workflow: ReleaseWorkflow): void {
+function assertQualificationGate(workflow: ReleaseWorkflow): void {
   const steps = workflow.jobs.build!.steps
-  const index = steps.findIndex(step => step.name === 'Verify hidden Windows command paths')
-  expect(index).toBeGreaterThan(steps.findIndex(step => step.name === 'Install from frozen lockfile'))
-  expect(index).toBeLessThan(steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer'))
-  expect(steps[index]?.run?.trim().split(/\s+/u)).toEqual([
-    'pnpm', 'exec', 'vitest', 'run',
-    'packages/subprocess/win32-process/tests',
-    'packages/subprocess/subprocess-local/tests/windows-job.spec.ts',
-    'packages/subprocess/subprocess-local/tests/native-windows.spec.ts',
-    'packages/sandbox/sandbox-windows-acl/tests/runner.spec.ts',
-    'packages/sandbox/sandbox-windows-acl/tests/provider-chain.spec.ts',
-    'packages/sandbox/sandbox-windows-acl/tests/control.spec.ts',
-    '--maxWorkers=2', '--testTimeout=90000', '--hookTimeout=90000',
-  ])
-}
-
-function assertPublisherSelection(workflow: ReleaseWorkflow): void {
-  const steps = workflow.jobs.release!.steps
-  const checkout = steps.findIndex(step => step.uses === 'actions/checkout@v6')
-  const node = steps.findIndex(step => step.uses === 'actions/setup-node@v6')
-  const assets = steps.findIndex(step => step.uses === 'actions/download-artifact@v4')
-  const verify = steps.findIndex(step => step.name === 'Cross-check downloaded artifact set')
-  const publish = steps.findIndex(step => step.name === 'Publish reviewed release')
-  expect(checkout).toBeGreaterThanOrEqual(0)
-  expect(steps[checkout]?.with).toMatchObject({ ref: '${{ needs.build.outputs.source_sha }}', 'persist-credentials': false, clean: true })
-  expect(node).toBeGreaterThan(checkout)
-  expect(steps[node]?.with?.['node-version']).toBe('${{ env.NODE_VERSION }}')
-  expect(assets).toBeGreaterThan(node)
-  expect(verify).toBeGreaterThan(assets)
-  expect(publish).toBeGreaterThan(verify)
-  expect(steps[publish]?.run).toBe('node apps/desktop/scripts/publish-fork-release.mjs release-assets')
-  expect(steps[publish]?.env).toEqual({
-    GH_TOKEN: '${{ github.token }}',
-    RELEASE_TAG: '${{ needs.build.outputs.tag }}',
-    RELEASE_VERSION: '${{ needs.build.outputs.version }}',
-    SOURCE_SHA: '${{ needs.build.outputs.source_sha }}',
+  const index = steps.findIndex(step => step.name === 'Verify complete release qualification')
+  expect(steps.filter(step => step.name === 'Verify complete release qualification')).toHaveLength(1)
+  const upgrade = steps.findIndex(step => step.name === 'Verify real installed Desktop upgrade')
+  const checksums = steps.findIndex(step => step.name === 'Verify release asset checksums')
+  expect(upgrade).toBeGreaterThanOrEqual(0)
+  expect(index).toBeGreaterThan(upgrade)
+  expect(checksums).toBeGreaterThan(index)
+  const step = steps[index]!
+  expect(step.id).toBe('qualification')
+  expect(step.shell).toBe('pwsh')
+  expect(step).not.toHaveProperty('if')
+  expect(step).not.toHaveProperty('continue-on-error')
+  expect(step.env).toBeUndefined()
+  expect(step.run?.trim()).toBe([
+    "$ErrorActionPreference = 'Stop'",
+    'pnpm exec tsx apps/desktop/scripts/verify-fork-qualification.ts `',
+    '  --plan $env:RELEASE_PLAN `',
+    '  --release-assets $env:RELEASE_ASSETS `',
+    '  --packaged-evidence dist/desktop-copilot-acceptance `',
+    '  --upgrade-root (Join-Path $env:RUNNER_TEMP "cloga-installer-upgrade-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT") `',
+    '  --baseline-directory (Join-Path $env:RUNNER_TEMP "desktop-upgrade-baseline-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT") `',
+    '  --expected-source $env:GITHUB_SHA `',
+    '  --run-id $env:GITHUB_RUN_ID `',
+    '  --run-attempt $env:GITHUB_RUN_ATTEMPT `',
+    '  --output dist/desktop-fork-qualification/qualification.json',
+    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+  ].join('\n'))
+  const summary = steps.findIndex(item => item.name === 'Retain verified internal qualification summary')
+  expect(summary).toBeGreaterThan(index)
+  expect(checksums).toBeGreaterThan(summary)
+  expect(steps[summary]).toMatchObject({
+    uses: 'actions/upload-artifact@v4',
+    with: {
+      name: 'desktop-fork-qualification-${{ steps.plan.outputs.version }}-${{ github.sha }}-${{ github.run_attempt }}',
+      path: 'dist/desktop-fork-qualification/qualification.json', 'if-no-files-found': 'error', 'retention-days': 7,
+    },
   })
-  expect(steps.filter(step => step.env?.GH_TOKEN !== undefined)).toHaveLength(1)
-  expect(steps.some(step => /gh release (?:create|edit)/u.test(step.run ?? ''))).toBe(false)
+  expect(steps[summary]).not.toHaveProperty('if')
+  expect(steps[summary]).not.toHaveProperty('continue-on-error')
+  const diagnostic = steps.findIndex(item => item.name === 'Retain unqualified rehearsal candidate for targeted diagnosis')
+  expect(diagnostic).toBeGreaterThan(steps.findIndex(item => item.name === 'Finalize release manifest and receipts'))
+  expect(upgrade).toBeGreaterThan(diagnostic)
+  expect(steps[diagnostic]).toMatchObject({
+    if: '${{ inputs.rehearsal }}', uses: 'actions/upload-artifact@v4',
+    with: {
+      name: 'desktop-unqualified-candidate-${{ steps.plan.outputs.version }}-${{ github.sha }}-${{ github.run_attempt }}',
+      path: '${{ env.RELEASE_ASSETS }}/*', 'if-no-files-found': 'error', 'retention-days': 7,
+    },
+  })
+  const released = steps.findIndex(item => item.with?.name === 'desktop-fork-release-${{ steps.plan.outputs.version }}')
+  expect(released).toBeGreaterThan(checksums)
+  expect(workflow.jobs.release!.needs).toBe('build')
+  const download = workflow.jobs.release!.steps.find(item => item.uses === 'actions/download-artifact@v4')
+  expect(download?.with?.name).toBe('desktop-fork-release-${{ needs.build.outputs.version }}')
 }
 
 describe('Desktop fork release plan', () => {
+  it('requires complete source-bound qualification before sealing and never publishes diagnostic artifacts', () => {
+    assertQualificationGate(readReleaseWorkflow())
+  })
+
   it('requires independent packaged plugin command acceptance before release finalization', () => {
     assertPackagedPluginCommandAcceptance(readReleaseWorkflow())
   })
@@ -197,47 +252,48 @@ describe('Desktop fork release plan', () => {
     else Object.assign(steps[index]!, mode === 'optional' ? { 'continue-on-error': true } : { if: 'false' })
     expect(() => { assertPackagedPluginCommandAcceptance(workflow) }).toThrow()
   })
-  it('publishes through the exact-source checked publisher after asset-set verification', () => {
-    assertPublisherSelection(readReleaseWorkflow())
-  })
-
-  it.each(['missing-publisher', 'mutable-checkout', 'persisted-auth', 'wrong-source', 'unchecked-cli', 'late-assets'] as const)(
-    'rejects a %s publication workflow', (damage) => {
-      const workflow = readReleaseWorkflow()
-      const steps = workflow.jobs.release!.steps
-      const publish = steps.findIndex(step => step.name === 'Publish reviewed release')
-      const checkout = steps.find(step => step.uses === 'actions/checkout@v6')!
-      if (damage === 'missing-publisher') steps.splice(publish, 1)
-      else if (damage === 'mutable-checkout') checkout.with!.ref = 'master'
-      else if (damage === 'persisted-auth') checkout.with!['persist-credentials'] = true
-      else if (damage === 'wrong-source') steps[publish]!.env!.SOURCE_SHA = '${{ github.sha }}'
-      else if (damage === 'unchecked-cli') steps[publish]!.run = 'gh release create followed by gh release edit'
-      else steps.push(...steps.splice(steps.findIndex(step => step.name === 'Cross-check downloaded artifact set'), 1))
-      expect(() => { assertPublisherSelection(workflow) }).toThrow()
-    },
-  )
-
-  it('requires native and restricted hidden-window checks before packaging', () => {
-    assertHiddenWindowSelection(readReleaseWorkflow())
-  })
-
-  it.each(['omitted', 'control', 'native', 'sandbox', 'budget', 'late'] as const)('rejects a %s hidden-window validation selection', (damage) => {
+  it.each([
+    'missing', 'duplicate', 'before-upgrade', 'after-seal', 'conditional', 'continue-on-error',
+    'wrong-source', 'public-summary-path', 'swallowed-exit', 'diagnostic-for-release', 'unguarded-diagnostic',
+  ])('rejects a %s qualification path', (damage) => {
     const workflow = readReleaseWorkflow()
     const steps = workflow.jobs.build!.steps
-    const index = steps.findIndex(step => step.name === 'Verify hidden Windows command paths')
+    const index = steps.findIndex(step => step.name === 'Verify complete release qualification')
     const step = steps[index]!
-    if (damage === 'omitted') steps.splice(index, 1)
-    else if (damage === 'late') steps.push(...steps.splice(index, 1))
-    else if (damage === 'budget') step.run = step.run!.replace('--testTimeout=90000', '--testTimeout=5000')
-    else {
-      const files = {
-        control: 'packages/sandbox/sandbox-windows-acl/tests/control.spec.ts',
-        native: 'packages/subprocess/subprocess-local/tests/native-windows.spec.ts',
-        sandbox: 'packages/sandbox/sandbox-windows-acl/tests/runner.spec.ts',
-      }
-      step.run = step.run!.replace(files[damage], '')
-    }
-    expect(() => { assertHiddenWindowSelection(workflow) }).toThrow()
+    if (damage === 'missing') steps.splice(index, 1)
+    else if (damage === 'duplicate') steps.push({ ...step })
+    else if (damage === 'before-upgrade') steps.unshift(...steps.splice(index, 1))
+    else if (damage === 'after-seal') steps.push(...steps.splice(index, 1))
+    else if (damage === 'conditional') step.if = 'always()'
+    else if (damage === 'continue-on-error') step['continue-on-error'] = true
+    else if (damage === 'wrong-source') step.run = step.run!.replace('--expected-source $env:GITHUB_SHA', '--expected-source unreviewed')
+    else if (damage === 'public-summary-path') step.run = step.run!.replace('dist/desktop-fork-qualification/', 'dist/desktop-fork-release/')
+    else if (damage === 'swallowed-exit') step.run = step.run!.replace('exit $LASTEXITCODE', 'Write-Output $LASTEXITCODE')
+    else if (damage === 'diagnostic-for-release') {
+      workflow.jobs.release!.steps.find(item => item.uses === 'actions/download-artifact@v4')!.with!.name = 'desktop-unqualified-candidate'
+    } else delete steps.find(item => item.name === 'Retain unqualified rehearsal candidate for targeted diagnosis')!.if
+    expect(() => { assertQualificationGate(workflow) }).toThrow()
+  })
+
+  it('isolates read-only rehearsals by branch while keeping publication globally serialized', () => {
+    assertRehearsalConcurrency(readReleaseWorkflow())
+  })
+
+  it.each([
+    'global-rehearsal', 'split-formal', 'cancel-running', 'string-input', 'publish-default',
+    'writable-rehearsal', 'self-hosted-rehearsal', 'unguarded-release', 'unguarded-remote-check',
+  ])('rejects a %s concurrency or publication boundary', (damage) => {
+    const workflow = readReleaseWorkflow()
+    if (damage === 'global-rehearsal') workflow.concurrency.group = 'desktop-fork-release'
+    else if (damage === 'split-formal') workflow.concurrency.group = 'desktop-fork-release-${{ github.ref }}'
+    else if (damage === 'cancel-running') workflow.concurrency['cancel-in-progress'] = true
+    else if (damage === 'string-input') workflow.on.workflow_dispatch.inputs.rehearsal!.type = 'string'
+    else if (damage === 'publish-default') workflow.on.workflow_dispatch.inputs.rehearsal!.default = true
+    else if (damage === 'writable-rehearsal') workflow.jobs.build!.permissions = { contents: 'write' }
+    else if (damage === 'self-hosted-rehearsal') workflow.jobs.build!['runs-on'] = 'self-hosted'
+    else if (damage === 'unguarded-release') delete workflow.jobs.release!.if
+    else delete workflow.jobs['remote-check']!.if
+    expect(() => { assertRehearsalConcurrency(workflow) }).toThrow()
   })
 
   it('requires a step-local exact reviewed source pin before dependencies and packaging in both modes', () => {
@@ -329,9 +385,9 @@ describe('Desktop fork release plan', () => {
     expect(plan).toMatchObject({
       schemaVersion: 2,
       channel: 'cloga-windows-x64',
-      version: '0.1.6-alpha.1.cloga.19',
-      sequence: 31,
-      upstreamVersion: '0.1.6-alpha.1',
+      version: '0.1.6-alpha.2.cloga.1',
+      sequence: 32,
+      upstreamVersion: '0.1.6-alpha.2',
       migration: {
         owner: 'cloga/dsh-windows-ops',
         maximumSequence: 1,
@@ -375,12 +431,20 @@ describe('Desktop fork release plan', () => {
       mode: 'github-release-managed',
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
-      currentSequence: 31,
+      currentSequence: 32,
       minimumSequence: 2,
       provisioning: {
         capability: { id: 'desktopNativePluginProvisioning' },
       },
     })
+  })
+
+  it('binds the reviewed upstream version to the Core and Desktop source manifests', () => {
+    const plan = parseDesktopForkReleasePlan(planValue())
+    for (const path of ['package.json', 'apps/desktop/package.json']) {
+      const manifest = JSON.parse(readFileSync(resolve(repositoryRoot, path), 'utf8')) as { version: string }
+      expect(manifest.version).toBe(plan.upstreamVersion)
+    }
   })
 
   it('normalizes the version-neutral schema 1 plan to an empty provisioning inventory', () => {
@@ -409,14 +473,14 @@ describe('Desktop fork release plan', () => {
     })).toThrow(/advance/u)
   })
 
-  it('opts into read-only metadata auth only in the two remote release-script steps', () => {
+  it('limits release-script auth to metadata steps and isolates baseline acquisition', () => {
     assertMetadataAuthScope(readReleaseWorkflow())
     const script = readFileSync(resolve(repositoryRoot, 'apps/desktop/scripts/fork-release.ts'), 'utf8')
     expect(script.match(/discoverDesktopReleaseForBuild\(capability, process\.env\.DSH_DESKTOP_RELEASE_GITHUB_TOKEN\)/gu)).toHaveLength(2)
     expect(script).not.toMatch(/process\.env\.(?:GH_TOKEN|GITHUB_TOKEN)/u)
   })
 
-  it.each(['workflow', 'job', 'package', 'account', 'observer', 'helper'])('rejects metadata token propagation to %s scope', (scope) => {
+  it.each(['workflow', 'job', 'package', 'account', 'helper', 'upgrade', 'baseline'])('rejects metadata token propagation to %s scope', (scope) => {
     const workflow = readReleaseWorkflow()
     const build = workflow.jobs.build!
     const env = { [metadataTokenEnv]: '${{ github.token }}' }
@@ -426,13 +490,179 @@ describe('Desktop fork release plan', () => {
       const names: Record<string, string> = {
         package: 'Build unsigned interactive NSIS installer',
         account: 'Verify packaged Copilot account and restart',
-        observer: 'Verify real acceptance observer failure cleanup',
         helper: 'Verify copied helper bootstrap and acknowledgement',
+        upgrade: 'Verify real installed Desktop upgrade',
+        baseline: 'Acquire the verified installer-upgrade baseline',
       }
       const step = build.steps.find(candidate => candidate.name === names[scope])!
       step.env = { ...step.env, ...env }
     }
     expect(() => { assertMetadataAuthScope(workflow) }).toThrow()
+  })
+
+  it.each(['Build unsigned interactive NSIS installer', 'Verify real installed Desktop upgrade', 'Verify copied helper bootstrap and acknowledgement', 'Verify packaged Copilot account and restart'])(
+    'does not forward the baseline acquisition token to %s', (name) => {
+      const workflow = readReleaseWorkflow()
+      const step = workflow.jobs.build!.steps.find(candidate => candidate.name === name)!
+      step.env = { ...step.env, GH_TOKEN: '${{ github.token }}' }
+      expect(() => { assertMetadataAuthScope(workflow) }).toThrow()
+    },
+  )
+
+  it('requires native Windows command and ACL acceptance before managed preparation and packaging', () => {
+    const steps = readReleaseWorkflow().jobs.build!.steps
+    const transactions = steps.findIndex(step => step.name === 'Verify Desktop project transactions')
+    const native = steps.findIndex(step => step.name === 'Verify hidden Windows command paths')
+    const prepare = steps.findIndex(step => step.name === 'Prepare reviewed managed capability')
+    const packaging = steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')
+    expect(transactions).toBeGreaterThanOrEqual(0)
+    expect(native).toBeGreaterThan(transactions)
+    expect(prepare).toBeGreaterThan(native)
+    expect(packaging).toBeGreaterThan(prepare)
+    expect(steps.filter(step => step.name === 'Verify hidden Windows command paths')).toHaveLength(1)
+    expect(steps[native]?.run?.trim()).toBe([
+      'pnpm exec vitest run',
+      'packages/subprocess/win32-process/tests',
+      'packages/subprocess/subprocess-local/tests/windows-job.spec.ts',
+      'packages/subprocess/subprocess-local/tests/native-windows.spec.ts',
+      'packages/sandbox/sandbox-windows-acl/tests/runner.spec.ts',
+      'packages/sandbox/sandbox-windows-acl/tests/provider-chain.spec.ts',
+      'packages/sandbox/sandbox-windows-acl/tests/control.spec.ts',
+      '--maxWorkers=2 --testTimeout=90000 --hookTimeout=90000',
+    ].join(' '))
+    expect(steps[native]).not.toHaveProperty('continue-on-error')
+    expect(steps[native]).not.toHaveProperty('if')
+  })
+
+  it('runs packaged skill canary guards before building and testing the actual artifact', () => {
+    const steps = readReleaseWorkflow().jobs.build!.steps
+    const guards = steps.findIndex(step => step.name === 'Verify packaged skill canary guards')
+    const build = steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')
+    const canary = steps.findIndex(step => step.name === 'Verify ASAR runtime inventory canaries with packaged Electron')
+    expect(guards).toBeGreaterThanOrEqual(0)
+    expect(build).toBeGreaterThan(guards)
+    expect(canary).toBeGreaterThan(build)
+    expect(steps[guards]?.shell).toBe('pwsh')
+    expect(steps[guards]?.run).toContain('node --test apps/desktop/tests/packaged-skills-smoke.test.mjs')
+    expect(steps[guards]?.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }')
+    expect(steps[guards]).not.toHaveProperty('continue-on-error')
+    expect(steps[guards]).not.toHaveProperty('if')
+  })
+
+  it('runs source installer guards before packaging and actual upgrade before release sealing', () => {
+    const workflow = readReleaseWorkflow()
+    const steps = workflow.jobs.build!.steps
+    const install = steps.findIndex(step => step.name === 'Install from frozen lockfile')
+    const build = steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')
+    const finalize = steps.findIndex(step => step.name === 'Finalize release manifest and receipts')
+    const acquire = steps.findIndex(step => step.name === 'Acquire the verified installer-upgrade baseline')
+    const guards = steps.findIndex(step => step.name === 'Verify installer-upgrade guard tests')
+    const upgrade = steps.findIndex(step => step.name === 'Verify real installed Desktop upgrade')
+    const seal = steps.findIndex(step => step.name === 'Verify release asset checksums')
+    expect(install).toBeGreaterThanOrEqual(0)
+    expect(guards).toBeGreaterThan(install)
+    expect(build).toBeGreaterThan(guards)
+    expect(finalize).toBeGreaterThan(build)
+    expect(acquire).toBeGreaterThan(finalize)
+    expect(upgrade).toBeGreaterThan(acquire)
+    expect(upgrade).toBeGreaterThan(guards)
+    expect(seal).toBeGreaterThan(upgrade)
+    expect(steps[acquire]?.run).toContain('$release.immutable -isnot [bool]')
+    expect(steps[acquire]?.run).toContain('$assets[0].digest -cne "sha256:$($expected.sha256)"')
+    assertSourceNativeGuardRun(steps[guards]?.run)
+    expect(steps[upgrade]?.id).toBe('installed_upgrade')
+    expect(steps[upgrade]?.run).toContain('./apps/desktop/tests/windows-installer-upgrade.ps1')
+    expect(steps[upgrade]?.run).toContain('-ExpectedSourceCommit $env:GITHUB_SHA')
+    expect(steps[upgrade]?.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }')
+    for (const index of [acquire, guards, upgrade]) {
+      expect(steps[index]).not.toHaveProperty('continue-on-error')
+      expect(steps[index]).not.toHaveProperty('if')
+    }
+    const evidence = steps.find(step => step.with?.name === 'desktop-installer-upgrade-${{ steps.plan.outputs.version }}')
+    expect(evidence?.uses).toBe('actions/upload-artifact@v4')
+    expect(evidence?.if).toContain("steps.installed_upgrade.outcome == 'failure'")
+    expect(evidence?.with?.path).toContain('/evidence/*')
+    expect(evidence?.with?.path).toContain('/acquisition.json')
+    expect(evidence?.with?.path).not.toMatch(/home|userData|release-assets/u)
+  })
+
+  it('rejects native guard scheduling drift without changing isolation, file membership or child budgets', () => {
+    const run = readReleaseWorkflow().jobs.build!.steps.find(step => step.name === 'Verify installer-upgrade guard tests')?.run
+    if (run === undefined) throw new Error('Native source guard step is missing')
+    assertSourceNativeGuardRun(run)
+    for (const changed of [
+      run.replace(' --test-concurrency=1', ''),
+      run.replace('--test-concurrency=1', '--test-concurrency=2'),
+      run.replace('--test-concurrency=1', '--test-concurrency=1 --test-isolation=none'),
+      run.replace('--test-concurrency=1', '--test-concurrency=1 --test-timeout=60000'),
+      run.replace('--test-concurrency=1', '--test-concurrency=1 --test-name-pattern=synthetic'),
+      run.replace(' apps/desktop/tests/windows-packaged-package-acceptance.test.mjs', ''),
+      run.replace('exit $LASTEXITCODE', 'exit 0'),
+    ]) expect(() => { assertSourceNativeGuardRun(changed) }).toThrow()
+    const fixture = readFileSync(resolve(repositoryRoot, 'apps/desktop/tests/windows-packaged-package-acceptance.test.mjs'), 'utf8')
+    expect(fixture).toContain("function powershellUnit(t, body, shell = 'pwsh', { timeout = 15_000, phases = false } = {})")
+    const start = fixture.indexOf("\ntest('native helper initializes standard providers for owned classic Win32 controls',")
+    const end = fixture.indexOf('\ntest(', start + 5)
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(end).toBeGreaterThan(start)
+    const owner = fixture.slice(start, end)
+    expect(owner).toContain('powershellUnit(t, nativeProviderUnitScript(),')
+    expect(owner).toContain("'powershell.exe'), { phases: true })")
+    expect(owner).not.toMatch(/timeout:|concurrency:|skip: true/u)
+  })
+
+  it('binds baseline API and tag commits to independently pinned manifest bytes', () => {
+    const acquisition = readReleaseWorkflow().jobs.build!.steps
+      .find(step => step.name === 'Acquire the verified installer-upgrade baseline')?.run
+    if (acquisition === undefined) throw new Error('Baseline acquisition step is missing')
+    expect(acquisition).not.toContain('$baseline.sourceCommit')
+    const digestCheck = acquisition.indexOf('$manifestDigest -cne $baseline.manifest.sha256')
+    const commitCheck = acquisition.indexOf('$manifest.source.commit -cne $release.target_commitish')
+    expect(digestCheck).toBeGreaterThanOrEqual(0)
+    expect(commitCheck).toBeGreaterThan(digestCheck)
+    expect(acquisition).toContain('$manifest.source.commit -cne $tagSha')
+  })
+
+  it('invokes the plan-bound publisher from the exact build checkout only after artifact verification', () => {
+    const workflow = readReleaseWorkflow()
+    const release = workflow.jobs.release!
+    expect(release.needs).toBe('build')
+    expect(release.if).toBe("${{ !inputs.rehearsal && github.ref == 'refs/heads/master' }}")
+    expect(release.environment).toBe('desktop-fork-release')
+    const steps = release.steps
+    const checkout = steps.findIndex(step => step.uses === 'actions/checkout@v6')
+    const node = steps.findIndex(step => step.uses === 'actions/setup-node@v6')
+    const download = steps.findIndex(step => step.uses === 'actions/download-artifact@v4')
+    const verified = steps.findIndex(step => step.name === 'Cross-check downloaded artifact set')
+    const publish = steps.findIndex(step => step.name === 'Publish reviewed release')
+    expect(checkout).toBeGreaterThanOrEqual(0)
+    expect(node).toBeGreaterThan(checkout)
+    expect(download).toBeGreaterThan(node)
+    expect(verified).toBeGreaterThan(download)
+    expect(publish).toBeGreaterThan(verified)
+    expect(steps[checkout]?.with).toMatchObject({ ref: '${{ needs.build.outputs.source_sha }}', 'persist-credentials': false, clean: true })
+    expect(steps[node]?.with).toEqual({ 'node-version': '${{ env.NODE_VERSION }}', 'package-manager-cache': false })
+    expect(steps[publish]?.env).toEqual({
+      GH_TOKEN: '${{ github.token }}', RELEASE_TAG: '${{ needs.build.outputs.tag }}',
+      RELEASE_VERSION: '${{ needs.build.outputs.version }}', SOURCE_SHA: '${{ needs.build.outputs.source_sha }}',
+    })
+    expect(steps[publish]?.run).toContain('$head = git rev-parse HEAD')
+    expect(steps[publish]?.run).toContain('$LASTEXITCODE -ne 0 -or $head -cne $env:SOURCE_SHA')
+    expect(steps[publish]?.run).toContain('node apps/desktop/scripts/publish-fork-release.mjs release-assets')
+    expect(steps[publish]?.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }')
+    expect(steps[publish]?.run).not.toMatch(/gh release (?:create|edit|delete)|@"/u)
+    expect(steps[publish]).not.toHaveProperty('continue-on-error')
+    expect(steps[publish]).not.toHaveProperty('if')
+    expect(workflow.jobs['remote-check']?.needs).toEqual(['build', 'release'])
+  })
+
+  it('keeps plan-byte binding and managed installer notes in the checked publisher', () => {
+    const script = readFileSync(resolve(repositoryRoot, 'apps/desktop/scripts/publish-fork-release.mjs'), 'utf8')
+    expect(script).toContain("new URL('../release/cloga-windows-x64.json', import.meta.url)")
+    expect(script).toContain('manifest.build?.planSha256, planSha256')
+    expect(script).toContain('receipt.buildInputs?.planSha256, planSha256')
+    expect(script).toContain('Source commit: ${sourceSha}')
+    expect(script).toContain('Native electron-updater is disabled.')
   })
 
   it('keeps write permission in the reviewed release job and pins build tools', () => {
@@ -445,7 +675,13 @@ describe('Desktop fork release plan', () => {
       jobs: Record<string, {
         permissions?: Record<string, string>
         environment?: string
-        steps?: Array<{ name?: string; run?: string; env?: Record<string, string> }>
+        steps?: Array<{
+          id?: string
+          name?: string
+          run?: string
+          env?: Record<string, string>
+          with?: { name?: string; path?: string; 'if-no-files-found'?: string; 'retention-days'?: number }
+        }>
       }>
     }
     expect(workflow.permissions).toEqual({ contents: 'read' })
@@ -479,10 +715,25 @@ describe('Desktop fork release plan', () => {
     expect(runtimeCanaries).toBeGreaterThan(packaging)
     expect(finalize).toBeGreaterThan(runtimeCanaries)
     const acceptance = steps.findIndex(step => step.name === 'Verify packaged Copilot account and restart')
-    const observerCleanup = steps.findIndex(step => step.name === 'Verify real acceptance observer failure cleanup')
-    expect(observerCleanup).toBeGreaterThan(acceptance)
-    expect(finalize).toBeGreaterThan(observerCleanup)
-    expect(steps[observerCleanup]?.run).toContain('apps/desktop/tests/fixtures/copilot-observer-smoke.ts')
+    expect(acceptance).toBeGreaterThan(runtimeCanaries)
+    expect(finalize).toBeGreaterThan(acceptance)
+    expect(steps.filter(step => step.run?.includes('fixtures/copilot-release-smoke.ts'))).toHaveLength(1)
+    expect(steps[acceptance]?.run?.trim()).toBe([
+      'pnpm exec tsx apps/desktop/tests/fixtures/copilot-release-smoke.ts',
+      '--application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe',
+      '--output dist/desktop-copilot-acceptance', '--observer-cleanup-canary',
+    ].join(' '))
+    expect(steps[acceptance]).not.toHaveProperty('continue-on-error')
+    expect(steps[acceptance]).not.toHaveProperty('if')
+    expect(steps.some(step => step.id === 'observer_cleanup' || step.run?.includes('fixtures/copilot-observer-smoke.ts'))).toBe(false)
+    expect(steps.some(step => typeof step.with?.name === 'string' && step.with.name.includes('desktop-copilot-observer-canary'))).toBe(false)
+    const combinedEvidence = steps.findIndex(step => step.with?.name === 'desktop-copilot-acceptance-${{ steps.plan.outputs.version }}')
+    expect(combinedEvidence).toBeGreaterThan(acceptance)
+    expect(finalize).toBeGreaterThan(combinedEvidence)
+    expect(steps[combinedEvidence]).toMatchObject({
+      if: "${{ !cancelled() && (steps.copilot_acceptance.outcome == 'success' || steps.copilot_acceptance.outcome == 'failure') }}",
+      with: { path: 'dist/desktop-copilot-acceptance/*', 'if-no-files-found': 'error', 'retention-days': 7 },
+    })
     expect(steps[runtimeCanaries]?.run?.trim()).toBe(
       'node apps/desktop/tests/fixtures/packaged-runtime-smoke.mjs '
       + 'apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe',

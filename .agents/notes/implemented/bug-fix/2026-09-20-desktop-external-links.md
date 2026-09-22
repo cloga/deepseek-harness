@@ -1,4 +1,4 @@
-# Agent Note: Open Desktop web links through the system browser
+# Agent Note: Contain Desktop external-link failures
 
 Status: implemented
 
@@ -6,24 +6,24 @@ English | [中文](2026-09-20-desktop-external-links.zh.md)
 
 ## Problem
 
-Denying every popup and cancelling every external navigation protects the owned application document but leaves ordinary web links without a destination. Changing one provider's anchor target cannot repair a shell that rejects both opening paths. The maintained shell also owns recovery actions that must remain separate from ordinary external navigation.
+Official `0.1.6-alpha.2` already hands external HTTP and HTTPS links to the system browser and permits same-origin navigation to the owned Host HTTP document. The retained gap is malformed destination handling and containment of synchronous opener failures or asynchronous rejection, not absence of external-link support. Failure diagnostics must not expose URLs that can contain authorization data or replace the owned application document.
 
 ## Decision
 
-[Window navigation](../../../../apps/desktop/src/window-navigation.ts) owns one policy for the product and plugin windows. It follows the official Desktop behavior of handing HTTP and HTTPS destinations to the system browser while rejecting Electron popup creation. Both popup requests and same-window navigation parse the destination first and dispatch its canonical URL. Malformed input and other external schemes remain blocked; no shell command or new renderer IPC is introduced.
+[Window navigation](../../../../apps/desktop/src/window-navigation.ts) preserves the official navigation policy for owned application windows. Same-window `dsh-app:` navigation and navigation to the current owned Host HTTP origin stay internal; external HTTP and HTTPS destinations are parsed and handed off canonically while Electron popup creation remains denied. Malformed destinations and other external URI schemes are blocked. No shell command or new renderer IPC is introduced.
 
-Internal `dsh-app:` navigation stays in the application. `dsh-recovery:` navigation is prevented and delegated only to the existing recovery owner, which retains document identity, action, permission, and in-flight checks. Popup recovery requests do not invoke recovery. This policy does not alter the Web client's optional iframe preview or its file-link routing.
+Native fatal recovery remains with the alpha2 main-process owner. The shared PluginManager, preload-owned caption menu and existing context menus retain their owners; this hardening does not reintroduce a plugin window, startup HTML or recovery-URL action path. The Web client's optional iframe preview and file-link routing are unchanged.
 
-Browser-opening rejection and synchronous failure share a redacted callback. The owning window displays existing-locale advice only while alive. Reporting failure is contained without logging either raw error or destination, because a requested URL can carry authorization data. An OS handoff is not proof that the page loaded or authorization succeeded.
+Browser-opening rejection and synchronous failure share a redacted callback. The owning window displays localized advice only while alive. Reporting failure is also contained without logging either raw error or destination. An OS handoff is not proof that the page loaded or authorization succeeded.
 
 ## Alternatives considered
 
-**Change individual anchors to `_self`.** That leaves other links and programmatic opens broken and couples provider UI to shell-specific behavior.
+**Change individual anchors to `_self`.** Anchor changes do not contain malformed URLs or opener failures and couple provider UI to shell-specific behavior.
 
 **Allow Electron popups or navigate the product window away.** Both broaden the renderer's capabilities and can replace or detach the owned application UI.
 
-**Replace the maintained shell or upgrade Core.** External navigation is a shell-owned omission; fixing it does not require changing runtime, plugin, recovery, or update ownership.
+**Replace the official opening policy as though it were absent.** Alpha2 already provides the opening and same-origin rules. Retain only the missing failure handling rather than restoring the older shell's plugin-window or recovery routing.
 
 ## Consequences
 
-The shared policy repairs both opening paths without changing the preload protocol or weakening sandbox settings. Unsupported URI schemes remain unavailable rather than launching arbitrary registered applications. Startup integration tests retain recovery behavior, and focused navigation tests cover rejection, malformed destinations, per-window operations, and redacted failure reporting. An isolated Electron renderer test establishes click dispatch with a substituted OS opener; it is not an installed-product or real default-browser acceptance claim.
+The hardening preserves both official opening paths, internal Host navigation, the preload protocol and sandbox settings. Unsupported URI schemes remain unavailable rather than launching arbitrary registered applications. Focused tests cover malformed destinations, synchronous/asynchronous opener failures, window lifetime and redacted reporting; main-entry coverage retains native fatal recovery and menu ownership. The mandatory CI development-Electron fixture uses private owned protocol/HTTP documents and an injected OS opener to observe real renderer dispatch. It does not open the system browser or establish OAuth, installed-upgrade or complete process-tree quiescence. That fixture is additive to the candidate's existing real installed-upgrade and v2 qualification lanes; synthetic or peer results cannot qualify the integrated alpha2 source.

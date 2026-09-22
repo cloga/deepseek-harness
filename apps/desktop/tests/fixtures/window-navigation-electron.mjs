@@ -33,7 +33,7 @@ const receipt = {
   createdWindows: 0,
   blockedRequests: [],
   openFailures: 0,
-  recoveries: [],
+  httpDocuments: [],
 }
 let window
 let active
@@ -53,8 +53,27 @@ async function run() {
   receipt.stage = 'window creation'
   const isolatedSession = session.fromPartition(`navigation-${process.pid}`)
   isolatedSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
+  const httpDocuments = new Set([
+    'http://navigation-test.invalid/index.html',
+    'http://navigation-test.invalid/next.html',
+  ])
+  // Intercept HTTP in this private session; never forward a request to the network.
+  isolatedSession.protocol.handle('http', (request) => {
+    if (!httpDocuments.has(request.url)) {
+      receipt.blockedRequests.push(request.url)
+      return Response.error()
+    }
+    receipt.httpDocuments.push(request.url)
+    return new Response(`<!doctype html>
+      <html data-fixture-document="${++documentSequence}"><head><title>HTTP navigation fixture</title></head><body>
+      <a id="http-owned" href="http://navigation-test.invalid/next.html" target="_self">Owned HTTP document</a>
+      <a id="http-cross-origin" href="http://example.invalid/cross-origin" target="_self">External HTTP document</a>
+      </body></html>`, {
+      headers: { 'content-type': 'text/html', 'content-security-policy': "default-src 'none'" },
+    })
+  })
   isolatedSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
-    const owned = new URL(details.url).protocol === 'dsh-app:'
+    const owned = new URL(details.url).protocol === 'dsh-app:' || httpDocuments.has(details.url)
     if (!owned) receipt.blockedRequests.push(details.url)
     callback({ cancel: !owned })
   })
@@ -88,7 +107,6 @@ async function run() {
       active.opened()
     },
     openFailed() { receipt.openFailures++ },
-    recover(url) { receipt.recoveries.push(url.href) },
   })
   // Observe Electron's event after the production listener, without cancelling it ourselves.
   contents.on('will-navigate', (event, url) => {
@@ -118,10 +136,12 @@ async function run() {
     const open = new Promise(resolve => { opened = resolve })
     const navigate = new Promise(resolve => { navigated = resolve })
     active = { name, externalUrls: [], navigationEvents: [], opened, navigated }
+    const loaded = completion === 'load' ? once(contents, 'did-finish-load') : undefined
     // DOM activation with a user gesture exercises Chromium/Electron dispatch, not a hand-emitted event.
     const rendererResult = await contents.executeJavaScript(script, true)
     if (completion === 'open') await open
     if (completion === 'navigate') await navigate
+    if (loaded) await loaded
     // A second renderer round-trip observes the document after dispatch and the OS-spy callback.
     const document = await observeDocument()
     receipt.cases.push({
@@ -148,6 +168,14 @@ async function run() {
   await contents.executeJavaScript("document.getElementById('owned').click(); null", true)
   await loaded
   receipt.ownedDocument = await observeDocument()
+  active = undefined
+
+  receipt.stage = 'HTTP document setup'
+  await window.loadURL('http://navigation-test.invalid/index.html')
+  receipt.httpInitialDocument = await observeDocument()
+  await attempt('http-cross-origin', "document.getElementById('http-cross-origin').click(); null", 'open')
+  await attempt('http-owned', "document.getElementById('http-owned').click(); null", 'load')
+  receipt.httpOwnedDocument = await observeDocument()
   active = undefined
 }
 
