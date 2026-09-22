@@ -40,6 +40,18 @@ function Assert-Launch($main, $process) {
     if ($process.HasExited) { throw 'Owned root exited during CDP identity check' }
 }
 
+function Initialize-UiAutomation {
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    $providerName = [Windows.Automation.AutomationElement].Assembly.GetName()
+    $providerName.Name = 'UIAutomationClientsideProviders'
+    # A managed reflection frame avoids the .NET Framework default-proxy loader's
+    # null ReflectedType dereference on PowerShell's dynamic invocation frames.
+    $registration = [Windows.Automation.ClientSettings].GetMethod('RegisterClientSideProviderAssembly',
+        [type[]]@([Reflection.AssemblyName]))
+    $null = $registration.Invoke($null, [object[]]@($providerName))
+}
+
 function Assert-PageTitle($title) {
     if ($title -isnot [string] -or [string]::IsNullOrWhiteSpace($title) -or $title.Length -gt 1024 -or
         $title -match '[\x00-\x1f\x7f]') { throw 'Expected bounded nonempty actual CDP page title' }
@@ -243,8 +255,7 @@ try {
         exit 0
     }
     if ($request.action -ne 'cancel') { throw 'Unknown fixture helper action' }
-    Add-Type -AssemblyName UIAutomationClient
-    Add-Type -AssemblyName UIAutomationTypes
+    Initialize-UiAutomation
     $mainHwnd = [IntPtr]([long]$ownership.mainHwnd)
     # Private fixture evidence only; flushed records survive helper failure or timeout.
     # No unrelated window text or controls are recorded, and evidence never selects a target.

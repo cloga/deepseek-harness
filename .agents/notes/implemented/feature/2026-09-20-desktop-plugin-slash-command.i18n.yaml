@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-09-20-desktop-plugin-slash-command.md
-2026-09-20-desktop-plugin-slash-command.md: 3c9ba0ab3b8cf097f518f98e51a870848bead56c
-2026-09-20-desktop-plugin-slash-command.zh.md: 85adbc0222f01fa45755051111d15fcb68348c63
+2026-09-20-desktop-plugin-slash-command.md: 1afc0bc2a045095da6e36adfb2688095e2eddcf6
+2026-09-20-desktop-plugin-slash-command.zh.md: c6058cc5b64708835ed83d9a961db36848da1f82

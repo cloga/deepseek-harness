@@ -1,17 +1,28 @@
-# Execute the source discovery functions against fake native/UIA providers; never load real UIA or invoke a control.
-param([Parameter(Mandatory = $true)][string]$SourceFile)
+# Exercise source provider initialization or fake-provider discovery; never query real windows or invoke a control.
+param([Parameter(Mandatory = $true)][string]$SourceFile, [switch]$InitializeProvidersOnly)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $tokens = $null
 $parseErrors = $null
 $source = [Management.Automation.Language.Parser]::ParseFile($SourceFile, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count -ne 0) { throw 'Native helper source failed PowerShell parsing' }
-foreach ($name in @('Read-OwnedWindows', 'Read-OwnedConfirmation')) {
+$names = if ($InitializeProvidersOnly) { @('Initialize-UiAutomation') } else { @('Read-OwnedWindows', 'Read-OwnedConfirmation') }
+foreach ($name in $names) {
     $definitions = @($source.FindAll({ param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
     }, $true))
     if ($definitions.Count -ne 1) { throw "Expected exactly one source function: $name" }
     . ([scriptblock]::Create($definitions[0].Extent.Text))
+}
+
+if ($InitializeProvidersOnly) {
+    Initialize-UiAutomation
+    # Read-only observation of the framework regression; never reset private state or query a window.
+    $manager = [Windows.Automation.AutomationElement].Assembly.GetType('MS.Internal.Automation.ProxyManager', $true)
+    $handlers = $manager.GetField('_classHandlers', [Reflection.BindingFlags]'NonPublic,Static').GetValue($null)
+    if ($handlers.Count -eq 0 -or !$handlers.ContainsKey('button')) { throw 'Standard Win32 Button provider was not registered' }
+    @{ providersRegistered = $true; buttonProxyRegistered = $true; realGuiUsed = $false } | ConvertTo-Json -Compress
+    exit 0
 }
 
 Add-Type -TypeDefinition @'

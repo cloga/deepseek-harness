@@ -1,4 +1,4 @@
-/** Windows PowerShell behavior regression: execute source discovery, never real GUI automation. */
+/** Windows PowerShell behavior regression: execute source helper functions, never real GUI automation. */
 import { spawn } from 'node:child_process'
 import { closeSync, mkdtempSync, openSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -8,7 +8,7 @@ import { expect, it } from 'vitest'
 import { desktopSmokeEnvironment } from '../scripts/smoke-environment.ts'
 import { removeOwnedDirectory } from '../src/owned-directory.ts'
 
-it.skipIf(process.platform !== 'win32')('discovers native candidates missing from UIA root while retaining strict ownership and matching', async () => {
+it.skipIf(process.platform !== 'win32').each(['discovery', 'providers'] as const)('validates native %s without querying the real desktop', async (mode) => {
   const home = mkdtempSync(join(tmpdir(), 'desktop-native-discovery-'))
   const environment = desktopSmokeEnvironment(home)
   const powershell = join(environment.SystemRoot ?? environment.SYSTEMROOT ?? 'C:\\Windows',
@@ -26,7 +26,8 @@ it.skipIf(process.platform !== 'win32')('discovers native candidates missing fro
     spawnAttempted = true
     const child = spawn(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned', '-File',
       fileURLToPath(new URL('./fixtures/desktop-plugin-native-discovery-regression.ps1', import.meta.url)),
-      '-SourceFile', fileURLToPath(new URL('./fixtures/desktop-plugin-native-cancel.ps1', import.meta.url))],
+      '-SourceFile', fileURLToPath(new URL('./fixtures/desktop-plugin-native-cancel.ps1', import.meta.url)),
+      ...(mode === 'providers' ? ['-InitializeProvidersOnly'] : [])],
     { cwd: home, env: environment, windowsHide: true, stdio: ['ignore', stdout, stderr] })
     let timedOut = false
     let spawnError: Error | undefined
@@ -46,15 +47,16 @@ it.skipIf(process.platform !== 'win32')('discovers native candidates missing fro
     }
     completedNormally = true // Add-Type completes its compiler synchronously on this normal path.
     const result: unknown = JSON.parse(readFileSync(stdoutPath, 'utf8').replace(/^\uFEFF/u, ''))
-    expect(result).toEqual({
-      passed: [
+    expect(result).toEqual(mode === 'providers'
+      ? { providersRegistered: true, buttonProxyRegistered: true, realGuiUsed: false }
+      : { passed: [
         'native-dialog-omitted-from-uia-root', 'wrong-pid', 'wrong-root-owner', 'main-hwnd',
         'missing-cancel', 'missing-apply', 'missing-message', 'wrong-case-cancel', 'not-a-button', 'duplicate-cancel',
         'canonical-handle-mismatch', 'ambiguous-dialogs', 'ambiguous-reversed-order', 'reenumeration-observes-new-ambiguity',
       ],
       realGuiUsed: false,
       nativeInvokeAvailable: false,
-    })
+      })
   } finally {
     for (const descriptor of descriptors) closeSync(descriptor)
     // An abnormal helper may leave an Add-Type compiler child: root close alone is not tree quiescence.
