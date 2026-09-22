@@ -2,8 +2,20 @@
 
 import { desktopErrorState } from './startup-error.ts'
 
+/** A package-specific action retained from a trusted startup failure. */
+export interface DesktopBackendRecovery {
+  readonly type: 'restore-planned-source'
+  readonly packageName: string
+  readonly requestedVersion: string
+}
+
 /** Backend availability presented by the desktop window. */
-export type DesktopBackendState = { readonly phase: 'starting' } | { readonly phase: 'ready' } | { readonly phase: 'error'; readonly message: string; readonly profileRecovery?: boolean }
+export type DesktopBackendState = { readonly phase: 'starting' } | { readonly phase: 'ready' } | {
+  readonly phase: 'error'
+  readonly message: string
+  readonly profileRecovery?: boolean
+  readonly recovery?: DesktopBackendRecovery
+}
 
 /** Child lifecycle owned by the desktop backend controller. */
 export interface DesktopBackendHost {

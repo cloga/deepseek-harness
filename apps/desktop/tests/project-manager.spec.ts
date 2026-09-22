@@ -552,6 +552,212 @@ describe('desktop external plugin profile', () => {
     await expect(runtimeManager.applyRelease()).resolves.toBe(false)
   })
 
+  it('rejects an alternate verified source for a strict active plan before acquisition', async () => {
+    const { root, manager } = setup()
+    const planned = pluginFixture('strict-provider')
+    const alternateArchive = verifiedPluginArchive('strict-provider', '2.0.0')
+    const alternate = verifiedSource(alternateArchive, 'strict-provider', '2.0.0')
+    mockVerifiedPlugins([planned, { archive: alternateArchive, source: alternate }])
+    await manager.applyRelease(hooks(), {
+      schemaVersion: 2, mode: 'exact', plugins: [{ required: true, source: planned.source, sourcePolicy: 'strict-pin' }],
+    })
+    const before = profileMetadata(manager.paths.profile), count = calls(root).length
+    const crafted = {
+      schemaVersion: 1, mode: 'exact', plugins: [{
+        required: true, source: planned.source, sourcePolicy: 'compatible-user-override',
+      }],
+    }
+    expect(() => assertDesktopProvisioningInventory(manager.paths.profile, crafted)).toThrow('invalid plugin entry')
+    await expect(manager.mutate({ type: 'plugins-reconcile', plan: crafted as never }, hooks()))
+      .rejects.toThrow('invalid plugin entry')
+    await expect(manager.mutate({ type: 'plugin-install', source: alternate }, hooks()))
+      .rejects.toThrow('restore the planned source')
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    expect(calls(root)).toHaveLength(count)
+  })
+
+  it('rejects a different verified source family for a compatible plan before acquisition', async () => {
+    const { root, manager } = setup()
+    const planned = pluginFixture('family-provider')
+    mockVerifiedPlugins([planned])
+    const plan = { schemaVersion: 2, mode: 'exact', plugins: [{
+      required: true, source: planned.source, sourcePolicy: 'compatible-user-override',
+    }] }
+    await manager.applyRelease(hooks(), plan)
+    const alien = {
+      ...planned.source, owner: 'other-owner',
+      checksumManifest: {
+        ...planned.source.checksumManifest,
+        url: planned.source.checksumManifest!.url.replace('/cloga/', '/other-owner/'),
+      },
+    }
+    const before = profileMetadata(manager.paths.profile), count = calls(root).length
+    await expect(manager.mutate({ type: 'plugin-install', source: alien }, hooks()))
+      .rejects.toThrow('restore the planned source')
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    expect(calls(root)).toHaveLength(count)
+  })
+
+  it.each(['0.4.0-alpha.32', '0.4.0-alpha.36'])(
+    'retains health-checked compatible verified user override %s without version ordering', async (overrideVersion) => {
+    const { root, manager } = setup()
+    const plannedArchive = verifiedPluginArchive('dsh-github-copilot', '0.4.0-alpha.33')
+    const overrideArchive = verifiedPluginArchive('dsh-github-copilot', overrideVersion)
+    const planned = verifiedSource(plannedArchive, 'dsh-github-copilot', '0.4.0-alpha.33')
+    const override = verifiedSource(overrideArchive, 'dsh-github-copilot', overrideVersion)
+    mockVerifiedPlugins([{ archive: plannedArchive, source: planned }, { archive: overrideArchive, source: override }])
+    const plan = parseDesktopPluginProvisioningPlan({
+      schemaVersion: 2, mode: 'exact', plugins: [{ required: true, source: planned, sourcePolicy: 'compatible-user-override' }],
+    })
+    await manager.applyRelease(hooks(), plan)
+    await manager.mutate({ type: 'plugin-install', source: override }, hooks())
+    const state = JSON.parse(readFileSync(join(manager.paths.profile, 'desktop-plugin-provisioning-state.json'), 'utf8')) as {
+      plugins: Array<{ requestedSource: unknown; effectiveSource: unknown; effective: string }>
+    }
+    expect(state.plugins[0]).toMatchObject({ requestedSource: planned, effectiveSource: override, effective: 'user-override' })
+    expect(receiptStore(manager).owners?.['dsh-github-copilot']).toBe('user')
+    const beforeReuse = calls(root).length
+    await manager.reconcileProvisioning(plan, hooks())
+    expect(calls(root)).toHaveLength(beforeReuse)
+    const dsh = join(root, 'compatible-runtime')
+    runtimeFixture(dsh, '1.1.0', '24.18.0')
+    const next = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
+    await next.applyRelease(hooks(), plan)
+    expect(next.listPlugins()[0]).toMatchObject({ name: 'dsh-github-copilot', version: overrideVersion, source: override })
+    expect(receiptStore(next).owners?.['dsh-github-copilot']).toBe('user')
+  }, 30_000)
+
+  it('rolls back a same-name compatible install when staged health fails', async () => {
+    const { manager } = setup()
+    const planned = pluginFixture('required-provider')
+    const overrideArchive = verifiedPluginArchive('required-provider', '2.0.0')
+    const override = verifiedSource(overrideArchive, 'required-provider', '2.0.0')
+    const unrelated = pluginFixture('unrelated-user')
+    mockVerifiedPlugins([planned, { archive: overrideArchive, source: override }, unrelated])
+    const plan = { schemaVersion: 2, mode: 'exact', plugins: [{
+      required: true, source: planned.source, sourcePolicy: 'compatible-user-override',
+    }] }
+    await manager.applyRelease(hooks(), plan)
+    await manager.mutate({ type: 'plugin-install', source: unrelated.source }, hooks())
+    const before = profileMetadata(manager.paths.profile)
+    const beforeStore = receiptStore(manager)
+    await expect(manager.mutate({ type: 'plugin-install', source: override }, hooks({
+      healthCheck: async () => { throw new Error('unrelated staged failure') },
+    }))).rejects.toThrow('health failed while user override required-provider was active')
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    expect(receiptStore(manager)).toEqual(beforeStore)
+    expect(manager.listPlugins()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: planned.source.packageName, version: planned.source.version }),
+      expect.objectContaining({ name: unrelated.source.packageName, version: unrelated.source.version }),
+    ]))
+  }, 30_000)
+
+  it('rejects invalid known-name mutations before package work and permits re-enabling', async () => {
+    const { root, manager } = setup()
+    const planned = pluginFixture('required-provider')
+    const overrideArchive = verifiedPluginArchive('required-provider', '2.0.0')
+    const override = verifiedSource(overrideArchive, 'required-provider', '2.0.0')
+    mockVerifiedPlugins([planned, { archive: overrideArchive, source: override }])
+    const plan = { schemaVersion: 2, mode: 'exact', plugins: [{
+      required: true, source: planned.source, sourcePolicy: 'compatible-user-override',
+    }] }
+    await manager.applyRelease(hooks(), plan)
+    await manager.mutate({ type: 'plugin-install', source: override }, hooks())
+    const before = profileMetadata(manager.paths.profile), callCount = calls(root).length
+    await expect(manager.mutate({ type: 'plugin-add', spec: `${override.packageName}@3.0.0` }, hooks()))
+      .rejects.toThrow('leave required planned plugin')
+    await expect(manager.mutate({ type: 'plugin-update', name: override.packageName, version: '3.0.0' }, hooks()))
+      .rejects.toThrow('leave required planned plugin')
+    await expect(manager.mutate({ type: 'plugin-toggle', name: override.packageName, enabled: false }, hooks()))
+      .rejects.toThrow('planned plugin')
+    await expect(manager.mutate({ type: 'plugin-remove', name: override.packageName }, hooks()))
+      .rejects.toThrow('planned plugin')
+    expect(profileMetadata(manager.paths.profile)).toEqual(before)
+    expect(calls(root)).toHaveLength(callCount)
+    await expect(manager.mutate({ type: 'plugin-toggle', name: override.packageName, enabled: true }, hooks())).resolves.toBeUndefined()
+  }, 30_000)
+
+  it('restores only the planned source after target-runtime override health failure', async () => {
+    const { root, manager } = setup()
+    const planned = pluginFixture('required-provider')
+    const overrideArchive = verifiedPluginArchive('required-provider', '2.0.0')
+    const override = verifiedSource(overrideArchive, 'required-provider', '2.0.0')
+    const sibling = pluginFixture('release-sibling')
+    const unrelated = pluginFixture('unrelated-user')
+    const fixtures = [planned, { archive: overrideArchive, source: override }, sibling, unrelated]
+    mockVerifiedPlugins(fixtures)
+    const plan = parseDesktopPluginProvisioningPlan({ schemaVersion: 2, mode: 'exact', plugins: [{
+      required: true, source: planned.source, sourcePolicy: 'compatible-user-override',
+    }, {
+      required: true, source: sibling.source, sourcePolicy: 'strict-pin',
+    }] })
+    await manager.applyRelease(hooks(), plan)
+    await manager.mutate({ type: 'plugin-install', source: override }, hooks())
+    await manager.mutate({ type: 'plugin-install', source: unrelated.source }, hooks())
+    const dsh = join(root, 'rejecting-runtime')
+    runtimeFixture(dsh, '1.1.0', '24.18.0')
+    const next = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
+    const rejectOverride = hooks({ healthCheck: async (projectDir) => {
+      const manifest = JSON.parse(readFileSync(join(projectDir, 'node_modules', override.packageName, 'package.json'), 'utf8')) as { version: string }
+      if (manifest.version === override.version) throw new Error('override runtime rejected')
+    } })
+    await expect(next.applyRelease(rejectOverride, plan)).rejects.toThrow('staged profile health failed while user override')
+    expect(manager.listPlugins()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: override.packageName, version: override.version }),
+      expect.objectContaining({ name: unrelated.source.packageName }),
+    ]))
+    const beforeRecovery = profileMetadata(manager.paths.profile)
+    const siblingReceipt = receiptStore(manager).receipts[sibling.source.packageName]
+    const siblingArtifact = readFileSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${sibling.source.sha256}.tgz`))
+    mockVerifiedPlugins(fixtures)
+    vi.mocked(globalThis.fetch).mockClear()
+    await expect(next.restorePlannedSource(plan, planned.source.packageName, hooks({
+      healthCheck: async () => { throw new Error('planned recovery health failed') },
+    }))).rejects.toThrow('planned recovery health failed')
+    expect(profileMetadata(manager.paths.profile)).toEqual(beforeRecovery)
+    expect(receiptStore(manager).owners).toMatchObject({ 'required-provider': 'user', 'unrelated-user': 'user' })
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => new URL(input instanceof Request ? input.url : input).pathname.includes('/release-sibling/'))).toBe(false)
+    mockVerifiedPlugins(fixtures)
+    vi.mocked(globalThis.fetch).mockClear()
+    await next.restorePlannedSource(plan, planned.source.packageName, hooks())
+    expect(next.listPlugins()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: planned.source.packageName, version: planned.source.version }),
+      expect.objectContaining({ name: sibling.source.packageName, version: sibling.source.version }),
+      expect.objectContaining({ name: unrelated.source.packageName, version: unrelated.source.version }),
+    ]))
+    expect(receiptStore(next).owners).toMatchObject({
+      'required-provider': 'release', 'release-sibling': 'release', 'unrelated-user': 'user',
+    })
+    expect(receiptStore(next).receipts[sibling.source.packageName]).toEqual(siblingReceipt)
+    expect(readFileSync(join(next.paths.profile, '.desktop-plugin-artifacts', `${sibling.source.sha256}.tgz`))).toEqual(siblingArtifact)
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => new URL(input instanceof Request ? input.url : input).pathname.includes('/release-sibling/'))).toBe(false)
+  }, 30_000)
+
+  it('does not select a targeted recovery when several overrides are active during health failure', async () => {
+    const { root, manager } = setup()
+    const planned = ['first-provider', 'second-provider'].map(name => pluginFixture(name))
+    const overrides = planned.map(item => {
+      const archive = verifiedPluginArchive(item.source.packageName, '2.0.0')
+      return { archive, source: verifiedSource(archive, item.source.packageName, '2.0.0') }
+    })
+    mockVerifiedPlugins([...planned, ...overrides])
+    const plan = { schemaVersion: 2, mode: 'exact', plugins: planned.map(item => ({
+      required: true, source: item.source, sourcePolicy: 'compatible-user-override',
+    })) }
+    await manager.applyRelease(hooks(), plan)
+    for (const override of overrides) await manager.mutate({ type: 'plugin-install', source: override.source }, hooks())
+    const dsh = join(root, 'multiple-override-runtime')
+    runtimeFixture(dsh, '1.1.0', '24.18.0')
+    const next = trackedProjectManager(manager.paths, { ...manager.runtime, dsh })
+    const failure = await next.applyRelease(
+      hooks({ healthCheck: async () => { throw new Error('unrelated graph failure') } }), plan,
+    ).then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toContain('unrelated graph failure')
+    expect((failure as Error).message).not.toContain('while user override')
+    expect(failure).not.toHaveProperty('code')
+  }, 30_000)
+
   // The release lane grants 90s for serial package children, rejected activation, rollback, retry and durable audit writes.
   it.each(['legacy', 'explicit'] as const)('retains off-plan user verified plugins during a runtime-mode exact-plan upgrade: %s ownership', async (ownership) => {
     const { root, manager } = setup()
@@ -645,7 +851,7 @@ describe('desktop external plugin profile', () => {
     } finally { globalThis.fetch = original }
   })
 
-  describe.each(['registry', 'alternate-artifact', 'artifact-bytes', 'missing-package', 'missing-row', 'empty-extra'] as const)('repairs exact restart inventory after %s drift', (drift) => {
+  describe.each(['artifact-bytes', 'missing-package', 'missing-row', 'empty-extra'] as const)('repairs exact restart inventory after %s drift', (drift) => {
     let manager: DesktopProjectManager
     const archive = verifiedPluginArchive()
     const source = verifiedSource(archive)
@@ -659,15 +865,7 @@ describe('desktop external plugin profile', () => {
     }))
 
     it('restores the planned inventory', async () => {
-      if (drift === 'registry') {
-        await manager.mutate({ type: 'plugin-update', name: source.packageName, version: source.version }, hooks())
-      } else if (drift === 'alternate-artifact') {
-        const alternateArchive = verifiedPluginArchive(source.packageName, source.version, '>=1.0.0')
-        const alternate = verifiedSource(alternateArchive)
-        globalThis.fetch = verifiedFetch(alternate, alternateArchive)
-        await manager.mutate({ type: 'plugin-install', source: alternate }, hooks())
-        globalThis.fetch = verifiedFetch(source, archive)
-      } else if (drift === 'artifact-bytes') {
+      if (drift === 'artifact-bytes') {
         writeFileSync(join(manager.paths.profile, '.desktop-plugin-artifacts', `${source.sha256}.tgz`), 'replaced archive')
       } else if (drift === 'missing-package') {
         rmSync(join(manager.paths.profile, 'node_modules', source.packageName), { recursive: true })
@@ -677,12 +875,6 @@ describe('desktop external plugin profile', () => {
         const path = join(manager.paths.profile, 'desktop-plugin-provisioning-state.json')
         const state = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
         writeFileSync(path, JSON.stringify({ ...state, plugins: [] }))
-      }
-      if (drift === 'registry' || drift === 'alternate-artifact') {
-        const before = profileMetadata(manager.paths.profile)
-        await expect(manager.reconcileProvisioning(plan, hooks())).rejects.toThrow('release plan conflicts with user plugin')
-        expect(profileMetadata(manager.paths.profile)).toEqual(before)
-        return
       }
       const state = await manager.reconcileProvisioning(plan, hooks())
       if (drift === 'empty-extra') {
@@ -755,7 +947,9 @@ describe('desktop external plugin profile', () => {
       const baseline = pluginFixture('legacy-provider')
       const manual = pluginFixture('manual-verified')
       mockVerifiedPlugins([baseline, manual])
-      const plan = { schemaVersion: 1, mode: 'exact', plugins: [{ required: false, source: baseline.source }] }
+      const plan = { schemaVersion: 2, mode: 'exact', plugins: [{
+        required: false, source: baseline.source, sourcePolicy: 'compatible-user-override',
+      }] }
       await manager.applyRelease(hooks(), plan)
       await manager.mutate({ type: 'plugin-install', source: manual.source }, hooks())
       const statePath = join(manager.paths.profile, 'desktop-plugin-provisioning-state.json')
@@ -764,8 +958,8 @@ describe('desktop external plugin profile', () => {
       if (evidence === 'incomplete-state') writeFileSync(statePath, JSON.stringify({ ...state, plugins: [] }))
       if (evidence === 'optional-failed') writeFileSync(statePath, JSON.stringify({
         ...state,
-        plugins: [{ name: baseline.source.packageName, version: baseline.source.version, required: false,
-          source: baseline.source, status: 'optional-failed', phase: 'download', message: 'old optional failure' }],
+        plugins: [{ name: baseline.source.packageName, required: false, requestedSource: baseline.source,
+          sourcePolicy: 'compatible-user-override', status: 'optional-failed', phase: 'download', message: 'old optional failure' }],
       }))
       if (evidence === 'different-receipt') {
         const archive = verifiedPluginArchive(baseline.source.packageName, baseline.source.version, '>=1.0.0')
@@ -791,29 +985,26 @@ describe('desktop external plugin profile', () => {
     }, 30_000,
   )
 
-  it.each(['identical-verified', 'changed-verified', 'registry'] as const)(
+  it.each(['identical-verified', 'changed-verified'] as const)(
     'preserves a user %s replacement when the next plan drops its name', async (replacement) => {
       const { root, manager } = setup()
       const fixture = pluginFixture('release-provider')
       mockVerifiedPlugins([fixture])
-      const plan = { schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source: fixture.source }] }
+      const plan = { schemaVersion: 2, mode: 'exact', plugins: [{
+        required: true, source: fixture.source, sourcePolicy: 'compatible-user-override',
+      }] }
       await manager.applyRelease(hooks(), plan)
-      if (replacement === 'registry') {
-        await manager.mutate({ type: 'plugin-add', spec: `${fixture.source.packageName}@1.0.0` }, hooks())
-        expect(receiptStore(manager).owners).toEqual({})
-      } else {
-        const archive = replacement === 'identical-verified' ? fixture.archive
-          : verifiedPluginArchive(fixture.source.packageName, fixture.source.version, '>=1.0.0')
-        const manual = { archive, source: verifiedSource(archive, fixture.source.packageName, fixture.source.version) }
-        mockVerifiedPlugins([manual])
-        await manager.mutate({ type: 'plugin-install', source: manual.source }, hooks())
+      const archive = replacement === 'identical-verified' ? fixture.archive
+        : verifiedPluginArchive(fixture.source.packageName, fixture.source.version, '>=1.0.0')
+      const manual = { archive, source: verifiedSource(archive, fixture.source.packageName, fixture.source.version) }
+      mockVerifiedPlugins([manual])
+      await manager.mutate({ type: 'plugin-install', source: manual.source }, hooks())
+      expect(receiptStore(manager).owners).toEqual({ 'release-provider': 'user' })
+      if (replacement === 'identical-verified') {
+        const count = calls(root).length
+        await manager.reconcileProvisioning(plan, hooks())
+        expect(calls(root)).toHaveLength(count)
         expect(receiptStore(manager).owners).toEqual({ 'release-provider': 'user' })
-        if (replacement === 'identical-verified') {
-          const count = calls(root).length
-          await manager.reconcileProvisioning(plan, hooks())
-          expect(calls(root)).toHaveLength(count)
-          expect(receiptStore(manager).owners).toEqual({ 'release-provider': 'user' })
-        }
       }
       const result = await manager.reconcileProvisioning({ schemaVersion: 1, mode: 'exact', plugins: [] }, hooks())
       expect(result.removed).toEqual([])

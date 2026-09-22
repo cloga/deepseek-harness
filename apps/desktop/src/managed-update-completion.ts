@@ -16,6 +16,7 @@ import { verifyDesktopManualInstallEvidence, type DesktopManualInstallRecovery }
 import { readDesktopManagedCompletedSequence } from './managed-update-state.ts'
 import {
   desktopPluginProvisioningPlanSha256,
+  LEGACY_DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
   parseDesktopPluginProvisioningPlan,
 } from './plugin-provisioning.ts'
 import { assertDesktopProvisioningInventory } from './project-manager.ts'
@@ -125,9 +126,20 @@ function retainedHandoffIdentity(
         } }
       }
     }
-    // Supply only parser metadata missing from schema 2; never return this synthetic capability.
+    let historicalProvisioning = historical.provisioning
+    if (!schema2 && typeof historicalProvisioning === 'object' && historicalProvisioning !== null
+      && !Array.isArray(historicalProvisioning)) {
+      const retained = historicalProvisioning as Record<string, unknown>
+      exactKeys(retained, ['capability', 'planSha256'], 'historical provisioning')
+      if (JSON.stringify(retained.capability) === JSON.stringify(LEGACY_DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY)
+        && retained.planSha256 === currentCapability.provisioning.planSha256) {
+        historicalProvisioning = currentCapability.provisioning
+      }
+    }
+    // Supply only parser metadata missing from historical records; never return this synthetic capability.
     normalized = { ...value, capability: {
-      ...historical, schemaVersion: 3, ...(schema2 ? { provisioning: currentCapability.provisioning } : {}),
+      ...historical, schemaVersion: 3,
+      ...(schema2 ? { provisioning: currentCapability.provisioning } : { provisioning: historicalProvisioning }),
       ...(migration === undefined ? {} : { migration }),
     } }
   }

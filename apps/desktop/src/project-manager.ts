@@ -58,6 +58,7 @@ import {
   desktopPluginProvisioningPlanSha256,
   parseDesktopPluginProvisioningPlan,
   parseDesktopPluginProvisioningState,
+  sameDesktopPluginSourceFamily,
   type DesktopPluginProvisioningPlan,
   type DesktopPluginProvisioningResult,
   type DesktopPluginProvisioningState,
@@ -116,6 +117,7 @@ export type DesktopProjectMutation =
   | { readonly type: 'plugin-update'; readonly name: string; readonly version: string }
   | { readonly type: 'plugin-toggle'; readonly name: string; readonly enabled: boolean }
   | { readonly type: 'plugins-reconcile'; readonly plan: DesktopPluginProvisioningPlan }
+  | { readonly type: 'plugin-restore-planned'; readonly name: string; readonly plan: DesktopPluginProvisioningPlan }
   | { readonly type: 'runtime-reconcile' }
   | { readonly type: 'plugins-disable-all' }
 
@@ -238,9 +240,13 @@ function legacyReceiptOwners(
   }
   const state = parseDesktopPluginProvisioningState(readJson(statePath))
   const previousPlan = parseDesktopPluginProvisioningPlan({
-    schemaVersion: 1,
+    schemaVersion: state.planSchemaVersion,
     mode: 'exact',
-    plugins: state.plugins.map(({ required, source }) => ({ required, source })),
+    plugins: state.plugins.map(result => ({
+      required: result.required,
+      source: result.requestedSource,
+      ...(state.planSchemaVersion === 1 ? {} : { sourcePolicy: result.sourcePolicy }),
+    })),
   })
   // Incomplete evidence cannot authorize deleting an otherwise unowned plugin.
   if (desktopPluginProvisioningPlanSha256(previousPlan) !== state.planSha256) return owners
@@ -250,13 +256,24 @@ function legacyReceiptOwners(
   }
   for (const result of state.plugins) {
     const receipt = receipts[result.name]
-    if (result.status === 'active' && receipt !== undefined
+    if (result.status === 'active' && result.effective === 'plan' && receipt !== undefined
       && JSON.stringify(receipt) === JSON.stringify(result.receipt)
       && manifest.dependencies[result.name] === artifactSpecifier(receipt)) {
       owners[result.name] = 'release'
     }
   }
   return owners
+}
+
+function planFromState(state: DesktopPluginProvisioningState): DesktopPluginProvisioningPlan {
+  return parseDesktopPluginProvisioningPlan({
+    schemaVersion: state.planSchemaVersion,
+    mode: 'exact',
+    plugins: state.plugins.map(result => ({
+      required: result.required, source: result.requestedSource,
+      ...(state.planSchemaVersion === 1 ? {} : { sourcePolicy: result.sourcePolicy }),
+    })),
+  })
 }
 
 function readPluginReceipts(projectDir: string): DesktopPluginReceiptStore {
@@ -318,27 +335,31 @@ function matchesProvisioning(
   if (state.planSha256 !== desktopPluginProvisioningPlanSha256(plan)
     || state.plugins.length !== plan.plugins.length) return false
   const manifest = projectManifest(projectDir)
-  const { receipts, owners } = readPluginReceipts(projectDir)
+  const store = readPluginReceipts(projectDir)
   const desired = new Map(plan.plugins.map(entry => [entry.source.packageName, entry]))
-  if (Object.keys(receipts).some(name => owners[name] === 'release' && !desired.has(name))) return false
+  if (Object.keys(store.receipts).some(name => store.owners[name] === 'release' && !desired.has(name))) return false
+  let resolution: DesktopProvisioningResolution
+  try { resolution = resolveProvisioning(readUserInventory(projectDir), plan) } catch (_error) { return false }
   return state.plugins.every((result) => {
-    const entry = desired.get(result.name)
-    if (entry === undefined || entry.required !== result.required
-      || JSON.stringify(entry.source) !== JSON.stringify(result.source)) return false
+    const decision = resolution.entries.get(result.name)
+    if (decision === undefined || decision.entry.required !== result.required
+      || decision.policy !== result.sourcePolicy
+      || JSON.stringify(decision.entry.source) !== JSON.stringify(result.requestedSource)) return false
     if (result.status === 'optional-failed') {
-      return !entry.required && receipts[result.name] === undefined
-        && !Object.hasOwn(manifest.dependencies, result.name)
-        && !profilePluginNames(projectDir).includes(result.name)
+      return !decision.entry.required && decision.receipt === undefined && store.receipts[result.name] === undefined
+        && !Object.hasOwn(manifest.dependencies, result.name) && !profilePluginNames(projectDir).includes(result.name)
     }
-    const receipt = receipts[result.name]
+    const receipt = store.receipts[result.name]
+    const effectiveSource = decision.receipt?.source ?? decision.entry.source
     if (receipt === undefined || JSON.stringify(receipt) !== JSON.stringify(result.receipt)
-      || receipt.artifactSha256 !== entry.source.sha256
+      || JSON.stringify(effectiveSource) !== JSON.stringify(result.effectiveSource)
+      || decision.effective !== result.effective || receipt.artifactSha256 !== effectiveSource.sha256
       || manifest.dependencies[result.name] !== artifactSpecifier(receipt)
       || !existsSync(join(projectDir, 'node_modules', result.name, 'package.json'))) return false
     const plugin = inspectPlugin(projectDir, result.name)
-    return plugin.version === entry.source.version && plugin.enabled
+    return plugin.version === effectiveSource.version && plugin.enabled
       && createHash('sha256').update(readFileSync(join(projectDir, PLUGIN_ARTIFACTS, `${receipt.artifactSha256}.tgz`)))
-        .digest('hex') === entry.source.sha256
+        .digest('hex') === effectiveSource.sha256
   })
 }
 
@@ -350,13 +371,51 @@ function matchesProvisioning(
  */
 export function assertDesktopProvisioningInventory(
   projectDir: string,
-  plan: DesktopPluginProvisioningPlan,
+  input: unknown,
 ): DesktopPluginProvisioningState {
+  const plan = parseDesktopPluginProvisioningPlan(input)
   const state = parseDesktopPluginProvisioningState(readJson(join(projectDir, DESKTOP_PLUGIN_PROVISIONING_STATE_FILE)))
   if (!matchesProvisioning(projectDir, plan, state)) {
     throw new Error('desktop plugin provisioning: active inventory does not match the release plan')
   }
   return state
+}
+
+function resolvedProvisioningState(
+  projectDir: string,
+  plan: DesktopPluginProvisioningPlan,
+  previous: DesktopPluginProvisioningState,
+): DesktopPluginProvisioningState {
+  const resolution = resolveProvisioning(readUserInventory(projectDir), plan)
+  const store = readPluginReceipts(projectDir)
+  const enabled = new Set(profilePluginNames(projectDir))
+  const plugins = plan.plugins.map((entry): DesktopPluginProvisioningResult => {
+    const decision = resolution.entries.get(entry.source.packageName)
+    if (decision === undefined) throw new Error('desktop plugin provisioning: missing resolved entry')
+    const receipt = decision.receipt ?? store.receipts[entry.source.packageName]
+    if (receipt === undefined || !enabled.has(entry.source.packageName)) {
+      const failed = previous.plugins.find(result => result.name === entry.source.packageName && result.status === 'optional-failed')
+      if (!entry.required && failed !== undefined) return {
+        name: entry.source.packageName, required: false, status: 'optional-failed', requestedSource: entry.source,
+        sourcePolicy: provisioningSourcePolicy(entry), message: failed.message, phase: failed.phase,
+      }
+      throw new DesktopProvisioningOverrideError(entry.source.packageName, entry.source.version,
+        `desktop project: mutation would leave planned plugin ${entry.source.packageName} inactive`)
+    }
+    const effectiveSource = receipt.source
+    if (decision.effective === 'plan' && JSON.stringify(effectiveSource) !== JSON.stringify(entry.source)) {
+      throw new DesktopProvisioningOverrideError(entry.source.packageName, entry.source.version)
+    }
+    return {
+      name: entry.source.packageName, required: entry.required, status: 'active', requestedSource: entry.source,
+      sourcePolicy: provisioningSourcePolicy(entry), effective: decision.effective, effectiveSource, receipt,
+    }
+  })
+  return {
+    schemaVersion: 2, capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+    planSchemaVersion: plan.schemaVersion, planSha256: desktopPluginProvisioningPlanSha256(plan), composition: 'active', plugins,
+    removed: previous.removed.map(name => name), rolledBack: false, verified: true,
+  }
 }
 
 function artifactSpecifier(receipt: DesktopPluginProvisionReceipt): string {
@@ -562,7 +621,7 @@ function parseActivationEvidence(value: Record<string, unknown>): DesktopActivat
     return undefined
   }
   const operations = new Set<string>(['plugin-add', 'plugin-install', 'plugin-remove', 'plugin-update', 'plugin-toggle',
-    'plugins-reconcile', 'runtime-reconcile', 'plugins-disable-all'])
+    'plugin-restore-planned', 'plugins-reconcile', 'runtime-reconcile', 'plugins-disable-all'])
   const needsTarget = typeof value.operation === 'string' && value.operation.startsWith('plugin-')
   if (typeof value.operation !== 'string' || !operations.has(value.operation)
     || needsTarget !== (value.target !== undefined)
@@ -577,16 +636,98 @@ function parseActivationEvidence(value: Record<string, unknown>): DesktopActivat
   }
 }
 
-function assertProvisioningUserSources(inventory: DesktopUserInventory, plan: DesktopPluginProvisioningPlan): void {
-  for (const { source } of plan.plugins) {
-    const manual = inventory.get(source.packageName)
-    if (manual === undefined) continue
-    if (!manual.enabled || manual.owner !== 'user' || manual.receipt === undefined || manual.snapshot !== undefined
-      || manual.dependency !== artifactSpecifier(manual.receipt)
-      || JSON.stringify(manual.receipt.source) !== JSON.stringify(source)) {
-      throw new Error(`desktop project: release plan conflicts with user plugin ${source.packageName}; install or enable the requested source explicitly`)
-    }
+function provisioningSourcePolicy(entry: DesktopPluginProvisioningPlan['plugins'][number]): 'strict-pin' | 'compatible-user-override' {
+  return 'sourcePolicy' in entry ? entry.sourcePolicy : 'strict-pin'
+}
+
+interface DesktopProvisioningResolutionEntry {
+  readonly entry: DesktopPluginProvisioningPlan['plugins'][number]
+  readonly policy: 'strict-pin' | 'compatible-user-override'
+  readonly effective: 'plan' | 'user-override'
+  readonly receipt?: DesktopPluginProvisionReceipt
+}
+
+interface DesktopProvisioningResolution {
+  readonly entries: ReadonlyMap<string, DesktopProvisioningResolutionEntry>
+}
+
+/** A planned package cannot use the retained user source without an explicit recovery choice. */
+export class DesktopProvisioningOverrideError extends Error {
+  readonly code = 'restore-planned-source'
+
+  /**
+   * @param packageName - Planned package whose retained user source conflicts.
+   * @param requestedVersion - Plan version available to recovery.
+   * @param message - Optional diagnostic that preserves the specific refusal.
+   */
+  constructor(readonly packageName: string, readonly requestedVersion: string, message?: string) {
+    super(message ?? `desktop project: release plan conflicts with user plugin ${packageName}; restore the planned source explicitly`)
+    this.name = 'DesktopProvisioningOverrideError'
   }
+}
+
+/** A staged health failure with exactly one active override offers replacement without claiming causality. */
+export class DesktopProvisioningOverrideHealthError extends DesktopProvisioningOverrideError {
+  /**
+   * @param packageName - Sole active override package available for optional recovery.
+   * @param requestedVersion - Packaged version offered by recovery.
+   * @param cause - Original staged verification failure, retained without attributing causality.
+   */
+  constructor(packageName: string, requestedVersion: string, cause: unknown) {
+    super(packageName, requestedVersion,
+      `desktop project: staged profile health failed while user override ${packageName} was active; restoring the planned source is available: ${errorOf(cause, 'Host health failed').message}`)
+    this.name = 'DesktopProvisioningOverrideHealthError'
+    this.cause = cause
+  }
+}
+
+function assertPlannedMutationPreflight(
+  plan: DesktopPluginProvisioningPlan,
+  mutation: DesktopProjectMutation,
+): void {
+  let name: string | undefined
+  if (mutation.type === 'plugin-add') {
+    const parsed = parseDesktopPluginInstallSpec(mutation.spec, process.cwd())
+    if (parsed.kind === 'registry') name = parsed.name
+  } else if (mutation.type === 'plugin-update' || mutation.type === 'plugin-remove'
+    || mutation.type === 'plugin-toggle' && !mutation.enabled) name = mutation.name
+  if (name === undefined) return
+  const entry = plan.plugins.find(item => item.required && item.source.packageName === name)
+  if (entry !== undefined) {
+    throw new DesktopProvisioningOverrideError(entry.source.packageName, entry.source.version,
+      `desktop project: ${mutation.type} would leave required planned plugin ${name} invalid; restore the planned source explicitly`)
+  }
+}
+
+function resolveProvisioning(
+  inventory: DesktopUserInventory,
+  plan: DesktopPluginProvisioningPlan,
+  forceRequestedSourceFor: ReadonlySet<string> = new Set(),
+): DesktopProvisioningResolution {
+  const entries = new Map<string, DesktopProvisioningResolutionEntry>()
+  for (const entry of plan.plugins) {
+    const { source } = entry
+    const policy = provisioningSourcePolicy(entry)
+    const manual = inventory.get(source.packageName)
+    if (manual === undefined || forceRequestedSourceFor.has(source.packageName)) {
+      entries.set(source.packageName, { entry, policy, effective: 'plan' })
+      continue
+    }
+    const verified = manual.enabled && manual.owner === 'user' && manual.receipt !== undefined && manual.snapshot === undefined
+      && manual.dependency === artifactSpecifier(manual.receipt)
+    const identical = verified && JSON.stringify(manual.receipt?.source) === JSON.stringify(source)
+    if (identical) {
+      entries.set(source.packageName, { entry, policy, effective: 'plan', receipt: manual.receipt })
+      continue
+    }
+    if (verified && manual.receipt !== undefined && policy === 'compatible-user-override'
+      && sameDesktopPluginSourceFamily(source, manual.receipt.source)) {
+      entries.set(source.packageName, { entry, policy, effective: 'user-override', receipt: manual.receipt })
+      continue
+    }
+    throw new DesktopProvisioningOverrideError(source.packageName, source.version)
+  }
+  return { entries }
 }
 
 function assertUserInventory(
@@ -599,13 +740,15 @@ function assertUserInventory(
 ): void {
   const current = readUserInventory(projectDir, ignoredArtifact ?? (mutation.type === 'plugin-remove' ? mutation.name : undefined))
   const replacement = mutation.type === 'plugin-add' || mutation.type === 'plugin-install'
-    || mutation.type === 'plugin-remove' || mutation.type === 'plugin-update' ? target : undefined
+    || mutation.type === 'plugin-remove' || mutation.type === 'plugin-update'
+    || mutation.type === 'plugin-restore-planned' ? target : undefined
   if (replacement !== undefined) {
-    const removed = preparedTarget === null
-      && !Object.hasOwn(projectManifest(projectDir).dependencies, replacement)
-      && !profilePluginNames(projectDir).includes(replacement)
-      && readPluginReceipts(projectDir).receipts[replacement] === undefined
-      && readDesktopPackageLocks(projectDir)[replacement] === undefined
+    const removed = preparedTarget === null && (mutation.type === 'plugin-restore-planned'
+      ? current.get(replacement) === undefined
+      : !Object.hasOwn(projectManifest(projectDir).dependencies, replacement)
+        && !profilePluginNames(projectDir).includes(replacement)
+        && readPluginReceipts(projectDir).receipts[replacement] === undefined
+        && readDesktopPackageLocks(projectDir)[replacement] === undefined)
     if (!removed && (preparedTarget === null || preparedTarget === undefined
       || JSON.stringify(current.get(replacement)) !== JSON.stringify(preparedTarget))) {
       throw new Error(`desktop project: requested plugin inventory changed for ${replacement}; refusing profile activation`)
@@ -1036,12 +1179,38 @@ export class DesktopProjectManager {
   ): Promise<DesktopProjectMutationResult> {
     return this.withLock(async () => {
       this.currentRuntime()
+      if (mutation.type === 'plugins-reconcile' || mutation.type === 'plugin-restore-planned') {
+        mutation = { ...mutation, plan: parseDesktopPluginProvisioningPlan(mutation.plan) }
+      }
       if ('name' in mutation) assertPackageName(mutation.name)
       if (!existsSync(this.paths.profile)) throw new Error('desktop project: active profile is not installed')
       const ignoredArtifact = mutation.type === 'plugin-remove' ? mutation.name : undefined
       const userInventory = readUserInventory(this.paths.profile, ignoredArtifact)
+      const provisioningPath = join(this.paths.profile, DESKTOP_PLUGIN_PROVISIONING_STATE_FILE)
+      const activeProvisioning = existsSync(provisioningPath)
+        ? parseDesktopPluginProvisioningState(readJson(provisioningPath)) : undefined
+      const activePlan = activeProvisioning === undefined ? undefined : planFromState(activeProvisioning)
+      if (activeProvisioning !== undefined && activePlan !== undefined
+        && desktopPluginProvisioningPlanSha256(activePlan) !== activeProvisioning.planSha256) {
+        throw new Error('desktop plugin provisioning: active state plan evidence is inconsistent')
+      }
+      if (activePlan !== undefined) assertPlannedMutationPreflight(activePlan, mutation)
+      if (mutation.type === 'plugin-install' && activePlan !== undefined) {
+        const source = parseDesktopPluginSource(mutation.source)
+        const entry = source.type === 'githubRelease'
+          ? activePlan.plugins.find(item => item.source.packageName === source.packageName) : undefined
+        if (entry !== undefined && JSON.stringify(entry.source) !== JSON.stringify(source)
+          && (provisioningSourcePolicy(entry) === 'strict-pin' || !sameDesktopPluginSourceFamily(entry.source, source))) {
+          throw new DesktopProvisioningOverrideError(entry.source.packageName, entry.source.version)
+        }
+      }
       const beforeInventory = profileInventoryEvidence(this.paths.profile)
-      if (mutation.type === 'plugins-reconcile') assertProvisioningUserSources(userInventory, mutation.plan)
+      if (mutation.type === 'plugins-reconcile') resolveProvisioning(userInventory, mutation.plan)
+      if (mutation.type === 'plugin-restore-planned') {
+        const entry = mutation.plan.plugins.find(item => item.source.packageName === mutation.name)
+        if (entry === undefined) throw new Error(`desktop project: ${mutation.name} is not in the packaged provisioning plan`)
+        resolveProvisioning(userInventory, mutation.plan, new Set([mutation.name]))
+      }
       let targetName = 'name' in mutation ? mutation.name : undefined
       const parent = dirname(this.paths.profile)
       mkdirSync(parent, { recursive: true, mode: 0o700 })
@@ -1066,7 +1235,7 @@ export class DesktopProjectManager {
         if (existsSync(join(staging, PLUGIN_RECEIPTS))) writePluginReceipts(staging, readPluginReceipts(staging))
         const removingSnapshot = mutation.type === 'plugin-remove' && readDesktopPackageLocks(staging)[mutation.name] !== undefined
         if (removingSnapshot) this.pruneSourcePackage(staging, mutation.name)
-        if (mutation.type === 'plugins-reconcile') {
+        if (mutation.type === 'plugins-reconcile' || mutation.type === 'plugin-restore-planned') {
           for (const entry of mutation.plan.plugins) this.pruneSourcePackage(staging, entry.source.packageName)
         }
         for (const snapshot of Object.values(readDesktopPackageLocks(staging))) {
@@ -1078,8 +1247,11 @@ export class DesktopProjectManager {
           await this.runPnpm(staging, ['install', removingSnapshot ? '--no-frozen-lockfile' : '--frozen-lockfile', '--ignore-scripts'], registry)
         }
         let provision: StagedDesktopPluginProvision | StagedDesktopProvisioning | undefined
-        if (mutation.type === 'plugins-reconcile') {
-          provision = await this.stageProvisioning(staging, mutation.plan, transaction, hooks)
+        if (mutation.type === 'plugins-reconcile' || mutation.type === 'plugin-restore-planned') {
+          provision = await this.stageProvisioning(
+            staging, mutation.plan, transaction, hooks,
+            mutation.type === 'plugin-restore-planned' ? new Set([mutation.name]) : undefined,
+          )
         } else if (removingSnapshot) {
           await this.reconcileProfile(staging, previous, true, registry)
         } else if (mutation.type === 'plugins-disable-all') {
@@ -1109,10 +1281,16 @@ export class DesktopProjectManager {
           }
           await this.reconcileProfile(staging, previous, materializedPackagesChanged, registry)
         }
-        const preparedTarget = mutation.type === 'plugin-remove' ? null
+        const preparedTarget = mutation.type === 'plugin-remove' || mutation.type === 'plugin-restore-planned' ? null
           : targetName === undefined || mutation.type === 'plugin-toggle' ? undefined
             : readUserInventory(staging).get(targetName)
         assertUserInventory(staging, userInventory, mutation, targetName, preparedTarget)
+        if (activePlan !== undefined && activeProvisioning !== undefined
+          && mutation.type !== 'plugins-reconcile' && mutation.type !== 'plugin-restore-planned'
+          && mutation.type !== 'plugins-disable-all') {
+          writeJson(join(staging, DESKTOP_PLUGIN_PROVISIONING_STATE_FILE),
+            resolvedProvisioningState(staging, activePlan, activeProvisioning))
+        }
         const evidence: DesktopActivationEvidence = {
           before: beforeInventory, after: profileInventoryEvidence(staging), operation: mutation.type,
           ...(targetName === undefined ? {} : { target: targetName }),
@@ -1125,12 +1303,20 @@ export class DesktopProjectManager {
             throw new Error('desktop project: staged inventory changed during health verification')
           }
         } catch (healthError) {
+          const healthPlan = provision !== undefined && 'plan' in provision ? provision.plan : activePlan
+          const overrides = healthPlan === undefined ? []
+            : [...resolveProvisioning(readUserInventory(staging), healthPlan).entries.values()]
+              .filter(decision => decision.effective === 'user-override')
+          const override = overrides.length === 1 ? overrides[0] : undefined
+          const failure = override === undefined ? healthError : new DesktopProvisioningOverrideHealthError(
+            override.entry.source.packageName, override.entry.source.version, healthError,
+          )
           try {
             await hooks.afterChange()
           } catch (restartError) {
-            throw new AggregateError([healthError, restartError], 'desktop project: staged health check and active Host restart failed')
+            throw new AggregateError([failure, restartError], 'desktop project: staged health check and active Host restart failed')
           }
-          throw healthError
+          throw failure
         }
         let result: DesktopProjectMutationResult
         if (provision !== undefined && !('plan' in provision)) {
@@ -1146,8 +1332,9 @@ export class DesktopProjectManager {
           result = receipt
         } else if (provision !== undefined) {
           const state: DesktopPluginProvisioningState = {
-            schemaVersion: 1,
+            schemaVersion: 2,
             capability: DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+            planSchemaVersion: provision.plan.schemaVersion,
             planSha256: desktopPluginProvisioningPlanSha256(provision.plan),
             composition: 'active',
             plugins: provision.results,
@@ -1177,6 +1364,8 @@ export class DesktopProjectManager {
           await hooks.afterChange()
           if (provision !== undefined && 'plan' in provision) {
             assertDesktopProvisioningInventory(this.paths.profile, provision.plan)
+          } else if (activePlan !== undefined && mutation.type !== 'plugins-disable-all') {
+            assertDesktopProvisioningInventory(this.paths.profile, activePlan)
           }
           assertUserInventory(this.paths.profile, userInventory, mutation, targetName, preparedTarget)
           if (!sameInventoryEvidence(profileInventoryEvidence(this.paths.profile), evidence.after)) {
@@ -1241,7 +1430,7 @@ export class DesktopProjectManager {
     hooks: DesktopProjectHooks,
   ): Promise<DesktopPluginProvisioningState> {
     const plan = parseDesktopPluginProvisioningPlan(input)
-    assertProvisioningUserSources(readUserInventory(this.paths.profile), plan)
+    resolveProvisioning(readUserInventory(this.paths.profile), plan)
     const path = join(this.paths.profile, DESKTOP_PLUGIN_PROVISIONING_STATE_FILE)
     if (existsSync(path)) {
       const state = parseDesktopPluginProvisioningState(readJson(path))
@@ -1253,6 +1442,25 @@ export class DesktopProjectManager {
     if (result === undefined || !('planSha256' in result)) {
       throw new Error('desktop plugin provisioning: reconciliation returned no state')
     }
+    return result
+  }
+
+  /**
+   * Replace one user override with the packaged requested source through the normal transaction.
+   * @param input - Packaged plan revalidated at the transaction entry.
+   * @param packageName - Exact planned package retained by trusted startup recovery.
+   * @param hooks - Active Host lifecycle and staged health checks.
+   * @returns Durable state for the fully activated plan.
+   */
+  async restorePlannedSource(
+    input: unknown,
+    packageName: string,
+    hooks: DesktopProjectHooks,
+  ): Promise<DesktopPluginProvisioningState> {
+    assertPackageName(packageName)
+    const plan = parseDesktopPluginProvisioningPlan(input)
+    const result = await this.mutate({ type: 'plugin-restore-planned', name: packageName, plan }, hooks)
+    if (result === undefined || !('planSha256' in result)) throw new Error('desktop plugin provisioning: recovery returned no state')
     return result
   }
 
@@ -1370,7 +1578,7 @@ export class DesktopProjectManager {
     if (mutation.type === 'plugin-remove' || mutation.type === 'plugin-update') {
       return readPluginReceipts(projectDir).receipts[mutation.name]?.source.dependencyRegistry ?? DESKTOP_REGISTRY
     }
-    if (mutation.type === 'plugins-reconcile') {
+    if (mutation.type === 'plugins-reconcile' || mutation.type === 'plugin-restore-planned') {
       return mutation.plan.plugins[0]?.source.dependencyRegistry ?? DESKTOP_REGISTRY
     }
     return DESKTOP_REGISTRY
@@ -1381,7 +1589,7 @@ export class DesktopProjectManager {
     source: DesktopGithubReleasePluginSource,
     transaction: string,
     owner: DesktopPluginOwner,
-    phase: (value: NonNullable<DesktopPluginProvisioningResult['phase']>) => void = () => {},
+    phase: (value: Extract<DesktopPluginProvisioningResult, { status: 'optional-failed' }>['phase']) => void = () => {},
   ): Promise<StagedDesktopPluginProvision> {
     if (this.currentRuntime().sharedPackages.some(entry => entry.name === source.packageName)) {
       throw new Error(`desktop project: cannot install host-owned package ${source.packageName}`)
@@ -1446,20 +1654,31 @@ export class DesktopProjectManager {
     plan: DesktopPluginProvisioningPlan,
     transaction: string,
     hooks: DesktopProjectHooks,
+    forceRequestedSourceFor: ReadonlySet<string> = new Set(),
   ): Promise<StagedDesktopProvisioning> {
     const manifest = projectManifest(projectDir)
     const store = readPluginReceipts(projectDir)
-    // Reconstructing the same requested artifact does not transfer a user's installation to the release.
-    const rebuiltOwner = (source: DesktopGithubReleasePluginSource): DesktopPluginOwner => {
-      const receipt = store.receipts[source.packageName]
-      return store.owners[source.packageName] === 'user' && receipt !== undefined
-        && JSON.stringify(receipt.source) === JSON.stringify(source)
-        && manifest.dependencies[source.packageName] === artifactSpecifier(receipt)
-        ? 'user' : 'release'
-    }
+    const resolution = resolveProvisioning(readUserInventory(projectDir), plan, forceRequestedSourceFor)
     const owned = Object.keys(store.receipts).filter(name => store.owners[name] === 'release')
     const desired = new Set(plan.plugins.map(entry => entry.source.packageName))
-    const replace = new Set([...owned, ...desired])
+    const retainedRelease = new Map<string, DesktopPluginProvisionReceipt>()
+    if (forceRequestedSourceFor.size > 0) {
+      for (const entry of plan.plugins) {
+        const name = entry.source.packageName, receipt = store.receipts[name]
+        if (!forceRequestedSourceFor.has(name) && store.owners[name] === 'release' && receipt !== undefined
+          && JSON.stringify(receipt.source) === JSON.stringify(entry.source)
+          && manifest.dependencies[name] === artifactSpecifier(receipt)
+          && profilePluginNames(projectDir).includes(name)) {
+          userArtifactSha256(projectDir, name, receipt, undefined)
+          retainedRelease.set(name, receipt)
+        }
+      }
+    }
+    const preserved = new Set([
+      ...[...resolution.entries].filter(([, decision]) => decision.receipt !== undefined).map(([name]) => name),
+      ...retainedRelease.keys(),
+    ])
+    const replace = new Set([...owned, ...desired].filter(name => !preserved.has(name)))
     const removed = owned.filter(name => !desired.has(name))
     for (const name of replace) this.clearPluginReceipt(projectDir, name)
     writeJson(join(projectDir, 'package.json'), {
@@ -1471,37 +1690,52 @@ export class DesktopProjectManager {
       } },
     })
     const registry = plan.plugins[0]?.source.dependencyRegistry ?? DESKTOP_REGISTRY
-    if (Object.keys(manifest.dependencies).length > 0) {
-      await this.runPnpm(projectDir, ['install', '--no-frozen-lockfile', '--ignore-scripts'], registry)
-    }
+    if (Object.keys(manifest.dependencies).length > 0) await this.runPnpm(projectDir, ['install', '--no-frozen-lockfile', '--ignore-scripts'], registry)
     const results = new Map<string, DesktopPluginProvisioningResult>()
-    const activeResult = (entry: DesktopPluginProvisioningPlan['plugins'][number], receipt: StagedDesktopPluginProvision): DesktopPluginProvisioningResult => ({
-      name: entry.source.packageName,
-      version: entry.source.version,
-      required: entry.required,
-      status: 'active',
-      source: entry.source,
-      receipt: { ...receipt, states: { staged: true, health: 'passed', activated: true, rolledBack: false, verified: true } },
-    })
-    for (const entry of plan.plugins.filter(entry => entry.required)) {
-      const receipt = await this.installGithubRelease(projectDir, entry.source, transaction, rebuiltOwner(entry.source))
+    const activeResult = (
+      entry: DesktopPluginProvisioningPlan['plugins'][number],
+      provision: StagedDesktopPluginProvision | DesktopPluginProvisionReceipt,
+      effective: 'plan' | 'user-override' = 'plan',
+    ): DesktopPluginProvisioningResult => {
+      const receipt: DesktopPluginProvisionReceipt = 'states' in provision ? provision : {
+        ...provision, states: { staged: true, health: 'passed', activated: true, rolledBack: false, verified: true },
+      }
+      return {
+        name: entry.source.packageName, required: entry.required, status: 'active', requestedSource: entry.source,
+        sourcePolicy: provisioningSourcePolicy(entry), effective, effectiveSource: receipt.source, receipt,
+      }
+    }
+    for (const [name, decision] of resolution.entries) {
+      if (decision.receipt !== undefined) results.set(name, activeResult(decision.entry, decision.receipt, decision.effective))
+      else {
+        const receipt = retainedRelease.get(name)
+        if (receipt !== undefined) results.set(name, activeResult(decision.entry, receipt))
+      }
+    }
+    for (const entry of plan.plugins.filter(entry => entry.required && !preserved.has(entry.source.packageName))) {
+      const receipt = await this.installGithubRelease(projectDir, entry.source, transaction, 'release')
       results.set(entry.source.packageName, activeResult(entry, receipt))
     }
     await this.reconcileProfile(projectDir, undefined, existsSync(this.pendingPackages(projectDir)), registry)
-    await hooks.healthCheck(projectDir)
-    for (const entry of plan.plugins.filter(entry => !entry.required)) {
+    try { await hooks.healthCheck(projectDir) } catch (error) {
+      const overrides = [...resolution.entries.values()].filter(decision => decision.effective === 'user-override')
+      const override = overrides.length === 1 ? overrides[0] : undefined
+      if (override !== undefined) {
+        throw new DesktopProvisioningOverrideHealthError(
+          override.entry.source.packageName, override.entry.source.version, error,
+        )
+      }
+      throw error
+    }
+    for (const entry of plan.plugins.filter(entry => !entry.required && !preserved.has(entry.source.packageName))) {
       const candidate = mkdtempSync(join(transaction, 'optional-'))
-      let phase: NonNullable<DesktopPluginProvisioningResult['phase']> = 'install'
+      let phase: Extract<DesktopPluginProvisioningResult, { status: 'optional-failed' }>['phase'] = 'install'
       try {
         let provision: StagedDesktopPluginProvision
         try {
           copyProfileMetadata(projectDir, candidate)
-          if (Object.keys(projectManifest(candidate).dependencies).length > 0) {
-            await this.runPnpm(candidate, ['install', '--frozen-lockfile', '--ignore-scripts'], registry)
-          }
-          provision = await this.installGithubRelease(
-            candidate, entry.source, transaction, rebuiltOwner(entry.source), (value) => { phase = value },
-          )
+          if (Object.keys(projectManifest(candidate).dependencies).length > 0) await this.runPnpm(candidate, ['install', '--frozen-lockfile', '--ignore-scripts'], registry)
+          provision = await this.installGithubRelease(candidate, entry.source, transaction, 'release', (value) => { phase = value })
           phase = 'graph'
           this.prepareProfile(candidate)
           phase = 'install'
@@ -1510,7 +1744,7 @@ export class DesktopProjectManager {
           await hooks.healthCheck(candidate)
         } catch (error) {
           results.set(entry.source.packageName, {
-            name: entry.source.packageName, version: entry.source.version, source: entry.source,
+            name: entry.source.packageName, requestedSource: entry.source, sourcePolicy: provisioningSourcePolicy(entry),
             required: false, status: 'optional-failed', phase,
             message: errorOf(error, 'desktop plugin provisioning: optional entry failed').message,
           })
@@ -1518,9 +1752,7 @@ export class DesktopProjectManager {
         }
         const superseded = join(transaction, 'optional-predecessor')
         renameSync(projectDir, superseded)
-        try {
-          renameSync(candidate, projectDir)
-        } catch (error) {
+        try { renameSync(candidate, projectDir) } catch (error) {
           renameSync(superseded, projectDir)
           throw error
         }
@@ -1566,7 +1798,7 @@ export class DesktopProjectManager {
 
   private async applyMutation(
     projectDir: string,
-    mutation: Exclude<DesktopProjectMutation, { type: 'plugins-disable-all' | 'plugins-reconcile' | 'runtime-reconcile' }>,
+    mutation: Exclude<DesktopProjectMutation, { type: 'plugins-disable-all' | 'plugins-reconcile' | 'plugin-restore-planned' | 'runtime-reconcile' }>,
     transaction: string,
   ): Promise<AppliedDesktopMutation> {
     switch (mutation.type) {

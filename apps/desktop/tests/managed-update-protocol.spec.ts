@@ -28,9 +28,9 @@ describe('Desktop managed update protocol', () => {
       provisioning: {
         capability: {
           id: 'desktopNativePluginProvisioning',
-          schemaVersion: 1,
-          planSchemaVersion: 1,
-          stateSchemaVersion: 1,
+          schemaVersion: 2,
+          planSchemaVersion: 2,
+          stateSchemaVersion: 2,
         },
         planSha256: 'b'.repeat(64),
       },

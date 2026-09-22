@@ -196,6 +196,10 @@ vi.mock('node:fs', async (importOriginal) => {
 })
 vi.mock('../src/paths.ts', () => ({ resolveDesktopPaths: () => ({ profile: 'desktop-test-profile' }) }))
 vi.mock('../src/project-manager.ts', () => ({
+  DesktopProvisioningOverrideError: class extends Error {
+    readonly code = 'restore-planned-source'
+    constructor(readonly packageName: string, readonly requestedVersion: string) { super('override failed') }
+  },
   DesktopProjectManager: class {
     readonly paths = { profile: 'desktop-test-profile' }
     readonly applyRelease = harness.applyRelease
@@ -217,6 +221,9 @@ vi.mock('../src/project-manager.ts', () => ({
       }
       harness.pluginsEnabled = false
       await hooks.afterChange()
+    }
+    async restorePlannedSource(_plan: unknown, name: string, hooks: { beforeChange(): Promise<void>; afterChange(): Promise<void> }) {
+      await this.mutate({ type: 'plugin-restore-planned', name }, hooks)
     }
     async resetConfiguration(hooks: { beforeChange(): Promise<void>; afterChange(): Promise<void> }) {
       await this.mutate(undefined, hooks)
@@ -501,7 +508,8 @@ describe('desktop plugin interruption boundary', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
     for (const channel of [
-      DESKTOP_IPC.backendRetry, DESKTOP_IPC.applicationRestart, DESKTOP_IPC.updatesInstall, DESKTOP_IPC.pluginsDisableAll,
+      DESKTOP_IPC.backendRetry, DESKTOP_IPC.applicationRestart, DESKTOP_IPC.provisioningRestore,
+      DESKTOP_IPC.updatesInstall, DESKTOP_IPC.pluginsDisableAll,
     ]) {
       await expect(Promise.resolve(invoke(channel, shell))).rejects.toThrow('in progress')
     }

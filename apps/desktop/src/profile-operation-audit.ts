@@ -17,7 +17,7 @@ export interface DesktopProfileInventoryEvidence {
 export interface DesktopProfileOperationRecord {
   readonly transaction: string
   readonly operation: 'plugin-add' | 'plugin-install' | 'plugin-remove' | 'plugin-update' | 'plugin-toggle'
-    | 'plugins-reconcile' | 'runtime-reconcile' | 'plugins-disable-all' | 'reset' | 'recovery'
+    | 'plugin-restore-planned' | 'plugins-reconcile' | 'runtime-reconcile' | 'plugins-disable-all' | 'reset' | 'recovery'
   readonly target?: string
   readonly phase: 'preparation' | 'activation' | 'rollback' | 'recovery' | 'reset'
   readonly outcome: 'started' | 'committed' | 'failed' | 'recovered'
