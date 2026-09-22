@@ -1,7 +1,7 @@
 /** Complete staged Auto JSON, model/effort choices, and revision-fenced settings writes. */
 
 import { describe, expect, it, vi } from 'vitest'
-import { autoRoutingSettingsScope, deferred } from './auto-model-routing-test-helpers.ts'
+import { autoRoutingSettingsScope, deferred } from './auto-model-routing-test-helpers.client.ts'
 import type { ModelProviderGroup, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import { AutoModelRoutingCardController } from '../src/client/auto-model-routing-card-controller.ts'
 import {

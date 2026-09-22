@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-test-runtime'
-import { autoRoutingSettingsScope, deferred } from './auto-model-routing-test-helpers.ts'
+import { autoRoutingSettingsScope, deferred } from './auto-model-routing-test-helpers.client.ts'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { AutoModelRoutingCard, type AutoModelRoutingCardProps } from '../src/client/AutoModelRoutingCard.tsx'
 import { AutoModelRoutingCardController } from '../src/client/auto-model-routing-card-controller.ts'
