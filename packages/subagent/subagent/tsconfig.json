@@ -14,6 +14,9 @@
     {
       "path": "../../../vendor/cordis"
     },
+    { "path": "../../../vendor/schemastery" },
+    { "path": "../../llm/model-routing" },
+    { "path": "../../settings/settings" },
     {
       "path": "../../attachment/attachment"
     },

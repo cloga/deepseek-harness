@@ -66,7 +66,9 @@ kind: "package-reference"
 
 设置 `modelSelectionSettings: true`，即可在组合每个全新顶层 Session 时读取宿主的 `subagent-model-selection` 偏好。没有已记录策略的恢复 Session 会保持禁用，包括显式为空的恢复。启用后，非空的精确 provider/model 路由列表会记录进 Session、由子 Session 继承，后续设置编辑不会改变它。工具随后公开可选的 `provider`、`model` 与 `reasoning_effort` 字段，并注册共享的 `list_subagent_models` 工具。此模式要求后端声明 `agentOptions`；两个进程内后端和 DSH SDK 支持该能力，而 ACP、Codex 与 Claude Code 会拒绝它，而不是忽略它。
 
-一次调用需同时提供 `provider` 与 `model`；当配置值、父 agent 值或提供方持有的默认值能提供路由时，也可只提供推理等级。静态的 `provider.agentRouteDefaults` 在存在时构成提供方／模型基线；工具配置与模型字段会在路由相关强度合并和确切路由预检前覆盖它。没有这些默认值的提供方会使用父 agent 最新已记录请求中的兼容值，再使用父级首次请求前的创建选项，并保留配置的 `maxTokens`。更改路由但未显式提供推理等级时，会清除继承的路由自有等级，使所选模型解析自己的默认值。实时 LLM 适配器在创建子 agent 前校验有效路由。目录成员资格只提供建议，因此适配器接受时，模型可以使用未列出的 id。
+面向模型的调用需同时提供 `provider` 与 `model`；当配置值、父级值或提供方持有的默认值能提供路由时，也可只提供推理等级。显式字段必须解析到已捕获的精确路由策略；未获准时会在原生 Auto 运行前失败。工具配置与模型字段覆盖提供方默认值；更改路由但不指定强度时，会清除不兼容的继承强度。原生隐式请求使用[共享创建时选择链](../subagent/README.zh.md#native-model-selection)，包括精确父模型规则与获准的全新 spawn Auto。服务拥有权限投影和异步原生预检；本工具保留同意捕获与同步 JSON／显式选择检查。外部预检行为不变。目录成员资格只提供建议：只要适配器接受，获准的 id 不必已在目录中公布。
+
+对原生实例，`modelSelectionSettings: false` 会为本次调用发送仅可拒绝的 Auto 退出标志。它不会禁用用户编写的精确父模型规则，不会清除子级独立捕获的委派偏好，也不会授予任何额外路由。已捕获同意缺失或禁用时，Auto 不会运行；已准入的 Auto 选择必须保留获准且可用的保守候选，而不能在失败后静默回退。随附 fork 工具不在自身选择中使用 Auto；显式配置与父模型规则仍是可能影响缓存的例外。冷恢复使用子级保存的模型与推理等级，而不是当前工具设置。
 
 -----
 
@@ -99,9 +101,9 @@ kind: "package-reference"
 | 文件 | 职责 |
 |---|---|
 | [`src/index.ts`](src/index.ts) | 工具注册、生命周期镜像、模式解析、结果结算 |
-| [`src/model-selection.ts`](src/model-selection.ts) | 请求／配置合并与实时 LLM 路由预检 |
+| [`src/model-selection.ts`](src/model-selection.ts) | 工具 JSON／配置合并、显式路由授权与外部预检 |
 | [`src/model-selection-settings.ts`](src/model-selection-settings.ts) | 为新 Session 读取的宿主所有 opt-in 设置 |
-| [`src/model-selection-state.ts`](src/model-selection-state.ts) | 记录并继承已读取决定的 Session 事件 |
+| [`src/model-selection-state.ts`](src/model-selection-state.ts) | 服务所有的持久权限投影的兼容导出 |
 | [`src/list-models.ts`](src/list-models.ts) | `list_subagent_models` 运行时发现工具 |
 
 </details>
@@ -131,9 +133,27 @@ kind: "package-reference"
 
 当提供方存在时，以当前实例配置的名称公开已生成的默认 [`subagent` schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-subagent)。启用的 Session 策略会添加 `provider`、`model` 与 `reasoning_effort`，以及继承和选择指引；提供方必须支持 `agentOptions`。提供方是否继承上下文会改变工具描述和提示词描述。启用后台模式会添加 `run_in_background`：可继续模式会记录其默认值为 `true`、运行时结算通知与显式前台覆盖；一次性模式会记录其默认值为 `false`，以及用 `job_output` 收集或用 `job_kill` 停止的 job id。当工具在本次组装的作用域中可见时，一个 `tool:<toolName>` 系统提示词 section 会指示模型同时启动相互独立的可继续委派、在它们运行时继续工作，并且仅当下一步动作依赖结果时选择前台；工具限制会同时移除其 schema 和这段指引。
 
+##### 启用模型选择的原生 spawn 描述
+
+```markdown
+Implicit child model choice uses configured tool/provider defaults, matching exact parent-model rules, authorized Auto when captured by the parent, then compatible parent defaults.
+```
+
+##### 不准入 Auto 的原生描述（包括 fork）
+
+```markdown
+Child model choice uses configured tool/provider defaults or matching exact parent-model rules, then compatible parent defaults. Auto selection is disabled for this tool.
+```
+
+##### 启用的原生模型选择指导
+
+```markdown
+Child LLM selection is optional. Supply `provider` and `model` together after using `list_subagent_models` to inspect advertised routes and efforts. Explicit provider, model, or reasoning effort suppresses parent rules and Auto; changing the route without naming an effort uses the selected model's default effort.
+```
+
 #### Token 影响
 
-每个父级请求支付固定的 schema 成本；模型选择会增加三个参数。每个提供方实例增加一个 schema，每个可继续实例还增加一个简短的系统提示词 section。
+每个父级请求支付固定的 schema 成本；原生路由会添加上面的简短指导，模型选择还会增加三个参数。每个提供方实例增加一个 schema，每个可继续实例还增加一个简短的系统提示词 section。
 
 #### KV Cache 影响
 
@@ -143,7 +163,7 @@ kind: "package-reference"
 
 #### 模型看到什么
 
-Session 携带策略的 settings 控制实例会公开子级 LLM 选择字段与 `list_subagent_models`。可选 `ctx.llm` 服务不可用时，调用会失败。发现只返回精确路由策略中的已注册提供方与已公布模型；未授权提供方会在调用其适配器目录前被拒绝，精确查询也必须先获准，才会解析模型的推理强度与默认值。执行阶段会独立强制同一策略。
+Session 携带策略的 settings 控制实例会公开子级 LLM 选择字段与 `list_subagent_models`。发现与需要实时适配器校验的选择在缺少 `ctx.llm` 时会被拒绝；正常继承不增加额外 LLM 预检。发现只返回精确路由策略中的已注册提供方与已公布模型；未授权提供方会在调用其适配器目录前被拒绝，精确查询也必须先获准，才会解析模型的推理强度与默认值。执行阶段会独立强制同一策略。
 
 #### Token 影响
 
@@ -210,7 +230,7 @@ Use subagent in the background by default. Start independent delegations togethe
 
 - **后台运行不通过本工具公开结果**——一次性任务的最终输出通过通用 Task 接口收集，可继续子 agent 的输出留在其自身会话中，按其 subagent id 读取。结算通知会说明该子 agent 如何结束，并携带其最终 assistant 输出中的非空文本，但它不是本次调用的返回值，也无法在此等待。
 - **等待中的一次性实例较晚才发现重复名称**（`TODO(subagent-dup-toolname)`）——可继续实例会在插件应用期间预留提示词 section 名称，但若要阻止等待中的一次性实例回滚提供方注册，仍需要一份预期名称注册表。
-- **随附 fork 工具不能选择子级 LLM 路由**——它们继承父级提供方与模型，使复制的对话前缀仍有资格复用 KV Cache。仅当路由变更能保留复用或公开有界重算成本时，才重新启用选择。
+- **随附 fork 工具省略面向模型的路由字段，并排除自身 Auto 选择**——默认使用兼容父路由以复用缓存；显式配置或用户编写的精确父模型规则仍可改变路由。捕获的委派偏好保持独立，可支持后续获准的全新 spawn；它不会重新路由 fork 自身。
 - **非路由子 agent 策略按实例固定**——另一个 persona、工具过滤器或深度上限需要另一个名称不同的工具。LLM 选择要求启用逐 Session 偏好，且提供方必须声明 `agentOptions`；两个进程内提供方和 DSH SDK 会声明该能力，而 ACP、Codex 与 Claude Code 会拒绝它，而不是忽略它。
 
 <a id="dev-note"></a>

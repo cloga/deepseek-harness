@@ -5,37 +5,38 @@
 import { z } from 'zod'
 import { lastAssistantStreamChunk, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm-retry/types'
+import type {} from '@deepseek-ai/dsh-model-routing'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
-import type { ContextPressureProjection, TokenUsageProjection } from './projection.ts'
+import type { ContextPressureProjection, TokenUsageBuckets } from './projection.ts'
 import { foldSurfaceProjection } from './surface-projection.ts'
 
-const zeroBuckets = (): TokenUsageProjection => ({
+const zeroBuckets = (): TokenUsageBuckets => ({
   uncachedInputTokens: 0,
   outputTokens: 0,
   cacheReadTokens: 0,
   cacheWriteTokens: 0,
 })
 
-const bucketsFrom = (usage: TokenUsage): TokenUsageProjection => ({
+const bucketsFrom = (usage: TokenUsage): TokenUsageBuckets => ({
   uncachedInputTokens: usage.inputTokens,
   outputTokens: usage.outputTokens,
   cacheReadTokens: usage.cacheReadTokens ?? 0,
   cacheWriteTokens: usage.cacheWriteTokens ?? 0,
 })
 
-const bucketsEqual = (left: TokenUsageProjection, right: TokenUsageProjection): boolean =>
+const bucketsEqual = (left: TokenUsageBuckets, right: TokenUsageBuckets): boolean =>
   left.uncachedInputTokens === right.uncachedInputTokens
   && left.outputTokens === right.outputTokens
   && left.cacheReadTokens === right.cacheReadTokens
   && left.cacheWriteTokens === right.cacheWriteTokens
 
 const addReplacing = (
-  totals: TokenUsageProjection,
-  previous: TokenUsageProjection | undefined,
-  next: TokenUsageProjection,
-): TokenUsageProjection => ({
+  totals: TokenUsageBuckets,
+  previous: TokenUsageBuckets | undefined,
+  next: TokenUsageBuckets,
+): TokenUsageBuckets => ({
   uncachedInputTokens: totals.uncachedInputTokens - (previous?.uncachedInputTokens ?? 0) + next.uncachedInputTokens,
   outputTokens: totals.outputTokens - (previous?.outputTokens ?? 0) + next.outputTokens,
   cacheReadTokens: totals.cacheReadTokens - (previous?.cacheReadTokens ?? 0) + next.cacheReadTokens,
@@ -49,12 +50,27 @@ const projectionSchema = z.object({
   cacheWriteTokens: z.number().int().nonnegative(),
 }).strict()
 
+const routingUsageSchema = projectionSchema.extend({
+  startedCalls: z.number().int().nonnegative(),
+  settledCalls: z.number().int().nonnegative(),
+  usageReportedCalls: z.number().int().nonnegative(),
+})
+
+const tokenUsageViewSchema = projectionSchema.extend({ routing: routingUsageSchema.optional() }).transform(({ routing, ...totals }) => ({
+  ...totals,
+  ...routing === undefined ? {} : { routing },
+}))
+const routingUsageStateSchema = routingUsageSchema.extend({
+  lastSeq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).transform(SessionSeq),
+})
+
 /**
  * The token-usage unit's state schema — the one definition of the state
  * shape; the state type is inferred from it.
  */
 const tokenUsageStateSchema = z.object({
   totals: projectionSchema,
+  routing: routingUsageStateSchema.nullable(),
   last: z.object({
     turn: z.number().int().nonnegative(),
     step: z.number().int().nonnegative(),
@@ -112,14 +128,46 @@ type ContextPressureState = z.infer<typeof contextPressureStateSchema>
  *
  * Each v2 Assistant settlement contributes the last usage sample embedded in
  * its stream. `llm/retry-started` closes the replacement slot so the retried
- * attempt adds to the total.
+ * attempt adds to the total. Routing settlements add their explicit observed
+ * usage once, independently of the Assistant replacement slot. Their stream
+ * usage is not added again. Routing counters distinguish unknown reports and
+ * unfinished calls without estimating either.
+ *
+ * The routing-event sequence watermark makes repeated application of an already
+ * folded event idempotent. Legal producers append at most one result per unique
+ * call id; this fold does not validate duplicate-call records at different seqs.
  */
 export const tokenUsageProjectionDefinition = {
   key: 'tokenUsage',
-  stateVersion: 2,
+  stateVersion: 3,
   stateSchema: tokenUsageStateSchema,
-  init: () => ({ totals: zeroBuckets(), last: null }),
+  init: () => ({ totals: zeroBuckets(), routing: null, last: null }),
   apply: (state, event) => {
+    if (event.type === 'model/routing-request' || event.type === 'model/routing-result') {
+      if (state.routing !== null && event.seq <= state.routing.lastSeq) return state
+      const previous = state.routing ?? {
+        ...zeroBuckets(), startedCalls: 0, settledCalls: 0, usageReportedCalls: 0, lastSeq: event.seq,
+      }
+      if (event.type === 'model/routing-request') {
+        return {
+          ...state,
+          routing: { ...previous, startedCalls: previous.startedCalls + 1, lastSeq: event.seq },
+        }
+      }
+      const usage = event.data.usage
+      const buckets = usage === undefined ? undefined : bucketsFrom(usage)
+      return {
+        ...state,
+        totals: buckets === undefined ? state.totals : addReplacing(state.totals, undefined, buckets),
+        routing: {
+          ...buckets === undefined ? previous : addReplacing(previous, undefined, buckets),
+          startedCalls: previous.startedCalls,
+          settledCalls: previous.settledCalls + 1,
+          usageReportedCalls: previous.usageReportedCalls + (usage === undefined ? 0 : 1),
+          lastSeq: event.seq,
+        },
+      }
+    }
     if (event.type === 'llm/retry-started') {
       return state.last?.turn === event.data.turn && state.last.step === event.data.step
         ? { ...state, last: null }
@@ -142,11 +190,19 @@ export const tokenUsageProjectionDefinition = {
     if (previous !== undefined && bucketsEqual(previous, buckets)) return state
 
     return {
+      ...state,
       totals: addReplacing(state.totals, previous, buckets),
       last: { turn, step, buckets },
     }
   },
-  wire: { viewSchema: projectionSchema, view: state => state.totals },
+  wire: {
+    viewSchema: tokenUsageViewSchema,
+    view: (state) => {
+      if (state.routing === null) return state.totals
+      const { lastSeq: _lastSeq, ...routing } = state.routing
+      return { ...state.totals, routing }
+    },
+  },
 } satisfies ProjectionDefinition<'tokenUsage', TokenUsageState>
 
 /**

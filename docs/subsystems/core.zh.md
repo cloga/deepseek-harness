@@ -19,6 +19,12 @@
 
 `scope/` 是这里唯一的非服务包：一个零依赖库（`createScope`/`scopeOf`/`scopeTarget`），在模块图中位于 `session/` 与 `system-prompt/` 之下，正是为了让它们消费它而不形成环。`agent-loop` 是公开 `Agent` 约定的唯一具体实现，放在这里因为它是 harness 的默认产品循环；它在 `ctx.agents.withInitiator()` 内运行每个 driver。扩展插件依赖 `agent`——包括需要发起 Agent 时——而绝不直接依赖 `agent-loop`，因此循环保持可替换。[`dsh-base`](../../packages/bundle/base/README.zh.md) 是默认产品组合，[`dsh-sdk-minimal`](../../packages/bundle/sdk-minimal/README.zh.md) 则声明一棵更小的独立配置树。
 
+<a id="model-selection-before-prompt-assembly"></a>
+
+## 提示组装前的模型选择
+
+[`agent/src/model-selection.ts`](../../packages/core/agent/src/model-selection.ts) 拥有的 `ModelSelectionResolution` 将精确的 `Agent`、已分离的配置选择 `selection` 和可选的组装取消信号 `signal` 传入带作用域的异步 `model-selection/resolve` waterfall。解析在下游提示组装前完成，因此提示变量与发出请求的 provider、model、reasoning effort 保持一致；它不会改写配置选择。没有 Agent 的诊断组装不触发此事件；`model-selection/query` 仍是同步的分离快照读取，而不是对 Auto 下一次路由的预测。
+
 <a id="creation-and-ownership"></a>
 
 ## 创建与所有权
@@ -1283,6 +1289,33 @@ Read a detached snapshot without assembling a prompt or consuming a selection. S
  * @mode waterfall
  */
 'model-selection/query'(this: Scoped<ModelSelectionQuery>, payload: ModelSelectionQuery, next: () => ModelSelection | undefined): ModelSelection | undefined
+```
+
+Types: [Scoped](scope.zh.md)
+
+Source: [`packages/core/agent/src/model-selection.ts`](../../packages/core/agent/src/model-selection.ts)
+
+<a id="model-selectionresolve--waterfall"></a>
+
+#### `model-selection/resolve` — waterfall
+
+Resolve the route for one scoped prompt assembly before its downstream assembly listeners run. The result supplies prompt variables, request routing, and switch notices without changing the configured selection. Scope-filtered dispatch uses payload.agent as the routing key. Diagnostic assemblies without an Agent do not dispatch this event.
+
+```ts cordis-catalog
+/**
+ * Resolve the route for one scoped prompt assembly before its downstream
+ * assembly listeners run. The result supplies prompt variables, request
+ * routing, and switch notices without changing the configured selection.
+ * Scope-filtered dispatch uses payload.agent as the routing key. Diagnostic
+ * assemblies without an Agent do not dispatch this event.
+ * @param payload.agent - Agent supplied by the assembly context.
+ * @param payload.selection - detached configured selection captured before any await.
+ * @param payload.signal - cancellation for this assembly, when supplied.
+ * @param next - delegate to the captured selection or another resolver.
+ * @returns the selection for this assembly, or undefined to retain request defaults.
+ * @mode waterfall
+ */
+'model-selection/resolve'(this: Scoped<Agent>, payload: ModelSelectionResolution, next: () => Promise<ModelSelection | undefined>): Promise<ModelSelection | undefined>
 ```
 
 Types: [Scoped](scope.zh.md)

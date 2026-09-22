@@ -800,6 +800,14 @@ inspect( sessionId: SessionId, signal?: AbortSignal, ): Promise<SessionInspectio
 @Remote('selectModel') selectModel(request: SessionSelectModelRequest): Promise<SessionSelectModelValue>
 
 /**
+ * Select a Session-local Auto mode without changing the deployment's concrete default.
+ * @param request - Ordinary Session identity and requested Auto tradeoff.
+ * @param signal - Caller cancellation before intent commitment.
+ * @returns The accepted mode; actual model use remains a durable request fact.
+ */
+@Remote('selectAutoModel') selectAutoModel(request: SessionSelectAutoModelRequest, signal: AbortSignal): Promise<SessionSelectAutoModelValue>
+
+/**
  * Describe every currently routable model for Host-generation selectors.
  * @returns provider-grouped models, the deployment default, and isolated provider failures.
  */

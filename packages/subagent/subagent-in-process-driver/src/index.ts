@@ -21,6 +21,7 @@ import type { SessionEvent, SessionId, SessionLogOffset as SessionLogOffsetType,
 import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import {
   appendDelegatedPolicyOverrides,
+  appendNativeChildSelection,
   applyChildComposition,
   assertSubagentMaxDepth,
   captureDelegatedPolicyOverrides,
@@ -36,6 +37,7 @@ import type {
   SubagentRun,
   SubagentStopReason,
 } from '@deepseek-ai/dsh-subagent'
+import { attachAnalysisOnly, type AnalysisAttachment } from './analysis-only.ts'
 import {
   attachStructuredRuntime,
   type StructuredAttachment,
@@ -106,7 +108,16 @@ export async function startInProcessRun(
   options: InProcessRunOptions,
 ): Promise<SubagentRun> {
   assertSubagentMaxDepth(request.maxDepth)
-  if (request.signal.aborted) throw prePublicationAbort()
+  if (request.analysisPolicy !== undefined) {
+    if (options.seed !== undefined || request.outputSchema !== undefined || request.resolvedAgentOptions === undefined
+      || request.resolvedModelSelection?.decision.source !== 'request'
+      || !request.resolvedModelSelection.allowedModels?.some(route =>
+        route.provider === request.resolvedAgentOptions?.provider && route.model === request.resolvedAgentOptions?.model)) {
+      throw new Error('analysis-only requires an authorized fixed fresh native creation without outputSchema')
+    }
+  }
+  const creationSignal = request.resolvedCreationSignal ?? request.signal
+  if (creationSignal.aborted) throw prePublicationAbort()
   const parent = request.parent
   const childDepth = resolveChildDepth(parent, request.maxDepth)
 
@@ -114,19 +125,27 @@ export async function startInProcessRun(
   const seed = options.seed
   const activationBoundary = SessionLogOffset(seed?.length ?? 0)
 
-  // Capture before the first await: a later parent switch belongs to the
-  // parent's future.
-  const inherited = captureDelegatedPolicyOverrides(parent)
+  // Registry-owned snapshots precede asynchronous selection; direct driver callers retain the ordinary local capture.
+  const inherited = request.resolvedDelegatedPolicies ?? captureDelegatedPolicyOverrides(parent)
 
   let structured: StructuredAttachment | undefined
+  let analysis: AnalysisAttachment | undefined
   const setup = (childCtx: Context, child: Agent): void => {
     appendDelegatedPolicyOverrides(child.session, inherited)
+    if (request.resolvedModelSelection !== undefined) appendNativeChildSelection(childCtx, child.session, request.resolvedModelSelection)
     applyChildComposition(childCtx, parent, {
       persona: request.persona,
       toolFilter: request.toolFilter,
     })
     if (request.outputSchema !== undefined) {
       structured = attachStructuredRuntime(childCtx, request.outputSchema)
+    }
+    if (request.analysisPolicy !== undefined) {
+      // Native admission above requires complete captured options before setup.
+      analysis = attachAnalysisOnly(
+        childCtx, child, request.analysisPolicy,
+        request.resolvedAgentOptions as NonNullable<typeof request.resolvedAgentOptions>,
+      )
     }
     attachDescriptorAppend(childCtx, request.descriptor)
   }
@@ -137,10 +156,21 @@ export async function startInProcessRun(
     meta: childSessionMeta(parent, childDepth, seed !== undefined),
     ...seed !== undefined ? { seed } : {},
     ...seed === undefined ? {} : { inheritedEventCount: activationBoundary },
-    agentOptions: resolveChildAgentOptions(parent, request.agentOptions, childDepth),
-    signal: request.signal,
+    agentOptions: request.resolvedAgentOptions === undefined
+      ? resolveChildAgentOptions(parent, request.agentOptions, childDepth)
+      : { ...request.resolvedAgentOptions, subagentDepth: childDepth },
+    signal: creationSignal,
     setup,
   })
+  if (request.resolvedCreationSignal !== undefined) {
+    try {
+      creationSignal.throwIfAborted()
+    } catch (_error: unknown) {
+      // The registry still owns admission; join a factory handle that lost its publication race.
+      await handle.dispose()
+      throw prePublicationAbort()
+    }
+  }
   return drivePublishedRun(
     handle,
     request.signal,
@@ -148,6 +178,7 @@ export async function startInProcessRun(
     childId,
     activationBoundary,
     structured,
+    analysis,
   )
 }
 
@@ -162,6 +193,7 @@ function drivePublishedRun(
   childId: SessionId,
   boundary: SessionLogOffsetType,
   structured: StructuredAttachment | undefined,
+  analysis: AnalysisAttachment | undefined,
 ): SubagentRun {
   const child = handle.agent
   const flags = { cancelled: false }
@@ -181,12 +213,13 @@ function drivePublishedRun(
         child.followup(createUserMessage({ content: prompt, source: { kind: 'user' } }))
         await child.whenIdle()
       }
-      return readResult(
+      const result = readResult(
         child,
         boundary,
         flags.cancelled,
         structured ? { captured: structured.captured() } : undefined,
       )
+      return analysis === undefined ? result : { ...result, analysis: analysis.snapshot() }
     } finally {
       signal.removeEventListener('abort', onAbort)
     }

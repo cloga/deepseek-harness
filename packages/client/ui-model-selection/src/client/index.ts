@@ -25,7 +25,8 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconDataOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ModelDirectoryState } from './directory.ts'
 import { ModelDirectoryResolver } from './service.ts'
-import type { ModelSelectInjected } from './slots.ts'
+import type { ModelSelectInjection } from './slots.ts'
+import { AUTO_MODE_LABELS, AUTO_MODE_ROWS } from './auto-modes.ts'
 import { ModelSelect } from './ModelSelect.tsx'
 import { en, zh, type ModelKey } from './locales.ts'
 
@@ -63,7 +64,14 @@ function descriptionOf(
 
 /** Flatten the directory into popup rows; failure rows are listed for visibility but never selectable. */
 function optionsOf(directory: ModelDirectoryState, t: TranslateNS<'model'>): SelectOption[] {
-  const rows: SelectOption[] = []
+  const rows: SelectOption[] = directory.autoRouting?.available === true
+    ? AUTO_MODE_ROWS.map(choice => ({
+      id: choice.id,
+      label: t('auto.trigger', { mode: t(AUTO_MODE_LABELS[choice.mode]) }),
+      detail: t(choice.detail),
+      ...directory.autoRouting?.mode === choice.mode ? { active: true } : {},
+    }))
+    : []
   for (const group of directory.groups) {
     for (const model of group.models) {
       const description = descriptionOf(group.id, model, t)
@@ -71,7 +79,8 @@ function optionsOf(directory: ModelDirectoryState, t: TranslateNS<'model'>): Sel
         id: rowId(group.id, model.id),
         label: model.name,
         detail: description !== undefined ? `${group.name} · ${description}` : group.name,
-        ...(directory.current !== null
+        ...((directory.autoRouting === undefined || directory.autoRouting.mode === 'manual')
+          && directory.current !== null
           && directory.current.provider === group.id
           && directory.current.model === model.id
           ? { active: true } : {}),
@@ -100,8 +109,9 @@ function selectionOf(state: ModelDirectoryState, id: string): ModelSelection | u
     for (const model of group.models) {
       if (rowId(group.id, model.id) !== id) continue
       const sameRoute = state.current?.provider === group.id && state.current.model === model.id
+      const automatic = state.autoRouting !== undefined && state.autoRouting.mode !== 'manual'
       const reasoningEffort = sameRoute
-        ? state.current?.reasoningEffort ?? model.reasoning?.defaultEffort
+        ? automatic ? state.current?.reasoningEffort : state.current?.reasoningEffort ?? model.reasoning?.defaultEffort
         : model.reasoning?.defaultEffort
       return {
         provider: group.id,
@@ -160,6 +170,12 @@ export function apply(ctx: ClientContext): void {
             throw new Error('model selection is unavailable for addressed subagent sessions')
           }
           const directory = models.directoryFor(session.sessionId)
+          const auto = AUTO_MODE_ROWS.find(choice => choice.id === option.id)
+          if (auto !== undefined) {
+            if (directory.store.getSnapshot().autoRouting?.available !== true) throw new Error(t('auto.unavailable'))
+            await directory.selectAuto(auto.mode)
+            return
+          }
           const selection = selectionOf(directory.store.getSnapshot(), option.id)
           if (selection === undefined) {
             throw new Error('this provider\'s catalog failed to load — pick a model from a loaded group')
@@ -177,17 +193,21 @@ export function apply(ctx: ClientContext): void {
     scope.slots.inject('conversation.input.model', () => scope.slots.register({
       name: 'conversation.input.model',
       locale: NS,
-      inject: (sessionId): ModelSelectInjected => {
+      inject: (sessionId): ModelSelectInjection => {
         const directory = models.directoryFor(sessionId)
         const available = sessions.subagentAddress(sessionId) === undefined
         return {
           available,
-          directory: directory.store,
+          hooks: { directory: directory.store },
+          selectionError: () => directory.store.getSnapshot().error,
           load: () => {
             if (available) directory.load().catch(() => { /* surfaced on the store */ })
           },
           select: (selection: ModelSelection) => available
             ? directory.select(selection).then(() => true, () => false)
+            : Promise.resolve(false),
+          selectAuto: mode => available
+            ? directory.selectAuto(mode).then(() => true, () => false)
             : Promise.resolve(false),
         }
       },

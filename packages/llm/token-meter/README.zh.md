@@ -46,7 +46,9 @@ const price = ctx.tokenMeter.estimateMessage(message)
 
 ### 会话投影
 
-当组合提供 `ctx.sessionProjections` 时，token-meter 注册三个投影单元。`tokenUsage` 携带完整持久日志中的 `uncachedInputTokens`、`outputTokens`、`cacheReadTokens` 与 `cacheWriteTokens`。最终 assistant 消息样本会替换同一次尝试的流式用量；`llm/retry-started` 会结束该替换范围，因此同一步骤中的重试会贡献另一次计费用量。`contextPressure` 携带可选 `pressureTokens`（提供方报告的最新提示词规模）、可选 `projectedTokens`（下一个请求的提示词将花费多少）与来自最新一条 `request/context` 记录的可选 `contextWindow`。`contextBreakdown` 携带启发式 `systemTokens`、`toolsTokens` 与 `messageTokens`——上下文的构成，而非提供方计费规模。卸载插件会移除全部三个键。
+当组合提供 `ctx.sessionProjections` 时，token-meter 注册三个投影单元。`tokenUsage` 携带持久日志中已观测的对话与分类器 `uncachedInputTokens`、`outputTokens`、`cacheReadTokens` 与 `cacheWriteTokens`。最终 assistant 消息样本会替换同一次尝试的流式用量；`llm/retry-started` 会结束该替换范围，因此同一步骤中的重试会贡献另一次计费用量。`contextPressure` 携带可选 `pressureTokens`（对话提供方报告的最新提示词规模）、可选 `projectedTokens`（下一个请求的提示词将花费多少）与来自最新一条 `request/context` 记录的可选 `contextWindow`。`contextBreakdown` 携带启发式 `systemTokens`、`toolsTokens` 与 `messageTokens`——上下文的构成，而非提供方计费规模。卸载插件会移除全部三个键。
+
+无论成功、失败还是取消，`model/routing-result.usage` 都把已观测的分类器用量加入总量；其内嵌流不会再次计数。路由事件不会替换或清空 Assistant 用量槽，也不会提供对话上下文压力。可选 `tokenUsage.routing` 视图在首个路由审计之后出现，提供已包含在总量中的分类器专属四桶小计，以及 `startedCalls`、`settledCalls` 和 `usageReportedCalls`。已开始但尚未结算的调用，其用量未知；没有报告的结算，其用量也仍未知。这些计数器把上述情况与测得的零区分开来，不虚构 token、价格或节省。
 
 图片省略重新计算现有节点的价格，同时保留此前的用量锚点。固定引用启发式规则不计入 `offloaded` 元数据，因此一次省略决定不改变 `contextBreakdown` 或标量启发式总量，按路由的测量则把所选图片的视觉价格换成占位文本价格。
 
@@ -100,7 +102,7 @@ const price = ctx.tokenMeter.estimateMessage(message)
 
 ### 投影语义
 
-`contextBreakdown` 按 surface 顺序保留纯 JSON 的 `{ seq, heuristicTokens, system }` 条目，并复用测量服务的 plan/commit fold。其状态与 surface 转换成本为 O(当前保留 surface)，不是 O(1)，也不是 O(完整历史日志)；被替换条目和消息正文不保留。状态版本 5 使计入省略元数据的检查点失效。`contextPressure` 仍是标量影子价消费方：没有相邻 claim 的替换贡献零增量。用量 fold 保留一个最后样本槽，因为合法日志不会在更晚步骤报告用量后再次报告更早步骤的用量。
+`contextBreakdown` 按 surface 顺序保留纯 JSON 的 `{ seq, heuristicTokens, system }` 条目，并复用测量服务的 plan/commit fold。其状态与 surface 转换成本为 O(当前保留 surface)，不是 O(1)，也不是 O(完整历史日志)；被替换条目和消息正文不保留。状态版本 5 使计入省略元数据的检查点失效。`contextPressure` 仍是标量影子价消费方：没有相邻 claim 的替换贡献零增量。用量 fold 保留一个 Assistant 最后样本槽，因为合法日志不会在更晚步骤报告用量后再次报告更早步骤的用量。路由统计保留标量计数器和一个路由事件序号水位，而不是不断增长的调用注册表。重复应用已经折叠的路由事件具有幂等性；生产者必须为每个唯一调用 id 追加一条请求和至多一条最终结果。该 fold 不校验在不同序号重复同一调用结算的畸形日志。token 用量状态版本 3 使未包含路由开销的旧检查点失效；上下文压力状态不变。
 
 </details>
 
@@ -140,6 +142,7 @@ const price = ctx.tokenMeter.estimateMessage(message)
 - **提供方用量只在规范 envelope 完全相同时可复用**——工具、提供方、模型或调用配置变化会刻意回退到完整启发式估算；系统提示词变更在下一次成功调用之前按带符号的表面增量计量。
 - **系统提示词改写不带影子价**——循环替换 system 节点时没有紧邻的计量事件，因此 `contextPressure.projectedTokens` 以零增量折叠该替换，直到下一个用量样本；`contextBreakdown.systemTokens` 与 `measure()` 会立即按新提示词重新计价。
 - **构成检查点保留当前 surface**——精确的 system/message 分类需要位置条目；检查点大小和 surface 事件折叠成本为 O(当前保留 surface)。
+- **未报告的辅助用量未知**——路由总量只累加已观测报告。已开始、已结算和已报告调用的计数器呈现不完整统计；分类器失败或取消都不能证明提供方成本为零。
 
 <a id="dev-note"></a>
 ### 开发备注

@@ -213,7 +213,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/api/session-controller/src/index.ts:71`](../packages/api/session-controller/src/index.ts)
+Source: [`packages/api/session-controller/src/index.ts:73`](../packages/api/session-controller/src/index.ts)
 
 <a id="deepseek-aidsh-api-settings-controller"></a>
 
@@ -1540,7 +1540,7 @@ export interface ReplayModelConfig {
 
 Depends on: [`ModelModality`](../packages/llm/llm/src/index.ts) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · [`SystemPromptUpdate`](../packages/llm/llm/src/index.ts)
 
-Source: [`packages/test-support/llm-replay/src/index.ts:1122`](../packages/test-support/llm-replay/src/index.ts)
+Source: [`packages/test-support/llm-replay/src/index.ts:1302`](../packages/test-support/llm-replay/src/index.ts)
 
 <a id="deepseek-aidsh-llm-retry"></a>
 
@@ -1689,6 +1689,75 @@ export interface Config {
 ```
 
 Source: [`packages/feedback/message-feedback/src/index.ts:40`](../packages/feedback/message-feedback/src/index.ts)
+
+<a id="deepseek-aidsh-model-routing"></a>
+
+## `@deepseek-ai/dsh-model-routing`
+
+Requires: `agents` · `llm` · `sessionProjections`
+
+```ts config-catalog
+/** Auto is unavailable until both a candidate policy and classifier are configured. */
+export interface Config {
+  /** Allow new explicit Session Auto selections; defaults to false and does not replace captured policies. */
+  readonly enabled: boolean
+  /** Curated candidates and selection constraints; required when enabled, validated whenever supplied. */
+  readonly policy?: ModelRoutingPolicy
+  /** Independent classifier route and limits; required when enabled, validated whenever supplied. */
+  readonly classifier?: RoutingClassifierConfig
+}
+
+/** Detached, deeply frozen policy returned by the configuration parser. */
+export interface ModelRoutingPolicy {
+  /** Configuration order breaks equal cost ties. One entry per provider/model/effort combination. */
+  readonly candidates: readonly RoutingCandidate[]
+  /** Minimum candidate quality for every mode/task-complexity pair; each floor must be satisfiable. */
+  readonly qualityFloors: Readonly<Record<ModelRoutingMode, Readonly<Record<TaskComplexity, ModelRoutingQuality>>>>
+  /** Confidence threshold between zero and one, inclusive; lower confidence uses the uncertainty policy. */
+  readonly minConfidence: number
+  /** Must name a highest-quality configured candidate that meets every floor. */
+  readonly conservativeCandidateId: string
+}
+
+/** Explicit deployment limits; no classifier route or budget is defaulted. */
+export interface RoutingClassifierConfig {
+  /** Explicit classifier provider/model route and optional reasoning effort, independent of conversation candidates. */
+  readonly selection: Readonly<ModelSelection>
+  /** Maximum UTF-8 bytes of the complete serialized request excluding its AbortSignal. */
+  readonly maxInputBytes: number
+  /** Positive integer output-token cap sent with each classifier request. */
+  readonly maxOutputTokens: number
+  /** Maximum accumulated UTF-8 bytes of observed serialized chunks, including JSON wrappers. */
+  readonly maxOutputBytes: number
+  /** Positive millisecond deadline, at most 2147483647, covering preparation and consumption; teardown is still joined. */
+  readonly timeoutMs: number
+}
+
+/** One curated route with an explicit quality rank and relative cost. */
+export interface RoutingCandidate {
+  /** Nonempty identity unique within the candidate policy, used by eligibility and conservative selection. */
+  readonly id: string
+  /** Exact provider/model route and optional explicit reasoning effort; omission uses the provider default. */
+  readonly selection: Readonly<ModelSelection>
+  /** Deployment-assigned ordinal quality rank used to enforce task floors; not inferred model capability. */
+  readonly quality: ModelRoutingQuality
+  /** Positive finite comparison weight, not a token price or savings estimate. */
+  readonly relativeCost: number
+}
+
+/** User-selected tradeoff whose quality floors are supplied by the deployment. */
+export type ModelRoutingMode = 'efficiency' | 'balanced' | 'intelligence'
+
+/** Task difficulty reported by the classifier, independently of a model name. */
+export type TaskComplexity = 'routine' | 'standard' | 'complex'
+
+/** Deployment-assigned ordinal quality; it is not inferred from model metadata. */
+export type ModelRoutingQuality = 1 | 2 | 3
+```
+
+Depends on: [`ModelSelection`](subsystems/core.md)
+
+Source: [`packages/llm/model-routing/src/config.ts:13`](../packages/llm/model-routing/src/config.ts)
 
 <a id="deepseek-aidsh-permission-presets"></a>
 
@@ -2519,6 +2588,38 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
 Source: [`packages/storage/storage-sqlite/src/index.ts:24`](../packages/storage/storage-sqlite/src/index.ts)
 
+<a id="deepseek-aidsh-subagent"></a>
+
+## `@deepseek-ai/dsh-subagent`
+
+```ts config-catalog
+/** Host-owned deterministic parent route rules; omitted rules preserve inheritance. */
+export interface Config {
+  /** Exact parent-to-child routes for implicit native delegation; omission adds no parent-specific override. */
+  readonly modelRules?: SubagentModelRule[]
+}
+
+/** User-authored exact parent-to-child route mapping for implicit native delegation. */
+export interface SubagentModelRule {
+  /** Exact direct-parent route that selects this rule when no child route or effort was requested. */
+  readonly parent: {
+    /** LLM provider name of the direct parent. */
+    readonly provider: string
+    /** Exact model id selected by the direct parent. */
+    readonly model: string
+  }
+  /** Child route applied when the parent matches; availability is checked at delegation time. */
+  readonly child: {
+    /** LLM provider name for the child. */
+    readonly provider: string
+    /** Exact model id for the child. */
+    readonly model: string
+  }
+}
+```
+
+Source: [`packages/subagent/subagent/src/index.ts:204`](../packages/subagent/subagent/src/index.ts)
+
 <a id="deepseek-aidsh-subagent-acp"></a>
 
 ## `@deepseek-ai/dsh-subagent-acp`
@@ -3218,7 +3319,7 @@ export interface Config {
 
 Depends on: [`AgentOptions`](subsystems/core.md)
 
-Source: [`packages/subagent/tool-subagent/src/index.ts:48`](../packages/subagent/tool-subagent/src/index.ts)
+Source: [`packages/subagent/tool-subagent/src/index.ts:47`](../packages/subagent/tool-subagent/src/index.ts)
 
 <a id="deepseek-aidsh-tool-terminal"></a>
 
@@ -3669,7 +3770,6 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-session-turn-outline` — requires `sessionProjections` ([`packages/session/session-turn-outline/src/index.ts`](../packages/session/session-turn-outline/src/index.ts))
 - `@deepseek-ai/dsh-skill-badge` — requires `skills` ([`packages/skill/skill-badge/src/index.ts`](../packages/skill/skill-badge/src/index.ts))
 - `@deepseek-ai/dsh-storage` ([`packages/storage/storage/src/index.ts`](../packages/storage/storage/src/index.ts))
-- `@deepseek-ai/dsh-subagent` ([`packages/subagent/subagent/src/index.ts`](../packages/subagent/subagent/src/index.ts))
 - `@deepseek-ai/dsh-subprocess-local` ([`packages/subprocess/subprocess-local/src/index.ts`](../packages/subprocess/subprocess-local/src/index.ts))
 - `@deepseek-ai/dsh-subprocess-ssh` — requires `ssh` ([`packages/ssh/subprocess-ssh/src/index.ts`](../packages/ssh/subprocess-ssh/src/index.ts))
 - `@deepseek-ai/dsh-terminal` ([`packages/terminal/terminal/src/index.ts`](../packages/terminal/terminal/src/index.ts))
@@ -3677,6 +3777,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-tool-call-timeout-policy` — requires `tools` ([`packages/guard/timeout-policy/src/index.ts`](../packages/guard/timeout-policy/src/index.ts))
 - `@deepseek-ai/dsh-tool-cordis` — requires `tools` · `systemPrompt` · `dynamicCordisRunner` · `cordisInspect` ([`packages/extensions/tool-cordis/src/index.ts`](../packages/extensions/tool-cordis/src/index.ts))
 - `@deepseek-ai/dsh-tool-subagent-control` — requires `tools` · `subagents` ([`packages/subagent/tool-subagent-control/src/index.ts`](../packages/subagent/tool-subagent-control/src/index.ts))
+- `@deepseek-ai/dsh-typert-registry` ([`packages/typert/registry/src/index.ts`](../packages/typert/registry/src/index.ts))
 - `@deepseek-ai/dsh-user-questions` ([`packages/interaction/user-questions/src/index.ts`](../packages/interaction/user-questions/src/index.ts))
 - `@deepseek-ai/dsh-webhook` — requires `agents` · `agentDefaultModel` · `agentPresets` · `permissionPresets` · `sessionTitle` · `workspaceRegistry` ([`packages/webhook/webhook/src/index.ts`](../packages/webhook/webhook/src/index.ts))
 - `@deepseek-ai/dsh-workspace` — requires `storageDomain` · `sessionPersistence` ([`packages/workspace/workspace/src/index.ts`](../packages/workspace/workspace/src/index.ts))
@@ -3732,6 +3833,7 @@ Imported as libraries by other packages; a `cordis.yml` cannot load them.
 - `@deepseek-ai/dsh-launch-environment` ([`packages/util/launch-environment/src/index.ts`](../packages/util/launch-environment/src/index.ts))
 - `@deepseek-ai/dsh-llm-mock-server` ([`packages/test-support/llm-mock-server/src/index.ts`](../packages/test-support/llm-mock-server/src/index.ts))
 - `@deepseek-ai/dsh-loader-smoke` ([`packages/test-support/loader-smoke/src/index.ts`](../packages/test-support/loader-smoke/src/index.ts))
+- `@deepseek-ai/dsh-model-routing-learning` ([`packages/llm/model-routing-learning/src/index.ts`](../packages/llm/model-routing-learning/src/index.ts))
 - `@deepseek-ai/dsh-native-command` ([`packages/util/native-command/src/index.ts`](../packages/util/native-command/src/index.ts))
 - `@deepseek-ai/dsh-output-retention` ([`packages/util/output-retention/src/index.ts`](../packages/util/output-retention/src/index.ts))
 - `@deepseek-ai/dsh-package-manifest` ([`packages/util/package-manifest/src/index.ts`](../packages/util/package-manifest/src/index.ts))
@@ -3753,7 +3855,6 @@ Imported as libraries by other packages; a `cordis.yml` cannot load them.
 - `@deepseek-ai/dsh-timeout` ([`packages/util/timeout/src/index.ts`](../packages/util/timeout/src/index.ts))
 - `@deepseek-ai/dsh-typert-generator` ([`packages/typert/generator/src/index.ts`](../packages/typert/generator/src/index.ts))
 - `@deepseek-ai/dsh-typert-protocol` ([`packages/typert/protocol/src/index.ts`](../packages/typert/protocol/src/index.ts))
-- `@deepseek-ai/dsh-typert-registry` ([`packages/typert/registry/src/index.ts`](../packages/typert/registry/src/index.ts))
 - `@deepseek-ai/dsh-util-crypto` ([`packages/util/crypto/src/index.ts`](../packages/util/crypto/src/index.ts))
 - `@deepseek-ai/dsh-util-time` ([`packages/util/time/src/index.ts`](../packages/util/time/src/index.ts))
 - `@deepseek-ai/dsh-util-values` ([`packages/util/values/src/index.ts`](../packages/util/values/src/index.ts))

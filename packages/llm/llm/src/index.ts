@@ -32,6 +32,10 @@ import { callConfigEquals } from './call-config.ts'
 import type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
 import { HarnessError, INVALID_CREDENTIAL_CODE } from './error.ts'
 import { normalizeLlmFailure } from './adapter-failure.ts'
+import { AdapterAttemptObservers } from './adapter-attempt.ts'
+import type {
+  AdapterAttemptObservation, LlmAdapterAttemptObserver, LlmAdapterAttemptSettlement, LlmAdapterAttemptTeardown,
+} from './adapter-attempt.ts'
 import { normalizeApiKey } from './api-key.ts'
 import {
   contentHasFile, contentHasImage, fileHandleText, projectFilesToText, projectImagesForTextModel,
@@ -50,6 +54,10 @@ export * from './retry-policy.ts'
 export { BlockAssembler } from './assembler.ts'
 export { callConfigEquals, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
 export type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
+export type {
+  LlmAdapterAttemptId, LlmAdapterAttemptStart, LlmAdapterAttemptEnd, LlmAdapterAttemptFinish,
+  LlmAdapterAttemptObserver, LlmAdapterAttemptSettlement, LlmAdapterAttemptTeardown,
+} from './adapter-attempt.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -334,6 +342,7 @@ export interface DirectoryRegistrationHandle {
  * API, interceptable via the `llm/stream` waterfall.
  */
 export class LlmRuntime extends TypertRemoteService {
+  private readonly attemptObservers = new AdapterAttemptObservers()
   private adapters = new Map<string, AdapterRegistration>()
   private directory = new Map<string, LlmConfigurableProvider>()
   private discoveries = new Map<
@@ -343,6 +352,18 @@ export class LlmRuntime extends TypertRemoteService {
 
   constructor(ctx: Context) {
     super(ctx, 'llm')
+  }
+
+  /**
+   * Observe actual adapter dispatch after local preflight, not logical stream calls
+   * or replay. This does not attest network billing, SDK-internal retries, or task
+   * ownership. Observers receive only detached selection and usage facts.
+   * @param observer - Synchronous correlation capture, optionally returning a terminal callback.
+   * @returns Fiber-owned disposer; already captured terminal callbacks still settle after teardown.
+   */
+  observeAdapterAttempts(observer: LlmAdapterAttemptObserver): () => void {
+    const dispose = this.ctx.effect(() => this.attemptObservers.add(observer), 'llm.observeAdapterAttempts()')
+    return () => { void dispose() }
   }
 
   /** Notify topology observers without letting one broken listener veto the commit. */
@@ -1015,58 +1036,66 @@ export class LlmRuntime extends TypertRemoteService {
     options: GenerateOptions,
     prepared?: PreparedDispatch,
   ): AsyncGenerator<StreamChunk> {
-    let iterator: AsyncIterator<StreamChunk>
-    try {
-      const registration = prepared?.registration ?? this.registration(options.provider)
-      const adapter = registration.adapter
-      let modelInfo: LlmResolvedModelInfo
-      let resolvedConfig: LlmCallConfig
-      let dispatch: (options: GenerateOptions) => AsyncIterable<StreamChunk>
-      if (prepared === undefined) {
-        const adapterCall = await adapter.prepareCall(options.provider, options.model, options.signal)
-        modelInfo = this.normalizeModelInfo(registration, options.model, adapterCall.model)
-        resolvedConfig = this.resolveCallWithInfo(options, modelInfo).config
-        dispatch = options => adapterCall.stream(options)
-      } else {
-        modelInfo = prepared.modelInfo
-        resolvedConfig = prepared.config
-        dispatch = prepared.dispatch
-      }
-      if (prepared !== undefined && !callConfigEquals(options, resolvedConfig)) {
-        throw new LlmError(
-          'prepared LLM call config changed before adapter dispatch',
-          'INVALID_PREPARED_CALL',
-        )
-      }
-      const resolvedOptions = callConfigEquals(options, resolvedConfig)
-        ? options
-        : Object.isFrozen(options)
-          ? deepFreeze({ ...options, ...resolvedConfig })
-          : { ...options, ...resolvedConfig }
-      // Files are never dispatched natively: every route receives handle text.
-      let projectedMessages: readonly Message[] = resolvedOptions.messages
-      if (projectedMessages.some(message => contentHasFile(message.content))) {
-        projectedMessages = projectFilesToText(projectedMessages, ref => this.fileReadPath(ref))
-      }
-      if (modelInfo.inputModalities !== undefined
-        && !modelInfo.inputModalities.includes('image')
-        && projectedMessages.some(message => contentHasImage(message.content))) {
-        projectedMessages = projectImagesForTextModel(projectedMessages)
-      }
-      const projectedOptions = projectedMessages === resolvedOptions.messages
-        ? resolvedOptions
-        : Object.isFrozen(resolvedOptions)
-          ? deepFreeze({ ...resolvedOptions, messages: projectedMessages as Message[] })
-          : { ...resolvedOptions, messages: projectedMessages as Message[] }
-      const stream = dispatch(this.forAdapter(projectedOptions, adapter))
-      iterator = stream[Symbol.asyncIterator]()
-    } catch (error: unknown) {
-      yield adapterFailureChunk(error, options.signal)
-      return
-    }
-
+    let iterator: AsyncIterator<StreamChunk> | undefined
+    let observation: AdapterAttemptObservation | undefined
+    let settlement: LlmAdapterAttemptSettlement = 'consumer-closed'
+    let teardown: LlmAdapterAttemptTeardown = 'not-acquired'
     let completed = false
     try {
+      try {
+        const registration = prepared?.registration ?? this.registration(options.provider)
+        const adapter = registration.adapter
+        let modelInfo: LlmResolvedModelInfo
+        let resolvedConfig: LlmCallConfig
+        let dispatch: (options: GenerateOptions) => AsyncIterable<StreamChunk>
+        if (prepared === undefined) {
+          const adapterCall = await adapter.prepareCall(options.provider, options.model, options.signal)
+          modelInfo = this.normalizeModelInfo(registration, options.model, adapterCall.model)
+          resolvedConfig = this.resolveCallWithInfo(options, modelInfo).config
+          dispatch = options => adapterCall.stream(options)
+        } else {
+          modelInfo = prepared.modelInfo
+          resolvedConfig = prepared.config
+          dispatch = prepared.dispatch
+        }
+        if (prepared !== undefined && !callConfigEquals(options, resolvedConfig)) {
+          throw new LlmError(
+            'prepared LLM call config changed before adapter dispatch',
+            'INVALID_PREPARED_CALL',
+          )
+        }
+        const resolvedOptions = callConfigEquals(options, resolvedConfig)
+          ? options
+          : Object.isFrozen(options)
+            ? deepFreeze({ ...options, ...resolvedConfig })
+            : { ...options, ...resolvedConfig }
+        // Files are never dispatched natively: every route receives handle text.
+        let projectedMessages: readonly Message[] = resolvedOptions.messages
+        if (projectedMessages.some(message => contentHasFile(message.content))) {
+          projectedMessages = projectFilesToText(projectedMessages, ref => this.fileReadPath(ref))
+        }
+        if (modelInfo.inputModalities !== undefined
+          && !modelInfo.inputModalities.includes('image')
+          && projectedMessages.some(message => contentHasImage(message.content))) {
+          projectedMessages = projectImagesForTextModel(projectedMessages)
+        }
+        const projectedOptions = projectedMessages === resolvedOptions.messages
+          ? resolvedOptions
+          : Object.isFrozen(resolvedOptions)
+            ? deepFreeze({ ...resolvedOptions, messages: projectedMessages as Message[] })
+            : { ...resolvedOptions, messages: projectedMessages as Message[] }
+        const adapterOptions = this.forAdapter(projectedOptions, adapter)
+        observation = this.attemptObservers.start(adapterOptions)
+        const stream = dispatch(adapterOptions)
+        iterator = stream[Symbol.asyncIterator]()
+      } catch (error: unknown) {
+        settlement = 'failed'
+        const failure = adapterFailureChunk(error, options.signal)
+        observation?.push(failure)
+        yield failure
+        return
+      }
+
       while (true) {
         let item: { done: true } | { done: false; value: StreamChunk }
         try {
@@ -1075,22 +1104,47 @@ export class LlmRuntime extends TypertRemoteService {
             ? { done: true }
             : { done: false, value: next.value }
         } catch (error: unknown) {
+          // Preserve the adapter contract: a failed next/result is not followed
+          // by a return lookup. Custom-iterator quiescence is therefore unknown.
           completed = true
-          yield adapterFailureChunk(error, options.signal)
+          settlement = 'failed'
+          teardown = 'adapter-failed'
+          const failure = adapterFailureChunk(error, options.signal)
+          observation?.push(failure)
+          yield failure
           return
         }
         if (item.done) {
           completed = true
+          settlement = 'exhausted'
+          teardown = 'exhausted'
           return
         }
+        observation?.push(item.value)
         // End the adapter-owned try before yielding: consumer/middleware
         // failures resumed into this generator must remain thrown.
         yield item.value
       }
+    } catch (error: unknown) {
+      settlement = 'failed'
+      throw error
     } finally {
-      if (!completed) {
-        const close = iterator.return?.bind(iterator)
-        if (close) await close()
+      try {
+        if (iterator !== undefined && !completed) {
+          const close = iterator.return?.bind(iterator)
+          if (close) {
+            await close()
+            teardown = 'returned'
+          } else {
+            teardown = 'not-available'
+          }
+        }
+      } catch (error: unknown) {
+        settlement = 'failed'
+        teardown = 'failed'
+        throw error
+      } finally {
+        observation?.settle(settlement, teardown)
       }
     }
   }

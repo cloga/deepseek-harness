@@ -74,6 +74,10 @@ interface SubagentStartRequest {
    * before initializing the separate child runtime.
    */
   readonly agentOptions?: AgentOptions
+  /** Deny-only consumer opt-out; omission never grants authority absent the captured parent allowlist. */
+  readonly disableAutoModelSelection?: true
+  /** Closed no-tools mode; native fresh one-shot only, explicit route/maxTokens and parent permission required. */
+  readonly analysisPolicy?: NativeAnalysisPolicy
   /**
    * Object-rooted JSON Schema within `assertObjectJsonSchema`'s enforced subset. Start rejects
    * unsupported schemas or providers without the capability. Data must be plain host-realm JSON;
@@ -106,6 +110,19 @@ interface SubagentStartRequest {
 }
 ```
 
+`analysisPolicy` 将全新的原生一次性子 agent 限制为无工具模式，并要求固定的显式路由和输出 token 上限。准入要求父级路由权限，并拒绝 fork、可继续委派、结构化输出工具和 Auto 权限预设。调用次数与已接收输出的限制必须是显式的正安全整数；该策略不授予额外权限。
+
+```ts type-equiv
+/** Fixed fresh one-shot analysis policy; this grants no model or filesystem authority. */
+interface NativeAnalysisPolicy {
+  readonly kind: 'analysis-only'
+  /** Maximum downstream model-stream admissions, including failed attempts and retries. */
+  readonly maxModelCalls: number
+  /** Aggregate serialized received chunks retained across all admitted model attempts. */
+  readonly maxOutputBytes: number
+}
+```
+
 `signal` 是就绪前后唯一的取消通道。[subagent 组合控制 Agent Note](../../.agents/notes/implemented/feature/2026-07-12-subagent-persona-tool-filter-and-depth.zh.md)规定 persona、live 全局工具过滤、绝对深度以及「可见性而非权限」的设计理由。
 
 面向调用方的请求不携带目录格式细节或继续执行状态。`SubagentRuntime.start()` 会在能力检查后解析分离的一次性描述符，再将以下面向提供方的请求传给所选传输；可继续子 agent 绝不会到达 `SubagentProvider.start()`：
@@ -118,6 +135,14 @@ interface SubagentStartRequest {
 interface ResolvedSubagentStartRequest extends SubagentStartRequest {
   /** Detached descriptor a session-backed provider persists in the child log. */
   readonly descriptor: SubagentDescriptorData
+  /** Registry-owned complete native options; an omitted effort must not inherit again. */
+  readonly resolvedAgentOptions?: AgentOptions
+  /** Registry-owned permission snapshot captured before asynchronous native selection. */
+  readonly resolvedDelegatedPolicies?: DelegatedPolicyOverrides
+  /** Registry-owned creation evidence and child delegation context. */
+  readonly resolvedModelSelection?: NativeChildModelSelection
+  /** Creation-only registry cancellation; a published run retains the original caller signal. */
+  readonly resolvedCreationSignal?: AbortSignal
 }
 ```
 
@@ -291,11 +316,26 @@ type SubagentDescendantListEntry = SubagentListEntry & {
 
 单次 run 的最终产出，由 `SubagentRun.result` resolve。`structured` 仅在请求了 `outputSchema` 且成功满足时才存在；请求 schema 不保证一定能得到它，当子 agent 失败或结束时未产出有效 capture 时，提供方可能返回 `stopReason: 'error'`。提供方可以为非 `completed` 结果附带安全且不属于 assistant 内容的 `diagnostic`；在消费方将它与 `output` 分开呈现前，提供方会排除工具输入、文件内容、环境值、凭证与原始协议载荷，并把完整值限制在 4096 个 UTF-8 字节以内。非 `completed` 的 `stopReason` 意味着 `output` 可能不完整——消费方将其映射为 `isError` 的工具结果，而非将部分输出报告为成功。
 
+对于仅分析子 agent，`analysis` 报告本地流准入次数与保留的序列化 chunk 字节数，而不是提供方费用或已验证的任务结果。失败尝试和重试会消耗调用准入次数。被拒绝的 chunk 字节数单独报告；其 token 与费用仍未知。上层所有者负责持久化任务预算凭据。
+
+```ts type-equiv
+/** Local counters, not provider charges, verified progress, or durable task-budget receipts. */
+interface NativeAnalysisUsage {
+  readonly admittedModelCalls: number
+  readonly retainedOutputBytes: number
+  /** Size of the received chunk refused at the byte limit; its tokens/cost remain unknown. */
+  readonly rejectedChunkBytes?: number
+  readonly limitHit?: 'model-calls' | 'output-bytes'
+}
+```
+
 ```ts type-equiv
 /**
  * The terminal outcome of a subagent run, resolved by {@link SubagentRun.result}.
  */
 interface SubagentResult {
+  /** Present only for analysis-only native children; the higher owner must persist task budget receipts. */
+  readonly analysis?: NativeAnalysisUsage
   /**
    * The child's final assistant output is the content of its last non-empty
    * assistant message. Empty-content messages, including usage-only messages,
@@ -425,6 +465,8 @@ interface SubagentProvider {
    * is detached immutable data and requires `agentOptions` support.
    */
   readonly agentRouteDefaults?: Readonly<{ provider: string; model: string }>
+  /** Trusted provider-side native creation ownership; external AgentOptions support alone does not enable Auto. */
+  readonly nativeModelSelection?: 'spawn' | 'fork'
   /**
    * Establish a ONE-SHOT child and return its handle after publication.
    * The service has already validated that every requested start-time

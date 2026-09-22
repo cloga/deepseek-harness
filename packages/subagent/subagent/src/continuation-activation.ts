@@ -32,6 +32,8 @@ import {
 import type { DelegatedPolicyOverrides } from './child-agent.ts'
 import { createSettlementMessage } from './continuation-messages.ts'
 import type { SubagentDescriptorData } from './descriptor.ts'
+import { appendNativeChildSelection } from './native-model-selection.ts'
+import type { NativeChildModelSelection } from './native-model-selection.ts'
 import { SubagentError } from './error.ts'
 import { SubagentInbox } from './inbox.ts'
 import type { SubagentDelivery } from './inbox.ts'
@@ -101,6 +103,8 @@ export interface MaterializeInputs {
     delegatedPolicies: DelegatedPolicyOverrides
     /** Child-owned composition record appended after the inherited marker. */
     descriptor: SubagentDescriptorData
+    /** Resolved native creation evidence, absent for legacy/custom providers. */
+    modelSelection?: NativeChildModelSelection
   }
   agentOptions: AgentOptions
   composition: { persona?: string | undefined; toolFilter?: ToolRestriction | undefined }
@@ -582,6 +586,7 @@ export class ContinuableActivationRegistry {
       if (create !== undefined) {
         child.session.append('subagent/descriptor', create.descriptor)
         appendDelegatedPolicyOverrides(child.session, create.delegatedPolicies)
+        if (create.modelSelection !== undefined) appendNativeChildSelection(childCtx, child.session, create.modelSelection)
       }
       applyChildComposition(childCtx, parent, inputs.composition)
     }

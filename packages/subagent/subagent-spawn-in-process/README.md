@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-subagent-spawn-in-process` is an in-process subagent backend: it runs each delegated task in a fresh child agent that shares this process and its agent factory, LLM, and tool services. The child starts with an empty conversation, so a task prompt must stand alone; it inherits the parent's working directory, session lineage, provider, model, reasoning effort, and output-token limit unless `request.agentOptions` overrides them. A delegation tool or API call reaches it under the `spawn` provider name. Choose it for the cheapest delegation transport; choose the fork backend when the child must build on the parent's completed conversation turns.
+`dsh-subagent-spawn-in-process` runs delegated tasks in fresh child agents sharing this process and its agent factory, LLM, and tool services. The child starts with an empty conversation, so its task prompt must stand alone. It inherits the parent's working directory and session lineage; native selection resolves its model, effort and output-token cap before creation. Delegation tools and API calls use the `spawn` provider name. Choose it for the cheapest delegation transport; choose fork when the child needs the parent's completed conversation turns.
 
 ## Table of Contents
 
@@ -29,7 +29,7 @@ Mount this backend in a composition that delegates work to fresh in-process chil
 
 ### When to choose it
 
-Choose the spawn backend when the child needs no parent conversation and running in this process is acceptable. Avoid it when the child must build on completed parent turns — the fork backend seeds that history — or when the child must run outside this process, which the out-of-process backends provide. Because the child inherits the parent's working directory and LLM selection by default, a self-contained prompt behaves exactly as written.
+Choose the spawn backend when the child needs no parent conversation and running in this process is acceptable. Avoid it when the child must build on completed parent turns — the fork backend seeds that history — or when the child must run outside this process, which the out-of-process backends provide. The child keeps the parent's working directory; explicit defaults, exact parent rules and authorized task-aware Auto follow the [shared native selection contract](../subagent/README.md#native-model-selection). None imports the parent's conversation.
 
 ### Minimal configuration
 
@@ -80,7 +80,7 @@ A start request resolves through the subagent service, then the shared driver va
 
 ### Ownership and scope
 
-The child gets a fresh flat registration scope: parent tool restrictions and authority are never imported, and the filter the tool applies is composition, not a parent-derived grant. The backend advertises all five start-time capabilities, including `agentOptions`, because it controls the child's creation window and can enforce each one.
+The child gets a fresh registration scope; its tool filter is composition, not a grant derived from copied conversation. Explicitly captured sandbox/approval state and child-route authorization are seeded separately by the shared service. The backend advertises all five start-time capabilities, including `agentOptions`, because it controls the child's creation window and can enforce each one.
 
 </details>
 
@@ -106,7 +106,7 @@ Read these pages when the package-level contract is not enough; they move from t
 
 #### What the model sees
 
-The fresh child receives the task content verbatim as its only user message in a new empty conversation, with the parent provider, model, reasoning effort, output-token limit, and working directory by default. A configured persona shadows global prompt text in the child's scope; a tool filter removes named global tools from its schemas, executable lookup, and PTC mode SDK bindings while leaving independently registered guidance. No parent conversation message is included; the filter is composition, not an inherited authority grant.
+The fresh child receives the task content verbatim as its only user message in a new empty conversation, with the registry-resolved provider, model, reasoning effort and output-token limit, plus the parent's working directory. A configured persona shadows global prompt text in the child's scope; a tool filter removes named global tools from its schemas, executable lookup, and PTC mode SDK bindings while leaving independently registered guidance. No parent conversation message is included; the filter is composition, not an inherited authority grant.
 
 #### Token effect
 
@@ -137,7 +137,7 @@ Append-only; newly visible content follows the reusable request prefix and does 
 
 These limits define when the backend is the wrong choice; they are current package constraints.
 
-- **Fresh means no parent transcript** — the child inherits cwd, lineage, provider, model, reasoning effort, output-token limit, and explicitly configured persona or tool restrictions, but none of the parent's conversation; use the fork backend when completed-turn context is required.
+- **Fresh means no parent transcript** — the child receives cwd, lineage, resolved model options and explicitly configured persona or tool restrictions, but none of the parent's conversation; use the fork backend when completed-turn context is required.
 
 <a id="dev-note"></a>
 ### Dev Note

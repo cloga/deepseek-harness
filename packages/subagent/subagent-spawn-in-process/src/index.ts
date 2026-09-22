@@ -39,6 +39,7 @@ export const Config: z<Config> = z.object({
  * shadowing persona section, applied in the child's creation window).
  */
 class SpawnInProcessProvider implements SubagentProvider {
+  readonly nativeModelSelection = 'spawn' as const
   readonly capabilities: SubagentCapabilities = {
     agentOptions: true,
     outputSchema: true,

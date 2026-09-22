@@ -152,6 +152,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Adapters register provider implementations; the loop and compaction call the provider-neutral stream service.',
   },
   {
+    key: 'modelRouting',
+    pkg: 'model-routing',
+    title: 'Captured task-aware model routing',
+    mode: 'core',
+    consumers: ['api-session-controller', 'subagent'],
+    note: 'Captures Session Auto policy and resolves provider, model and effort before prompt assembly. The native registry owns permission intersection; optional learning weights cannot replace hard policy or the active task.',
+  },
+  {
     key: 'deepseekLlmApiExtensions',
     pkg: 'deepseek-llm-api-extensions',
     title: 'Official DeepSeek request extensions',

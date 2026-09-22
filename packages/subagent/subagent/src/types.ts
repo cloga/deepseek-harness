@@ -15,6 +15,8 @@ import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { ObjectJsonSchema, ToolRestriction } from '@deepseek-ai/dsh-tools'
 import type { SubagentDescriptorData } from './descriptor.ts'
+import type { DelegatedPolicyOverrides } from './child-agent.ts'
+import type { NativeChildModelSelection } from './native-model-selection.ts'
 
 /** Identifies one accepted subagent run across its lifecycle event pair. */
 export type SubagentRunId = Branded<'SubagentRunId'>
@@ -44,7 +46,7 @@ export interface ContinuableStartSpec {
    * The delegation request. The manager reserves the stable child id, resolves
    * the durable descriptor, and composes the child itself.
    */
-  readonly request: Omit<SubagentStartRequest, 'label' | 'signal' | 'outputSchema'>
+  readonly request: Omit<SubagentStartRequest, 'label' | 'signal' | 'outputSchema' | 'analysisPolicy'>
   /** Caller cancellation, owning the operation only until inbox acceptance. */
   readonly signal: AbortSignal
 }
@@ -135,6 +137,24 @@ export interface SubagentCapabilities {
   readonly persona: boolean
 }
 
+/** Fixed fresh one-shot analysis policy; this grants no model or filesystem authority. */
+export interface NativeAnalysisPolicy {
+  readonly kind: 'analysis-only'
+  /** Maximum downstream model-stream admissions, including failed attempts and retries. */
+  readonly maxModelCalls: number
+  /** Aggregate serialized received chunks retained across all admitted model attempts. */
+  readonly maxOutputBytes: number
+}
+
+/** Local counters, not provider charges, verified progress, or durable task-budget receipts. */
+export interface NativeAnalysisUsage {
+  readonly admittedModelCalls: number
+  readonly retainedOutputBytes: number
+  /** Size of the received chunk refused at the byte limit; its tokens/cost remain unknown. */
+  readonly rejectedChunkBytes?: number
+  readonly limitHit?: 'model-calls' | 'output-bytes'
+}
+
 /**
  * What a caller asks for when starting a ONE-SHOT subagent. The tool layer
  * builds this from the model's `{ description, prompt }` plus its own config;
@@ -169,6 +189,10 @@ export interface SubagentStartRequest {
    * before initializing the separate child runtime.
    */
   readonly agentOptions?: AgentOptions
+  /** Deny-only consumer opt-out; omission never grants authority absent the captured parent allowlist. */
+  readonly disableAutoModelSelection?: true
+  /** Closed no-tools mode; native fresh one-shot only, explicit route/maxTokens and parent permission required. */
+  readonly analysisPolicy?: NativeAnalysisPolicy
   /**
    * Object-rooted JSON Schema within `assertObjectJsonSchema`'s enforced subset. Start rejects
    * unsupported schemas or providers without the capability. Data must be plain host-realm JSON;
@@ -207,6 +231,14 @@ export interface SubagentStartRequest {
 export interface ResolvedSubagentStartRequest extends SubagentStartRequest {
   /** Detached descriptor a session-backed provider persists in the child log. */
   readonly descriptor: SubagentDescriptorData
+  /** Registry-owned complete native options; an omitted effort must not inherit again. */
+  readonly resolvedAgentOptions?: AgentOptions
+  /** Registry-owned permission snapshot captured before asynchronous native selection. */
+  readonly resolvedDelegatedPolicies?: DelegatedPolicyOverrides
+  /** Registry-owned creation evidence and child delegation context. */
+  readonly resolvedModelSelection?: NativeChildModelSelection
+  /** Creation-only registry cancellation; a published run retains the original caller signal. */
+  readonly resolvedCreationSignal?: AbortSignal
 }
 
 /**
@@ -269,6 +301,8 @@ export type SubagentStopReason = SubagentStopReasonMap[keyof SubagentStopReasonM
  * The terminal outcome of a subagent run, resolved by {@link SubagentRun.result}.
  */
 export interface SubagentResult {
+  /** Present only for analysis-only native children; the higher owner must persist task budget receipts. */
+  readonly analysis?: NativeAnalysisUsage
   /**
    * The child's final assistant output is the content of its last non-empty
    * assistant message. Empty-content messages, including usage-only messages,
@@ -359,6 +393,8 @@ export interface SubagentProvider {
    * is detached immutable data and requires `agentOptions` support.
    */
   readonly agentRouteDefaults?: Readonly<{ provider: string; model: string }>
+  /** Trusted provider-side native creation ownership; external AgentOptions support alone does not enable Auto. */
+  readonly nativeModelSelection?: 'spawn' | 'fork'
   /**
    * Establish a ONE-SHOT child and return its handle after publication.
    * The service has already validated that every requested start-time

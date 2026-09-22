@@ -101,7 +101,16 @@ export function resolveChildAgentOptions(
   requested: AgentOptions | undefined,
   childDepth: number,
 ): AgentOptions {
-  const parentOptions = parentAgentOptionsForDelegation(parent)
+  return { ...mergeChildAgentOptions(parentAgentOptionsForDelegation(parent), requested), subagentDepth: childDepth }
+}
+
+/**
+ * Merge child overrides over captured parent options without reading a live Agent.
+ * @param parentOptions - Direct-parent options captured before asynchronous selection.
+ * @param requested - Configured or explicit child options.
+ * @returns Complete child options without depth stamping.
+ */
+export function mergeChildAgentOptions(parentOptions: AgentOptions, requested: AgentOptions | undefined): AgentOptions {
   const parentProvider = parentOptions.provider
   const parentModel = parentOptions.model
   const parentReasoningEffort = parentOptions.reasoningEffort
@@ -112,7 +121,6 @@ export function resolveChildAgentOptions(
     ...parentReasoningEffort !== undefined ? { reasoningEffort: parentReasoningEffort } : {},
     ...parentMaxTokens !== undefined ? { maxTokens: parentMaxTokens } : {},
     ...requested,
-    subagentDepth: childDepth,
   }
   const routeChanged = resolved.provider !== parentProvider || resolved.model !== parentModel
   if (routeChanged && requested?.reasoningEffort === undefined) delete resolved.reasoningEffort

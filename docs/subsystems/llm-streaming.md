@@ -6,6 +6,12 @@ The conversation and streaming types from [`packages/llm`](../../packages/llm/RE
 
 Source: [`packages/llm/llm/src/types.ts`](../../packages/llm/llm/src/types.ts)
 
+## Auto routing and attempt observation
+
+[`model-routing`](../../packages/llm/model-routing/README.md) owns `ModelRoutingMode` and `ctx.modelRouting`: an explicit Session choice captures the human-authored candidate policy, and a bounded classifier selects provider, model and reasoning effort before prompt assembly. `DelegationRoutingCapture`, `ResolveDelegationRoutingRequest` and `ResolvedDelegationRouting` carry isolated fresh-child routing proposals; native creation separately enforces the captured parent allowlist. A proposal is not evidence of actual dispatch. An optional `LearningWeightProvider` can supply only a validated bounded weight reduction for a confident new main task; it cannot replace routes, permissions or quality floors, and changing it does not reroute existing tasks. Evidence approval, persistence and UI belong to the higher learning owner.
+
+`LlmAdapterAttemptObserver`, declared in [`adapter-attempt.ts`](../../packages/llm/llm/src/adapter-attempt.ts), observes the resolved adapter boundary rather than logical `llm/stream` requests. Its immutable start/end facts omit prompts, tool content and error details; the end separates settlement, teardown, terminal kind and last reported cumulative usage. Replay and preflight do not fabricate adapter dispatch. Successful `return()` is not full exhaustion, missing usage is not zero, and adapter dispatch does not prove exact billing or expose SDK-internal retries. Complete task accounting additionally requires producer-owned attribution and joined auxiliary work. Removing a registration prevents future starts but allows captured terminal callbacks to settle.
+
 <a id="content-blocks-and-messages"></a>
 
 ## Content blocks and messages
@@ -618,7 +624,7 @@ interface GenerateOptions {
    * map the purpose to model-hidden transport metadata or purpose-specific
    * generation policy. Ordinary conversation requests leave it unset.
    */
-  purpose?: 'compaction' | 'session-title'
+  purpose?: 'compaction' | 'session-title' | 'model-routing'
 }
 ```
 
@@ -897,6 +903,15 @@ The abstract `llm` service: an adapter registry plus a streaming model-call API,
 
 ```ts cordis-catalog
 /**
+ * Observe actual adapter dispatch after local preflight, not logical stream calls
+ * or replay. This does not attest network billing, SDK-internal retries, or task
+ * ownership. Observers receive only detached selection and usage facts.
+ * @param observer - Synchronous correlation capture, optionally returning a terminal callback.
+ * @returns Fiber-owned disposer; already captured terminal callbacks still settle after teardown.
+ */
+observeAdapterAttempts(observer: LlmAdapterAttemptObserver): () => void
+
+/**
  * Register an adapter for the given provider routes. Throws `LlmError` with code
  * `DUPLICATE_ADAPTER` if any provider already has an adapter (all-or-nothing).
  * Disposed with the fiber.
@@ -1046,6 +1061,57 @@ stream(options: GenerateOptions): AsyncIterable<StreamChunk>
 Types: [FileAttachmentRef](attachment.md)
 
 Source: [`packages/llm/llm/src/index.ts`](../../packages/llm/llm/src/index.ts)
+
+<a id="ctxmodelrouting--modelroutingruntime"></a>
+
+### `ctx.modelRouting` — `ModelRoutingRuntime`
+
+Host service whose durable policies change only through an explicit Session choice.
+
+```ts cordis-catalog
+/**
+ * Register one optional local weight owner without changing the captured human policy.
+ * Registration belongs to the calling Fiber; existing task bindings are never revisited.
+ * @param provider - Synchronous evidence-authorized lookup and bounded change ceiling.
+ * @returns A disposer that prevents future new-task lookups.
+ */
+registerLearningWeights(provider: LearningWeightProvider): () => void
+
+/**
+ * Report configuration readiness without network access or predicting a model.
+ * @returns Whether future explicit Auto selections have the required configuration.
+ */
+isAvailable(): boolean
+
+/**
+ * Validate classifier/conservative routes, then capture the current policy for one Session.
+ * Subsequent settings edits do not replace this durable selection.
+ * @param agent - Exact live top-level Agent receiving the user's opt-in.
+ * @param mode - Selected policy tradeoff.
+ * @param signal - Optional cancellation before the intent commit.
+ * @returns Fulfillment after the Auto intent is appended; no model call is made.
+ */
+async enable(agent: Agent, mode: ModelRoutingMode, signal?: AbortSignal): Promise<void>
+
+/**
+ * Capture an ordinary parent's Auto intent or a child's creation-owned delegation preference.
+ * @param parent - Exact live direct parent of the proposed delegation.
+ * @returns Detached policy and parent-local identity, or undefined when Auto is inapplicable.
+ */
+captureDelegation(parent: Agent): DelegationRoutingCapture | undefined
+
+/**
+ * Resolve an isolated child proposal without changing the parent's conversation route.
+ * The native owner separately enforces authorization and child-creation admission.
+ * @param request - Captured parent policy, authorized IDs and isolated child input.
+ * @returns A materialized model/effort proposal with classifier-audit attribution.
+ */
+resolveDelegation(request: ResolveDelegationRoutingRequest): Promise<ResolvedDelegationRouting>
+```
+
+Types: [Agent](core.md)
+
+Source: [`packages/llm/model-routing/src/runtime.ts`](../../packages/llm/model-routing/src/runtime.ts)
 
 <a id="llm-events"></a>
 

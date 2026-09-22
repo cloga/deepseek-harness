@@ -3,7 +3,10 @@ import { Context } from '@deepseek-ai/cordis'
 import { createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
-import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { RoutingCallId, RoutingClassificationOutcome } from '@deepseek-ai/dsh-model-routing'
+import { tokenUsageProjectionDefinition } from '../src/usage-projection.ts'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import type { ContextPressureProjection, TokenUsageProjection } from '@deepseek-ai/dsh-token-meter/client'
@@ -92,6 +95,175 @@ function appendSummaryMeter(ctx: Context, session: Session, start: SessionSeq, e
     model: 'mock',
   })
 }
+
+function routingRequest(session: Session, id: string): SessionEvent<'model/routing-request'> {
+  return session.append('model/routing-request', {
+    callId: id as RoutingCallId,
+    intentSeq: SessionSeq(0),
+    taskText: 'classify this bounded task',
+    config: { provider: 'mock', model: 'classifier', maxTokens: 100 },
+    system: 'classify',
+    messages: [],
+  })
+}
+
+function routingResult(
+  session: Session,
+  request: SessionEvent<'model/routing-request'>,
+  usage?: TokenUsage,
+  outcome: RoutingClassificationOutcome = 'success',
+): SessionEvent<'model/routing-result'> {
+  return session.append('model/routing-result', {
+    callId: request.data.callId,
+    outcome,
+    stream: usage === undefined ? [] : [{ type: 'chunk', time: 0, chunk: { type: 'usage', usage } }],
+    ...outcome === 'success'
+      ? { classification: { continuity: 'new-task', complexity: 'routine', confidence: 1, reasonCode: 'new-task' } }
+      : {},
+    ...usage === undefined ? {} : { usage },
+  })
+}
+
+describe('tokenUsage routing overhead', () => {
+  it('adds routing usage once while preserving the Assistant replacement slot and context pressure', async () => {
+    const { ctx, session } = await harness()
+    try {
+      startStep(session, 1, 1)
+      usageChunk(session, { inputTokens: 10, outputTokens: 2, cacheReadTokens: 3 }, 1, 1)
+      const beforePressure = pressure(ctx, session)
+      const request = routingRequest(session, 'routing-interleaved')
+      routingResult(session, request, { inputTokens: 4, outputTokens: 1, cacheReadTokens: 2 })
+      expect(pressure(ctx, session)).toEqual(beforePressure)
+      finalUsage(session, { inputTokens: 14, outputTokens: 5, cacheReadTokens: 8 }, 1, 1)
+      expect(projected(ctx, session)).toEqual({
+        uncachedInputTokens: 18, outputTokens: 6, cacheReadTokens: 10, cacheWriteTokens: 0,
+        routing: {
+          uncachedInputTokens: 4, outputTokens: 1, cacheReadTokens: 2, cacheWriteTokens: 0,
+          startedCalls: 1, settledCalls: 1, usageReportedCalls: 1,
+        },
+      })
+      expect(pressure(ctx, session).pressureTokens).toBe(22)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it.each(['success', 'provider-error', 'aborted', 'timeout', 'output-limit'] as const)(
+    'includes observed %s usage without inventing a conversation sample', async (outcome) => {
+      const { ctx, session } = await harness()
+      try {
+        const request = routingRequest(session, `routing-${outcome}`)
+        routingResult(session, request, {
+          inputTokens: 7, outputTokens: 3, cacheReadTokens: 2, cacheWriteTokens: 1, reasoningTokens: 2,
+        }, outcome)
+        expect(projected(ctx, session)).toEqual({
+          uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 2, cacheWriteTokens: 1,
+          routing: {
+            uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 2, cacheWriteTokens: 1,
+            startedCalls: 1, settledCalls: 1, usageReportedCalls: 1,
+          },
+        })
+        expect(pressure(ctx, session)).toEqual({})
+        expect(ctx.tokenMeter.measure(session).totalTokens).toBe(0)
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    },
+  )
+
+  it('distinguishes unfinished and unreported calls without synthesizing their token usage', async () => {
+    const { ctx, session } = await harness()
+    try {
+      expect(projected(ctx, session)).not.toHaveProperty('routing')
+      const first = routingRequest(session, 'routing-unreported')
+      expect(projected(ctx, session)).toEqual({
+        ...ZERO, routing: { ...ZERO, startedCalls: 1, settledCalls: 0, usageReportedCalls: 0 },
+      })
+      routingResult(session, first, undefined, 'provider-error')
+      routingRequest(session, 'routing-unfinished')
+      expect(projected(ctx, session)).toEqual({
+        ...ZERO, routing: { ...ZERO, startedCalls: 2, settledCalls: 1, usageReportedCalls: 0 },
+      })
+      expect(pressure(ctx, session)).toEqual({})
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps retry replacement semantics independent from routing settlements', async () => {
+    const { ctx, session } = await harness()
+    try {
+      startStep(session, 1, 1)
+      usageChunk(session, { inputTokens: 10, outputTokens: 2 }, 1, 1)
+      const first = routingRequest(session, 'routing-before-retry')
+      routingResult(session, first, { inputTokens: 4, outputTokens: 1 })
+      session.append('llm/retry-started', {
+        retryId: RetryId('routing-accounting-retry'), turn: 1, step: 1, retry: 1,
+      })
+      usageChunk(session, { inputTokens: 12, outputTokens: 3 }, 1, 1)
+      const second = routingRequest(session, 'routing-during-retry')
+      routingResult(session, second, undefined, 'aborted')
+      finalUsage(session, { inputTokens: 14, outputTokens: 5 }, 1, 1)
+      expect(projected(ctx, session)).toEqual({
+        ...ZERO, uncachedInputTokens: 28, outputTokens: 8,
+        routing: { ...ZERO, uncachedInputTokens: 4, outputTokens: 1, startedCalls: 2, settledCalls: 2, usageReportedCalls: 1 },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('folds each routing event sequence once and reproduces its view after JSON replay', async () => {
+    const { ctx, session } = await harness()
+    try {
+      const first = routingRequest(session, 'routing-replay-first')
+      const settled = routingResult(session, first, { inputTokens: 4, outputTokens: 1 })
+      const later = routingRequest(session, 'routing-replay-pending')
+      const events = [first, settled, later]
+      const definition = tokenUsageProjectionDefinition
+      let state: Parameters<typeof definition.apply>[0] = definition.init()
+      state = definition.apply(state, first)
+      expect(definition.apply(state, first)).toBe(state)
+      state = definition.apply(state, settled)
+      expect(definition.apply(state, settled)).toBe(state)
+      state = definition.apply(state, later)
+      expect(definition.apply(state, settled)).toBe(state)
+      const restored = definition.stateSchema.parse(JSON.parse(JSON.stringify(state)))
+      expect(definition.apply(restored, settled)).toBe(restored)
+      const decoded = JSON.parse(JSON.stringify(events)) as SessionEvent[]
+      let replay: Parameters<typeof definition.apply>[0] = definition.init()
+      for (const event of decoded) replay = definition.apply(replay, event)
+      expect(definition.wire.view(replay)).toEqual(definition.wire.view(state))
+      const view: TokenUsageProjection = definition.wire.view(replay)
+      expect(view).toEqual(projected(ctx, session))
+      expect(view.routing).not.toHaveProperty('lastSeq')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('checkpoints routing counters under the revised tokenUsage cache version and removes them on disposal', async () => {
+    const { ctx, session, meterFiber } = await harness()
+    try {
+      const first = routingRequest(session, 'routing-checkpoint')
+      routingResult(session, first, { inputTokens: 8, outputTokens: 2 })
+      routingRequest(session, 'routing-checkpoint-pending')
+      const before = projected(ctx, session)
+      const checkpoint = JSON.parse(JSON.stringify(
+        ctx.sessionProjections.checkpoint(session),
+      )) as ReturnType<typeof ctx.sessionProjections.checkpoint>
+      expect(checkpoint.tokenUsage?.ver).toBe(3)
+      expect(checkpoint.contextPressure?.ver).toBe(5)
+      await meterFiber.dispose()
+      expect(ctx.sessionProjections.snapshot(session).values).not.toHaveProperty('tokenUsage')
+      await ctx.plugin(TokenMeter)
+      expect(ctx.sessionProjections.viewCheckpoint(checkpoint).tokenUsage).toEqual(before)
+      expect(ctx.sessionProjections.viewCheckpoint(checkpoint).contextPressure).toEqual({})
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
 
 describe('tokenUsage session projection', () => {
   it('serves zero buckets without usage samples', async () => {

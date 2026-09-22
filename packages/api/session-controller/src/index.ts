@@ -51,6 +51,8 @@ import type {
   SessionSearchValue,
   SessionSelectModelRequest,
   SessionSelectModelValue,
+  SessionSelectAutoModelRequest,
+  SessionSelectAutoModelValue,
   SessionUpdateQueueRequest,
   SessionUpdateQueueValue,
 } from './types.ts'
@@ -165,6 +167,14 @@ export class SessionController extends TypertRemoteService {
           event.data.header.config.reasoningEffort,
         )
       }
+      if (event.type === 'model/auto-selection') {
+        const agent = ctx.agents.get(session.id)
+        const routing = ctx.sessionProjections.stateOf(session, 'modelRouting')
+        if (agent?.session === session && routing?.intent.kind === 'auto' && routing.intent.seq === event.seq) {
+          const selected = this.agents.selectionFor(agent).current
+          this.agents.consumeSelection(agent, selected.provider, selected.model, selected.reasoningEffort)
+        }
+      }
       if (event.type !== 'user/message' || event.data.source.kind !== 'user') return
       ctx.emit('api-session/activity', session.id, event.time)
     })
@@ -254,6 +264,17 @@ export class SessionController extends TypertRemoteService {
   @Remote('selectModel')
   selectModel(request: SessionSelectModelRequest): Promise<SessionSelectModelValue> {
     return this.commands.selectModel(request)
+  }
+
+  /**
+   * Select a Session-local Auto mode without changing the deployment's concrete default.
+   * @param request - Ordinary Session identity and requested Auto tradeoff.
+   * @param signal - Caller cancellation before intent commitment.
+   * @returns The accepted mode; actual model use remains a durable request fact.
+   */
+  @Remote('selectAutoModel')
+  selectAutoModel(request: SessionSelectAutoModelRequest, signal: AbortSignal): Promise<SessionSelectAutoModelValue> {
+    return this.commands.selectAutoModel(request, signal)
   }
 
   /**

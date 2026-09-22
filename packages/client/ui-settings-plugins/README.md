@@ -25,7 +25,7 @@ Use the **Plugins** settings section to configure the plugins exposed by the cur
 <a id="use-this-package"></a>
 ## Use this package
 
-Open the Plugins section in Settings and select the **Plugin configuration** tab to edit the host-plane plugins this deployment composes. The cards appear in this order: the shell executor (`bash`), the agent loop's tool-call parallelism (`agent-loop`), subagent model selection (`subagent-model-selection`), and the DeepSeek search provider (`web-search-deepseek`).
+Open the Plugins section in Settings and select the **Plugin configuration** tab to edit the host-plane plugins this deployment composes. The cards appear in this order: the shell executor (`shell`), the agent loop's tool-call parallelism (`agent-loop`), subagent model selection (`subagent-model-selection`), Auto model routing (`model-routing`), and the DeepSeek search provider (`web-search-deepseek`).
 
 ### What appears here
 
@@ -36,6 +36,16 @@ The tab reads which settings namespaces the Host serves and dispatches one slot 
 A card stages what the user types and writes it only when they save. Each control renders staged text, so what is on screen is exactly what a save would store; **Discard** drops the drafts, and a card holding unsaved edits says so on its header even while collapsed. A successful save collapses the card after the read-back confirms the writes; a failed save keeps the card open, reports the failure, and retains the drafts for correction. A reset stages the composed default rather than writing immediately, and a draft the field does not accept blocks the save instead of being dropped. The Host is the only authority on whether a value was accepted.
 
 The Subagent card stages its permission switch and exact model checkboxes together. Enabling requires at least one selected adapter route. Saving submits `enabled` and `allowedModels` in one mutation fenced by the revision where that draft began; a newer Host revision marks the draft failed instead of restoring a revoked route. Disabling retains the selected routes for later reuse. Available models are grouped by provider, while saved routes absent from the current catalog appear last and remain removable. Adapter names and model descriptions remain live directory metadata and are not stored, and the card refreshes them after adapter changes, settings commits, and reconnects.
+
+### Auto model routing
+
+The Auto card configures the [Host routing owner](../../llm/model-routing/README.md) through the `model-routing` namespace. It exposes the enable switch, candidate ids and exact model/effort combinations, user-assigned quality ranks and relative cost weights, the conservative candidate, classifier route and budgets, mode/task quality floors, and confidence threshold. Model and effort choices come from the Host catalog; neither model names nor catalog defaults determine a candidate's quality or cost. Relative weights are not token prices or benchmark results. Editing this namespace does not change the separate subagent route allowlist.
+
+Provider-default effort remains an omitted value, distinct from an explicit effort. Re-selecting the same model preserves its staged effort; changing the model clears that route-owned effort. Duplicate exact provider/model/effort combinations are rejected, while different efforts for one model remain valid candidates. The explicit suggestions button stages visible editable floors, confidence, and limits only; it does not choose routes, efforts, quality ranks, or weights. The owning routing package documents policy validation rather than this card duplicating its full schema.
+
+Save atomically replaces the credential-free namespace under the revision captured when editing began. A complete configuration is required to enable routing. Disabled settings may omit policy and classifier sections, but an invalid partial section remains a draft: switching off does not silently discard existing configuration. Discard restores current saved values; explicit reset stages the deployment layer and, on save, removes the user override. Read-only state blocks mutation, competing revisions retain a visible conflict, and a failed save retains edits with safe diagnostics.
+
+Catalog loading, errors, and provider-local failures are shown separately. Saved unavailable models or efforts remain visible and repairable; catalog disappearance does not delete them or expand authorization. Provider, settings, and credential changes refresh metadata without replacing drafts; reconnect discards Host-generation-specific drafts and reloads. Saving neither invokes the paid classifier nor installs or restarts anything. Existing Sessions retain their captured policy; users explicitly reselect Auto to capture changed settings. This card provides no recovery or personalization controls.
 
 ### Secret-role fields
 
@@ -59,6 +69,8 @@ The section declares `settings.plugins.tab`, a root list slot whose labels becom
 
 Saving writes staged fields through the client settings scope, which fences each write or ordered mutation with the namespace revision the draft read, so a form that has drifted from the document is refused rather than overwriting a concurrent change. A field's presence in the raw user layer — not its value — is what marks it overridden; a reset clears that field so it re-inherits the composition layer. Secret-role fields never ride a response; the card re-reads on the forwarded `credentials/reference-updated` event for the reference it watches.
 
+The Auto card's controller owns drafts and the revision fence; the settings scope remains the Host-state mirror. Its registration injects a private observable through `hooks.autoModelRoutingCard`, which the renderer binds as `useAutoModelRoutingCard`, plus plain edit callbacks. The component has no direct external-store subscription or Host service/parser dependency. Disposal invalidates pending catalog and save settlements and removes subscriptions; a reconnect starts a new draft and catalog generation.
+
 </details>
 
 -----
@@ -73,6 +85,8 @@ These pages cover the settings base, the inventory tab, and the durable seams be
 - [settings](../../settings/README.md) — the durable user-settings seam and its file provider.
 - [credentials](../../credentials/README.md) — the credential-reference seam secret fields write through.
 - [ui-settings-general](../ui-settings-general/README.md) — the settings shell hosting this section.
+- [Model routing](../../llm/model-routing/README.md) — policy validation, captured Session behavior, classifier budgets, and costs.
+- [Model selection](../ui-model-selection/README.md) — choosing Auto or a manual model for an ordinary Session.
 
 -----
 
@@ -83,7 +97,7 @@ None, as the package is a browser-side settings surface that registers no model 
 
 #### KV Cache effect
 
-None; this package neither assembles nor sends a provider request.
+No direct effect; this package neither assembles nor sends a model-generation request. Saving Auto settings does not replace an existing Session's captured policy or active request prefix.
 
 ## Known Limitations and Deferred Work
 
@@ -95,7 +109,8 @@ These limits define which plugins appear and how fresh the list is; they are cur
 - **Only host-plane plugins appear** — a plugin an agent preset mounts carries its configuration inline in that preset's `agent.cordis.yml` and cannot register a settings namespace at all, so this section lists nothing for it. Editing those values remains the preset editor's job.
 - **A card still needs a browser bundle** — the browser half must be a `dsh.client` package built in the client module system's lazy-CJS factory format, and the `clientBundle` preset that emits it lives in `../../../packages/client/tsdown.client.ts` rather than a published package, so a plugin outside this repository has to reproduce that build itself.
 - **The served namespaces re-read on two signals only** — the wire announces settings-document commits and connection resets, not registrations, so a namespace whose owner registers after the tab's read joins the list on the next document commit or reconnect.
-- **The shell card follows the composed executor** — the POSIX and PowerShell executor families share the `bash` namespace because a host composes exactly one of them, so the served schema differs by platform (PowerShell adds `pwshPath`) even though the card edits the same two fields on both.
+- **The shell card edits a narrow field set** — it stages `timeoutMs` and `maxOutputBytes` from the `shell` namespace; executor-specific configuration remains with its owning shell plugin.
+- **Saved Auto choices are not a provider-health test** — unavailable stored routes remain repairable, and successful settings validation does not guarantee that a later Session Auto opt-in can resolve them.
 
 <a id="dev-note"></a>
 ### Dev Note
