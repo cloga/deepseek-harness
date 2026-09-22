@@ -123,9 +123,10 @@ describe('public semantic dock measurement with actual DOM queries', () => {
 
   it.each(['owner', 'time', 'usage', 'copilot'] as const)('waits for a nonzero %s rectangle', (kind) => {
     const fixture = dockFixture()
-    vi.mocked(fixture[kind].getBoundingClientRect).mockReturnValue(new DOMRect(200, 600, 0, 22))
+    const rectangle = vi.spyOn(fixture[kind], 'getBoundingClientRect')
+    rectangle.mockReturnValue(new DOMRect(200, 600, 0, 22))
     expect(measureNativeComposerDock(fixture.anchor)).toBeNull()
-    vi.mocked(fixture[kind].getBoundingClientRect).mockReturnValue(new DOMRect(200, 600, 100, 0))
+    rectangle.mockReturnValue(new DOMRect(200, 600, 100, 0))
     expect(measureNativeComposerDock(fixture.anchor)).toBeNull()
   })
 
