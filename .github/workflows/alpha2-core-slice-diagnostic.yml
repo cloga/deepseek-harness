@@ -1,0 +1,77 @@
+name: Alpha2 Core source slice diagnostic (internal only)
+
+on:
+  push:
+    branches: [cloga-alpha2-core-desktop-67]
+
+permissions:
+  contents: read
+
+jobs:
+  source-only:
+    name: Boot, Web carrier and Desktop Host focused tests
+    if: github.repository == 'cloga/deepseek-harness' && github.ref == 'refs/heads/cloga-alpha2-core-desktop-67'
+    runs-on: windows-2025
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+
+      - name: Require exact current task branch before installing dependencies
+        env:
+          EXPECTED_SOURCE: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:EXPECTED_SOURCE -cnotmatch '\A[a-f0-9]{40}\z') { throw 'Invalid reviewed source SHA' }
+          if ($env:GITHUB_SHA -cne $env:EXPECTED_SOURCE) { throw 'Workflow source differs from reviewed push' }
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:EXPECTED_SOURCE) { throw 'Checkout differs from reviewed source' }
+          $selected = 'refs/remotes/alpha2-source/current'
+          git fetch --no-tags origin "refs/heads/$($env:GITHUB_REF_NAME):$selected"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch current task branch without changing credentials' }
+          $selectedHead = git rev-parse $selected
+          if ($LASTEXITCODE -ne 0 -or $selectedHead -cne $head) { throw 'Task branch moved after review' }
+          $dirty = git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0 -or $dirty) { throw 'Diagnostic checkout is not clean' }
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.7.0'
+          dest: ${{ runner.temp }}/alpha2-source-pnpm
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.13.0'
+          package-manager-cache: false
+
+      - name: Install exact frozen dependencies without a release credential
+        run: |
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test only the reviewed source contracts, never package or publish
+        run: |
+          pnpm exec vitest run `
+            packages/boot/app-boot/tests/profile-pending-package.spec.ts `
+            packages/boot/app-boot/tests/profile-package-lease.spec.ts `
+            packages/boot/app-boot/tests/package-types.spec.ts `
+            packages/boot/app-boot/tests/profile-plugins.spec.ts `
+            packages/boot/app-boot/tests/profile-sanitize.spec.ts `
+            packages/boot/app-boot/tests/profile-context.spec.ts `
+            apps/desktop-host/tests/package-transactions.spec.ts `
+            apps/desktop-host/tests/desktop-plugin-command-ipc.spec.ts `
+            apps/desktop/tests/project-manager.spec.ts `
+            apps/desktop/tests/fork-release.spec.ts `
+            apps/web/tests/desktop-boot.spec.ts `
+            apps/web/tests/injection-order.spec.ts `
+            packages/api/gateway/tests/gateway.client.spec.ts `
+            --maxWorkers=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
