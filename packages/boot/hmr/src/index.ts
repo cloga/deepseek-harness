@@ -6,8 +6,7 @@ import { ModuleLoader, type ModuleJob, type ResolveResult } from '@deepseek-ai/c
 import type { Include } from '@deepseek-ai/cordis-plugin-include'
 import { FSWatcher, watch, type ChokidarOptions } from 'chokidar'
 import { basename, dirname, join, relative, resolve } from 'node:path'
-import { readFileSync } from 'node:fs'
-import { realpath } from 'node:fs/promises'
+import { readFileSync, realpathSync } from 'node:fs'
 import { readProfileManifest, readProfilePatches, reconcileProfilePatches, PROFILE_PATCH_FILENAME } from '@deepseek-ai/dsh-app-boot'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import { handleError } from './error.ts'
@@ -37,15 +36,14 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-async function canonicalPath(filename: string): Promise<string> {
-  // Keep watch registration and dispatched URLs in the same canonical spelling
-  // as the established Host watcher. On hosted Windows, synchronous realpath
-  // can return a DOS short-name prefix (RUNNER~1) for a long-name cache path.
-  try { return await realpath(filename) } catch (error) {
+function canonicalPath(filename: string): string {
+  // Match the official Node loader's module cache spelling, including Windows
+  // short-name aliases. The config watcher also records the caller's path.
+  try { return realpathSync(filename) } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     const parent = dirname(filename)
     if (parent === filename) throw error
-    return resolve(await canonicalPath(parent), basename(filename))
+    return resolve(canonicalPath(parent), basename(filename))
   }
 }
 
@@ -160,7 +158,7 @@ class Hmr extends Service {
    * @returns Disposer closing this registration and waiting for its pending refresh.
    */
   async watchConfig(filename: string, refresh: () => Promise<void>): Promise<() => Promise<void>> {
-    const paths = [resolve(filename), await canonicalPath(filename)]
+    const paths = [resolve(filename), canonicalPath(filename)]
     if (paths.some(path => this.configPaths.has(path))) throw new Error(`config path already registered: ${filename}`)
     for (const path of paths) this.configPaths.add(path)
     try {
@@ -249,7 +247,7 @@ class Hmr extends Service {
     }
 
     const match = picomatch(ignored)
-    const watchBaseDir = await realpath(this.baseDir)
+    const watchBaseDir = realpathSync(this.baseDir)
 
     // Collect externals before opening the watcher so every post-ready change
     // is observed by listeners that already have their classification state.
@@ -277,7 +275,7 @@ class Hmr extends Service {
         const includes = new Set<Include>()
         let fullReload = false
         for (const path of batch) {
-          const filename = await canonicalPath(resolve(watchBaseDir, path))
+          const filename = canonicalPath(resolve(watchBaseDir, path))
           const configuredFilename = resolve(this.baseDir, path)
           if (this.configPaths.has(filename) || this.configPaths.has(configuredFilename)) continue
           const url = pathToFileURL(filename).href

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import * as fsPromises from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -59,10 +59,10 @@ describe('HMR exact config paths', () => {
     const aliasFilename = join(alias, 'module.ts')
     symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir')
     writeFileSync(aliasFilename, 'export const generation = 0\n')
-    // This acceptance owns alias-to-cache identity. Other cases below exercise
-    // native events; polling keeps Windows fs.watch queue pressure out of it.
+    // This acceptance owns the official HMR event URL through a filesystem
+    // alias. Other cases exercise native events; polling bounds Windows pressure.
     const ctx = await bootHmr(alias, ['.'], true)
-    const filename = join(await realpath(target), 'module.ts')
+    const filename = join(realpathSync(target), 'module.ts')
     const expected = pathToFileURL(filename).href
     const cacheHas = vi.spyOn(ctx.loader.internal!.loadCache, 'has').mockReturnValue(false)
     const observed: string[] = []
