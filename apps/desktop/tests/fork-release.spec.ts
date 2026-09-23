@@ -533,7 +533,9 @@ describe('Desktop fork release plan', () => {
       },
     })
     expect(workflow.jobs['remote-check']?.permissions).toEqual({ contents: 'read' })
-    const steps = workflow.jobs.build?.steps ?? []
+    const buildWorkflow = readBuildWorkflow()
+    expect(buildWorkflow.permissions).toEqual({ contents: 'read' })
+    const steps = buildWorkflow.jobs.build!.steps
     const install = steps.findIndex(step => step.name === 'Install from frozen lockfile')
     const browser = steps.findIndex(step => step.name === 'Prepare browser for isolated Desktop acceptance')
     const packaging = steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')
