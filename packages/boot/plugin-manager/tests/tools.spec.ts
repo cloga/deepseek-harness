@@ -91,11 +91,26 @@ it.each(['read-only', 'workspace-write'] as const)('approves each action once in
   } })
   const request = audit[0]
   if (request?.type !== 'approval/asked') throw new Error('Expected an approval request')
-  expect(request.data.reason).toContain('"action":"list_plugins"')
+  expect(request.data.reason).toContain('plugin_manager list_plugins')
   expect(audit[1]).toMatchObject({ type: 'approval/decided', data: { outcome: 'allowed-once' } })
   dispose()
   expect((await call({ action: 'list_plugins' }, agent)).isError).toBe(true)
   expect(manager.listPlugins).toHaveBeenCalledTimes(1)
+})
+
+it('keeps caller source URLs and approved script names out of the durable approval reason', async () => {
+  const { ctx, call, manager } = await fixture('workspace-write', 'ask')
+  const agent = activeAgent()
+  ctx.on('approval/request', async () => 'allowed-once' as const)
+  const spec = 'https://packages.example.test/plugin.tgz?signature=private-token'
+  expect((await call({ action: 'install_bundle', target: spec, approvedBuilds: ['native'] }, agent)).isError).toBe(false)
+  expect(manager.installBundle).toHaveBeenCalledWith(spec, { approvedBuilds: ['native'] })
+  const asked = agent.session.snapshotEvents().find(event => event.type === 'approval/asked')
+  if (asked?.type !== 'approval/asked') throw new Error('Expected an owned approval request')
+  expect(asked.data.reason).toContain('plugin_manager install_bundle')
+  expect(asked.data.reason).not.toContain('private-token')
+  expect(asked.data.reason).not.toContain('https://')
+  expect(asked.data.reason).not.toContain('native')
 })
 
 it.each(['rejected', 'cancelled', 'unavailable'] as const)('does not mutate the profile when approval is %s', async (outcome) => {
@@ -150,7 +165,8 @@ it('does not apply a grant when the call was cancelled before dispatch', async (
 it('paginates inventories with an explicit continuation and total', async () => {
   const { call } = await fixture()
   const first = await call({ action: 'list_plugins' })
-  expect(first.isError).toBe(false)
+  const diagnostic = first.content.find(item => item.type === 'text')?.text
+  expect(first.isError, diagnostic).toBe(false)
   expect(JSON.stringify(first.content)).toContain('nextOffset')
   expect(JSON.parse(resultText(first))).toMatchObject({ nextOffset: 25, total: 30 })
   const last = await call({ action: 'list_plugins', offset: 25, limit: 10 })

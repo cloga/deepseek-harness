@@ -32,11 +32,16 @@ export function apply(ctx: Context): void {
     },
     async execute(args, exec) {
       const policy = ctx.sandboxPolicy.resolve(exec.agent === undefined ? {} : { session: exec.agent.session })
-      await approveEscalation({
-        requestedMode: 'danger-full-access', effectiveMode: policy.mode, subject: 'plugin management operation',
-        justification: `plugin_manager ${JSON.stringify(args)}. Profile changes persist across sessions; installed Host code runs outside the workspace sandbox.`,
-      }, { approver: ctx.get('approval'), agent: exec.agent, callId: exec.callId,
-        toolName: 'plugin_manager', signal: exec.signal })
+      // The maintained sandbox accepts only a STRICTLY wider escalation. An
+      // already-full-access caller needs no request and must not be prompted.
+      if (policy.mode !== 'danger-full-access') {
+        await approveEscalation({
+          requestedMode: 'danger-full-access', effectiveMode: policy.mode, subject: 'plugin management operation',
+          // The approval audit is durable; never copy caller-supplied source URLs or credentials into its reason.
+          justification: `plugin_manager ${args.action}. Profile changes persist across sessions; installed Host code runs outside the workspace sandbox.`,
+        }, { approver: ctx.get('approval'), agent: exec.agent, callId: exec.callId,
+          toolName: 'plugin_manager', signal: exec.signal })
+      }
       exec.signal.throwIfAborted()
       const manager = ctx.pluginManager
       switch (args.action) {
