@@ -77,6 +77,7 @@ jobs:
             packages/skill/skill-office/tests/skill-office.spec.ts `
             apps/desktop-host/tests/package-transactions.spec.ts `
             apps/desktop-host/tests/desktop-plugin-command-ipc.spec.ts `
+            apps/desktop-host/tests/desktop-plugin-command-runtime.spec.ts `
             apps/desktop-host/tests/update-impact.spec.ts `
             apps/desktop-host/tests/update-task-control.spec.ts `
             apps/cli/tests/resolved-profile-boot.spec.ts `
