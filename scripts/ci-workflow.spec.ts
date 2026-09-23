@@ -30,7 +30,8 @@ function assertDevelopmentElectronPreparation(job: Record<string, unknown>, test
 function desktopRehearsalPlanScript(workflow: Record<string, unknown>): string {
   const job = workflowJob(workflow, 'desktop-rehearsal-plan')
   if (!Array.isArray(job.steps)) throw new TypeError('Desktop rehearsal plan must define steps')
-  const step = job.steps.find(candidate => isRecord(candidate) && candidate.name === 'Select exact Desktop rehearsal source')
+  const steps = job.steps as unknown[]
+  const step = steps.find(candidate => isRecord(candidate) && candidate.name === 'Select exact Desktop rehearsal source')
   if (!isRecord(step) || typeof step.run !== 'string') throw new TypeError('Desktop rehearsal selector must define a script')
   return step.run
 }

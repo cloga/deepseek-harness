@@ -380,7 +380,7 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
   it('pins slash override actions, alpha36 descriptor, and work/cleanup deadline partition', () => {
     const fixture = readFileSync(new URL('./fixtures/desktop-plugin-command-smoke.ts', import.meta.url), 'utf8')
     const helper = readFileSync(new URL('./fixtures/desktop-plugin-native-cancel.ps1', import.meta.url), 'utf8')
-    const workflow = readFileSync(new URL('../../../.github/workflows/desktop-fork-release.yml', import.meta.url), 'utf8')
+    const workflow = readFileSync(new URL('../../../.github/workflows/desktop-fork-build.yml', import.meta.url), 'utf8')
     const alpha36 = JSON.parse(readFileSync(new URL('./fixtures/copilot-alpha36-source.json', import.meta.url), 'utf8')) as Record<string, unknown>
     expect(fixture).not.toContain('keyboard.press(')
     expect(fixture).not.toContain('plugin-manager.html')

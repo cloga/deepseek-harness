@@ -140,7 +140,7 @@ function assertReviewedSourcePin(workflow: ReleaseWorkflow): string {
     PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
   })
   expect(script).toContain("if ($env:REHEARSAL -ne 'true') { throw 'Pull-request Desktop qualification must be a rehearsal' }")
-  expect(script).toContain("refs/heads/$($env:PR_HEAD_REF):$selectedRef")
+  expect(script).toContain('refs/heads/$($env:PR_HEAD_REF):$selectedRef')
   expect(script).toContain('if ($head -ne $selected)')
   expect(script).toContain('if ($head -ne $master)')
   expect(script).toContain('if ($env:CONFIRM_VERSION -ne $plan.version)')
@@ -524,7 +524,7 @@ describe('Desktop fork release plan', () => {
       NODE_VERSION: '24.13.0',
       PNPM_VERSION: '11.7.0',
     })
-    expect(workflow.jobs.build?.permissions).toBeUndefined()
+    expect(workflow.jobs.build?.permissions).toEqual({ contents: 'read' })
     expect(workflow.jobs.release).toMatchObject({
       environment: 'desktop-fork-release',
       permissions: {
