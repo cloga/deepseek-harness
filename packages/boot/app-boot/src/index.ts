@@ -62,6 +62,10 @@ export {
   type ProfileTemplate,
 } from './profile.ts'
 export {
+  readProfilePlugins, reconcileProfilePlugins, writeProfileBundles,
+  type ProfilePluginLocation, type ProfilePluginDependency, type ProfilePluginInventory, type ProfilePluginReconciliation,
+} from './profile-plugins.ts'
+export {
   PluginPackages,
   type PluginPackage,
   type PluginPackagesConfig,
