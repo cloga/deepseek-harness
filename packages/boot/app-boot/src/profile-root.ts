@@ -38,3 +38,21 @@ export function prepareProfileRootConfig(profileDir: string): void {
   }
   writeProfileRootConfig(profileDir)
 }
+
+/**
+ * Read-only boot check for a launcher-staged application profile. The private
+ * native owner must prepare the candidate; Host startup must not repair a live
+ * profile before the stage handshake or user consent.
+ */
+export function assertPreparedProfileRootConfig(profileDir: string): void {
+  const path = join(profileDir, PROFILE_ROOT_FILENAME)
+  try {
+    const stat = lstatSync(path, { throwIfNoEntry: false })
+    if (stat === undefined || !stat.isFile() || stat.isSymbolicLink()
+      || stat.size !== Buffer.byteLength(PROFILE_ROOT_CONFIG) || readFileSync(path, 'utf8') !== PROFILE_ROOT_CONFIG) {
+      throw new Error('noncanonical')
+    }
+  } catch {
+    throw new Error('profile root: staged application requires an already sealed canonical root')
+  }
+}

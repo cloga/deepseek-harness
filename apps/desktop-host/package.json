@@ -7,9 +7,10 @@
   "type": "module",
   "main": "lib/index.js",
   "files": [
-    "lib/index.js",
+    "lib/*.js",
     "register-module-resolution-policy.mjs",
-    "config/desktop.cordis.patch.yml"
+    "config/desktop.cordis.patch.yml",
+    "config/alpha2-desktop.cordis.patch.yml"
   ],
   "dependencies": {
     "@deepseek-ai/cordis": "workspace:^",

@@ -7,7 +7,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import {
   boot, composeEntries, createProfileResolutionGeneration, healIsolatedProfileModuleFallback,
-  PluginPackages, type Profile, type ProfilePackageTransactions,
+  PluginPackages, PROFILE_ROOT_CONFIG, type Profile, type ProfilePackageTransactions,
 } from '@deepseek-ai/dsh-app-boot'
 import { installProxyFromEnvironment } from '@deepseek-ai/dsh-http-proxy'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -148,12 +148,13 @@ describe('runProfile with an application-owned profile', () => {
     },
   )
 
-  it.each(['absent', 'wrong-protocol'] as const)('refuses %s staged package authority before profile entries mount', async (kind) => {
+  it.each(['absent', 'wrong-protocol', 'unsealed-root'] as const)('refuses %s staged package authority before profile entries mount', async (kind) => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-profile-staging-refusal-'))
     homes.push(home)
     mkdirSync(join(home, 'runtime'))
     writeFileSync(join(home, 'runtime/package.json'), '{"name":"test-runtime","version":"1.0.0"}')
     writeFileSync(join(home, 'package.json'), '{"name":"test-bundle","version":"1.0.0"}')
+    if (kind !== 'unsealed-root') writeFileSync(join(home, 'cordis.yml'), PROFILE_ROOT_CONFIG)
     vi.stubEnv('DSH_HOME', home)
     vi.spyOn(process, 'on').mockReturnValue(process)
     const ctx = new Context()
@@ -177,11 +178,43 @@ describe('runProfile with an application-owned profile', () => {
         ...(kind === 'wrong-protocol' ? { prepare: (owner: Context) => {
           owner.provide('profilePackageTransactions', { protocolVersion: 2 } as unknown as ProfilePackageTransactions)
         } } : {}),
-      })).rejects.toThrow('launcher package staging is required but unavailable')
+      })).rejects.toThrow(kind === 'unsealed-root'
+        ? 'already sealed canonical root' : 'launcher package staging is required but unavailable')
       expect(mounted).not.toHaveBeenCalled()
-      expect(dispose).toHaveBeenCalledOnce()
+      if (kind === 'unsealed-root') expect(boot).not.toHaveBeenCalled()
+      expect(dispose).toHaveBeenCalledTimes(kind === 'unsealed-root' ? 0 : 1)
       expect(disposeProxy).toHaveBeenCalledOnce()
+      if (kind === 'unsealed-root') expect(existsSync(join(home, 'cordis.yml'))).toBe(false)
+      else expect(readFileSync(join(home, 'cordis.yml'), 'utf8')).toBe(PROFILE_ROOT_CONFIG)
     } finally { await ctx.fiber.dispose() }
+  })
+
+  it('calls application composition guards before Include or profile entries can activate', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-profile-owner-composition-'))
+    homes.push(home)
+    mkdirSync(join(home, 'runtime'))
+    writeFileSync(join(home, 'runtime/package.json'), '{"name":"test-runtime","version":"1.0.0"}')
+    writeFileSync(join(home, 'package.json'), '{"name":"test-bundle","version":"1.0.0"}')
+    writeFileSync(join(home, 'cordis.yml'), PROFILE_ROOT_CONFIG)
+    vi.stubEnv('DSH_HOME', home)
+    vi.spyOn(process, 'on').mockReturnValue(process)
+    const disposeProxy = vi.fn().mockResolvedValue(undefined)
+    vi.mocked(installProxyFromEnvironment).mockResolvedValue(disposeProxy)
+    const beforeCompose = vi.fn(() => { throw new Error('desktop owner rejected protected Web id') })
+    const afterCompose = vi.fn()
+    const profile: Profile = { name: 'desktop', dir: home, patchPath: join(home, 'cordis.patch.yml'),
+      layers: [], patches: [], patchReload: 'startup' }
+    await expect(runProfile({
+      environment: createLaunchEnvironmentSnapshot([]), profile: 'desktop', patchFiles: [], args: [],
+      resolvedProfile: { profile, installAnchor: join(home, 'runtime/package.json') },
+      stagedPackageTransactions: true,
+      validateComposition: { beforeCompose, afterCompose },
+    })).rejects.toThrow('desktop owner rejected protected Web id')
+    expect(beforeCompose).toHaveBeenCalledOnce()
+    expect(afterCompose).not.toHaveBeenCalled()
+    expect(boot).not.toHaveBeenCalled()
+    expect(readFileSync(join(home, 'cordis.yml'), 'utf8')).toBe(PROFILE_ROOT_CONFIG)
+    expect(disposeProxy).toHaveBeenCalledOnce()
   })
 
   it.each([
@@ -222,7 +255,8 @@ describe('runProfile with an application-owned profile', () => {
     writeFileSync(homePatch, '- id: target\n  config: { home: true, priority: home }\n')
     writeFileSync(profilePatch, '- id: target\n  config: { profile: true, priority: profile }\n')
     writeFileSync(overlay, '- id: target\n  config: { overlay: true, priority: overlay }\n')
-    writeFileSync(join(home, 'cordis.yml'), '# previously derived empty root\n[]\n')
+    writeFileSync(join(home, 'cordis.yml'), selection === 'default'
+      ? PROFILE_ROOT_CONFIG : '# previously derived empty root\n[]\n')
     const profile: Profile = {
       name: 'desktop', dir: home, patchPath: profilePatch, patchReload: 'live',
       patches: [{ id: 'target', config: { profile: true, priority: 'profile' } }],

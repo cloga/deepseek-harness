@@ -20,6 +20,7 @@ import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import {
   boot,
   assertNoLegacyHmrOverride,
+  assertPreparedProfileRootConfig,
   composeEntries,
   createProfileResolutionGeneration,
   healProfilesModuleFallback,
@@ -207,6 +208,12 @@ interface ComposedProfile {
   overlays: PatchOptions[]
 }
 
+/** Optional application-owned guards both before Include warnings and before plugin activation. */
+export interface ProfileCompositionGuard {
+  beforeCompose(patches: readonly PatchOptions[]): void
+  afterCompose(entries: readonly EntryOptions[]): void
+}
+
 /** The full patch stack of one composed profile, in application order. */
 function allPatches(composed: ComposedProfile): PatchOptions[] {
   return [
@@ -226,6 +233,8 @@ function allPatches(composed: ComposedProfile): PatchOptions[] {
  * then the telemetry switch.
  * @param name - the profile name.
  * @param patchFiles - `--patch` overlay paths, in argv order.
+ * @param stagedPackageTransactions - require an already sealed read-only root for a staged application profile.
+ * @param validateComposition - optional application-owner assertion before any composed row mounts.
  * @returns the profile and its patch layers.
  */
 async function composeProfile(
@@ -234,9 +243,14 @@ async function composeProfile(
   resolutionMode: ProfileResolutionMode,
   fromDefaultProfile?: string,
   resolvedProfile?: ResolvedProfileRuntime,
+  stagedPackageTransactions?: boolean,
+  validateComposition?: ProfileCompositionGuard,
 ): Promise<ComposedProfile> {
   const profile = resolvedProfile?.profile ?? prepareProfile(name, true, fromDefaultProfile)
-  if (resolvedProfile !== undefined) prepareProfileRootConfig(profile.dir)
+  if (resolvedProfile !== undefined) {
+    if (stagedPackageTransactions === true) assertPreparedProfileRootConfig(profile.dir)
+    else prepareProfileRootConfig(profile.dir)
+  }
   const resolutionOptions = { installAnchor: resolvedProfile?.installAnchor ?? INSTALL_ANCHOR, profile }
   if (resolvedProfile !== undefined && resolutionMode !== 'runtime') healIsolatedProfileModuleFallback(resolvedProfile)
   const resolution = resolutionMode === 'runtime' || resolvedProfile !== undefined
@@ -245,9 +259,16 @@ async function composeProfile(
   const homePatches = loadOptionalPatches(NAME, homePatchPath()) ?? []
   const overlays = patchFiles.flatMap(file => loadOverlayPatches(NAME, resolve(file)))
   const bundlePatches = profile.layers.flatMap(layer => layer.patches)
-  assertNoLegacyHmrOverride([...bundlePatches, ...profile.patches, ...homePatches, ...overlays])
+  const rawPatches = [...bundlePatches, ...profile.patches, ...homePatches, ...overlays]
+  validateComposition?.beforeCompose(rawPatches)
+  assertNoLegacyHmrOverride(rawPatches)
+  const composedEntries = composeEntries([bundlePatches, profile.patches, homePatches, overlays])
+  // Application owners inspect the exact final tree BEFORE any profile plugin
+  // mounts; a lower-layer insert with a reused id can skip a name-qualified
+  // launcher patch while leaving a credential-printing row active.
+  validateComposition?.afterCompose(composedEntries)
   const rows = new Map<string, EntryOptions>()
-  for (const row of composeEntries([bundlePatches, profile.patches, homePatches, overlays])) {
+  for (const row of composedEntries) {
     if (typeof row.id === 'string') rows.set(row.id, row)
   }
   const composedOverlays = [...overlays]
@@ -278,8 +299,10 @@ export interface RunProfileOptions {
   args: readonly string[]
   /** Application-owned package executable, scoped to explicit plugin operations. */
   packageManager?: ProfileContext['packageManager']
-  /** Refuse live mutations when the launcher does not provide its staged package service. */
+  /** Require a presealed root and staged package service; never repair an application-owned live root before consent. */
   stagedPackageTransactions?: boolean
+  /** Inspect raw protected IDs before Include warnings and the effective tree before any row mounts. */
+  validateComposition?: ProfileCompositionGuard
   /** Fiber-owned Host services installed before any profile entry mounts. */
   prepare?: (ctx: Context) => void | Promise<void>
   /** Module fallback backend; pkg executables always use runtime resolution. */
@@ -338,6 +361,7 @@ export async function runProfile(options: RunProfileOptions): Promise<{ ctx: Con
     const resolutionMode = packaged ? 'runtime' : options.resolutionMode ?? (options.resolvedProfile === undefined ? 'link' : 'runtime')
     const composed = await composeProfile(
       options.profile, options.patchFiles, resolutionMode, options.fromDefaultProfile, options.resolvedProfile,
+      options.stagedPackageTransactions, options.validateComposition,
     )
     const appReady = createAppReady()
     const shutdown = createProcessShutdown(dispose)

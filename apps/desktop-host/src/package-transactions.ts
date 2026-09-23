@@ -48,10 +48,14 @@ export async function provideDesktopPackageTransactions(ctx: Context): Promise<v
     if (pending.size >= 100) return Promise.reject(new Error('desktop packages: too many pending shell requests'))
     const rpcId = randomUUID()
     return new Promise((resolve, reject) => {
+      // The boot-time hello must settle before any profile entry mounts. Keep the
+      // ten-minute ambiguity window only for real staging writes and status reads.
       const timer = setTimeout(() => {
         pending.delete(rpcId)
-        reject(new Error('desktop packages: response deadline exceeded; query pending status before retrying'))
-      }, 600000)
+        reject(new Error(operation === 'hello'
+          ? 'desktop packages: shell staging handshake deadline exceeded'
+          : 'desktop packages: response deadline exceeded; query pending status before retrying'))
+      }, operation === 'hello' ? 5000 : 600000)
       timer.unref()
       pending.set(rpcId, { resolve, reject, timer })
       send({ type: 'package-transaction', protocolVersion: 1, rpcId, operation, ...fields }, (error) => {

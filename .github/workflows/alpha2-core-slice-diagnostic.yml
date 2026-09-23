@@ -57,10 +57,50 @@ jobs:
           pnpm install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build source Host entries for official alpha2 packages, never an installer
+      - name: Build dormant Host entry and inspect nonpublishing CLI/Host tars, never an installer
         run: |
           pnpm run build:lib:host
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($file in @('apps/cli/lib/bin.js', 'apps/cli/lib/profile-boot.js',
+            'apps/cli/lib/types/profile-boot.d.ts', 'apps/desktop-host/lib/index.js',
+            'apps/desktop-host/lib/alpha2-entry.js')) {
+            if (!(Test-Path $file)) { throw "Missing exact-source entry: $file" }
+          }
+          Push-Location apps/desktop-host
+          try {
+            node --input-type=module -e "import { runProfile } from '@deepseek-ai/dsh/profile-boot'; if (typeof runProfile !== 'function') process.exit(2)"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            node --input-type=module -e "const m = await import('./lib/alpha2-entry.js'); if (typeof m.runAlpha2DesktopHost !== 'function') process.exit(2)"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            node --input-type=module -e "if (!import.meta.resolve('@deepseek-ai/dsh/lib/bin.js').endsWith('/lib/bin.js')) process.exit(2)"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          $packDir = Join-Path $env:RUNNER_TEMP 'alpha2-cli-source-pack'
+          New-Item -ItemType Directory -Force -Path $packDir | Out-Null
+          pnpm --dir apps/cli pack --pack-destination $packDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $archives = @(Get-ChildItem -LiteralPath $packDir -Filter '*.tgz')
+          if ($archives.Count -ne 1) { throw 'CLI source pack did not produce exactly one archive' }
+          $members = @(tar -tf $archives[0].FullName)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($member in @('package/lib/bin.js', 'package/lib/profile-boot.js',
+            'package/lib/types/profile-boot.d.ts', 'package/package.json')) {
+            if ($members -notcontains $member) { throw "CLI source package lacks $member" }
+          }
+          $hostPackDir = Join-Path $env:RUNNER_TEMP 'alpha2-host-source-pack'
+          New-Item -ItemType Directory -Force -Path $hostPackDir | Out-Null
+          pnpm --dir apps/desktop-host pack --pack-destination $hostPackDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hostArchives = @(Get-ChildItem -LiteralPath $hostPackDir -Filter '*.tgz')
+          if ($hostArchives.Count -ne 1) { throw 'Host source pack did not produce exactly one archive' }
+          $hostMembers = @(tar -tf $hostArchives[0].FullName)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($member in @('package/lib/index.js', 'package/lib/alpha2-entry.js',
+            'package/config/desktop.cordis.patch.yml', 'package/config/alpha2-desktop.cordis.patch.yml',
+            'package/register-module-resolution-policy.mjs', 'package/package.json')) {
+            if ($hostMembers -notcontains $member) { throw "Host source package lacks $member" }
+          }
+          if (@(git status --porcelain).Count -ne 0) { throw 'Source packs modified the checkout' }
 
       - name: Test only the reviewed source contracts, never package or publish
         run: |
@@ -89,6 +129,7 @@ jobs:
             packages/host/plugin-inventory/tests/inventory.spec.ts `
             packages/skill/skill-office/tests/skill-office.spec.ts `
             packages/util/lazy-require/tests/index.spec.ts `
+            packages/bundle/web-app/tests/web-app.spec.ts `
             packages/deliverables/workspace-changes/tests/capture.spec.ts `
             packages/deliverables/workspace-changes/tests/compare.spec.ts `
             packages/deliverables/workspace-changes/tests/git.spec.ts `
@@ -97,6 +138,13 @@ jobs:
             packages/deliverables/workspace-changes/tests/numstat.spec.ts `
             packages/deliverables/workspace-changes/tests/paths.spec.ts `
             apps/desktop-host/tests/package-transactions.spec.ts `
+            apps/desktop-host/tests/alpha2-admission.spec.ts `
+            apps/desktop-host/tests/alpha2-parent-stop.spec.ts `
+            apps/desktop-host/tests/alpha2-profile-ownership.spec.ts `
+            apps/desktop-host/tests/alpha2-injections.spec.ts `
+            apps/desktop-host/tests/alpha2-owner-patch.spec.ts `
+            apps/desktop-host/tests/alpha2-entry.spec.ts `
+            apps/desktop-host/tests/alpha2-packaging.spec.ts `
             apps/desktop-host/tests/package-health.spec.ts `
             apps/desktop-host/tests/desktop-plugin-command-ipc.spec.ts `
             apps/desktop-host/tests/desktop-plugin-command-runtime.spec.ts `
@@ -110,6 +158,8 @@ jobs:
             apps/desktop/tests/web-document.spec.ts `
             apps/web/tests/desktop-boot.spec.ts `
             apps/web/tests/injection-order.spec.ts `
+            scripts/build-exe-for-python-sdk.spec.ts `
+            scripts/project-reference-faces.spec.ts `
             packages/api/gateway/tests/gateway.client.spec.ts `
             packages/api/remotes/tests/remote-events.host.spec.ts `
             packages/client/connection/tests/node-half.host.spec.ts `

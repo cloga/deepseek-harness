@@ -2,7 +2,7 @@ import { lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, sy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
-import { prepareProfileRootConfig, PROFILE_ROOT_CONFIG, writeProfileRootConfig } from '../src/profile-root.ts'
+import { assertPreparedProfileRootConfig, prepareProfileRootConfig, PROFILE_ROOT_CONFIG, writeProfileRootConfig } from '../src/profile-root.ts'
 
 const roots: string[] = []
 afterEach(() => { for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true }) })
@@ -15,6 +15,23 @@ it.each([undefined, '[]\n', '\uFEFF[]\n', '# old empty derived root\r\n[]\r\n', 
   prepareProfileRootConfig(path)
   expect(readFileSync(join(path, 'cordis.yml'), 'utf8')).toBe(PROFILE_ROOT_CONFIG)
   expect(readFileSync(join(path, 'cordis.patch.yml'), 'utf8')).toBe('- id: preserve-user\n  disabled: true\n')
+})
+
+it('requires a presealed staged root without creating it or normalizing user bytes', () => {
+  const path = root()
+  const rootFile = join(path, 'cordis.yml')
+  const patchFile = join(path, 'cordis.patch.yml')
+  writeFileSync(patchFile, '- id: preserve-user\n  disabled: true\n')
+  expect(() => { assertPreparedProfileRootConfig(path) }).toThrow('already sealed canonical root')
+  expect(lstatSync(rootFile, { throwIfNoEntry: false })).toBeUndefined()
+  const commented = '# previously derived empty root\n[]\n'
+  writeFileSync(rootFile, commented)
+  expect(() => { assertPreparedProfileRootConfig(path) }).toThrow('already sealed canonical root')
+  expect(readFileSync(rootFile, 'utf8')).toBe(commented)
+  writeFileSync(rootFile, PROFILE_ROOT_CONFIG)
+  expect(() => { assertPreparedProfileRootConfig(path) }).not.toThrow()
+  expect(readFileSync(rootFile, 'utf8')).toBe(PROFILE_ROOT_CONFIG)
+  expect(readFileSync(patchFile, 'utf8')).toBe('- id: preserve-user\n  disabled: true\n')
 })
 
 it('refuses an unrecognized nonempty candidate root without overwriting it', () => {

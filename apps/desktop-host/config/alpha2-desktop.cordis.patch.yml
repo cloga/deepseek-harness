@@ -1,0 +1,25 @@
+# INTERNAL alpha2 Desktop owner overlay. runProfile.patchFiles places this after
+# bundle, profile, and home patches; the old framed Desktop overlay is unchanged.
+# A row patch replaces its entire config. These literal values must remain last:
+# no user layer may publish a launch token or bind the private Web carrier to LAN.
+
+- id: webserver
+  name: '@deepseek-ai/dsh-host-webserver'
+  disabled: false
+  inject: [webStartup]
+  config:
+    host: 127.0.0.1
+    port: 0
+    compression: gzip
+    compressionLevel: 1
+    compressionThresholdBytes: 1024
+
+- id: web-runtime
+  name: '@deepseek-ai/dsh-web-app'
+  disabled: false
+  inject: [webStartup]
+  config:
+    openBrowser: false
+    printUrl: false
+    surfaceContext: false
+    trustedHosts: []

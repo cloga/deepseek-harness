@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { provideDesktopPackageTransactions } from '../src/package-transactions.ts'
 
 const transactionId = '11111111-1111-4111-8111-111111111111'
@@ -52,6 +52,52 @@ async function withProxy<T>(reply: (operation: string) => unknown, action: (ctx:
 }
 
 describe('actual Host staging proxy pending readers', () => {
+  it('refuses a silent shell hello in five seconds without ever publishing a staging capability', async () => {
+    const previousSend = Object.getOwnPropertyDescriptor(process, 'send')
+    const previousConnected = Object.getOwnPropertyDescriptor(process, 'connected')
+    const messagesBefore = process.listenerCount('message')
+    const disconnectBefore = process.listenerCount('disconnect')
+    const ctx = new Context()
+    let helloRpcId: string | undefined
+    let settled = false
+    vi.useFakeTimers()
+    try {
+      Object.defineProperty(process, 'connected', { configurable: true, value: true })
+      Object.defineProperty(process, 'send', { configurable: true, value(message: unknown, callback: (error: Error | null) => void) {
+        if (message === null || typeof message !== 'object' || !('operation' in message) || message.operation !== 'hello'
+          || !('rpcId' in message) || typeof message.rpcId !== 'string') {
+          throw new Error('Only the boot-time hello may reach a shell without staging ownership')
+        }
+        helloRpcId = message.rpcId
+        callback(null)
+        return true
+      } })
+      const handshake = provideDesktopPackageTransactions(ctx)
+      const refused = expect(handshake).rejects.toThrow('desktop packages: shell staging handshake deadline exceeded')
+      void handshake.then(() => { settled = true }, () => { settled = true })
+      await vi.advanceTimersByTimeAsync(4999)
+      expect(settled).toBe(false)
+      expect(ctx.get('profilePackageTransactions')).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(1)
+      await refused
+      expect(settled).toBe(true)
+      if (helloRpcId === undefined) throw new Error('Fixture did not send staging hello')
+      process.emit('message', { type: 'package-transaction-result', protocolVersion: 1,
+        rpcId: helloRpcId, ok: true, value: 1 }, undefined)
+      expect(ctx.get('profilePackageTransactions')).toBeUndefined()
+    } finally {
+      try { await ctx.fiber.dispose() } finally {
+        vi.useRealTimers()
+        for (const [key, previous] of [['send', previousSend], ['connected', previousConnected]] as const) {
+          if (previous === undefined) Reflect.deleteProperty(process, key)
+          else Object.defineProperty(process, key, previous)
+        }
+      }
+      expect(process.listenerCount('message')).toBe(messagesBefore)
+      expect(process.listenerCount('disconnect')).toBe(disconnectBefore)
+    }
+  })
+
   it('reads both pending variants while preserving the legacy stage response', async () => {
     await withProxy(operation => operation === 'list' ? [legacy, selection] : operation === 'status' ? selection : legacy,
       async (ctx, operations) => {
