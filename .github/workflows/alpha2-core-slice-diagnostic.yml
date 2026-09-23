@@ -97,6 +97,7 @@ jobs:
             packages/deliverables/workspace-changes/tests/numstat.spec.ts `
             packages/deliverables/workspace-changes/tests/paths.spec.ts `
             apps/desktop-host/tests/package-transactions.spec.ts `
+            apps/desktop-host/tests/package-health.spec.ts `
             apps/desktop-host/tests/desktop-plugin-command-ipc.spec.ts `
             apps/desktop-host/tests/desktop-plugin-command-runtime.spec.ts `
             apps/desktop-host/tests/update-impact.spec.ts `

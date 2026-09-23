@@ -43,6 +43,7 @@ async function fixture(reload: 'live' | 'startup' = 'live', overlay = false, pre
   const overlays: PatchOptions[] = overlay ? [{ id: 'managed', disabled: true }] : []
   const profile: ProfileContext = {
     name: 'test',
+    watchProfilePatches: reload === 'live',
     ...(staged ? { stagedPackageTransactions: true } : {}),
     ...(packageManager === undefined ? {} : { packageManager }),
     startedBundles: ['core', 'extra'],
@@ -832,6 +833,7 @@ it('does not delete a bundle retained by a higher-priority overlay', async () =>
 
 it('applies watched configuration while pnpm installation is still running', async () => {
   const { ctx, manager, dir, profile, bundle } = await fixture()
+  expect(profile.watchProfilePatches).toBe(true)
   const entered = Promise.withResolvers<undefined>()
   const release = Promise.withResolvers<undefined>()
   const pnpm = vi.spyOn(operations, 'runProfilePnpm').mockImplementation(async () => {
@@ -856,10 +858,18 @@ it('applies watched configuration while pnpm installation is still running', asy
 })
 
 it('installs and removes with the bundled pnpm when PATH contains no pnpm', async () => {
+  const startedAt = Date.now()
+  const phases: string[] = []
+  const mark = (phase: string): void => { phases.push(`${phase}:${Date.now() - startedAt}ms`) }
+  let completed = false
+  onTestFinished(() => {
+    if (!completed) console.warn('manager bundled pnpm fixture phases', Object.freeze([...phases]).join(', '))
+  })
   const pnpm = fileURLToPath(new URL('../../../../apps/desktop/node_modules/pnpm/bin/pnpm.mjs', import.meta.url))
   const { manager, dir } = await fixture('startup', false, undefined, { pnpmCommand: 'must-not-be-used' }, {
     command: process.execPath, args: ['--expose-internals', pnpm], env: { PATH: '', ELECTRON_RUN_AS_NODE: '1' },
   })
+  mark('fixture-ready')
   const target = join(dir, 'local-bundle')
   mkdirSync(target)
   writeFileSync(join(target, 'package.json'), JSON.stringify({ name: '@test/desktop-manager', version: '1.0.0',
@@ -869,12 +879,17 @@ it('installs and removes with the bundled pnpm when PATH contains no pnpm', asyn
   const manifest = readProfileManifest('test', dir)
   delete manifest.dependencies
   writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest))
+  mark('local-bundle-ready')
   const installed = await manager.installBundle(target)
+  mark('install-settled')
   expect(installed.error).toBeUndefined()
   expect(installed.packageResult?.exitCode).toBe(0)
   expect(readProfileManifest('test', dir).dependencies).toHaveProperty('@test/desktop-manager')
+  mark('install-observed')
   const removed = await manager.removeBundle('@test/desktop-manager')
+  mark('remove-settled')
   expect(removed.error).toBeUndefined()
   expect(removed.packageResult?.exitCode).toBe(0)
   expect(readProfileManifest('test', dir).dependencies ?? {}).not.toHaveProperty('@test/desktop-manager')
+  completed = true
 })
