@@ -16,10 +16,11 @@
     - id: timer
       name: '@deepseek-ai/cordis-plugin-timer'
 
-    # Module reload is opt-in per profile. `patchReload: live` config watching
-    # uses the launcher's watch-only fallback and does not require this row.
+    # Module reload is opt-in per profile. Named `patchReload: live` profiles
+    # use the official HMR service's watch-only fallback when this row is disabled;
+    # startup-frozen and application-owned profiles never gain implicit watches.
     - id: hmr
-      name: '@deepseek-ai/cordis-plugin-hmr'
+      name: '@deepseek-ai/dsh-hmr'
       disabled: true
       config:
         root: ['.']

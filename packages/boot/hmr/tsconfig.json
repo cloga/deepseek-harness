@@ -18,22 +18,16 @@
       "path": "../../../vendor/include"
     },
     {
-      "path": "../../../vendor/group"
+      "path": "../../../vendor/timer"
     },
     {
-      "path": "../../core/system-prompt"
+      "path": "../../../vendor/schemastery"
     },
     {
-      "path": "../../util/atomic-write"
+      "path": "../app-boot"
     },
     {
-      "path": "../../util/launch-environment"
-    },
-    {
-      "path": "../../util/home-paths"
-    },
-    {
-      "path": "../../util/package-manifest"
+      "path": "../cmdline"
     }
   ]
 }

@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { boot, watchUserPatches, type Profile } from '@deepseek-ai/dsh-app-boot'
+import { boot, type Profile } from '@deepseek-ai/dsh-app-boot'
 import { installProxyFromEnvironment } from '@deepseek-ai/dsh-http-proxy'
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -10,7 +10,7 @@ import { runProfile } from '../src/profile-boot.ts'
 
 vi.mock('@deepseek-ai/dsh-app-boot', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@deepseek-ai/dsh-app-boot')>()
-  return { ...actual, boot: vi.fn(), watchUserPatches: vi.fn(), installFailLoud: vi.fn() }
+  return { ...actual, boot: vi.fn(), installFailLoud: vi.fn() }
 })
 vi.mock('@deepseek-ai/dsh-http-proxy', () => ({ installProxyFromEnvironment: vi.fn() }))
 vi.mock('../src/process-shutdown.ts', () => ({ createProcessShutdown: vi.fn((dispose: () => Promise<void>) => ({
@@ -56,7 +56,7 @@ it('releases the launch proxy exactly once even when a successfully booted tree 
   } finally { await ctx.fiber.dispose() }
 })
 
-it('unwinds a live named-profile tree and proxy when ordinary HMR setup fails', async () => {
+it('unwinds a live named-profile tree and proxy when official HMR setup fails', async () => {
   const home = mkdtempSync(join(tmpdir(), 'dsh-live-watch-disposal-'))
   roots.push(home)
   const dir = join(home, 'profiles', 'custom')
@@ -67,8 +67,11 @@ it('unwinds a live named-profile tree and proxy when ordinary HMR setup fails', 
   vi.stubEnv('DSH_HOME', home)
   vi.spyOn(process, 'on').mockReturnValue(process)
   const ctx = new Context()
-  ctx.provide('loader', { create: vi.fn() })
-  ctx.provide('hmr', {})
+  const failure = new Error('official HMR setup failed')
+  const create = vi.fn(async (row: { name: string }) => {
+    if (row.name === '@deepseek-ai/dsh-hmr') throw failure
+  })
+  ctx.provide('loader', { create })
   const disposed = vi.spyOn(ctx.fiber, 'dispose')
   const releaseProxy = vi.fn().mockResolvedValue(undefined)
   vi.mocked(installProxyFromEnvironment).mockResolvedValue(releaseProxy)
@@ -76,12 +79,10 @@ it('unwinds a live named-profile tree and proxy when ordinary HMR setup fails', 
     await prepare?.(ctx)
     return ctx
   })
-  const failure = new Error('ordinary patch watcher failed')
-  vi.mocked(watchUserPatches).mockRejectedValueOnce(failure)
   try {
     await expect(runProfile({ environment: createLaunchEnvironmentSnapshot([]), profile: 'custom',
       patchFiles: [], args: [] })).rejects.toBe(failure)
-    expect(watchUserPatches).toHaveBeenCalledOnce()
+    expect(create).toHaveBeenCalledWith({ name: '@deepseek-ai/dsh-hmr', config: { root: [] } })
     expect(disposed).toHaveBeenCalledOnce()
     expect(releaseProxy).toHaveBeenCalledOnce()
   } finally { await ctx.fiber.dispose() }

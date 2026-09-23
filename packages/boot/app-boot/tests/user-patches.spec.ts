@@ -1,44 +1,27 @@
 /**
  * User patch-layer behavior of `dsh-app-boot`: the optional patch-list loader
  * (a profile's `cordis.patch.yml`) and `boot()` applying the user layer over
- * a real Loader tree with live file watching.
+ * a real Loader tree. The official HMR package now owns live profile watching.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterAll, afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
-import { FSWatcher, type ChokidarOptions } from 'chokidar'
+import { afterAll, afterEach, describe, expect, it, onTestFinished } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import Hmr from '@deepseek-ai/cordis-plugin-hmr'
 import Include, { type PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
-import Timer from '@deepseek-ai/cordis-plugin-timer'
 import {
+  assertNoLegacyHmrOverride,
   boot,
   loadOptionalPatches,
   loadOverlayPatches,
   PROFILE_PATCH_FILENAME,
   reconcileProfilePatches,
-  watchUserPatches,
 } from '../src/index.ts'
 
 const NAME = 'dsh-test-bin'
-
-const configWatch = vi.hoisted(() => ({
-  create: undefined as ((options?: ChokidarOptions) => FSWatcher) | undefined,
-}))
-
-vi.mock('chokidar', async (importOriginal) => {
-  const native = await importOriginal<typeof import('chokidar')>()
-  return {
-    ...native,
-    watch: (paths: string | string[], options?: ChokidarOptions) => configWatch.create === undefined
-      ? native.watch(paths, options)
-      : configWatch.create(options),
-  }
-})
 
 const tempRoots: string[] = []
 afterAll(() => {
@@ -49,14 +32,6 @@ const tmp = (): string => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-user-patches-'))
   tempRoots.push(dir)
   return dir
-}
-
-async function eventually(test: () => boolean, message: string): Promise<void> {
-  const deadline = Date.now() + 10_000
-  while (!test()) {
-    if (Date.now() >= deadline) throw new Error(message)
-    await new Promise(resolve => setTimeout(resolve, 10))
-  }
 }
 
 describe('loadOptionalPatches', () => {
@@ -357,6 +332,30 @@ describe('Loader entry disabled interpolation', () => {
 })
 
 describe('profile reconciliation settlement', () => {
+  it.each(['qualified', 'qualified-other-id', 'inserted', 'alternate-id', 'nested'] as const)(
+    'rejects a %s legacy HMR module before replacing the live Include generation', async (kind) => {
+      const dir = tmp()
+      writeFileSync(join(dir, 'cordis.yml'), '[]\n')
+      const ctx = await boot(NAME, join(dir, 'cordis.yml'), [])
+      onTestFinished(() => ctx.fiber.dispose())
+      const include = [...ctx.loader.entries()].find(entry => entry.id === 'include')
+      if (include === undefined) throw new Error('missing bootstrap Include')
+      const before = JSON.stringify(include.options.config)
+      const legacy = { id: kind === 'alternate-id' || kind === 'qualified-other-id' || kind === 'nested'
+        ? 'custom-hmr' : 'hmr', name: '@deepseek-ai/cordis-plugin-hmr', disabled: false }
+      const patches = kind === 'qualified' || kind === 'qualified-other-id' ? [legacy]
+        : kind === 'nested' ? [{ insert: [{ id: 'group', name: 'cordis:group', group: true, config: [legacy] }] }]
+          : [{ insert: [legacy] }]
+      await expect(reconcileProfilePatches(ctx, patches, NAME)).rejects.toThrow('legacy HMR module or name-qualified override')
+      expect(JSON.stringify(include.options.config)).toBe(before)
+    },
+  )
+
+  it('keeps an id-only enablement patch eligible for the official HMR row', () => {
+    expect(() => assertNoLegacyHmrOverride([{ id: 'hmr', disabled: false }])).not.toThrow()
+    expect(() => assertNoLegacyHmrOverride([{ id: 'other', name: '@deepseek-ai/cordis-plugin-include' }])).not.toThrow()
+  })
+
   it('retains unchanged optional import diagnostics but refuses an explicitly required target', async () => {
     const dir = tmp()
     writeFileSync(join(dir, 'cordis.yml'), '[]\n')
@@ -500,144 +499,4 @@ describe('boot with user patches', () => {
     }
   })
 
-  it.each([
-    { id: 'noop', asyncApply: false },
-    { id: 'webserver', asyncApply: false },
-    { id: 'webserver', asyncApply: true },
-  ])('keeps HMR best effort and recovers ($id, async apply: $asyncApply)', { timeout: 20_000 }, async ({ id, asyncApply }) => {
-    const dir = tmp()
-    const userDir = tmp()
-    const filename = join(userDir, PROFILE_PATCH_FILENAME)
-    const basePatches = [{ id, config: { value: 'generated' } }]
-    const ctx = await boot(NAME, writeTree(dir, id, asyncApply), basePatches)
-    onTestFinished(() => ctx.fiber.dispose())
-    await ctx.plugin(Timer)
-    await ctx.plugin(Hmr, { root: [], ignored: [], debounce: 0 })
-    // Native notifications belong to watch-config.spec.ts; this case owns
-    // Include recomposition after each explicitly delivered filesystem event.
-    const watchers: FSWatcher[] = []
-    const previousFactory = configWatch.create
-    onTestFinished(() => { configWatch.create = previousFactory })
-    configWatch.create = (options) => {
-      const watcher = new FSWatcher(options)
-      watchers.push(watcher)
-      queueMicrotask(() => { watcher.emit('ready') })
-      return watcher
-    }
-    const failures: Error[] = []
-    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation((value: unknown) => {
-      if (value instanceof Error) failures.push(value)
-    })
-    onTestFinished(() => { warn.mockRestore() })
-    const dispose = await watchUserPatches(ctx, {
-      binName: NAME,
-      filename,
-      compose: userPatches => [...basePatches, ...userPatches],
-    })
-    expect(watchers).toHaveLength(1)
-    const watcher = watchers[0]!
-    try {
-      writeFileSync(filename, `- id: ${id}\n  config:\n    value: live\n`)
-      watcher.emit('add', filename)
-      await eventually(() => (entryConfig(ctx, id) as { value?: string }).value === 'live', 'user patch addition was not applied')
-
-      writeFileSync(filename, `- id: ${id}\n  config:\n    fail: true\n`)
-      watcher.emit('change', filename)
-      await eventually(() => failures.length === 1, 'failed candidate was not reported')
-      expect(failures[0]).toBeInstanceOf(Error)
-      expect(entryConfig(ctx, id)).toMatchObject({ fail: true })
-
-      writeFileSync(filename, `- id: ${id}\n  disabled: !!js "JSON.parse('invalid')"\n`)
-      watcher.emit('change', filename)
-      await eventually(() => failures.length === 2, 'disabled expression failure was not reported')
-      expect(failures[1]?.message).toContain(`${id} (./noop.mjs): disabled expression failed: SyntaxError`)
-      expect([...ctx.loader.entries()].find(entry => entry.options.id === id)?.options.disabled)
-        .toEqual({ __jsExpr: "JSON.parse('invalid')" })
-
-      writeFileSync(filename, 'invalid: [unclosed\n')
-      watcher.emit('change', filename)
-      await eventually(() => failures.length === 3, 'parse failure was not reported')
-      expect(failures[2]).toBeInstanceOf(Error)
-      expect([...ctx.loader.entries()].find(entry => entry.options.id === id)?.options.disabled)
-        .toEqual({ __jsExpr: "JSON.parse('invalid')" })
-
-      writeFileSync(filename, `- id: ${id}\n  config:\n    value: recovered\n`)
-      watcher.emit('change', filename)
-      await eventually(() => (entryConfig(ctx, id) as { value?: string }).value === 'recovered', 'valid recovery was not applied')
-      await ctx.loader.await()
-      expect([...ctx.loader.entries()].find(entry => entry.options.id === id)?.fiber?.state).toBe(2)
-
-      unlinkSync(filename)
-      watcher.emit('unlink', filename)
-      await eventually(() => (entryConfig(ctx, id) as { value?: string }).value === 'generated', 'user patch removal did not restore the app-owned patch')
-      expect(failures).toHaveLength(3)
-
-      // Default compose: the user layer IS the whole patch list, so a
-      // fresh generation replaces the app-owned layer instead of stacking on it.
-      await dispose()
-      const disposeDefault = await watchUserPatches(ctx, { binName: NAME, filename })
-      expect(watchers).toHaveLength(2)
-      try {
-        writeFileSync(filename, `- id: ${id}\n  config:\n    value: identity\n`)
-        watchers[1]!.emit('add', filename)
-        await eventually(() => (entryConfig(ctx, id) as { value?: string }).value === 'identity', 'default-compose user patch was not applied')
-      } finally {
-        await disposeDefault()
-      }
-    } finally {
-      await dispose()
-    }
-  })
-
-  it('fails loud when the exact watcher lacks HMR or a root Include', async () => {
-    const dir = tmp()
-    const withoutHmr = await boot(NAME, writeTree(dir))
-    await expect(watchUserPatches(withoutHmr, { binName: NAME, filename: join(tmp(), PROFILE_PATCH_FILENAME) })).rejects.toThrow('requires the Cordis HMR service')
-    await withoutHmr.fiber.dispose()
-
-    const withoutInclude = new Context()
-    withoutInclude.baseUrl = pathToFileURL(`${tmp()}/`).href
-    await withoutInclude.plugin(Loader)
-    await withoutInclude.plugin(Timer)
-    await withoutInclude.plugin(Hmr, { root: [], ignored: [], debounce: 0 })
-    await expect(watchUserPatches(withoutInclude, { binName: NAME, filename: join(tmp(), PROFILE_PATCH_FILENAME) })).rejects.toThrow('requires the root Include entry')
-    await withoutInclude.fiber.dispose()
-  })
-
-  it('returns a no-op disposer when the tree is disposed while the watcher opens', async () => {
-    const dir = tmp()
-    const ctx = await boot(NAME, writeTree(dir))
-    await ctx.plugin(Timer)
-    await ctx.plugin(Hmr, { root: [], ignored: [], debounce: 0 })
-    const previousFactory = configWatch.create
-    onTestFinished(() => { configWatch.create = previousFactory })
-    const release = Promise.withResolvers<undefined>()
-    ctx.effect(() => () => release.promise)
-    let disposal: Promise<void> | undefined
-    onTestFinished(async () => { release.resolve(undefined); await disposal })
-    configWatch.create = (options) => {
-      const watcher = new FSWatcher(options)
-      disposal = ctx.fiber.dispose()
-      queueMicrotask(() => { watcher.emit('ready') })
-      return watcher
-    }
-    const dispose = await watchUserPatches(ctx, { binName: NAME, filename: join(tmp(), PROFILE_PATCH_FILENAME) })
-    await expect(dispose()).resolves.toBeUndefined()
-  })
-
-  it('propagates registration failures other than mid-teardown', async () => {
-    const dir = tmp()
-    const filename = join(tmp(), PROFILE_PATCH_FILENAME)
-    const ctx = await boot(NAME, writeTree(dir))
-    try {
-      await ctx.plugin(Timer)
-      await ctx.plugin(Hmr, { root: [], ignored: [], debounce: 0 })
-      const dispose = await watchUserPatches(ctx, { binName: NAME, filename })
-      // Same user-layer path registered twice: the watcher refuses; not a teardown race.
-      await expect(watchUserPatches(ctx, { binName: NAME, filename })).rejects.toThrow('already registered')
-      await dispose()
-    } finally {
-      await ctx.fiber.dispose()
-    }
-  })
 })

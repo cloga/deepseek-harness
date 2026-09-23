@@ -7,7 +7,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import {
   boot, composeEntries, createProfileResolutionGeneration, healIsolatedProfileModuleFallback,
-  PluginPackages, watchUserPatches, type Profile, type ProfilePackageTransactions,
+  PluginPackages, type Profile, type ProfilePackageTransactions,
 } from '@deepseek-ai/dsh-app-boot'
 import { installProxyFromEnvironment } from '@deepseek-ai/dsh-http-proxy'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -20,7 +20,6 @@ vi.mock('@deepseek-ai/dsh-app-boot', async (importOriginal) => {
     boot: vi.fn(),
     createProfileResolutionGeneration: vi.fn(actual.createProfileResolutionGeneration),
     healIsolatedProfileModuleFallback: vi.fn(actual.healIsolatedProfileModuleFallback),
-    watchUserPatches: vi.fn(),
     installFailLoud: vi.fn(),
   }
 })
@@ -102,6 +101,44 @@ describe('runProfile with an application-owned profile', () => {
     }
   })
 
+  it.each(['named-live', 'named-startup', 'home', 'overlay', 'application-owned', 'inserted-other-id'] as const)(
+    'refuses a %s name-qualified legacy HMR patch without touching user choices', async (source) => {
+      const home = mkdtempSync(join(tmpdir(), 'dsh-legacy-hmr-patch-'))
+      homes.push(home)
+      const owned = source === 'application-owned'
+      const profileDir = owned ? home : join(home, 'profiles', 'custom')
+      mkdirSync(profileDir, { recursive: true })
+      const runtime = join(home, 'runtime')
+      mkdirSync(runtime)
+      writeFileSync(join(runtime, 'package.json'), '{"name":"test-runtime","version":"1.0.0"}')
+      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: owned ? 'desktop' : 'custom',
+        dsh: { profile: { bundles: [], patchReload: source === 'named-startup' || owned ? 'startup' : 'live' } } }))
+      const legacy = source === 'inserted-other-id'
+        ? "- insert:\n    - id: custom-hmr\n      name: '@deepseek-ai/cordis-plugin-hmr'\n      disabled: false\n"
+        : "- id: hmr\n  name: '@deepseek-ai/cordis-plugin-hmr'\n  disabled: false\n"
+      const profilePatch = join(profileDir, owned ? 'profile.patch.yml' : 'cordis.patch.yml')
+      const homePatch = join(home, 'cordis.patch.yml')
+      const overlay = join(home, 'legacy-overlay.yml')
+      writeFileSync(profilePatch, source === 'named-live' || source === 'named-startup' || source === 'inserted-other-id' ? legacy : '[]\n')
+      if (homePatch !== profilePatch) writeFileSync(homePatch, source === 'home' ? legacy : '[]\n')
+      writeFileSync(overlay, source === 'overlay' ? legacy : '[]\n')
+      const record = source === 'home' ? homePatch : source === 'overlay' ? overlay : profilePatch
+      const previous = readFileSync(record, 'utf8')
+      vi.stubEnv('DSH_HOME', home)
+      const releaseProxy = vi.fn().mockResolvedValue(undefined)
+      vi.mocked(installProxyFromEnvironment).mockResolvedValue(releaseProxy)
+      const profile: Profile = { name: 'desktop', dir: profileDir, patchPath: profilePatch,
+        layers: [], patches: [{ id: 'hmr', name: '@deepseek-ai/cordis-plugin-hmr', disabled: false }], patchReload: 'startup' }
+      await expect(runProfile({ environment: createLaunchEnvironmentSnapshot([]),
+        profile: owned ? 'desktop' : 'custom', patchFiles: source === 'overlay' ? [overlay] : [], args: [],
+        ...(owned ? { resolvedProfile: { profile, installAnchor: join(runtime, 'package.json') } } : {}),
+      })).rejects.toThrow('legacy HMR module or name-qualified override')
+      expect(readFileSync(record, 'utf8')).toBe(previous)
+      expect(boot).not.toHaveBeenCalled()
+      expect(releaseProxy).toHaveBeenCalledOnce()
+    },
+  )
+
   it.each(['absent', 'wrong-protocol'] as const)('refuses %s staged package authority before profile entries mount', async (kind) => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-profile-staging-refusal-'))
     homes.push(home)
@@ -161,9 +198,8 @@ describe('runProfile with an application-owned profile', () => {
     const oldExitCode = process.exitCode
     const ctx = new Context()
     const plugin = vi.spyOn(ctx, 'plugin')
-    // The real context supplies services; this test substitutes tree mounting and filesystem watchers.
+    // An application-owned startup-frozen profile must not acquire HMR implicitly.
     ctx.provide('loader', { create: vi.fn() })
-    ctx.provide('hmr', {})
     const dispose = vi.spyOn(ctx.fiber, 'dispose')
     const disposeProxy = vi.fn().mockResolvedValue(undefined)
     vi.mocked(installProxyFromEnvironment).mockResolvedValue(disposeProxy)
@@ -243,7 +279,6 @@ describe('runProfile with an application-owned profile', () => {
       expect(rows.find(row => row.id === 'session-telemetry-otel')?.disabled).toBe(true)
       expect(ctx.profileContext).toMatchObject({ dir: home, patchPath: profilePatch,
         installAnchor: runtime.installAnchor, watchProfilePatches: false })
-      expect(watchUserPatches).not.toHaveBeenCalled()
       await shutdown.shutdown(0)
       expect(dispose).toHaveBeenCalledOnce()
       expect(disposeProxy).toHaveBeenCalledOnce()
@@ -266,7 +301,7 @@ describe('runProfile with an application-owned profile', () => {
     const previousExitCode = process.exitCode
     const ctx = new Context()
     ctx.provide('loader', { create: vi.fn() })
-    ctx.provide('hmr', {})
+    ctx.provide('hmr', { runExclusive: async <T>(operation: () => Promise<T>): Promise<T> => operation() } as unknown as Context['hmr'])
     const disposeProxy = vi.fn().mockResolvedValue(undefined)
     vi.mocked(installProxyFromEnvironment).mockResolvedValue(disposeProxy)
     vi.mocked(boot).mockImplementation(async (_name, _root, _patches, setup) => {
@@ -276,8 +311,8 @@ describe('runProfile with an application-owned profile', () => {
     try {
       const { shutdown } = await runProfile({ environment: createLaunchEnvironmentSnapshot([]),
         profile: 'custom', patchFiles: [], args: [] })
-      expect(watchUserPatches).toHaveBeenCalledTimes(patchReload === 'live' ? 2 : 0)
       expect(ctx.profileContext.watchProfilePatches).toBe(patchReload === 'live')
+      expect(ctx.get('hmr')).toBeDefined()
       expect(healIsolatedProfileModuleFallback).not.toHaveBeenCalled()
       await shutdown.shutdown(0)
       expect(disposeProxy).toHaveBeenCalledOnce()
@@ -285,5 +320,33 @@ describe('runProfile with an application-owned profile', () => {
       await ctx.fiber.dispose()
       process.exitCode = previousExitCode
     }
+  })
+
+  it('refuses a legacy HMR row rather than silently dropping a named live profile watcher', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-legacy-hmr-'))
+    homes.push(home)
+    const dir = join(home, 'profiles', 'custom')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'custom',
+      dsh: { profile: { bundles: [], patchReload: 'live' } } }))
+    writeFileSync(join(dir, 'cordis.patch.yml'), '[]\n')
+    vi.stubEnv('DSH_HOME', home)
+    vi.spyOn(process, 'on').mockReturnValue(process)
+    const ctx = new Context()
+    const create = vi.fn()
+    ctx.provide('loader', { create })
+    ctx.provide('hmr', {} as unknown as Context['hmr'])
+    const disposeProxy = vi.fn().mockResolvedValue(undefined)
+    vi.mocked(installProxyFromEnvironment).mockResolvedValue(disposeProxy)
+    vi.mocked(boot).mockImplementation(async (_name, _root, _patches, setup) => {
+      await setup?.(ctx)
+      return ctx
+    })
+    try {
+      await expect(runProfile({ environment: createLaunchEnvironmentSnapshot([]),
+        profile: 'custom', patchFiles: [], args: [] })).rejects.toThrow('requires official serialized HMR')
+      expect(create).not.toHaveBeenCalled()
+      expect(disposeProxy).toHaveBeenCalledOnce()
+    } finally { await ctx.fiber.dispose() }
   })
 })

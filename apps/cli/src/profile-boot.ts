@@ -19,6 +19,7 @@ import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import {
   boot,
+  assertNoLegacyHmrOverride,
   composeEntries,
   createProfileResolutionGeneration,
   healProfilesModuleFallback,
@@ -35,12 +36,12 @@ import {
   PROFILE_TEMPLATES,
   writeProfileRootConfig,
   resolveProfileDir,
-  watchUserPatches,
   type Profile,
   type ProfileContext,
   type ProfileResolutionGeneration,
   type ProfileResolutionMode,
 } from '@deepseek-ai/dsh-app-boot'
+import type {} from '@deepseek-ai/dsh-hmr'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { installProxyFromEnvironment } from '@deepseek-ai/dsh-http-proxy'
 import { DSH_LAUNCH_ENVIRONMENT_KEY, type LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
@@ -244,6 +245,7 @@ async function composeProfile(
   const homePatches = loadOptionalPatches(NAME, homePatchPath()) ?? []
   const overlays = patchFiles.flatMap(file => loadOverlayPatches(NAME, resolve(file)))
   const bundlePatches = profile.layers.flatMap(layer => layer.patches)
+  assertNoLegacyHmrOverride([...bundlePatches, ...profile.patches, ...homePatches, ...overlays])
   const rows = new Map<string, EntryOptions>()
   for (const row of composeEntries([bundlePatches, profile.patches, homePatches, overlays])) {
     if (typeof row.id === 'string') rows.set(row.id, row)
@@ -356,26 +358,9 @@ export async function runProfile(options: RunProfileOptions): Promise<{ ctx: Con
     })
 
     const rootConfig = join(composed.profile.dir, PROFILE_ROOT_FILENAME)
-    // Recomposition for the live user layers: bundle layers below, overlays
-    // above, so a user edit can never displace them. Parsed app arguments are
-    // not in here at all — they live in app-provided services that survive a
-    // recomposition. BOTH
-    // user files are re-read per generation (the HMR watcher hands us only the
-    // changed file's patches, which one of the reads duplicates — fresh reads
-    // keep the two watchers from stitching in each other's stale copy).
-    // Fresh clones per generation: the include pushes `insert` rows into the
-    // mounted tree BY REFERENCE and later id-targeted patches mutate those
-    // objects in place. Reusing one parsed patch object across applications
-    // would bake a user override into the bundle's in-memory insert row, so
-    // removing the override could never revert the row to the bundle default.
-    const composeLive = (): PatchOptions[] => structuredClone([
-      ...composed.bundlePatches,
-      ...loadOptionalPatches(NAME, composed.profile.patchPath) ?? [],
-      ...loadOptionalPatches(NAME, homePatchPath()) ?? [],
-      ...composed.overlays,
-    ])
-    // Cloned for the same insert-aliasing reason as composeLive: the boot
-    // application must not mutate the objects later reloads recompose from.
+    // Loader mutates inserted rows by reference. Clone this invocation's
+    // complete boot generation; the official HMR service reads fresh ProfileContext
+    // layers under its own serialized queue when a live named profile changes.
     const profileContext: ProfileContext = {
       name: options.profile,
       ...(options.packageManager === undefined ? {} : { packageManager: options.packageManager }),
@@ -410,41 +395,41 @@ export async function runProfile(options: RunProfileOptions): Promise<{ ctx: Con
       }
     })
     app.current = ctx
-    // A live-reload profile can dispose the whole tree while post-boot watcher
-    // setup is in flight — a signal or appExit. Loader presence and fiber state
-    // own liveness; the initial check skips a tree that already exited, and the
-    // catch below re-checks for an exit that landed mid-setup. Startup-frozen
-    // profiles apply every user layer above but install no HMR fallback or watcher.
+    // A named live profile can dispose the whole tree while the official HMR
+    // service opens its configuration watches. The launcher skips a tree that
+    // already exited; startup-frozen and application-owned profiles acquire no
+    // automatic profile/home/manifest watcher.
     if (profileContext.watchProfilePatches === true
       && !signalShutdown.signal.aborted
       && ctx.fiber.state === FiberState.ACTIVE
       && ctx.get('loader') !== undefined) {
       try {
-        // Config-only HMR for the live profile patch layer: dsh-base disables
-        // module reload by default, so when no profile explicitly enabled that
-        // service, mount a watch-only instance with no module roots —
-        // cordis.patch.yml edits stay live without replacing source modules. A
-        // silent skip would break the documented reload contract. HMR injects
-        // the timer service, which a bare custom profile may not mount either.
+        // The base bundle disables source-module reload. Its absent HMR service
+        // is installed watch-only for named live profile/home/manifest patches;
+        // a user who explicitly enabled the base row keeps opt-in module reload.
         if (ctx.get('hmr') === undefined) {
           if (ctx.get('timer') === undefined) {
             await ctx.loader.create({ name: '@deepseek-ai/cordis-plugin-timer' })
           }
-          await ctx.loader.create({ name: '@deepseek-ai/cordis-plugin-hmr', config: { root: [] } })
+          await ctx.loader.create({ name: '@deepseek-ai/dsh-hmr', config: { root: [] } })
           await ctx.loader.await()
         }
-        await watchUserPatches(ctx, {
-          binName: NAME,
-          filename: composed.profile.patchPath,
-          compose: composeLive,
-        })
-        await watchUserPatches(ctx, {
-          binName: NAME,
-          filename: homePatchPath(),
-          compose: composeLive,
-        })
       } catch (error) {
         suppressShutdownError(ctx, signalShutdown.signal, error)
+      }
+    }
+    // A legacy user HMR row must not silently satisfy a startup-frozen or
+    // application-owned profile either: the official manager needs runExclusive
+    // whenever any HMR service is mounted, regardless of who owns patch watches.
+    if (!signalShutdown.signal.aborted && ctx.fiber.state === FiberState.ACTIVE
+      && ctx.get('loader') !== undefined) {
+      const current: unknown = ctx.get('hmr')
+      if (current !== undefined && (typeof current !== 'object' || current === null
+        || !('runExclusive' in current) || typeof current.runExclusive !== 'function')) {
+        throw new Error('dsh: profile HMR requires official serialized HMR; remove the legacy HMR row')
+      }
+      if (profileContext.watchProfilePatches === true && current === undefined) {
+        throw new Error('dsh: live profile requires official serialized HMR')
       }
     }
     if (!signalShutdown.signal.aborted

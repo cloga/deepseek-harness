@@ -17,8 +17,6 @@ import Include, { applyEntryPatches, entryListSchema, type PatchOptions } from '
 import Group from '@deepseek-ai/cordis-plugin-group'
 import { dshHomePath, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { createLaunchEnvironmentSnapshot, type LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
-import type {} from '@deepseek-ai/cordis-plugin-hmr'
-import { watchConfig } from './watch-config.ts'
 export { readProfilePatches, resolveTelemetryPatch, type ProfileContext, type ProfilePnpmInvocation } from './profile-context.ts'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 
@@ -252,6 +250,27 @@ const bootstrapIncludes = new WeakMap<Context, Entry>()
 const userPatchesSchema = entryListSchema
 
 /**
+ * Refuse any old vendor HMR module or name-qualified override instead of
+ * silently skipping or replacing it when the base row uses the official provider.
+ * An id-only enable/disable remains valid and retains the user's configuration.
+ * @param patches - Complete startup or live user patch generation.
+ */
+export function assertNoLegacyHmrOverride(patches: readonly PatchOptions[]): void {
+  const legacy = '@deepseek-ai/cordis-plugin-hmr'
+  const refuse = (): never => {
+    throw new Error('dsh: legacy HMR module or name-qualified override cannot target official HMR; remove the old name or select @deepseek-ai/dsh-hmr explicitly')
+  }
+  for (const patch of patches) {
+    if (patch.name === legacy) refuse()
+    const entries = [...(patch.insert ?? [])]
+    for (let entry = entries.pop(); entry !== undefined; entry = entries.pop()) {
+      if (entry.name === legacy) refuse()
+      if (entry.group === true && Array.isArray(entry.config)) entries.push(...entry.config as EntryOptions[])
+    }
+  }
+}
+
+/**
  * Reconcile one complete profile patch generation and await Loader settlement.
  * Existing unchanged optional failures remain diagnostics; new, changed, or
  * explicitly required failures reject instead of reporting false success.
@@ -266,6 +285,7 @@ export async function reconcileProfilePatches(
 ): Promise<string[]> {
   const entry = bootstrapIncludes.get(ctx)
   if (entry === undefined) throw new Error(`${binName}: profile reload requires the root Include entry`)
+  assertNoLegacyHmrOverride(patches)
   const previousFailures = (await inactiveEntries(ctx)).map(failure => ({
     ...failure, fiber: failure.entry.fiber, options: JSON.stringify(failure.entry.options),
   }))
@@ -288,67 +308,6 @@ export async function reconcileProfilePatches(
     if (result.status === 'rejected' && !previousFibers[index]?.failed) throw result.reason
   }
   return failures.map(failure => failure.diagnostic)
-}
-
-/** Options for live user patch-layer reconciliation. */
-export interface UserPatchWatchOptions {
-  /** Diagnostic prefix used by {@link loadOptionalPatches}. */
-  binName: string
-  /** Absolute path of the watched patch file (a profile's `cordis.patch.yml`). */
-  filename: string
-  /**
-   * Compose the full patch list for a fresh user-layer generation —
-   * the same composition the app booted with, so a reload can interleave the
-   * new user patches between app-owned layers (bundle layers below,
-   * overlays above). Identity when omitted: the user layer
-   * is the whole patch list.
-   */
-  compose?: (userPatches: PatchOptions[]) => PatchOptions[]
-}
-
-/**
- * Watch the user patch layer and reapply it to the boot Include without rollback.
- * @param ctx - settled app context containing the root Include and an active HMR service.
- * @param options - diagnostic, file, and patch-composition inputs.
- * @returns an asynchronous disposer after the exact-path watcher is ready.
- * @throws when HMR or the root Include is absent, watcher setup fails, or initial path resolution fails.
- */
-export async function watchUserPatches(
-  ctx: Context,
-  options: UserPatchWatchOptions,
-): Promise<() => Promise<void>> {
-  const { binName, filename, compose = (patches: PatchOptions[]) => patches } = options
-  const hmr = ctx.get('hmr')
-  if (hmr === undefined) throw new Error(`${binName}: user patch-layer watching requires the Cordis HMR service`)
-  const entry = bootstrapIncludes.get(ctx)
-  if (entry === undefined) throw new Error(`${binName}: user patch-layer watching requires the root Include entry`)
-  const register = watchConfig(ctx, filename, hmr.config, async () => {
-    // Re-read the include's non-patch options per refresh so a writer that
-    // updates another option between refreshes is not silently reverted.
-    const { patches: _previousPatches, ...includeConfig } = entry.options.config as Include.Config
-    const userPatches = loadOptionalPatches(binName, filename) ?? []
-    const patches = compose(userPatches)
-    await entry.update({
-      config: {
-        ...includeConfig,
-        patches,
-      },
-    })
-    await ctx.loader.await()
-    await Promise.allSettled([...ctx.loader.entries()].map(entry => Promise.resolve(entry.fiber?.await())))
-    const failures = await inactiveEntries(ctx)
-    if (failures.length > 0) throw new Error(activationDiagnostic(binName, 'warning', failures).trimEnd())
-  })
-  try {
-    return await register
-  } catch (error) {
-    // A surface can dispose the whole tree while the watcher is still opening;
-    // the HMR effect registration then fails with INACTIVE_EFFECT. That is the
-    // app exiting exactly as asked, not a watch failure, so return a no-op
-    // disposer instead of crashing.
-    if ((error as { code?: string } | null)?.code === 'INACTIVE_EFFECT') return async () => {}
-    throw error
-  }
 }
 
 /**

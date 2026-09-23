@@ -74,6 +74,13 @@ jobs:
             packages/boot/app-boot/tests/profile-root.spec.ts `
             packages/boot/app-boot/tests/profile.spec.ts `
             packages/boot/app-boot/tests/user-patches.spec.ts `
+            packages/boot/app-boot/tests/watch-config.spec.ts `
+            packages/boot/hmr/tests/coordination.spec.ts `
+            packages/boot/hmr/tests/error.spec.ts `
+            packages/boot/hmr/tests/modules.spec.ts `
+            packages/boot/hmr/tests/profile.spec.ts `
+            packages/boot/hmr/tests/reconciliation.spec.ts `
+            packages/boot/hmr/tests/watch-config.spec.ts `
             packages/skill/skill-office/tests/skill-office.spec.ts `
             apps/desktop-host/tests/package-transactions.spec.ts `
             apps/desktop-host/tests/desktop-plugin-command-ipc.spec.ts `
@@ -82,6 +89,7 @@ jobs:
             apps/desktop-host/tests/update-task-control.spec.ts `
             apps/cli/tests/resolved-profile-boot.spec.ts `
             apps/cli/tests/resolved-profile-disposal.spec.ts `
+            apps/cli/tests/profile-hmr.spec.ts `
             apps/desktop/tests/project-manager.spec.ts `
             apps/desktop/tests/fork-release.spec.ts `
             apps/desktop/tests/web-document.spec.ts `

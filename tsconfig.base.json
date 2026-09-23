@@ -330,6 +330,7 @@
       "@deepseek-ai/dsh-goal-round-driver": ["./packages/goal/goal-round-driver/src"],
       "@deepseek-ai/dsh-goal-round-driver/invariant": ["./packages/goal/goal-round-driver/src/invariant.ts"],
       "@deepseek-ai/dsh-headless": ["./packages/bundle/headless/src"],
+      "@deepseek-ai/dsh-hmr": ["./packages/boot/hmr/src"],
       "@deepseek-ai/dsh-home-paths": ["./packages/util/home-paths/src"],
       "@deepseek-ai/dsh-hook-protocol": ["./packages/hooks/hook-protocol/src"],
       "@deepseek-ai/dsh-hook-protocol/invariant": ["./packages/hooks/hook-protocol/src/invariant.ts"],

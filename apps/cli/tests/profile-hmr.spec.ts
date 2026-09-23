@@ -27,7 +27,7 @@ describe('profile module-HMR policy', () => {
       const modePatches = bundle(mode)
       expect(modePatches.some(patch => patch.id === 'hmr')).toBe(false)
       expect(hmr([bundle('base'), modePatches])).toMatchObject({
-        disabled: true,
+        name: '@deepseek-ai/dsh-hmr', disabled: true,
         config: { root: ['.'] },
       })
     },
@@ -35,7 +35,7 @@ describe('profile module-HMR policy', () => {
 
   it('requires an explicit later layer to enable source-module reload', () => {
     expect(hmr([bundle('base'), [{ id: 'hmr', disabled: false }]])).toMatchObject({
-      disabled: false,
+      name: '@deepseek-ai/dsh-hmr', disabled: false,
       config: { root: ['.'] },
     })
   })
