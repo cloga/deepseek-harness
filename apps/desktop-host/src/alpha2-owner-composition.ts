@@ -39,10 +39,10 @@ function afterCompose(entries: readonly unknown[]): void {
     if (!record(value)) return
     if (protectedId(value.id)) {
       const id = value.id
-      if (++counts[id] > 1 || value.name !== protectedModules[id] || value.disabled !== false
-        || !Array.isArray(value.inject) || value.inject.length !== 1 || value.inject[0] !== 'webStartup'
-        || !record(value.config)) refuse()
       const config = value.config
+      if (!record(config)) refuse()
+      if (++counts[id] > 1 || value.name !== protectedModules[id] || value.disabled !== false
+        || !Array.isArray(value.inject) || value.inject.length !== 1 || value.inject[0] !== 'webStartup') refuse()
       if (id === 'webserver') {
         if (config.host !== '127.0.0.1' || config.port !== 0 || config.compression !== 'gzip'
           || config.compressionLevel !== 1 || config.compressionThresholdBytes !== 1024
