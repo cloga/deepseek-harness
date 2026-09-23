@@ -101,11 +101,11 @@ describe('runProfile with an application-owned profile', () => {
     }
   })
 
-  it.each(['named-live', 'named-startup', 'home', 'overlay', 'application-owned', 'inserted-other-id'] as const)(
+  it.each(['named-live', 'named-startup', 'home', 'overlay', 'application-owned', 'application-group-config', 'inserted-other-id'] as const)(
     'refuses a %s name-qualified legacy HMR patch without touching user choices', async (source) => {
       const home = mkdtempSync(join(tmpdir(), 'dsh-legacy-hmr-patch-'))
       homes.push(home)
-      const owned = source === 'application-owned'
+      const owned = source === 'application-owned' || source === 'application-group-config'
       const profileDir = owned ? home : join(home, 'profiles', 'custom')
       mkdirSync(profileDir, { recursive: true })
       const runtime = join(home, 'runtime')
@@ -115,11 +115,14 @@ describe('runProfile with an application-owned profile', () => {
         dsh: { profile: { bundles: [], patchReload: source === 'named-startup' || owned ? 'startup' : 'live' } } }))
       const legacy = source === 'inserted-other-id'
         ? "- insert:\n    - id: custom-hmr\n      name: '@deepseek-ai/cordis-plugin-hmr'\n      disabled: false\n"
-        : "- id: hmr\n  name: '@deepseek-ai/cordis-plugin-hmr'\n  disabled: false\n"
+        : source === 'application-group-config'
+          ? "- id: group\n  config:\n    - id: custom-hmr\n      name: '@deepseek-ai/cordis-plugin-hmr'\n      disabled: false\n"
+          : "- id: hmr\n  name: '@deepseek-ai/cordis-plugin-hmr'\n  disabled: false\n"
       const profilePatch = join(profileDir, owned ? 'profile.patch.yml' : 'cordis.patch.yml')
       const homePatch = join(home, 'cordis.patch.yml')
       const overlay = join(home, 'legacy-overlay.yml')
-      writeFileSync(profilePatch, source === 'named-live' || source === 'named-startup' || source === 'inserted-other-id' ? legacy : '[]\n')
+      writeFileSync(profilePatch, source === 'named-live' || source === 'named-startup'
+        || source === 'inserted-other-id' || source === 'application-group-config' ? legacy : '[]\n')
       if (homePatch !== profilePatch) writeFileSync(homePatch, source === 'home' ? legacy : '[]\n')
       writeFileSync(overlay, source === 'overlay' ? legacy : '[]\n')
       const record = source === 'home' ? homePatch : source === 'overlay' ? overlay : profilePatch
@@ -127,8 +130,14 @@ describe('runProfile with an application-owned profile', () => {
       vi.stubEnv('DSH_HOME', home)
       const releaseProxy = vi.fn().mockResolvedValue(undefined)
       vi.mocked(installProxyFromEnvironment).mockResolvedValue(releaseProxy)
+      const groupOverride = source === 'application-group-config'
       const profile: Profile = { name: 'desktop', dir: profileDir, patchPath: profilePatch,
-        layers: [], patches: [{ id: 'hmr', name: '@deepseek-ai/cordis-plugin-hmr', disabled: false }], patchReload: 'startup' }
+        layers: groupOverride ? [{ packageName: 'desktop', packageDir: profileDir, patchPath: join(profileDir, 'bundle.yml'),
+          patches: [{ insert: [{ id: 'group', name: 'cordis:group', group: true, config: [] }] }] }] : [],
+        patches: groupOverride ? [{ id: 'group', config: [
+          { id: 'custom-hmr', name: '@deepseek-ai/cordis-plugin-hmr', disabled: false },
+        ] }] : [{ id: 'hmr', name: '@deepseek-ai/cordis-plugin-hmr', disabled: false }],
+        patchReload: 'startup' }
       await expect(runProfile({ environment: createLaunchEnvironmentSnapshot([]),
         profile: owned ? 'desktop' : 'custom', patchFiles: source === 'overlay' ? [overlay] : [], args: [],
         ...(owned ? { resolvedProfile: { profile, installAnchor: join(runtime, 'package.json') } } : {}),

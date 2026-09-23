@@ -260,13 +260,25 @@ export function assertNoLegacyHmrOverride(patches: readonly PatchOptions[]): voi
   const refuse = (): never => {
     throw new Error('dsh: legacy HMR module or name-qualified override cannot target official HMR; remove the old name or select @deepseek-ai/dsh-hmr explicitly')
   }
+  const groups = new Set<string>()
+  const scanEntries = (entries: readonly unknown[]): void => {
+    for (const value of entries) {
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
+      const entry = value as Partial<EntryOptions>
+      if (entry.name === legacy) refuse()
+      if (entry.group === true && typeof entry.id === 'string') groups.add(entry.id)
+      if (entry.group === true && Array.isArray(entry.config)) scanEntries(entry.config)
+    }
+  }
   for (const patch of patches) {
     if (patch.name === legacy) refuse()
-    const entries = [...(patch.insert ?? [])]
-    for (let entry = entries.pop(); entry !== undefined; entry = entries.pop()) {
-      if (entry.name === legacy) refuse()
-      if (entry.group === true && Array.isArray(entry.config)) entries.push(...entry.config as EntryOptions[])
-    }
+    if (patch.group === false && typeof patch.id === 'string') groups.delete(patch.id)
+    if (Array.isArray(patch.insert)) scanEntries(patch.insert)
+    // Include replaces a group row's entire config when a later patch targets
+    // it. Ordinary plugin configuration arrays are data, not Loader rows.
+    if (Array.isArray(patch.config) && (patch.group === true
+      || (typeof patch.id === 'string' && groups.has(patch.id)))) scanEntries(patch.config)
+    if (patch.group === true && typeof patch.id === 'string') groups.add(patch.id)
   }
 }
 

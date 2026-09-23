@@ -15,6 +15,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import {
   assertNoLegacyHmrOverride,
   boot,
+  composeEntries,
   loadOptionalPatches,
   loadOverlayPatches,
   PROFILE_PATCH_FILENAME,
@@ -332,7 +333,7 @@ describe('Loader entry disabled interpolation', () => {
 })
 
 describe('profile reconciliation settlement', () => {
-  it.each(['qualified', 'qualified-other-id', 'inserted', 'alternate-id', 'nested'] as const)(
+  it.each(['qualified', 'qualified-other-id', 'inserted', 'alternate-id', 'nested', 'group-config'] as const)(
     'rejects a %s legacy HMR module before replacing the live Include generation', async (kind) => {
       const dir = tmp()
       writeFileSync(join(dir, 'cordis.yml'), '[]\n')
@@ -345,7 +346,14 @@ describe('profile reconciliation settlement', () => {
         ? 'custom-hmr' : 'hmr', name: '@deepseek-ai/cordis-plugin-hmr', disabled: false }
       const patches = kind === 'qualified' || kind === 'qualified-other-id' ? [legacy]
         : kind === 'nested' ? [{ insert: [{ id: 'group', name: 'cordis:group', group: true, config: [legacy] }] }]
-          : [{ insert: [legacy] }]
+          : kind === 'group-config' ? [
+            { insert: [{ id: 'group', name: 'cordis:group', group: true, config: [] }] },
+            { id: 'group', config: [legacy] },
+          ] : [{ insert: [legacy] }]
+      if (kind === 'group-config') {
+        const group = composeEntries([structuredClone(patches)]).find(entry => entry.id === 'group')
+        expect(group?.config).toEqual([legacy]) // Include would activate this child without the guard.
+      }
       await expect(reconcileProfilePatches(ctx, patches, NAME)).rejects.toThrow('legacy HMR module or name-qualified override')
       expect(JSON.stringify(include.options.config)).toBe(before)
     },
@@ -354,6 +362,9 @@ describe('profile reconciliation settlement', () => {
   it('keeps an id-only enablement patch eligible for the official HMR row', () => {
     expect(() => assertNoLegacyHmrOverride([{ id: 'hmr', disabled: false }])).not.toThrow()
     expect(() => assertNoLegacyHmrOverride([{ id: 'other', name: '@deepseek-ai/cordis-plugin-include' }])).not.toThrow()
+    expect(() => assertNoLegacyHmrOverride([{ id: 'settings', config: [
+      { id: 'catalog-only', name: '@deepseek-ai/cordis-plugin-hmr' },
+    ] }])).not.toThrow() // A non-group plugin's array is inert data, never Loader rows.
   })
 
   it('retains unchanged optional import diagnostics but refuses an explicitly required target', async () => {
