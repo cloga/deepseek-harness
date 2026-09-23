@@ -77,6 +77,10 @@ export function apply(ctx: Context): void {
         default: return assertNever(args.action)
       }
     },
-    presentCall: args => ({ card: 'generic', title: 'Manage profile plugins', kind: args.action.startsWith('list_') ? 'read' : 'other', rawInput: args }),
+    presentCall: args => ({
+      card: 'generic', title: 'Manage profile plugins', kind: args.action.startsWith('list_') ? 'read' : 'other',
+      // Expanded tool cards must not duplicate caller URLs, credentials, or build-script names.
+      rawInput: { action: args.action, ...(args.enabled === undefined ? {} : { enabled: args.enabled }) },
+    }),
   }))
 }

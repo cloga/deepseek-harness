@@ -210,6 +210,10 @@ it('presents reads and changes distinctly and disposes its registration', async 
   const definition = ctx.tools.get('plugin_manager')!
   expect(definition.presentCall?.({ action: 'list_plugins' })).toMatchObject({ kind: 'read' })
   expect(definition.presentCall?.({ action: 'remove_bundle', target: 'bundle' })).toMatchObject({ kind: 'other' })
+  const card = definition.presentCall?.({ action: 'install_bundle', enabled: true,
+    target: 'https://packages.example.test/addon.tgz?signature=private-token', approvedBuilds: ['native'] })
+  if (card?.card !== 'generic') throw new Error('Expected an owned generic tool card')
+  expect(card.rawInput).toEqual({ action: 'install_bundle', enabled: true })
   await fiber.dispose()
   expect(ctx.tools.get('plugin_manager')).toBeUndefined()
 })
