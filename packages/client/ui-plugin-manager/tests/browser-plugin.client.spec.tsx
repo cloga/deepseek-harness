@@ -69,10 +69,8 @@ describe('ui-plugin-manager browser plugin', () => {
     // The sidebar entry addresses the page by the same id and speaks the dictionary.
     const icon = b.slots.entries('sidebar.panellist')[0]!
     expect(icon.component).toBe(PluginsPanelIcon)
-    const unread = () => { throw new Error('The sidebar icon must not read application state') }
-    const glyph = render(<PluginsPanelIcon size={18} active={false}
-      usePanelInfo={unread} useSessions={unread} useSessionStatus={unread} useSessionRetainInfo={unread}
-      useWorkspaces={unread} useResource={unread} />)
+    // The maintained Sidebar icon contract supplies only size/active, so no application state is available.
+    const glyph = render(<PluginsPanelIcon size={18} active={false} />)
     expect(glyph.container.querySelector('svg')?.getAttribute('width')).toBe('18')
     expect(icon.options).toMatchObject({ id: PANEL_ID, order: 0 })
     expect(icon.locale).toBe(NS)

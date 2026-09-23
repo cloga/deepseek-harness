@@ -111,6 +111,7 @@ jobs:
             apps/web/tests/desktop-boot.spec.ts `
             apps/web/tests/injection-order.spec.ts `
             packages/api/gateway/tests/gateway.client.spec.ts `
+            packages/api/remotes/tests/remote-events.host.spec.ts `
             packages/client/connection/tests/node-half.host.spec.ts `
             --maxWorkers=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -126,7 +127,7 @@ jobs:
             throw 'Official Manager UI client export missing from source build'
           }
 
-      - name: Test official browser and Manager UI components without mounting Desktop
+      - name: Test official browser, Manager UI and terminal components without mounting Desktop
         run: |
           pnpm exec vitest run `
             packages/client/ui-sidebar-browser/tests/apply.client.spec.ts `
@@ -141,6 +142,8 @@ jobs:
             packages/client/ui-plugin-manager/tests/components.client.spec.tsx `
             packages/client/ui-plugin-manager/tests/config-ledger.client.spec.ts `
             packages/client/ui-plugin-manager/tests/manager-store.client.spec.ts `
+            packages/client/ui-primitives/tests/terminal-block.client.spec.tsx `
+            packages/client/ui-tool/tests/terminal-card.client.spec.tsx `
             --maxWorkers=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

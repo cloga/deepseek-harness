@@ -8,6 +8,7 @@ import type {
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import { describe, expect, it } from 'vitest'
 import { apply, inject } from '../src/index.ts'
+import { API_REMOTE_FORWARDED_EVENTS } from '../src/remote-events.ts'
 
 interface GatewayProbe {
   source: TypertRemoteEventSource | undefined
@@ -79,6 +80,14 @@ function invocationOf(value: unknown): TypertRemoteEventInvocation {
 }
 
 describe('Remote event Host source', () => {
+  it('declares the three Manager lifecycle notifications with emitted forwarding modes', () => {
+    expect(API_REMOTE_FORWARDED_EVENTS.filter(entry => entry.event.startsWith('plugin-manager/'))).toEqual([
+      { event: 'plugin-manager/changed', mode: 'emit' },
+      { event: 'plugin-manager/install-log', mode: 'emit' },
+      { event: 'plugin-manager/install-state', mode: 'emit' },
+    ])
+  })
+
   it('registers the Host home used by Client connection generations', async () => {
     const { gateway, fiber } = await setup()
     expect(gateway.host?.home).toBeTypeOf('string')

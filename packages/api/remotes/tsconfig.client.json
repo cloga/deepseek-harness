@@ -45,6 +45,9 @@
       "path": "../../host/plugin-inventory"
     },
     {
+      "path": "../../boot/plugin-manager"
+    },
+    {
       "path": "../../interaction/commands"
     },
     {
