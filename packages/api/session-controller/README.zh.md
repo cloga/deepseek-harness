@@ -8,11 +8,12 @@ kind: "package-reference"
 
 ## 概述
 
-`@deepseek-ai/dsh-api-session-controller` 拥有 Host 的 `ctx.sessionController` 服务，以及生成的 Client `session`、`skills` 和 `fileReferences` Remote namespace。它提供 Session 生命周期与历史、Host generation 模型目录、工作区路径打开、用户可调用 skill（技能）发现和 Agent（智能体）范围的文件引用。当 Client 需要按 Session 寻址的操作时，请通过 API Gateway 使用它。
+通过 API Gateway 使用 `@deepseek-ai/dsh-api-session-controller`，可创建或恢复普通 Session、提交提示词、跟随持久历史，并选择手动模型或 Auto 模式。Client 还可以检查模型目录、发现用户可调用的 skill（技能）、解析 Agent（智能体）范围的文件引用，以及打开工作区路径。每个操作都会说明是否可以激活 Session；模型选择保持 subagent 所有权，并区分已接受意图与实际模型使用。
 
 ## 目录
 
 - [使用本包](#use-this-package)
+- [模型选择](#model-selection)
 - [会话媒体引用](#session-media-references)
 - [配置](#configuration)
 - [模型体验](#model-experience)
@@ -38,6 +39,17 @@ Session 对象还承载本地提交回显：`session.beginSubmission` 在调用�
 面向用户调用的 `skills/list` 元数据包含胜出提供方可选的指令文件 `path`。输入框可据此预览文件，无需加载每个 skill 的正文或激活冷态 Agent。
 
 分叉复制截至选中已结束轮次的历史，并包含其 `turn/end`。该位置之后的事件均被排除，包括排队输入和模型设置变更。省略锚点或锚点超出日志末尾时，选择最后一个已结束轮次；位于未结束轮次内的锚点会被拒绝。
+
+<a id="model-selection"></a>
+### 模型选择
+
+`session.selectModel` 校验具体的提供方／模型／强度选择，记录手动意图，并保留现有的具体默认模型保存行为。`session.selectAutoModel({ sessionId, mode })` 则接受类型限定的 `efficiency`、`balanced` 或 `intelligence` 模式，通过可选 Host 所有者校验路由就绪状态，并只返回已接受的 `mode`。它记录捕获的 Auto 策略，不选择虚构模型 id、不生成模型响应，也不写入部署的具体默认模型。[model-routing 包](../../llm/model-routing/README.zh.md)负责任务分类、候选策略和实际发送决策。
+
+两个操作都解析或恢复确切的普通 Session Agent，并共享其串行化模型／图片准入路径。Auto 选择在意图提交前传递调用方取消信号。路由服务缺失或未就绪，或发生普通路由校验失败时，返回携带请求模式的 `session/auto-model-unavailable`；取消时返回 `gateway/cancelled`。已有类型化 Remote 失败保留原有代码。属于 subagent 的 Session 仍被 `session/agent-busy` 拒绝，不会通过此 endpoint 被独立恢复或配置。
+
+显式 Auto 事件会清除被取代的待应用手动选择，同时保留 `modelSelection.lastUsed`；后续具体选择即使指定同一路由，也会清除 Auto 意图。实时缓存退休会检查确切 Agent 和当前意图，避免旧事件消费较新的手动选择。`modelSelection.next` 表示待应用手动选择或最后实际路由，绝不预测尚未解析的 Auto 工作。独立的 `modelRouting` 投影携带模式和最后确认的决策，包括具体选择及原因；其裁剪视图省略原始任务文本和策略内部信息。
+
+`session.modelCatalog()` 把提供方／模型分组与 `autoRouting.available` 分开。该标志报告新 Auto 选择的配置就绪状态，而非提供方可达性、预测路由或 Session 已捕获策略的有效性。禁止未来选择 Auto 不会悄然撤销现有 Auto 意图。目录名称和强度说明仍是建议性的展示数据；需要精确路由的操作由 Host 校验。
 
 <a id="session-media-references"></a>
 ## 会话媒体引用

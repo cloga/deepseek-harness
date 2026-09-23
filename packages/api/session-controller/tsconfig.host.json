@@ -36,6 +36,7 @@
     { "path": "../../jobs/jobs" },
     { "path": "../../fs/fs" },
     { "path": "../../llm/llm" },
+    { "path": "../../llm/model-routing" },
     { "path": "../../util/deque" },
     { "path": "../../util/native-command" },
     { "path": "../../preset/agent-presets" },

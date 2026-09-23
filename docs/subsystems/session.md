@@ -6,6 +6,12 @@ The in-memory, event-sourced model of [dsh-session](../../packages/core/session)
 
 Source: [`packages/core/session/src/types.ts`](../../packages/core/session/src/types.ts)
 
+<a id="session-auto-selection"></a>
+
+## Session Auto selection
+
+`SessionSelectAutoModelRequest` and `SessionSelectAutoModelValue` are declared by [`api/session-controller/src/types.ts`](../../packages/api/session-controller/src/types.ts). The request carries `sessionId` and a [`ModelRoutingMode`](llm-streaming.md#task-aware-routing-types); the accepted value carries only `mode`. Acceptance records Session-local Auto intent, not a predicted concrete model or evidence of actual model use. The Host selects the concrete route for task work.
+
 ## `SessionEventMap` — the event vocabulary
 
 The append-only event types. Merge-extensible: a plugin declares extra event types via declaration merging — e.g. the [compaction seam](compaction.md) adds `compaction/start` / `compaction/summary` / `compaction/end`, and `@deepseek-ai/dsh-hook-protocol` adds log-only `hook/invoked` / `hook/result` records for a hook bridge. Like `compaction/*`, these are NOT `SurfaceEventType`s (no `surfaceOp`). The generated [persistence log event catalog](../persistence-catalog.md) enumerates every member — core and merged — with its payload, surface badge, and declaration site.
@@ -798,6 +804,14 @@ inspect( sessionId: SessionId, signal?: AbortSignal, ): Promise<SessionInspectio
  * @returns the normalized selection installed for the Session.
  */
 @Remote('selectModel') selectModel(request: SessionSelectModelRequest): Promise<SessionSelectModelValue>
+
+/**
+ * Select a Session-local Auto mode without changing the deployment's concrete default.
+ * @param request - Ordinary Session identity and requested Auto tradeoff.
+ * @param signal - Caller cancellation before intent commitment.
+ * @returns The accepted mode; actual model use remains a durable request fact.
+ */
+@Remote('selectAutoModel') selectAutoModel(request: SessionSelectAutoModelRequest, signal: AbortSignal): Promise<SessionSelectAutoModelValue>
 
 /**
  * Describe every currently routable model for Host-generation selectors.

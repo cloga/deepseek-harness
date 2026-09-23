@@ -21,6 +21,8 @@ import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: the ctx.remote Context merge and the forwarded-event key face.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import { AgentLoopCard } from './AgentLoopCard.tsx'
+import { AutoModelRoutingCard } from './AutoModelRoutingCard.tsx'
+import { AUTO_MODEL_ROUTING_NS, AutoModelRoutingCardController } from './auto-model-routing-card-controller.ts'
 import { BashCard } from './BashCard.tsx'
 import { ConfigurablePluginsTab } from './ConfigurablePluginsTab.tsx'
 import { PluginsSettingsSection } from './PluginsSettingsSection.tsx'
@@ -73,27 +75,43 @@ export function apply(ctx: ClientContext): void {
     ctx.settingsScope.bind({ namespace: SUBAGENT_MODEL_SELECTION_NS }),
     ctx,
   )
+  const autoModelRouting = new AutoModelRoutingCardController(
+    ctx.settingsScope.bind({ namespace: AUTO_MODEL_ROUTING_NS }), ctx,
+  )
 
   // The credential a card reports is not part of any settings section, so its
   // scope publishes nothing when one is written. This is the only signal that
   // a key written on another surface reached the Host.
   ctx.effect(
-    () => ctx.remote.$on('credentials/reference-updated', (ref) => { webSearch.refreshCredential(ref) }),
+    () => ctx.remote.$on('credentials/reference-updated', (ref) => {
+      webSearch.refreshCredential(ref)
+      autoModelRouting.refreshCatalog()
+    }),
     'ui-settings-plugins: credential invalidations',
   )
   ctx.effect(
-    () => ctx.remote.$on('llm/adapters-updated', () => { subagentModelSelection.refreshCatalog() }),
-    'ui-settings-plugins: subagent adapter invalidations',
+    () => ctx.remote.$on('llm/adapters-updated', () => {
+      subagentModelSelection.refreshCatalog()
+      autoModelRouting.refreshCatalog()
+    }),
+    'ui-settings-plugins: model catalog adapter invalidations',
   )
   ctx.effect(
-    () => ctx.remote.$on('settings/document-updated', () => { subagentModelSelection.refreshCatalog() }),
-    'ui-settings-plugins: subagent settings invalidations',
+    () => ctx.remote.$on('settings/document-updated', () => {
+      subagentModelSelection.refreshCatalog()
+      autoModelRouting.refreshCatalog()
+    }),
+    'ui-settings-plugins: model catalog settings invalidations',
   )
   ctx.effect(
-    () => ctx.on('connection/reset', () => { subagentModelSelection.resetConnection() }),
-    'ui-settings-plugins: subagent connection generation',
+    () => ctx.on('connection/reset', () => {
+      subagentModelSelection.resetConnection()
+      autoModelRouting.resetConnection()
+    }),
+    'ui-settings-plugins: model catalog connection generation',
   )
   ctx.effect(() => () => { subagentModelSelection.dispose() }, 'ui-settings-plugins: subagent preference')
+  ctx.effect(() => () => { autoModelRouting.dispose() }, 'ui-settings-plugins: Auto routing preference')
 
   // The shared SettingsScope mirror updates after document commits and reconnects.
   const configurable = new ConfigurablePluginsTabController(
@@ -183,6 +201,12 @@ export function apply(ctx: ClientContext): void {
       locale: NS,
       inject: () => subagentModelSelection.inject(),
     }, SubagentModelSelectionCard)
+    yield ctx.slots.register({
+      name: 'settings.plugin.item',
+      key: AUTO_MODEL_ROUTING_NS,
+      locale: NS,
+      inject: () => autoModelRouting.inject(),
+    }, AutoModelRoutingCard)
     yield ctx.slots.register({
       name: 'settings.plugin.item',
       key: WEB_SEARCH_NS,

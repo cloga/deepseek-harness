@@ -6,6 +6,14 @@ The conversation and streaming types from [`packages/llm`](../../packages/llm/RE
 
 Source: [`packages/llm/llm/src/types.ts`](../../packages/llm/llm/src/types.ts)
 
+<a id="task-aware-routing-types"></a>
+
+## Task-aware routing types
+
+[`model-routing/src/types.ts`](../../packages/llm/model-routing/src/types.ts) declares `ModelRoutingMode` as `efficiency`, `balanced`, or `intelligence`, the user-selected tradeoff whose quality floors come from the deployment. `ctx.modelRouting` owns captured routing preferences and task-aware route resolution.
+
+[`model-routing/src/delegation-types.ts`](../../packages/llm/model-routing/src/delegation-types.ts) declares three creation-time types. `DelegationRoutingCapture` holds the exact direct parent's Session identity, parent-local intent sequence, and captured Auto selection. `ResolveDelegationRoutingRequest` carries that capture, the parent Agent, isolated child prompt, already-authorized eligible candidate IDs, optional output cap, and child-start cancellation signal. `ResolvedDelegationRouting` returns a proposed selection with materialized effort, candidate ID, reason, and optional classifier-call ID. The native owner validates the proposal before publishing a child; it is not dispatch evidence and does not enable Auto for the child's own conversation.
+
 <a id="content-blocks-and-messages"></a>
 
 ## Content blocks and messages
@@ -618,7 +626,7 @@ interface GenerateOptions {
    * map the purpose to model-hidden transport metadata or purpose-specific
    * generation policy. Ordinary conversation requests leave it unset.
    */
-  purpose?: 'compaction' | 'session-title'
+  purpose?: 'compaction' | 'session-title' | 'model-routing'
 }
 ```
 
@@ -1046,6 +1054,49 @@ stream(options: GenerateOptions): AsyncIterable<StreamChunk>
 Types: [FileAttachmentRef](attachment.md)
 
 Source: [`packages/llm/llm/src/index.ts`](../../packages/llm/llm/src/index.ts)
+
+<a id="ctxmodelrouting--modelroutingruntime"></a>
+
+### `ctx.modelRouting` — `ModelRoutingRuntime`
+
+Host service whose durable policies change only through an explicit Session choice.
+
+```ts cordis-catalog
+/**
+ * Report configuration readiness without network access or predicting a model.
+ * @returns Whether future explicit Auto selections have the required configuration.
+ */
+isAvailable(): boolean
+
+/**
+ * Validate classifier/conservative routes, then capture the current policy for one Session.
+ * Subsequent settings edits do not replace this durable selection.
+ * @param agent - Exact live top-level Agent receiving the user's opt-in.
+ * @param mode - Selected policy tradeoff.
+ * @param signal - Optional cancellation before the intent commit.
+ * @returns Fulfillment after the Auto intent is appended; no model call is made.
+ */
+async enable(agent: Agent, mode: ModelRoutingMode, signal?: AbortSignal): Promise<void>
+
+/**
+ * Capture an ordinary parent's Auto intent or a child's creation-owned delegation preference.
+ * @param parent - Exact live direct parent of the proposed delegation.
+ * @returns Detached policy and parent-local identity, or undefined when Auto is inapplicable.
+ */
+captureDelegation(parent: Agent): DelegationRoutingCapture | undefined
+
+/**
+ * Resolve an isolated child proposal without changing the parent's conversation route.
+ * The native owner separately enforces authorization and child-creation admission.
+ * @param request - Captured parent policy, authorized IDs and isolated child input.
+ * @returns A materialized model/effort proposal with classifier-audit attribution.
+ */
+resolveDelegation(request: ResolveDelegationRoutingRequest): Promise<ResolvedDelegationRouting>
+```
+
+Types: [Agent](core.md)
+
+Source: [`packages/llm/model-routing/src/runtime.ts`](../../packages/llm/model-routing/src/runtime.ts)
 
 <a id="llm-events"></a>
 

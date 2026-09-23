@@ -43,6 +43,7 @@ import { establishCatalogChild } from './catalog.ts'
 import { SubagentError } from './error.ts'
 import { isAdjacentAgentSendMessageTool } from './internal.ts'
 import type { ActivationObserver } from './lifecycle.ts'
+import type { CapturedNativeChildSelection } from './native-model-selection.ts'
 import type {
   ContinuableCreateRequest,
   ContinuableCreateSpec,
@@ -97,9 +98,10 @@ export class SubagentContinuationManager {
    * Every earlier failure disposes any created handle and rolls back Activation
    * and parent ownership without returning either id.
    * @param spec - provider, delegation request, and caller cancellation.
+   * @param captured - Registry-owned native selection captured before asynchronous work.
    * @returns the durable child id and accepted initial prompt message id.
    */
-  async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart> {
+  async startContinuable(spec: ContinuableStartSpec, captured?: CapturedNativeChildSelection): Promise<ContinuableStart> {
     const request = spec.request
     const parent = request.parent
     this.activations.assertAdmitting(parent)
@@ -108,31 +110,35 @@ export class SubagentContinuationManager {
     const childId = spec.childId ?? brandString<SessionId>(randomUUID())
     this.activations.assertChildIdAvailable(childId)
     const childDepth = resolveChildDepth(parent, request.maxDepth)
-    // Snapshot before any await: invalid descriptor JSON rejects the call
-    // before a child exists, and the detached value is what reaches the log.
-    const agentOptions = resolveChildAgentOptions(parent, request.agentOptions, childDepth)
-    const agentProvider = agentOptions.provider
-    const agentModel = agentOptions.model
-    const agentReasoningEffort = agentOptions.reasoningEffort
-    const descriptor = snapshotSubagentDescriptor({
-      mode: 'continuable',
-      provider: spec.provider,
-      label: spec.label,
-      ...agentProvider !== undefined ? { agentProvider } : {},
-      ...agentModel !== undefined ? { agentModel } : {},
-      ...agentReasoningEffort !== undefined ? { agentReasoningEffort } : {},
+    // Validate non-route composition before paid work; later descriptor construction uses these detached values.
+    const composition = snapshotSubagentDescriptor({
+      mode: 'continuable', provider: spec.provider, label: spec.label,
       ...request.persona !== undefined ? { persona: request.persona } : {},
       ...request.toolFilter !== undefined ? { toolFilter: request.toolFilter } : {},
     })
-    // Capture before the first await: a later parent switch belongs to the
-    // parent's future, not to this child.
-    const delegatedPolicies = captureDelegatedPolicyOverrides(parent)
+    const selectionInput = captured === undefined
+      ? { kind: 'fixed' as const, value: {
+        agentOptions: resolveChildAgentOptions(parent, request.agentOptions, childDepth),
+        delegatedPolicies: captureDelegatedPolicyOverrides(parent),
+      } }
+      : { kind: 'resolve' as const, value: captured }
 
     // An idle continuation-managed parent must not settle while a caller is
     // still creating its child. A turn-scoped delegation does not need this,
     // but the service is also callable outside a turn.
     const releaseHold = this.activations.holdOwnership(parent, childId)
     try {
+      const selection = selectionInput.kind === 'fixed' ? selectionInput.value : await selectionInput.value.resolve(spec.signal)
+      spec.signal.throwIfAborted()
+      this.activations.assertAdmitting(parent)
+      captured?.assertCurrent()
+      const agentOptions = { ...selection.agentOptions, subagentDepth: childDepth }
+      const descriptor = snapshotSubagentDescriptor({
+        ...composition,
+        ...agentOptions.provider === undefined ? {} : { agentProvider: agentOptions.provider },
+        ...agentOptions.model === undefined ? {} : { agentModel: agentOptions.model },
+        ...agentOptions.reasoningEffort === undefined ? {} : { agentReasoningEffort: agentOptions.reasoningEffort },
+      })
       const prepared = await this.host.prepareContinuable(spec.provider, {
         sessionId: childId,
         parent,
@@ -141,6 +147,7 @@ export class SubagentContinuationManager {
       spec.signal.throwIfAborted()
       this.activations.assertAdmitting(parent)
 
+      captured?.assertCurrent()
       const inheritedEventCount = SessionLogOffset(prepared.seed?.length ?? 0)
       const seed = prepared.seed
       const messageId = await this.activations.locks.run(childId, async () => {
@@ -156,6 +163,7 @@ export class SubagentContinuationManager {
             throw new SubagentError(`subagent "${childId}" already exists`, 'DUPLICATE_CHILD')
           }
         }
+        captured?.assertCurrent()
         const activation = await this.activations.materialize({
           childId,
           provider: spec.provider,
@@ -164,11 +172,12 @@ export class SubagentContinuationManager {
             seed,
             meta: childSessionMeta(parent, childDepth, prepared.seed !== undefined),
             inheritedEventCount,
-            delegatedPolicies,
+            delegatedPolicies: selection.delegatedPolicies,
             descriptor,
+            ...'modelSelection' in selection ? { modelSelection: selection.modelSelection } : {},
           },
           agentOptions,
-          composition: { persona: request.persona, toolFilter: request.toolFilter },
+          composition: { persona: composition.persona, toolFilter: composition.toolFilter },
           signal: spec.signal,
         })
         const childHeader = activation.handle.agent.session.header

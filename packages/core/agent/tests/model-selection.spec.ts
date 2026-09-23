@@ -170,6 +170,176 @@ describe('installModelSelection()', () => {
     await ctx.fiber.dispose()
   })
 
+  it('resolves one route for prompt variables, request effort, and the switch notice without changing queries', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    const agent = createAgent()
+    const scope = createScope(ctx, agent)
+    const current = { provider: 'configured', model: 'configured' }
+    const selection: ModelSelectionRef = { current, assembled: undefined }
+    const dispose = installModelSelection(scope.ctx, selection)
+    const routed: ModelSelection = { provider: 'routed', model: 'chosen', reasoningEffort: ReasoningEffortId('high') }
+    const order: string[] = []
+    scope.ctx.on('model-selection/resolve', async (payload, next) => {
+      order.push('resolve')
+      expect(payload.agent).toBe(agent)
+      expect(payload.signal).toBe(SIGNAL)
+      expect(payload.selection).toEqual(current)
+      expect(payload.selection).not.toBe(current)
+      expect(await next()).toBe(payload.selection)
+      return routed
+    })
+    scope.ctx.on('system-prompt/assemble', (_assembly, _context, next) => {
+      order.push('assemble')
+      return next()
+    })
+    agent.session.append('request/header', { header: { config: current }, reason: 'initial' })
+    try {
+      expect(readModelSelection(ctx, agent)).toEqual(current)
+      expect(order).toEqual([])
+      const assembly = await ctx.systemPrompt.assemble({ scope: agent, agent, signal: SIGNAL })
+      expect(order).toEqual(['resolve', 'assemble'])
+      expect(assembly.variables).toMatchObject({ provider: 'routed', model: 'chosen' })
+      expect(selection.current).toBe(current)
+      expect(selection.assembled).toEqual(routed)
+      expect(selection.assembled).not.toBe(routed)
+      expect(readModelSelection(ctx, agent)).toEqual(current)
+      await expect(agentEvents(ctx, agent).waterfall(
+        'agent/request', { turn: 1, step: 1, signal: SIGNAL },
+        () => Promise.resolve({ provider: 'seed', model: 'seed', reasoningEffort: ReasoningEffortId('low'), temperature: 0.2 }),
+      )).resolves.toEqual({ ...routed, temperature: 0.2 })
+      await expect(preStep(ctx, agent)).resolves.toMatchObject({
+        messages: [INPUT, expectedNotice('configured/configured', 'routed/chosen')],
+      })
+      delete routed.reasoningEffort
+      await ctx.systemPrompt.assemble({ scope: agent, agent, signal: SIGNAL })
+      await expect(agentEvents(ctx, agent).waterfall(
+        'agent/request', { turn: 1, step: 2, signal: SIGNAL },
+        () => Promise.resolve({ provider: 'seed', model: 'seed', reasoningEffort: ReasoningEffortId('low') }),
+      )).resolves.toEqual({ provider: 'routed', model: 'chosen' })
+      dispose()
+      order.length = 0
+      expect((await ctx.systemPrompt.assemble({ scope: agent, agent })).variables).toEqual({})
+      expect(order).toEqual(['assemble'])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('isolates asynchronous resolution between Agents and preserves undefined delegation', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    const a = createAgent()
+    const b = createAgent()
+    const scopeA = createScope(ctx, a)
+    const scopeB = createScope(ctx, b)
+    const selectionA: ModelSelectionRef = { current: undefined, assembled: undefined }
+    const selectionB: ModelSelectionRef = { current: undefined, assembled: undefined }
+    installModelSelection(scopeA.ctx, selectionA)
+    installModelSelection(scopeB.ctx, selectionB)
+    scopeA.ctx.on('model-selection/resolve', async ({ agent, selection }, next) => {
+      expect(agent).toBe(a)
+      expect(selection).toBeUndefined()
+      expect(await next()).toBeUndefined()
+      return { provider: 'a', model: 'resolved' }
+    })
+    try {
+      expect((await ctx.systemPrompt.assemble({ scope: a, agent: a })).variables).toEqual({ provider: 'a', model: 'resolved' })
+      expect((await ctx.systemPrompt.assemble({ scope: b, agent: b })).variables).toEqual({})
+      expect(selectionA.assembled).toEqual({ provider: 'a', model: 'resolved' })
+      expect(selectionB.assembled).toBeUndefined()
+      await scopeA.dispose()
+      expect((await ctx.systemPrompt.assemble({ scope: a, agent: a })).variables).toEqual({})
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps a concurrent manual choice for the next assembly and detaches the in-flight selection', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    const agent = createAgent()
+    const scope = createScope(ctx, agent)
+    const current = { provider: 'first', model: 'first' }
+    const selection: ModelSelectionRef = { current, assembled: undefined }
+    installModelSelection(scope.ctx, selection)
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    scope.ctx.on('model-selection/resolve', async (_payload, next) => {
+      entered.resolve(undefined)
+      await release.promise
+      return next()
+    })
+    try {
+      const pending = ctx.systemPrompt.assemble({ scope: agent, agent })
+      await entered.promise
+      current.model = 'mutated'
+      selection.current = { provider: 'manual', model: 'later' }
+      release.resolve(undefined)
+      expect((await pending).variables).toEqual({ provider: 'first', model: 'first' })
+      expect(selection.assembled).toEqual({ provider: 'first', model: 'first' })
+      expect(readModelSelection(ctx, agent)).toEqual({ provider: 'manual', model: 'later' })
+      expect((await ctx.systemPrompt.assemble({ scope: agent, agent })).variables).toEqual({ provider: 'manual', model: 'later' })
+    } finally {
+      release.resolve(undefined)
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it.each(['unscoped', 'scoped'] as const)('does not resolve %s diagnostic assemblies without an Agent', async (kind) => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    const agent = createAgent()
+    const selection: ModelSelectionRef = { current: { provider: 'configured', model: 'configured' }, assembled: undefined }
+    installModelSelection(ctx, selection)
+    ctx.on('model-selection/resolve', () => { throw new Error('diagnostics must not resolve') })
+    try {
+      const assembly = await ctx.systemPrompt.assemble(kind === 'scoped' ? { scope: agent } : {})
+      expect(assembly.variables).toEqual({ provider: 'configured', model: 'configured' })
+      expect(selection.assembled).toEqual(selection.current)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it.each(['before-resolution', 'during-resolution', 'during-assembly', 'resolver-error', 'assembly-error'] as const)(
+    'retains the previous assembled route after %s', async (stage) => {
+      const ctx = new Context()
+      await ctx.plugin(SystemPrompt)
+      const agent = createAgent()
+      const scope = createScope(ctx, agent)
+      const previous = { provider: 'previous', model: 'previous' }
+      const selection: ModelSelectionRef = { current: { provider: 'next', model: 'next' }, assembled: previous }
+      installModelSelection(scope.ctx, selection)
+      const abort = new AbortController()
+      const failure = new Error(stage)
+      let resolverCalls = 0
+      let assemblyCalls = 0
+      scope.ctx.on('model-selection/resolve', async (_payload, next) => {
+        resolverCalls += 1
+        if (stage === 'during-resolution') abort.abort(failure)
+        if (stage === 'resolver-error') throw failure
+        return next()
+      })
+      scope.ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
+        assemblyCalls += 1
+        if (stage === 'during-assembly') abort.abort(failure)
+        if (stage === 'assembly-error') throw failure
+        return next()
+      })
+      if (stage === 'before-resolution') abort.abort(failure)
+      try {
+        await expect(ctx.systemPrompt.assemble({ scope: agent, agent, signal: abort.signal })).rejects.toBe(failure)
+        expect(selection.assembled).toBe(previous)
+        expect(selection.current).toEqual({ provider: 'next', model: 'next' })
+        expect(resolverCalls).toBe(stage === 'before-resolution' ? 0 : 1)
+        expect(assemblyCalls).toBe(stage === 'during-assembly' || stage === 'assembly-error' ? 1 : 0)
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    },
+  )
+
   it('announces same-provider and cross-provider route changes from the assembled selection', async () => {
     const { agent, ctx, dispose, selection } = await switchHarness(
       { provider: 'alpha', model: 'a1' },

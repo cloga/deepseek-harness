@@ -482,6 +482,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Layers the default ModelSelection through settings so direct and Host-backed Agent entry points share one state owner.',
   },
   {
+    key: 'modelRouting',
+    pkg: 'model-routing',
+    title: 'Captured task-aware model routing',
+    mode: 'core',
+    consumers: ['api-session-controller', 'subagent'],
+    note: 'Captures Session Auto policy and resolves provider/model/effort before prompt assembly; the native subagent registry independently owns child authorization.',
+  },
+  {
     key: 'agentLoop',
     pkg: 'agent-loop',
     title: 'Concrete loop driver',

@@ -5,6 +5,7 @@
  */
 
 import type { UserMessage } from '@deepseek-ai/dsh-llm/types'
+import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm/brand'
 import type { OptionalSessionSeq, SessionId, SessionSeq } from '@deepseek-ai/dsh-session/types'
 import type { TypertContext, TypertLookup } from '@deepseek-ai/dsh-typert-protocol'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
@@ -23,6 +24,30 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertContextMap {
     /** Agent Context identity shared by Host and Client adapters. */
     agent: TypertContext<SessionId>
+  }
+}
+
+/** Complete provider, model, and optional reasoning effort selected for one live Agent. */
+export interface ModelSelection {
+  /** Registered provider route. */
+  provider: string
+  /** Provider-owned model id. */
+  model: string
+  /** Adapter-owned reasoning effort, or provider/default behavior when absent. */
+  reasoningEffort?: ReasoningEffortId
+}
+
+/** Durable explicit provider, model, and optional effort chosen for subsequent requests. */
+export interface ModelSelectionIntent {
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+}
+
+declare module '@deepseek-ai/dsh-session/types' {
+  interface SessionEventMap {
+    /** Complete validated manual selection; log-only and absent from model history. */
+    'model/selection': ModelSelectionIntent
   }
 }
 
