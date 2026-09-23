@@ -18,7 +18,7 @@ import type {
 export type * from './types.ts'
 
 /** Brand an existing Loader-tree entry id at the owning boundary. */
-function pluginEntryId(value: string): PluginEntryId {
+export function pluginEntryId(value: string): PluginEntryId {
   return value as PluginEntryId
 }
 
@@ -42,6 +42,32 @@ const FIBER_PHASE = {
   [FIBER_STATE.UNLOADING]: 'unloading',
 } as const satisfies Record<FiberState, PluginFiberPhase>
 
+/** Read the same owned Loader and preset projection without requiring a Remote Gateway to be mounted. */
+export async function readPluginInventory(ctx: Context): Promise<PluginInventorySnapshot> {
+  const entries: PluginInventoryEntry[] = []
+  for (const entry of ctx.loader.entries()) {
+    if (entry.options.group) continue
+    entries.push({
+      entryId: pluginEntryId(entry.id),
+      moduleName: entry.options.name,
+      enabled: !entry.disabled,
+      fiberPhase: entry.fiber === undefined ? null : FIBER_PHASE[entry.fiber.state],
+    })
+  }
+  const presets = ctx.get('agentPresets')
+  if (presets === undefined) return { entries }
+  const agentPresets: AgentPresetPluginGroup[] = (await presets.compositionInventory()).map(
+    composition => ({
+      ...composition,
+      rows: composition.rows.map(({ fiberState, ...row }) => ({
+        ...row,
+        fiberPhase: fiberState === undefined ? null : FIBER_PHASE[fiberState],
+      })),
+    }),
+  )
+  return { entries, agentPresets }
+}
+
 /** Remote-only service exposing the Loader's current non-group entry state. */
 export class PluginInventoryGateway extends TypertRemoteService {
   static inject = ['loader']
@@ -64,28 +90,7 @@ export class PluginInventoryGateway extends TypertRemoteService {
    */
   @Remote('list')
   async list(): Promise<PluginInventorySnapshot> {
-    const entries: PluginInventoryEntry[] = []
-    for (const entry of this.ctx.loader.entries()) {
-      if (entry.options.group) continue
-      entries.push({
-        entryId: pluginEntryId(entry.id),
-        moduleName: entry.options.name,
-        enabled: !entry.disabled,
-        fiberPhase: entry.fiber === undefined ? null : FIBER_PHASE[entry.fiber.state],
-      })
-    }
-    const presets = this.ctx.get('agentPresets')
-    if (presets === undefined) return { entries }
-    const agentPresets: AgentPresetPluginGroup[] = (await presets.compositionInventory()).map(
-      composition => ({
-        ...composition,
-        rows: composition.rows.map(({ fiberState, ...row }) => ({
-          ...row,
-          fiberPhase: fiberState === undefined ? null : FIBER_PHASE[fiberState],
-        })),
-      }),
-    )
-    return { entries, agentPresets }
+    return readPluginInventory(this.ctx)
   }
 }
 

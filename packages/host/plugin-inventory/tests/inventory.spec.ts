@@ -3,7 +3,7 @@ import { Context, FiberState, type Plugin } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
 import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
-import PluginInventoryGateway from '../src/index.ts'
+import PluginInventoryGateway, { pluginEntryId, readPluginInventory } from '../src/index.ts'
 
 const contexts: Context[] = []
 
@@ -32,6 +32,19 @@ async function harness(): Promise<{
 }
 
 describe('PluginInventoryGateway', () => {
+  it('shares its direct read projection without requiring a Remote Gateway in a named profile', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(Loader)
+    ctx.loader.builtins.active = activePlugin
+    const id = await ctx.loader.create({ name: 'cordis:active' })
+    expect(ctx.get('pluginInventory')).toBeUndefined()
+    expect(pluginEntryId(id)).toBe(id)
+    expect(await readPluginInventory(ctx)).toEqual({ entries: [{
+      entryId: id, moduleName: 'cordis:active', enabled: true, fiberPhase: 'active',
+    }] })
+  })
+
   it('publishes one direct list method under the pluginInventory namespace', async () => {
     const { inventory } = await harness()
     expect(inventory.typertRemote).toMatchObject({

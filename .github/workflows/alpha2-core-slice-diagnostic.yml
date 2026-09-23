@@ -81,6 +81,12 @@ jobs:
             packages/boot/hmr/tests/profile.spec.ts `
             packages/boot/hmr/tests/reconciliation.spec.ts `
             packages/boot/hmr/tests/watch-config.spec.ts `
+            packages/boot/plugin-manager/tests/build-approval.spec.ts `
+            packages/boot/plugin-manager/tests/install-spec.spec.ts `
+            packages/boot/plugin-manager/tests/operations.spec.ts `
+            packages/boot/plugin-manager/tests/patch.spec.ts `
+            packages/boot/plugin-manager/tests/tools.spec.ts `
+            packages/host/plugin-inventory/tests/inventory.spec.ts `
             packages/skill/skill-office/tests/skill-office.spec.ts `
             packages/util/lazy-require/tests/index.spec.ts `
             packages/deliverables/workspace-changes/tests/capture.spec.ts `
@@ -128,6 +134,11 @@ jobs:
             packages/client/ui-sidebar-browser/tests/store.client.spec.ts `
             packages/client/ui-sidebar-browser/tests/url.client.spec.ts `
             --maxWorkers=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test all official named-profile Manager cases and staged no-write refusal
+        run: |
+          pnpm exec vitest run packages/boot/plugin-manager/tests/manager.spec.ts --maxWorkers=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test all official workspace recorder integration cases in one fresh worker
