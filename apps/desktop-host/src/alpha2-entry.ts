@@ -11,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-plugin-manager'
 import { createAlpha2ParentStop } from './alpha2-parent-stop.ts'
 import { assertAlpha2ProfileOwnership } from './alpha2-profile-ownership.ts'
 import { Alpha2TransportAdmission } from './alpha2-admission.ts'
-import { assertAlpha2Injections } from './alpha2-injections.ts'
+import { snapshotAlpha2Injections } from './alpha2-injections.ts'
 import { alpha2OwnerCompositionGuard } from './alpha2-owner-composition.ts'
 import { installDesktopPluginCommands, type DesktopPluginCommandInstallation } from './desktop-plugin-command-runtime.ts'
 import { readDesktopPackageHealth } from './package-health.ts'
@@ -138,8 +138,7 @@ export async function runAlpha2DesktopHost(): Promise<void> {
     }
     const packages = await readDesktopPackageHealth(ctx)
     if (packages === undefined) throw new Error('desktop alpha2: package inventory is unavailable')
-    const injections = server.collectIndexInjections()
-    assertAlpha2Injections(injections)
+    const injections = snapshotAlpha2Injections(server.collectIndexInjections())
     if (stopping !== undefined) { await stopping; return }
     // This is TRANSPORT preparation, never proof that required Core packages,
     // optional Copilot acquisition, native receipts, or source hashes passed.
