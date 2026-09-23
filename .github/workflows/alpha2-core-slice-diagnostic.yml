@@ -66,6 +66,7 @@ jobs:
             packages/boot/app-boot/tests/profile-plugins.spec.ts `
             packages/boot/app-boot/tests/profile-sanitize.spec.ts `
             packages/boot/app-boot/tests/profile-context.spec.ts `
+            packages/boot/app-boot/tests/profile-root.spec.ts `
             apps/desktop-host/tests/package-transactions.spec.ts `
             apps/desktop-host/tests/desktop-plugin-command-ipc.spec.ts `
             apps/desktop/tests/project-manager.spec.ts `

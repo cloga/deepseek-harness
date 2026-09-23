@@ -63,6 +63,7 @@ export {
   type ProfileResolutionMode,
   type ProfileTemplate,
 } from './profile.ts'
+export { PROFILE_ROOT_FILENAME, PROFILE_ROOT_CONFIG, prepareProfileRootConfig, writeProfileRootConfig } from './profile-root.ts'
 export {
   readProfilePlugins, reconcileProfilePlugins, writeProfileBundles,
   type ProfilePluginLocation, type ProfilePluginDependency, type ProfilePluginInventory, type ProfilePluginReconciliation,
