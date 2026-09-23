@@ -2502,6 +2502,69 @@ describe('Remote stream client carrier lifecycle', () => {
     })
   })
 
+  it('uses the shell-owned Host origin for the Desktop Remote WebSocket without changing ordinary page routing', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, '__DSH_TRANSPORT__')
+    try {
+      Object.defineProperty(globalThis, '__DSH_TRANSPORT__', { configurable: true,
+        value: { ownsHost: true, streamBaseUrl: 'http://127.0.0.1:19387' } })
+      await withFakeWebSocket('dsh-app://app', async () => {
+        FakeWebSocket.autoOpen = false
+        const client = new RemoteStreamMuxClient()
+        client.start()
+        expect(FakeWebSocket.sockets).toHaveLength(1)
+        expect(FakeWebSocket.sockets[0]?.url).toBe('ws://127.0.0.1:19387/api/remote.mux')
+        await client.close()
+      })
+    } finally {
+      if (descriptor === undefined) Reflect.deleteProperty(globalThis, '__DSH_TRANSPORT__')
+      else Object.defineProperty(globalThis, '__DSH_TRANSPORT__', descriptor)
+    }
+  })
+
+  it.each([
+    ['ordinary Web cannot select a Desktop origin', 'https://harness.example', true, 'http://127.0.0.1:19387'],
+    ['foreign Desktop document', 'dsh-app://shell', true, 'http://127.0.0.1:19387'],
+    ['carrier must own its Host', 'dsh-app://app', false, 'http://127.0.0.1:19387'],
+    ['foreign Host', 'dsh-app://app', true, 'https://elsewhere.example/'],
+    ['unqualified HTTPS Host', 'dsh-app://app', true, 'https://127.0.0.1:19387/'],
+    ['unqualified localhost alias', 'dsh-app://app', true, 'http://localhost:19387/'],
+    ['non-HTTP protocol', 'dsh-app://app', true, 'file:///outside'],
+    ['URL credentials', 'dsh-app://app', true, 'http://user:pass@127.0.0.1:19387/'],
+    ['unexpected path', 'dsh-app://app', true, 'http://127.0.0.1:19387/private'],
+    ['query token', 'dsh-app://app', true, 'http://127.0.0.1:19387/?token=secret'],
+    ['fragment', 'dsh-app://app', true, 'http://127.0.0.1:19387/#secret'],
+  ] as const)('refuses %s without constructing a Remote socket', async (_reason, origin, ownsHost, streamBaseUrl) => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, '__DSH_TRANSPORT__')
+    try {
+      Object.defineProperty(globalThis, '__DSH_TRANSPORT__', { configurable: true, value: { ownsHost, streamBaseUrl } })
+      await withFakeWebSocket(origin, async () => {
+        const client = new RemoteStreamMuxClient()
+        expect(() => client.start()).toThrow(/Desktop.*stream origin|only the Desktop shell/u)
+        expect(FakeWebSocket.sockets).toHaveLength(0)
+        await client.close()
+      })
+    } finally {
+      if (descriptor === undefined) Reflect.deleteProperty(globalThis, '__DSH_TRANSPORT__')
+      else Object.defineProperty(globalThis, '__DSH_TRANSPORT__', descriptor)
+    }
+  })
+
+  it('refuses Desktop app traffic before its owned Host origin is supplied', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, '__DSH_TRANSPORT__')
+    try {
+      Reflect.deleteProperty(globalThis, '__DSH_TRANSPORT__')
+      await withFakeWebSocket('dsh-app://app', async () => {
+        const client = new RemoteStreamMuxClient()
+        expect(() => client.start()).toThrow('Desktop application Host stream origin is missing or foreign')
+        expect(FakeWebSocket.sockets).toHaveLength(0)
+        await client.close()
+      })
+    } finally {
+      if (descriptor === undefined) Reflect.deleteProperty(globalThis, '__DSH_TRANSPORT__')
+      else Object.defineProperty(globalThis, '__DSH_TRANSPORT__', descriptor)
+    }
+  })
+
   it('fails waiters with one socket attempt and lets the owner start the next attempt', async () => {
     await withFakeWebSocket('null', async () => {
       FakeWebSocket.autoOpen = false
@@ -2623,7 +2686,9 @@ async function withFakeWebSocket(
   const locationDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'location')
   ;(globalThis as WebSocketGlobal).WebSocket = FakeWebSocket as unknown as typeof WebSocket
   if (origin === undefined) Reflect.deleteProperty(globalThis, 'location')
-  else Object.defineProperty(globalThis, 'location', { configurable: true, value: { origin } })
+  else Object.defineProperty(globalThis, 'location', { configurable: true,
+    value: { origin, protocol: origin === 'null' ? 'null:' : new URL(origin).protocol,
+      hostname: origin === 'null' ? '' : new URL(origin).hostname } })
   FakeWebSocket.sockets.length = 0
   FakeWebSocket.autoOpen = true
   FakeWebSocket.dispatchClose = true

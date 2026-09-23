@@ -302,8 +302,26 @@ class StreamInbox {
 }
 
 function remoteStreamUrl(): string {
-  const location = (globalThis as { location?: { origin?: string } }).location
-  const base = location?.origin !== undefined && location.origin !== 'null' ? location.origin : INTERNAL_BASE
+  const location = (globalThis as { location?: { origin?: string; protocol?: string; hostname?: string } }).location
+  const transport = (globalThis as { __DSH_TRANSPORT__?: { ownsHost?: boolean; streamBaseUrl?: string } }).__DSH_TRANSPORT__
+  const desktopBase = transport?.streamBaseUrl
+  if (location?.protocol === 'dsh-app:' && (location.hostname !== 'app' || desktopBase === undefined)) {
+    throw new RemoteStreamCarrierError('api gateway: Desktop application Host stream origin is missing or foreign')
+  }
+  if (desktopBase !== undefined) {
+    if (transport?.ownsHost !== true || location?.protocol !== 'dsh-app:' || location.hostname !== 'app') {
+      throw new RemoteStreamCarrierError('api gateway: only the Desktop shell may select a Host stream origin')
+    }
+    let host: URL
+    try { host = new URL(desktopBase) }
+    catch { throw new RemoteStreamCarrierError('api gateway: invalid Desktop Host stream origin') }
+    if (host.protocol !== 'http:' || host.hostname !== '127.0.0.1'
+      || host.username !== '' || host.password !== '' || host.pathname !== '/'
+      || host.search !== '' || host.hash !== '') {
+      throw new RemoteStreamCarrierError('api gateway: invalid Desktop Host stream origin')
+    }
+  }
+  const base = desktopBase ?? (location?.origin !== undefined && location.origin !== 'null' ? location.origin : INTERNAL_BASE)
   const url = new URL(REMOTE_STREAM_MUX_PATH, base)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.href
