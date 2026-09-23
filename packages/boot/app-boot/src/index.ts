@@ -44,6 +44,8 @@ export {
   DEFAULT_PROFILE_BUNDLES,
   DEFAULT_PROFILE_PATCH_RELOAD,
   healProfilesModuleFallback,
+  healIsolatedProfileModuleFallback,
+  unlinkProfileModuleFallback,
   initProfile,
   loadProfile,
   loadProfileDirectory,
