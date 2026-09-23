@@ -54,8 +54,11 @@ export async function readPluginInventory(ctx: Context): Promise<PluginInventory
       fiberPhase: entry.fiber === undefined ? null : FIBER_PHASE[entry.fiber.state],
     })
   }
+  // A profile alone does not authorize management; advertise only an actual
+  // mounted Manager Service, never a release-plan or installation dependency.
+  const capability = ctx.get('pluginManager') === undefined ? {} : { managementAvailable: true }
   const presets = ctx.get('agentPresets')
-  if (presets === undefined) return { entries }
+  if (presets === undefined) return { entries, ...capability }
   const agentPresets: AgentPresetPluginGroup[] = (await presets.compositionInventory()).map(
     composition => ({
       ...composition,
@@ -65,7 +68,7 @@ export async function readPluginInventory(ctx: Context): Promise<PluginInventory
       })),
     }),
   )
-  return { entries, agentPresets }
+  return { entries, agentPresets, ...capability }
 }
 
 /** Remote-only service exposing the Loader's current non-group entry state. */

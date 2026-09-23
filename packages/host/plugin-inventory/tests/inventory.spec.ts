@@ -45,6 +45,14 @@ describe('PluginInventoryGateway', () => {
     }] })
   })
 
+  it('advertises management only while an actual Manager Service exists', async () => {
+    const { ctx, inventory } = await harness()
+    expect((await inventory.list()).managementAvailable).toBeUndefined()
+    ctx.provide('pluginManager', {} as never)
+    expect((await inventory.list()).managementAvailable).toBe(true)
+    expect((await readPluginInventory(ctx)).managementAvailable).toBe(true)
+  })
+
   it('publishes one direct list method under the pluginInventory namespace', async () => {
     const { inventory } = await harness()
     expect(inventory.typertRemote).toMatchObject({

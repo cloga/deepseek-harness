@@ -62,6 +62,8 @@ export interface AgentPresetPluginGroup {
 /** Point-in-time inventory returned by the plugin inventory Remote. */
 export interface PluginInventorySnapshot {
   readonly entries: readonly PluginInventoryEntry[]
+  /** True only while this Host Context actually exposes an active Manager Service. Absent means unavailable. */
+  readonly managementAvailable?: boolean
   /**
    * Per-preset compositions, present only when an agent-preset roster is
    * composed in this deployment.

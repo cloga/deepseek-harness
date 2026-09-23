@@ -115,15 +115,18 @@ jobs:
             --maxWorkers=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build Client face and verify the official browser export, never an installer
+      - name: Build Client face and verify official browser and Manager UI exports, never an installer
         run: |
           pnpm run build:lib:client
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (!(Test-Path packages/client/ui-sidebar-browser/lib/client.js)) {
             throw 'Official Sidebar Browser client export missing from source build'
           }
+          if (!(Test-Path packages/client/ui-plugin-manager/lib/client.js)) {
+            throw 'Official Manager UI client export missing from source build'
+          }
 
-      - name: Test real React Sidebar browser components without mounting Desktop
+      - name: Test official browser and Manager UI components without mounting Desktop
         run: |
           pnpm exec vitest run `
             packages/client/ui-sidebar-browser/tests/apply.client.spec.ts `
@@ -134,6 +137,10 @@ jobs:
             packages/client/ui-sidebar-browser/tests/browser-title.client.spec.tsx `
             packages/client/ui-sidebar-browser/tests/store.client.spec.ts `
             packages/client/ui-sidebar-browser/tests/url.client.spec.ts `
+            packages/client/ui-plugin-manager/tests/browser-plugin.client.spec.tsx `
+            packages/client/ui-plugin-manager/tests/components.client.spec.tsx `
+            packages/client/ui-plugin-manager/tests/config-ledger.client.spec.ts `
+            packages/client/ui-plugin-manager/tests/manager-store.client.spec.ts `
             --maxWorkers=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
