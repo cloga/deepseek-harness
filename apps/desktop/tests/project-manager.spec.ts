@@ -1295,6 +1295,30 @@ describe('desktop external plugin profile', () => {
     } finally { globalThis.fetch = original }
   })
 
+  it('keeps a fresh Core profile usable when independently published Copilot is optional and rate-limited', async () => {
+    const { manager } = setup()
+    const fixture = pluginFixture('dsh-github-copilot')
+    const plan = parseDesktopPluginProvisioningPlan({ schemaVersion: 2, mode: 'exact', plugins: [{
+      required: false, sourcePolicy: 'compatible-user-override', source: fixture.source,
+    }] })
+    await manager.applyRelease()
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async () => new Response('{}', { status: 403, headers: {
+      'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1790120733',
+    } })
+    try {
+      const state = await manager.reconcileProvisioning(plan, hooks())
+      expect(state.plugins).toMatchObject([{ name: fixture.source.packageName, required: false,
+        status: 'optional-failed', phase: 'download' }])
+      expect(state.plugins[0]).not.toHaveProperty('receipt')
+      expect(manager.listPlugins()).toEqual([])
+      expect(() => assertDesktopProvisioningInventory(manager.paths.profile, plan)).not.toThrow()
+      await expect(manager.mutate({ type: 'plugin-install', source: fixture.source }, hooks())).rejects.toThrow()
+      expect(manager.listPlugins()).toEqual([])
+      expect(() => assertDesktopProvisioningInventory(manager.paths.profile, plan)).not.toThrow()
+    } finally { globalThis.fetch = originalFetch }
+  }, 30_000)
+
   it('stages a Node upgrade without running pnpm in the active profile', async () => {
     const { root, manager } = setup()
     await manager.applyRelease()
