@@ -11,7 +11,7 @@ English | [中文](README.zh.md)
 
 Browse HTTP(S) pages, including loopback services, inside independent right-Sidebar tabs. The current carrier is an iframe with application-managed history in both Web and Desktop. The package never injects Electron or Node access into visited content.
 
-> Integration status in this fork: source only; no Browser tab or navigation request is active in the shipped composition.
+> Integration status: the alpha2 branch now selects this package in its Web roster. The published Desktop has not changed; packaged Electron iframe navigation, popup permissions, and unsafe-mode behavior still require same-source acceptance before release.
 
 ## Table of Contents
 

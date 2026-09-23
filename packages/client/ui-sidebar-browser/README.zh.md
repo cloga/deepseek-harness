@@ -11,7 +11,7 @@ kind: "package-reference"
 
 在独立的右侧 Sidebar tab 中浏览 HTTP(S) 页面，包括 loopback 服务。当前 Web 与 Desktop 都使用 iframe 和应用维护的 history。本包不会向被访问内容注入 Electron 或 Node 能力。
 
-> 本 fork 当前仅导入源码；正式组合尚未激活 Browser tab，也不会由本包发起导航请求。
+> 集成状态：alpha2 分支现已在 Web roster 中选用本包；已发布的 Desktop 未改变。正式发布前仍须对同源码安装器中的 Electron iframe 导航、弹窗权限与 unsafe 模式做真实验收。
 
 ## 目录
 

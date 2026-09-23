@@ -130,6 +130,7 @@ jobs:
             packages/skill/skill-office/tests/skill-office.spec.ts `
             packages/util/lazy-require/tests/index.spec.ts `
             packages/bundle/web-app/tests/web-app.spec.ts `
+            packages/bundle/web-app/tests/official-browser-roster.spec.ts `
             packages/deliverables/workspace-changes/tests/capture.spec.ts `
             packages/deliverables/workspace-changes/tests/compare.spec.ts `
             packages/deliverables/workspace-changes/tests/git.spec.ts `

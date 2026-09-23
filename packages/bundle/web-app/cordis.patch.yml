@@ -229,6 +229,10 @@
     - id: ui-sidebar-documentpreview
       name: '@deepseek-ai/dsh-client-ui-sidebar-documentpreview'
 
+    # Official sandboxed HTTP(S) Browser tabs in the right Sidebar.
+    - id: ui-sidebar-browser
+      name: '@deepseek-ai/dsh-client-ui-sidebar-browser'
+
     # The right Sidebar's workspace file tree tab type.
     - id: ui-sidebar-terminal
       name: '@deepseek-ai/dsh-client-ui-sidebar-terminal'
