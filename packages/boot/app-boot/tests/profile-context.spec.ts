@@ -22,7 +22,7 @@ it('copies launch overlays before applying the telemetry hard-disable to a loade
   const home = mkdtempSync(join(tmpdir(), 'dsh-profile-context-'))
   roots.push(home)
   const dir = join(home, 'profiles', 'test')
-  const telemetry = { id: 'session-telemetry-otel', name: 'telemetry' }
+  const telemetry = { insert: [{ id: 'session-telemetry-otel', name: 'telemetry' }] }
   const profile: Profile = {
     name: 'test', dir, patchPath: join(dir, 'cordis.patch.yml'), patchReload: 'live',
     layers: [{ packageName: 'fixture', packageDir: home, patchPath: join(home, 'layer.yml'), patches: [telemetry] }],
