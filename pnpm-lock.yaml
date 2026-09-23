@@ -9924,6 +9924,28 @@ importers:
         specifier: workspace:^
         version: link:../skill
 
+  packages/skill/skill-office:
+    dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../vendor/schemastery
+        version: link:../../../vendor/schemastery
+      yaml:
+        specifier: ^2.4.2
+        version: 2.9.0
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/cordis-plugin-include':
+        specifier: workspace:^
+        version: link:../../../vendor/include
+      '@deepseek-ai/cordis-plugin-loader':
+        specifier: workspace:^
+        version: link:../../../vendor/loader
+      '@deepseek-ai/dsh-skill':
+        specifier: workspace:^
+        version: link:../skill
+
   packages/skill/tool-skill:
     dependencies:
       '@deepseek-ai/schemastery':

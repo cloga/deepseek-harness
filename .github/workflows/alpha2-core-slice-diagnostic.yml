@@ -57,6 +57,11 @@ jobs:
           pnpm install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Build source Host entries for official alpha2 packages, never an installer
+        run: |
+          pnpm run build:lib:host
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Test only the reviewed source contracts, never package or publish
         run: |
           pnpm exec vitest run `
@@ -68,6 +73,8 @@ jobs:
             packages/boot/app-boot/tests/profile-context.spec.ts `
             packages/boot/app-boot/tests/profile-root.spec.ts `
             packages/boot/app-boot/tests/profile.spec.ts `
+            packages/boot/app-boot/tests/user-patches.spec.ts `
+            packages/skill/skill-office/tests/skill-office.spec.ts `
             apps/desktop-host/tests/package-transactions.spec.ts `
             apps/desktop-host/tests/desktop-plugin-command-ipc.spec.ts `
             apps/cli/tests/resolved-profile-boot.spec.ts `
