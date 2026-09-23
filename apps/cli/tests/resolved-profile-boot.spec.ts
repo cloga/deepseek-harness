@@ -241,7 +241,8 @@ describe('runProfile with an application-owned profile', () => {
       ])
       expect(rows.find(row => row.id === 'target')?.config).toEqual({ overlay: true, priority: 'overlay' })
       expect(rows.find(row => row.id === 'session-telemetry-otel')?.disabled).toBe(true)
-      expect(ctx.profileContext).toMatchObject({ dir: home, patchPath: profilePatch, installAnchor: runtime.installAnchor })
+      expect(ctx.profileContext).toMatchObject({ dir: home, patchPath: profilePatch,
+        installAnchor: runtime.installAnchor, watchProfilePatches: false })
       expect(watchUserPatches).not.toHaveBeenCalled()
       await shutdown.shutdown(0)
       expect(dispose).toHaveBeenCalledOnce()
@@ -252,13 +253,13 @@ describe('runProfile with an application-owned profile', () => {
     }
   })
 
-  it('keeps the maintained ordinary named-profile patch watchers', async () => {
+  it.each(['live', 'startup'] as const)('keeps the maintained ordinary named-profile %s watcher policy', async (patchReload) => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-named-profile-hmr-'))
     homes.push(home)
     const dir = join(home, 'profiles', 'custom')
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'custom',
-      dsh: { profile: { bundles: [], patchReload: 'live' } } }))
+      dsh: { profile: { bundles: [], patchReload } } }))
     writeFileSync(join(dir, 'cordis.patch.yml'), '[]\n')
     vi.stubEnv('DSH_HOME', home)
     vi.spyOn(process, 'on').mockReturnValue(process)
@@ -275,7 +276,8 @@ describe('runProfile with an application-owned profile', () => {
     try {
       const { shutdown } = await runProfile({ environment: createLaunchEnvironmentSnapshot([]),
         profile: 'custom', patchFiles: [], args: [] })
-      expect(watchUserPatches).toHaveBeenCalledTimes(2)
+      expect(watchUserPatches).toHaveBeenCalledTimes(patchReload === 'live' ? 2 : 0)
+      expect(ctx.profileContext.watchProfilePatches).toBe(patchReload === 'live')
       expect(healIsolatedProfileModuleFallback).not.toHaveBeenCalled()
       await shutdown.shutdown(0)
       expect(disposeProxy).toHaveBeenCalledOnce()

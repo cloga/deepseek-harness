@@ -18,6 +18,8 @@ export interface ProfileContext {
   readonly packageManager?: ProfilePnpmInvocation
   /** Refuse stock live package mutation when the launcher-owned stage service is unavailable. */
   readonly stagedPackageTransactions?: boolean
+  /** Only a named live profile may own automatic profile/home patch watching; omitted means no watcher. */
+  readonly watchProfilePatches?: boolean
   readonly dir: string
   readonly patchPath: string
   readonly installAnchor: string

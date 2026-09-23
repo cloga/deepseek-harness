@@ -380,6 +380,7 @@ export async function runProfile(options: RunProfileOptions): Promise<{ ctx: Con
       name: options.profile,
       ...(options.packageManager === undefined ? {} : { packageManager: options.packageManager }),
       ...(options.stagedPackageTransactions === undefined ? {} : { stagedPackageTransactions: options.stagedPackageTransactions }),
+      watchProfilePatches: options.resolvedProfile === undefined && composed.profile.patchReload === 'live',
       dir: composed.profile.dir, patchPath: composed.profile.patchPath,
       installAnchor: options.resolvedProfile?.installAnchor ?? INSTALL_ANCHOR,
       cwd: process.cwd(), home: resolveDshHome(),
@@ -414,7 +415,7 @@ export async function runProfile(options: RunProfileOptions): Promise<{ ctx: Con
     // own liveness; the initial check skips a tree that already exited, and the
     // catch below re-checks for an exit that landed mid-setup. Startup-frozen
     // profiles apply every user layer above but install no HMR fallback or watcher.
-    if (options.resolvedProfile === undefined && composed.profile.patchReload === 'live'
+    if (profileContext.watchProfilePatches === true
       && !signalShutdown.signal.aborted
       && ctx.fiber.state === FiberState.ACTIVE
       && ctx.get('loader') !== undefined) {
