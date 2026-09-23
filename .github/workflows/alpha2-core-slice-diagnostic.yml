@@ -90,7 +90,6 @@ jobs:
             apps/cli/tests/resolved-profile-boot.spec.ts `
             apps/cli/tests/resolved-profile-disposal.spec.ts `
             apps/cli/tests/profile-hmr.spec.ts `
-            apps/desktop/tests/project-manager.spec.ts `
             apps/desktop/tests/fork-release.spec.ts `
             apps/desktop/tests/web-document.spec.ts `
             apps/web/tests/desktop-boot.spec.ts `
@@ -98,4 +97,9 @@ jobs:
             packages/api/gateway/tests/gateway.client.spec.ts `
             packages/client/connection/tests/node-half.host.spec.ts `
             --maxWorkers=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test the same maintained Desktop project-manager suite in its own bounded worker
+        run: |
+          pnpm exec vitest run apps/desktop/tests/project-manager.spec.ts --maxWorkers=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
