@@ -183,6 +183,8 @@
       "@deepseek-ai/dsh-client-ui-sidebar-right/client": ["./packages/client/ui-sidebar-right/src/client"],
       "@deepseek-ai/dsh-client-ui-sidebar-documentpreview": ["./packages/client/ui-sidebar-documentpreview/src"],
       "@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client": ["./packages/client/ui-sidebar-documentpreview/src/client"],
+      "@deepseek-ai/dsh-client-ui-sidebar-browser": ["./packages/client/ui-sidebar-browser/src"],
+      "@deepseek-ai/dsh-client-ui-sidebar-browser/client": ["./packages/client/ui-sidebar-browser/src/client"],
       "@deepseek-ai/dsh-api-workspace-files": ["./packages/api/workspace-files/src"],
       "@deepseek-ai/dsh-api-workspace-files/types": ["./packages/api/workspace-files/src/types.ts"],
       "@deepseek-ai/dsh-api-workspace-files/client": ["./packages/api/workspace-files/src/client/index.ts"],
@@ -341,6 +343,7 @@
       "@deepseek-ai/dsh-jobs/invariant": ["./packages/jobs/jobs/src/invariant.ts"],
       "@deepseek-ai/dsh-jobs-local": ["./packages/jobs/jobs-local/src"],
       "@deepseek-ai/dsh-launch-environment": ["./packages/util/launch-environment/src"],
+      "@deepseek-ai/dsh-lazy-require": ["./packages/util/lazy-require/src"],
       "@deepseek-ai/dsh-llm": ["./packages/llm/llm/src"],
       "@deepseek-ai/dsh-llm/invariant": ["./packages/llm/llm/src/invariant.ts"],
       "@deepseek-ai/dsh-llm-deepseek": ["./packages/llm/llm-deepseek/src"],
@@ -489,7 +492,8 @@
       "@deepseek-ai/dsh-workflow/invariant": ["./packages/workflow/workflow/src/invariant.ts"],
       "@deepseek-ai/dsh-workflow-ptc": ["./packages/workflow/workflow-ptc/src"],
       "@deepseek-ai/dsh-workspace": ["./packages/workspace/workspace/src"],
-      "@deepseek-ai/dsh-workspace/invariant": ["./packages/workspace/workspace/src/invariant.ts"]
+      "@deepseek-ai/dsh-workspace/invariant": ["./packages/workspace/workspace/src/invariant.ts"],
+      "@deepseek-ai/dsh-workspace-changes": ["./packages/deliverables/workspace-changes/src"]
       // END generated package aliases
     }
   }
