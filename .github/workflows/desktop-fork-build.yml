@@ -212,6 +212,8 @@ jobs:
       - name: Verify packaged plugin override cold start and native cancellation
         id: plugin_command_acceptance
         timeout-minutes: 20
+        env:
+          DSH_DESKTOP_REVIEWED_SOURCE_SHA: ${{ steps.plan.outputs.source_sha }}
         run: >-
           pnpm exec tsx apps/desktop/tests/fixtures/desktop-plugin-command-smoke.ts
           --application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe

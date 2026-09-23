@@ -62,7 +62,11 @@ function assertPackagedPluginCommandAcceptance(workflow: ReleaseWorkflow): void 
   const step = steps[command]!
   expect(step).not.toHaveProperty('if')
   expect(step).not.toHaveProperty('continue-on-error')
-  expect(step).toMatchObject({ id: 'plugin_command_acceptance', 'timeout-minutes': 20 })
+  expect(step).toMatchObject({
+    id: 'plugin_command_acceptance',
+    'timeout-minutes': 20,
+    env: { DSH_DESKTOP_REVIEWED_SOURCE_SHA: '${{ steps.plan.outputs.source_sha }}' },
+  })
   expect(step.run).toContain('apps/desktop/tests/fixtures/desktop-plugin-command-smoke.ts')
   expect(step.run).toContain('--application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe')
   expect(step.run).toContain('--output dist/desktop-plugin-command-acceptance')

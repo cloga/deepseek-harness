@@ -29,6 +29,7 @@ import {
   snapshotDesktopPluginProfile,
   validateCommittedAudit,
   validateDesktopPluginTranscript,
+  validateDesktopReviewedSource,
 } from './fixtures/desktop-plugin-command-smoke.ts'
 
 import {
@@ -207,6 +208,20 @@ describe('packaged desktop-plugin command fixture (no GUI)', () => {
       expect(canRemoveDesktopPluginHome({ spawnAttempted: true, jobOwned: false,
         jobQuiescent, helperTreeUncertain: false })).toBe(false)
     }
+  })
+
+  it('binds PR packages to reviewed heads while requiring dispatch event SHA equality', () => {
+    const reviewed = 'a'.repeat(40)
+    const merge = 'b'.repeat(40)
+    expect(validateDesktopReviewedSource(reviewed, reviewed, 'pull_request', merge)).toEqual({
+      candidateCommit: reviewed, reviewedSourceSha: reviewed, eventName: 'pull_request', githubSha: merge,
+    })
+    expect(validateDesktopReviewedSource(reviewed, reviewed, 'workflow_dispatch', reviewed)).toEqual({
+      candidateCommit: reviewed, reviewedSourceSha: reviewed, eventName: 'workflow_dispatch', githubSha: reviewed,
+    })
+    expect(() => validateDesktopReviewedSource(reviewed, reviewed, 'workflow_dispatch', merge)).toThrow()
+    expect(() => validateDesktopReviewedSource(reviewed, merge, 'pull_request', merge)).toThrow()
+    expect(() => validateDesktopReviewedSource(reviewed, undefined, 'pull_request', merge)).toThrow()
   })
 
   it('never retries a handle that already closed in a partial-close epoch', () => {

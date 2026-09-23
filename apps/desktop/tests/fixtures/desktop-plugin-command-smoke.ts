@@ -42,6 +42,37 @@ export function desktopPluginAcceptanceDeadlines(started: number): { work: numbe
 }
 
 /**
+ * Bind packaged evidence to the reviewed source rather than a pull-request merge commit.
+ * @param candidateCommit - Exact commit checked out and packaged.
+ * @param reviewedSourceSha - Source selected by the reviewed build-plan step.
+ * @param eventName - GitHub event that owns the build.
+ * @param githubSha - GitHub's event SHA, which is a merge commit for pull requests.
+ * @returns Explicit source-binding fields retained in acceptance evidence.
+ */
+export function validateDesktopReviewedSource(
+  candidateCommit: string,
+  reviewedSourceSha: string | undefined,
+  eventName: string | undefined,
+  githubSha: string | undefined,
+): {
+  candidateCommit: string
+  reviewedSourceSha: string
+  eventName: 'pull_request' | 'workflow_dispatch'
+  githubSha: string
+} {
+  assert.match(candidateCommit, /^[a-f0-9]{40}$/u)
+  assert(reviewedSourceSha !== undefined && /^[a-f0-9]{40}$/u.test(reviewedSourceSha),
+    'Reviewed Desktop source SHA must be exact lowercase hexadecimal')
+  assert.equal(candidateCommit, reviewedSourceSha, 'Packaged checkout differs from the reviewed Desktop source')
+  assert(githubSha !== undefined && /^[a-f0-9]{40}$/u.test(githubSha), 'GitHub event SHA must be exact lowercase hexadecimal')
+  assert(eventName === 'pull_request' || eventName === 'workflow_dispatch', 'Unsupported Desktop acceptance event')
+  if (eventName === 'workflow_dispatch') {
+    assert.equal(candidateCommit, githubSha, 'Dispatch checkout must equal the GitHub event SHA')
+  }
+  return { candidateCommit, reviewedSourceSha, eventName, githubSha }
+}
+
+/**
  * Return only handle kinds that have not already closed in the current epoch.
  * @param processClosed - Whether the process handle closed successfully.
  * @param jobClosed - Whether the Job handle closed successfully.
@@ -385,9 +416,13 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
   const candidateTree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], {
     encoding: 'utf8', timeout: Math.min(10_000, remainingDeadline(fixtureWorkDeadline)),
   }).trim()
-  assert.match(candidateCommit, /^[a-f0-9]{40}$/u)
   assert.match(candidateTree, /^[a-f0-9]{40}$/u)
-  if (process.env.GITHUB_SHA !== undefined) assert.equal(candidateCommit, process.env.GITHUB_SHA)
+  const reviewedSource = validateDesktopReviewedSource(
+    candidateCommit,
+    process.env.DSH_DESKTOP_REVIEWED_SOURCE_SHA,
+    process.env.GITHUB_EVENT_NAME,
+    process.env.GITHUB_SHA,
+  )
   const alpha36DescriptorBytes = readFileSync(new URL('./copilot-alpha36-source.json', import.meta.url))
   const workflowRunId = process.env.GITHUB_RUN_ID
   const workflowRunAttempt = process.env.GITHUB_RUN_ATTEMPT
@@ -396,7 +431,7 @@ export async function runPackagedDesktopPluginCommandAcceptance(options: Package
   assert(workflowRunAttempt !== undefined && /^[1-9][0-9]*$/u.test(workflowRunAttempt), 'Hosted run attempt is required')
   assert(workflowJob !== undefined && workflowJob !== '', 'Hosted job identity is required')
   const sourceBinding = {
-    candidateCommit, candidateTree, workflowRunId, workflowRunAttempt, workflowJob,
+    ...reviewedSource, candidateTree, workflowRunId, workflowRunAttempt, workflowJob,
     lockfileSha256: createHash('sha256').update(readFileSync(resolve('pnpm-lock.yaml'))).digest('hex'),
     alpha36DescriptorSha256: createHash('sha256').update(alpha36DescriptorBytes).digest('hex'),
   }
