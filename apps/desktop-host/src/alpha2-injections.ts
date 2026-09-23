@@ -28,7 +28,7 @@ function fields(value: unknown): Record<string, unknown> {
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key !== 'string') return invalid()
     const descriptor = descriptors[key]
-    if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) invalid()
+    if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) return invalid()
     owned[key] = descriptor.value
   }
   return owned
