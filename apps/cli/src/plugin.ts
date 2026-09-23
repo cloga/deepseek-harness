@@ -19,11 +19,11 @@ import {
   PROFILE_TEMPLATES,
   readProfileManifest,
   resolveBundleDir,
-  resolveProfileDir,
   writeProfileManifest,
   type ProfileManifest,
 } from '@deepseek-ai/dsh-app-boot'
 import { INSTALL_ANCHOR } from './profile-boot.ts'
+import { resolveCliPluginDirectory } from './profile-ownership.ts'
 
 const NAME = 'dsh'
 
@@ -118,7 +118,7 @@ function anchorPathSpec(argument: string, cwd: string): string {
  * @returns the pnpm exit code.
  */
 export function runPlugin(profile: string, args: readonly string[]): number {
-  const dir = resolveProfileDir(profile)
+  const dir = resolveCliPluginDirectory(profile)
   if (!existsSync(join(dir, 'package.json'))) {
     const template = PROFILE_TEMPLATES[profile]
     initProfile(

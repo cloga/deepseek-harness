@@ -90,7 +90,6 @@ jobs:
             packages/deliverables/workspace-changes/tests/loader-composition.spec.ts `
             packages/deliverables/workspace-changes/tests/numstat.spec.ts `
             packages/deliverables/workspace-changes/tests/paths.spec.ts `
-            packages/deliverables/workspace-changes/tests/plugin.spec.ts `
             apps/desktop-host/tests/package-transactions.spec.ts `
             apps/desktop-host/tests/desktop-plugin-command-ipc.spec.ts `
             apps/desktop-host/tests/desktop-plugin-command-runtime.spec.ts `
@@ -98,6 +97,7 @@ jobs:
             apps/desktop-host/tests/update-task-control.spec.ts `
             apps/cli/tests/resolved-profile-boot.spec.ts `
             apps/cli/tests/resolved-profile-disposal.spec.ts `
+            apps/cli/tests/profile-ownership.spec.ts `
             apps/cli/tests/profile-hmr.spec.ts `
             apps/desktop/tests/fork-release.spec.ts `
             apps/desktop/tests/web-document.spec.ts `
@@ -128,6 +128,11 @@ jobs:
             packages/client/ui-sidebar-browser/tests/store.client.spec.ts `
             packages/client/ui-sidebar-browser/tests/url.client.spec.ts `
             --maxWorkers=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test all official workspace recorder integration cases in one fresh worker
+        run: |
+          pnpm exec vitest run packages/deliverables/workspace-changes/tests/plugin.spec.ts --maxWorkers=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test the same maintained Desktop project-manager suite in its own bounded worker
