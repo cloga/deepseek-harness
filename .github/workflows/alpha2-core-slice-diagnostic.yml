@@ -142,6 +142,7 @@ jobs:
             packages/client/ui-plugin-manager/tests/components.client.spec.tsx `
             packages/client/ui-plugin-manager/tests/config-ledger.client.spec.ts `
             packages/client/ui-plugin-manager/tests/manager-store.client.spec.ts `
+            packages/client/ui-primitives/tests/ansi.client.spec.ts `
             packages/client/ui-primitives/tests/terminal-block.client.spec.tsx `
             packages/client/ui-tool/tests/terminal-card.client.spec.tsx `
             --maxWorkers=1
