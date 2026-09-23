@@ -21,6 +21,14 @@ import type {} from '@deepseek-ai/cordis-plugin-hmr'
 import { watchConfig } from './watch-config.ts'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 
+export { ProfilePackageCancelledError } from './profile-package-cancellation.ts'
+export {
+  profilePackageLeaseTarget, withProfilePackageLease, parseProfileTransactionId, parseProfilePreparedChange, parseProfilePendingChange,
+  type ProfilePackageTransactions, type ProfilePackageMutation, type ProfilePackageSource,
+  type ProfilePreparedPackageChange, type ProfilePreparedBundleSelection, type ProfilePendingPackageChange,
+  type ProfileVerifiedReleaseSource, type ProfilePackageHealth,
+} from './profile-package-transactions.ts'
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** Harness-home path resolver available to Loader `!!js` config expressions. */
