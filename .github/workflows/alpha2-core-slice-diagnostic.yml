@@ -70,6 +70,7 @@ jobs:
             apps/desktop-host/tests/desktop-plugin-command-ipc.spec.ts `
             apps/desktop/tests/project-manager.spec.ts `
             apps/desktop/tests/fork-release.spec.ts `
+            apps/desktop/tests/web-document.spec.ts `
             apps/web/tests/desktop-boot.spec.ts `
             apps/web/tests/injection-order.spec.ts `
             packages/api/gateway/tests/gateway.client.spec.ts `
