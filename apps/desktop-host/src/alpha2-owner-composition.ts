@@ -39,8 +39,7 @@ function afterCompose(entries: readonly unknown[]): void {
     if (!record(value)) return
     if (protectedId(value.id)) {
       const id = value.id
-      const config = value.config
-      if (!record(config)) refuse()
+      const config: Record<string, unknown> = record(value.config) ? value.config : refuse()
       if (++counts[id] > 1 || value.name !== protectedModules[id] || value.disabled !== false
         || !Array.isArray(value.inject) || value.inject.length !== 1 || value.inject[0] !== 'webStartup') refuse()
       if (id === 'webserver') {
