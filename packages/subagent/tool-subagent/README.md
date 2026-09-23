@@ -66,7 +66,9 @@ Under `continuable` policy, an omitted or `true` `run_in_background` starts a du
 
 Set `modelSelectionSettings: true` to sample the Host's `subagent-model-selection` preference when each fresh top-level Session is composed. A restored Session without a recorded policy remains disabled, including an explicitly empty restore. When enabled, the non-empty exact provider/model route list is recorded in the Session, inherited by child Sessions, and unchanged by later settings edits. The tool then exposes optional `provider`, `model`, and `reasoning_effort` fields and registers the shared `list_subagent_models` tool. This mode requires a backend that advertises `agentOptions`; both in-process backends and DSH SDK support it, while ACP, Codex, and Claude Code reject it rather than ignore it.
 
-A call supplies `provider` and `model` together, or supplies only an effort when configured, parent, or provider-owned defaults provide the route. Static `provider.agentRouteDefaults`, when present, form the provider/model baseline; tool configuration and model fields overlay it before route-aware effort merging and exact-route preflight. Providers without these defaults use compatible values from the parent's latest logged request, then the parent's creation options before its first request, while retaining the configured `maxTokens`. Changing the route without an explicit effort clears the inherited route-owned effort, so the selected model resolves its default. The live LLM adapter validates the effective route before child creation. Catalog membership remains advisory, so a model can use an unlisted id when its adapter accepts it.
+A model-facing call supplies `provider` and `model` together, or supplies only an effort when configured, parent, or provider-owned defaults provide the route. Explicit fields must resolve to the captured exact-route policy and fail before native Auto can run when unauthorized. Tool configuration and model fields overlay provider-owned defaults; changing the route without an effort clears incompatible inherited effort. Native implicit requests use the [shared creation-time selection chain](../subagent/README.md#native-model-selection), including exact parent rules and authorized fresh-spawn Auto. The service owns the permission projection and asynchronous native preflight; this tool retains consent sampling and synchronous JSON/explicit-selection checks. External preflight behavior is unchanged. Catalog membership remains advisory: an authorized id need not be advertised if its adapter accepts it.
+
+For a native instance, `modelSelectionSettings: false` sends a deny-only Auto opt-out for that invocation. It does not disable exact user-authored parent rules, erase a child's separate captured delegation preference, or grant any additional route. Missing or disabled captured consent prevents Auto; an admitted Auto choice must retain an authorized available conservative candidate rather than silently falling back after failure. Shipped fork tools keep Auto out of their own selection; explicit configuration and parent rules remain possible cache-affecting exceptions. Cold resume uses the child's saved model and effort, not current tool settings.
 
 -----
 
@@ -99,9 +101,9 @@ The tool's description derives from `provider.inheritsParentContext`: a fresh ch
 | File | Role |
 |---|---|
 | [`src/index.ts`](src/index.ts) | Tool registration, lifecycle mirroring, mode resolution, result settlement |
-| [`src/model-selection.ts`](src/model-selection.ts) | Request/config merge and live LLM route preflight |
+| [`src/model-selection.ts`](src/model-selection.ts) | Tool JSON/config merging, explicit route authorization and external preflight |
 | [`src/model-selection-settings.ts`](src/model-selection-settings.ts) | Host-owned opt-in setting sampled for new Sessions |
-| [`src/model-selection-state.ts`](src/model-selection-state.ts) | Session event that records and inherits the sampled decision |
+| [`src/model-selection-state.ts`](src/model-selection-state.ts) | Compatibility exports for the service-owned durable permission projection |
 | [`src/list-models.ts`](src/list-models.ts) | `list_subagent_models` runtime discovery tool |
 
 </details>
@@ -131,9 +133,27 @@ Read these pages when the package-level contract is not enough; they move from t
 
 The generated default [`subagent` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-subagent) under this instance's configured name while its provider exists. An enabled Session policy adds `provider`, `model`, and `reasoning_effort` plus inheritance and selection guidance; the provider must support `agentOptions`. Provider context inheritance changes the tool and prompt descriptions. Enabled background mode adds `run_in_background`: continuable mode documents its `true` default, runtime settlement notice, and explicit foreground override, while one-shot mode documents its `false` default and the job id collected with `job_output` or stopped with `job_kill`. While the tool is visible in an assembly's scope, a `tool:<toolName>` system-prompt section tells the model to start independent continuable delegations together, keep working while they run, and choose foreground only when its next action depends on the result; a tool restriction removes both its schema and this guidance.
 
+##### Model-selectable native spawn description
+
+```markdown
+Implicit child model choice uses configured tool/provider defaults, matching exact parent-model rules, authorized Auto when captured by the parent, then compatible parent defaults.
+```
+
+##### Native tool description without Auto admission, including fork tools
+
+```markdown
+Child model choice uses configured tool/provider defaults or matching exact parent-model rules, then compatible parent defaults. Auto selection is disabled for this tool.
+```
+
+##### Enabled native model-facing selection fields
+
+```markdown
+Child LLM selection is optional. Supply `provider` and `model` together after using `list_subagent_models` to inspect advertised routes and efforts. Explicit provider, model, or reasoning effort suppresses parent rules and Auto; changing the route without naming an effort uses the selected model's default effort.
+```
+
 #### Token effect
 
-Fixed schema cost per parent request; model selection adds three parameters. Each provider instance adds one schema, and each continuable instance adds one short system-prompt section.
+Fixed schema cost per parent request; native routing adds the short guidance above, and model selection adds three parameters. Each provider instance adds one schema, and each continuable instance adds one short system-prompt section.
 
 #### KV Cache effect
 
@@ -143,7 +163,7 @@ Prefix-stable while provider instances and their configuration are unchanged. Ad
 
 #### What the model sees
 
-A settings-controlled instance whose Session carries a policy exposes the child LLM selection fields and `list_subagent_models`. Calls reject while the optional `ctx.llm` service is unavailable. Discovery returns only registered providers and advertised models in the exact route policy; an unauthorized provider is rejected before its adapter catalog is called, and an exact lookup must be allowed before it resolves the model's reasoning efforts and default. Execution independently enforces the same policy.
+A settings-controlled instance whose Session carries a policy exposes the child LLM selection fields and `list_subagent_models`. Discovery and selections requiring live adapter validation reject without `ctx.llm`; ordinary inheritance adds no extra LLM preflight. Discovery returns only registered providers and advertised models in the exact route policy; an unauthorized provider is rejected before its adapter catalog is called, and an exact lookup must be allowed before it resolves the model's reasoning efforts and default. Execution independently enforces the same policy.
 
 #### Token effect
 
@@ -210,7 +230,7 @@ These limits define what this tool does not return or enforce; they are current 
 
 - **Background runs expose no result through this tool** — a one-shot task's final output is collected through the generic task surface, and a continuable child's output stays in its own session, read by its subagent id. The settlement notice states how that child ended and carries nonempty text from its final assistant output, but it is not this call's return value and cannot be awaited here.
 - **Duplicate names across waiting one-shot instances are detected late** (`TODO(subagent-dup-toolname)`) — continuable instances reserve their prompt-section name during plugin application, but preventing provider-registration rollback for waiting one-shot instances requires a registry of intended names.
-- **Shipped fork tools cannot select a child LLM route** — they inherit the parent's provider and model to keep the copied conversation prefix eligible for KV Cache reuse. Re-enable selection only when route changes preserve reuse or expose a bounded recomputation cost.
+- **Shipped fork tools omit model-facing route fields and exclude their own Auto choice** — compatible parent routing is the default for cache reuse; explicit configuration or an exact user-authored parent rule can still change the route. A captured delegation preference remains separate and can support an authorized later fresh spawn; it does not reroute the fork itself.
 - **Non-routing child policy is fixed per instance** — another persona, tool filter, or depth cap requires another distinctly named tool. LLM selection requires an enabled per-Session preference and a provider that advertises `agentOptions`; both in-process providers and DSH SDK advertise it, while ACP, Codex, and Claude Code reject it rather than ignore it.
 
 <a id="dev-note"></a>

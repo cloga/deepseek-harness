@@ -19,6 +19,12 @@ A turn flows through the six packages in one loop: the driver in [`agent-loop`](
 
 `scope/` is the one non-service package: a dependency-free library (`createScope`/`scopeOf`/`scopeTarget`) that sits below `session/` and `system-prompt/` in the module graph precisely so they can consume it without a cycle. `agent-loop` is the one concrete implementation of the public `Agent` contract and lives here because it is the harness's default product loop; it runs each driver inside `ctx.agents.withInitiator()`. Extension plugins depend on `agent` — including when they need the initiating Agent — and never on `agent-loop` directly, so the loop stays swappable. [`dsh-base`](../../packages/bundle/base/README.md) is the default product composition, while [`dsh-sdk-minimal`](../../packages/bundle/sdk-minimal/README.md) declares a smaller standalone tree.
 
+<a id="model-selection-before-prompt-assembly"></a>
+
+## Model selection before prompt assembly
+
+`ModelSelectionResolution`, declared in [`agent/src/model-selection.ts`](../../packages/core/agent/src/model-selection.ts), carries the exact `Agent`, a detached configured `selection`, and optional assembly cancellation `signal` into the scoped asynchronous `model-selection/resolve` waterfall. Resolution finishes before downstream prompt assembly, so prompt variables and the outgoing provider, model, and reasoning effort agree without changing the configured selection. Diagnostic assembly without an Agent does not dispatch this event; `model-selection/query` remains a synchronous detached read rather than a prediction of the next resolved route.
+
 ## Creation and ownership
 
 Consumers create agents through `ctx.agents` — `create()` builds a fresh session and agent under one caller-supplied `SessionId`, `resume()` loads a persisted session first — or declaratively through the loop's config entries. Programmatic creation returns the owner's handle:
@@ -1273,6 +1279,33 @@ Read a detached snapshot without assembling a prompt or consuming a selection. S
  * @mode waterfall
  */
 'model-selection/query'(this: Scoped<ModelSelectionQuery>, payload: ModelSelectionQuery, next: () => ModelSelection | undefined): ModelSelection | undefined
+```
+
+Types: [Scoped](scope.md)
+
+Source: [`packages/core/agent/src/model-selection.ts`](../../packages/core/agent/src/model-selection.ts)
+
+<a id="model-selectionresolve--waterfall"></a>
+
+#### `model-selection/resolve` — waterfall
+
+Resolve the route for one scoped prompt assembly before its downstream assembly listeners run. The result supplies prompt variables, request routing, and switch notices without changing the configured selection. Scope-filtered dispatch uses payload.agent as the routing key. Diagnostic assemblies without an Agent do not dispatch this event.
+
+```ts cordis-catalog
+/**
+ * Resolve the route for one scoped prompt assembly before its downstream
+ * assembly listeners run. The result supplies prompt variables, request
+ * routing, and switch notices without changing the configured selection.
+ * Scope-filtered dispatch uses payload.agent as the routing key. Diagnostic
+ * assemblies without an Agent do not dispatch this event.
+ * @param payload.agent - Agent supplied by the assembly context.
+ * @param payload.selection - detached configured selection captured before any await.
+ * @param payload.signal - cancellation for this assembly, when supplied.
+ * @param next - delegate to the captured selection or another resolver.
+ * @returns the selection for this assembly, or undefined to retain request defaults.
+ * @mode waterfall
+ */
+'model-selection/resolve'(this: Scoped<Agent>, payload: ModelSelectionResolution, next: () => Promise<ModelSelection | undefined>): Promise<ModelSelection | undefined>
 ```
 
 Types: [Scoped](scope.md)

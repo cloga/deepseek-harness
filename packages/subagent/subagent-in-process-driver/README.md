@@ -37,7 +37,7 @@ One call starts and drives one one-shot child. Fulfillment means the child is al
 
 ### What the child gets
 
-The child receives the parent's working-directory/session lineage and inherits the parent provider, model, reasoning effort, and output-token cap unless `request.agentOptions` overrides them. It gets a fresh flat registration scope: parent tool restrictions and authority are not imported. A run carries the parent's explicit sandbox override and `'never'` approval pin into the child and appends a per-run descriptor inside the child's initial turn.
+The child receives the parent's working-directory/session lineage and the registry's complete model/effort options from the [shared native selection chain](../subagent/README.md#native-model-selection). The driver clones those options only to stamp depth; it never re-merges a later parent route or restores a parent's effort when the selected combination omits it. Captured sandbox/approval state, route authorization, resolved-choice evidence and any separate delegation preference are seeded before child tool composition. Persona and tool filtering apply in the child's fresh scope; a preference does not grant tool access or enable the child's own Auto mode. The one-shot descriptor is appended inside the child's initial turn.
 
 -----
 
@@ -54,14 +54,14 @@ This section explains the driver's lifecycle contract and the structured-output 
 The driver follows this sequence:
 
 1. Validate the parent depth and optional absolute `maxDepth`, then derive child depth as parent depth plus one and persist it in the child session header.
-2. Create the child through the host agent factory with the caller's required signal threaded into the creation transaction.
-3. During that transaction's unpublished setup window, install the requested persona, tool restriction, and structured-output runtime.
+2. Create the child through the host agent factory with registry-resolved options and a creation-only signal combining caller cancellation with registry lifetime.
+3. During that transaction's unpublished setup window, seed captured policy and resolved selection evidence, then install the requested persona, tool restriction, and structured-output runtime.
 4. Publish the child, retain the returned handle, and drive one task.
 5. Read the child's own output — its last non-empty assistant message, or its accumulated assistant text when none exists — and the final durable turn reason from the complete owned run, excluding any fork seed.
 
 ### Cancellation and ownership
 
-The required request signal covers both startup and the live run. Before publication, the creation transaction observes it, rolls back, and rejects; the driver re-checks once after publication to close the handoff race, then installs a minimal live-run listener. After fulfillment the caller owns the run: provider unload does not revoke it, and `dispose()` removes the abort listener, records cancellation, and delegates to the handle's memoized quiescence transaction, which stops the loop, removes the agent and session, and unwinds scoped registrations. Cancellation owns every non-completed in-flight outcome and reports `aborted`; an already-completed turn remains completed.
+The original request signal governs the live one-shot run. During startup, `resolvedCreationSignal` additionally observes registry disposal; the creation transaction rolls back on cancellation, and the driver rechecks before starting child work. Registry unload aborts and joins pending starts, not runs already returned to their callers. After fulfillment, provider or registry unload does not replace the original caller signal or revoke the run. `dispose()` removes its abort listener and joins the handle's quiescence transaction. Cancellation owns non-completed in-flight outcomes and reports `aborted`; a completed turn remains completed. Direct driver callers without registry-owned fields retain the ordinary pre-await capture and caller-signal behavior.
 
 ### Structured output
 
@@ -132,7 +132,7 @@ Prefix-stable inside the child while the structured-output instruction and schem
 
 #### What the model sees
 
-Through `dsh-tool-subagent`, invalid depth state becomes exactly `Error: agent subagentDepth must be a non-negative safe integer`, `Error: subagent child depth exceeds the safe-integer range`, or `Error: subagent depth <attempted> exceeds maxDepth <max>`. A pre-publication cancellation passes its abort reason through the registry's `Error: <message>` wrapper.
+Through `dsh-tool-subagent`, invalid depth state becomes exactly `Error: agent subagentDepth must be a non-negative safe integer`, `Error: subagent child depth exceeds the safe-integer range`, or `Error: subagent depth <attempted> exceeds maxDepth <max>`. The driver's cancellation guard reports `Error: subagent request was aborted before child publication`; cancellation during asynchronous selection can instead retain the caller's abort reason through the consumer's `Error: <message>` wrapper.
 
 #### Token effect
 

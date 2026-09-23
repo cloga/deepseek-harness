@@ -74,6 +74,8 @@ interface SubagentStartRequest {
    * before initializing the separate child runtime.
    */
   readonly agentOptions?: AgentOptions
+  /** Deny-only consumer opt-out; omission never grants authority absent the captured parent allowlist. */
+  readonly disableAutoModelSelection?: true
   /**
    * Object-rooted JSON Schema within `assertObjectJsonSchema`'s enforced subset. Start rejects
    * unsupported schemas or providers without the capability. Data must be plain host-realm JSON;
@@ -106,7 +108,7 @@ interface SubagentStartRequest {
 }
 ```
 
-`signal` is the single cancellation channel before and after readiness. The [subagent composition-controls Agent Note](../../.agents/notes/implemented/feature/2026-07-12-subagent-persona-tool-filter-and-depth.md) owns the persona, live global-tool filter, absolute-depth, and visibility-not-authority rationale.
+The caller's `signal` remains its cancellation channel before and after readiness. A native registry's `resolvedCreationSignal` governs only creation admission; the published run retains the original caller signal. `disableAutoModelSelection` is a deny-only opt-out and never grants authority beyond the captured parent allowlist. The [subagent composition-controls Agent Note](../../.agents/notes/implemented/feature/2026-07-12-subagent-persona-tool-filter-and-depth.md) owns the persona, live global-tool filter, absolute-depth, and visibility-not-authority rationale.
 
 The caller-facing request does not carry catalog format details or continuation state. `SubagentRuntime.start()` resolves the detached one-shot descriptor after capability checks, then passes this provider-facing request to the selected transport; a continuable child never reaches `SubagentProvider.start()`:
 
@@ -118,6 +120,14 @@ The caller-facing request does not carry catalog format details or continuation 
 interface ResolvedSubagentStartRequest extends SubagentStartRequest {
   /** Detached descriptor a session-backed provider persists in the child log. */
   readonly descriptor: SubagentDescriptorData
+  /** Registry-owned complete native options; an omitted effort must not inherit again. */
+  readonly resolvedAgentOptions?: AgentOptions
+  /** Registry-owned permission snapshot captured before asynchronous native selection. */
+  readonly resolvedDelegatedPolicies?: DelegatedPolicyOverrides
+  /** Registry-owned creation evidence and child delegation context. */
+  readonly resolvedModelSelection?: NativeChildModelSelection
+  /** Creation-only registry cancellation; a published run retains the original caller signal. */
+  readonly resolvedCreationSignal?: AbortSignal
 }
 ```
 
@@ -421,6 +431,8 @@ interface SubagentProvider {
    * is detached immutable data and requires `agentOptions` support.
    */
   readonly agentRouteDefaults?: Readonly<{ provider: string; model: string }>
+  /** Trusted provider-side native creation ownership; external AgentOptions support alone does not enable Auto. */
+  readonly nativeModelSelection?: 'spawn' | 'fork'
   /**
    * Establish a ONE-SHOT child and return its handle after publication.
    * The service has already validated that every requested start-time

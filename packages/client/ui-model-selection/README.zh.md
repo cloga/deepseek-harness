@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-Web GUI 允许用户通过 `/model` 弹窗或 composer 模型控件切换既有会话使用的模型与推理（reasoning）强度。两个界面呈现同一组按提供方分组的选择；所选模型决定可用的推理强度名称与默认值。完整选择从下一次请求开始生效；运行中的步骤保留其启动时的模型与推理强度。如果没有适配器可以服务会话路由，composer 会保持停用，直至路由恢复可用。
+通过 `/model` 或 composer 模型控件，可以为既有普通 Session 选择具体模型与推理（reasoning）强度，或选择 Auto 模式。两个入口共享 Host 自有的选择状态。在 Auto 下，composer 区分所选模式与最后实际模型及强度，不会根据目录预测下一条路由。运行中的步骤保留已组装的选择；已寻址的 subagent Session 不公开这两个控件。
 
 ## 目录
 
@@ -25,15 +25,21 @@ Web GUI 允许用户通过 `/model` 弹窗或 composer 模型控件切换既有�
 <a id="use-this-package"></a>
 ## 使用本包
 
-与 `ui-conversation` 及命令包一起挂载本插件；composer 随即在待处理指示器旁显示模型位，`/model` 则以弹窗打开同一份目录。当确切提供方／模型对仍在已公布分组中时，两个界面都显示 Host 报告的当前选择；目录行缺席时，可路由的选择保持不变，触发器提示 `Select model`。
+与 `ui-conversation` 及命令包一起挂载本插件；composer 显示模型位，`/model` 则以弹窗打开同一份共享目录。Host 提供提供方分组和持久选择状态。目录名称改善展示，但目录行缺失不会抹去已知的具体选择：composer 可以改为显示提供方／模型 id。
 
 ### 模型与推理强度
 
-模型按提供方分组。composer 菜单只显示模型与推理强度名称。`/model` 弹窗显示提供方名称与目录说明；其中两个内置 DeepSeek 模型的说明使用当前语言，外部提供方说明保持原文。弹窗应用所选模型的默认推理强度；composer 随后可以选择任一已公布的推理强度。适配器没有推理元数据时不显示 Effort 行；不存在任意推理强度输入。
+模型按提供方分组。`/model` 弹窗显示提供方名称与目录说明；其中两个内置 DeepSeek 模型的说明使用当前语言，外部说明保持原文。手动选择使用确切模型公布的强度词汇和 Host 校验，而非浏览器自有的全局强度枚举。composer 不支持任意强度输入；适配器没有推理元数据时不显示 Effort 行。
+
+### Auto 意图与实际使用
+
+当 Host 报告可以接受新选择时，Auto 提供 `efficiency`、`balanced` 和 `intelligence` 模式。弹窗省略不可用的 Auto 选项；composer 的 Auto 面板说明不可用状态并禁用这些选项。就绪状态后来变为 false 时，已有的捕获 Auto 模式仍保持可见。[Host 路由所有者](../../llm/model-routing/README.zh.md)决定任务边界和模型／强度策略；两个浏览器入口都不运行分类器或给候选排序。
+
+composer 把 Auto 模式标签与 `modelRouting.lastDecision` 或 `modelSelection.lastUsed` 提供的最后实际路由分开展示。尚无实际路由时，它显示待定提示，而不是部署默认值。在 Auto 下，缺失的实际强度保持缺失，不会由目录默认值补齐。Effort 控件由 Auto 管理；选择具体模型会固定手动意图并退出 Auto，即使提供方／模型对未变也是如此。重新选择 Auto 会捕获 Host 当前配置，而不是原地修改已经捕获的策略。
 
 ### 不可路由的会话
 
-当 Host 报告没有适配器服务该会话的路由时，本插件注册一个 composer 阻塞块，输入框随之停用并显示本插件自己的文案；恢复后无需重新加载即清除。首次加载之前或加载失败之后的 `null` 绝不阻断；目录成员关系同样不阻断——一条仍在服务、只是不公布该模型的路由不在分组里，却可用。
+手动选择时，Host 明确报告没有适配器服务所选提供方，才会触发 composer 阻塞块；恢复后无需重新加载即清除。目录读取处于加载中或失败时保持未知，而不是阻塞；单个模型行缺失也不构成拒绝。Auto 活动时，旧提供方或默认提供方不能触发这项手动路由阻塞：Host 在工作开始时解析资格，仍可能拒绝不可用路由。未来 Auto 选择的就绪状态，并不保证某次请求一定可用。
 
 -----
 
@@ -43,7 +49,9 @@ Web GUI 允许用户通过 `/model` 弹窗或 composer 模型控件切换既有�
 <details>
 <summary>实现细节——点击展开</summary>
 
-两个入口共用一份由 `ModelDirectoryResolver`（`ctx.modelDirectories`）持有的会话级目录：`/model` popupSelect 贡献项（经 `ctx.commandUi` 注册）与 composer 的具名 `conversation.input.model` 位都经 `session.models` 加载会话的建议目录、经 `session.selectModel` 通过同一个 `ModelDirectory` 实例提交，因此任一入口所做的切换正是另一个入口接下来显示的。目录加载与选择共享一个代次计数器，旧响应不会覆盖新结果；连接重置丢弃所有常驻投影，并在显示前重新拉取 Host 恢复的选择。目录按会话惰性解析，随会话作用域一并 dispose（资源释放）；已寻址 subagent 会话不公开任一入口。每份常驻目录都会直接在转发的 `llm/adapters-updated` 与 `settings/document-updated` owner 事件上重拉。
+`ModelDirectoryResolver`（`ctx.modelDirectories`）基于共享的 Host 代次 `session.modelCatalog()` 结果，为每个 Session 持有一份目录。`/model` popupSelect 贡献项和 `conversation.input.model` 位通过同一份目录提交 `session.selectModel` 或 `session.selectAutoModel`。持久 `modelSelection` 和 `modelRouting` 投影提供已接受意图与实际使用；成功的 RPC 响应不会被用来虚构具体的 Auto 选择。渲染器把注入的 `hooks.directory` 源绑定为 `useDirectory`；组件不直接使用 `useSyncExternalStore` 订阅，也不接收服务属性。
+
+选择代次防止陈旧响应替换较新的操作状态。提供方、设置和凭据失效信号会刷新共享目录；连接重置使旧的进行中工作失效，并刷新 Host 代次，Session 投影则通过其所属模型重连。刷新期间可以保留最后已知的展示数据，并单独报告加载或失败状态。每个 Session 的订阅和 composer 阻塞块随其作用域一起撤销。已寻址的 subagent Session 不公开这两个选择入口。
 
 </details>
 
@@ -57,6 +65,8 @@ Web GUI 允许用户通过 `/model` 弹窗或 composer 模型控件切换既有�
 - [ui-commands](../ui-commands/README.zh.md)——`/model` 贡献项注册进的 popupSelect 外壳。
 - [ui-conversation](../ui-conversation/README.zh.md)——声明 composer 的 `conversation.input.model` 位与 composer 阻塞块。
 - [dsh-agent-default-model](../../core/agent-default-model/README.zh.md)——为从未选择的会话提供默认模型的默认模型服务。
+- [模型路由](../../llm/model-routing/README.zh.md)——Host 自有的任务策略、分类器成本和实际使用决策。
+- [插件设置](../ui-settings-plugins/README.zh.md)——暂存的 Auto 候选和分类器配置。
 - [客户端包映射](../README.zh.md)——相邻的浏览器 UI 包。
 
 -----
@@ -64,11 +74,11 @@ Web GUI 允许用户通过 `/model` 弹窗或 composer 模型控件切换既有�
 <a id="model-experience"></a>
 ## 模型体验
 
-两个入口提交的 `session.selectModel` 选择会间接影响模型：Host 会在下一次提示词组装边界为完整的 `ModelSelection` 创建快照，并负责使其对模型生效；运行中的步骤则保留已组装的选择。
+间接地，通过两个入口提交的 `session.selectModel` 和 `session.selectAutoModel` 意图产生影响：Host 负责下一次提示词组装边界的解析及任何模型可见效果，运行中的步骤则保留已组装的选择。浏览器不添加分类器请求、对话消息或面向模型的 schema。
 
 #### KV Cache 影响
 
-切换路由可能减少提供方侧后续请求的缓存复用，或使其失效；提示词前缀本身不受影响。
+修改 UI 意图本身不会重写提示词或发送提供方请求。Host 解析出的模型或强度变化可能减少后续工作的缓存复用；任务亲和性和路由切换通知由 Host 路由及 Agent 包负责。
 
 ## 已知限制与延期工作
 

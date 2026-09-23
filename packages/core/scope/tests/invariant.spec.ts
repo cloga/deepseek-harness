@@ -95,6 +95,21 @@ describe('scoped-dispatch invariants', () => {
     }
   })
 
+  it('resolves model selection through its actual waterfall only for the matching Agent carrier', async () => {
+    const ctx = await setup()
+    const agent = { id: 'selection-owner' } as unknown as Agent
+    const other = { id: 'other-owner' } as unknown as Agent
+    const selection = { provider: 'fixture', model: 'model' }
+    const payload = { agent, selection, signal: new AbortController().signal }
+    let delegated = 0
+    const next = () => { delegated += 1; return Promise.resolve(selection) }
+    await expect(ctx.waterfall(scopeTarget(agent, agent), 'model-selection/resolve', payload, next)).resolves.toEqual(selection)
+    expect(delegated).toBe(1)
+    expect(() => ctx.waterfall(scopeTarget(agent, other), 'model-selection/resolve', payload, next)).toThrow(/DIFFERENT subject/)
+    expect(delegated).toBe(1)
+    await ctx.fiber.dispose()
+  })
+
   it('requires carriers for generated presence-only scoped events without comparing a payload subject', async () => {
     const ctx = await setup()
     const agent = { id: 'a1' }

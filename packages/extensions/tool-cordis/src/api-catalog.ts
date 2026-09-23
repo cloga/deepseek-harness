@@ -1335,6 +1335,37 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'modelRouting',
+    summary: 'Host service whose durable policies change only through an explicit Session choice.',
+    description: 'Host service whose durable policies change only through an explicit Session choice.',
+    methods: [
+      {
+        signature: 'isAvailable(): boolean',
+        description: 'Report configuration readiness without network access or predicting a model.',
+        parameters: [],
+        returns: 'Whether future explicit Auto selections have the required configuration.',
+      },
+      {
+        signature: 'async enable(agent: Agent, mode: ModelRoutingMode, signal?: AbortSignal): Promise<void>',
+        description: 'Validate classifier/conservative routes, then capture the current policy for one Session. Subsequent settings edits do not replace this durable selection.',
+        parameters: [{ name: 'agent', description: 'Exact live top-level Agent receiving the user\'s opt-in.' }, { name: 'mode', description: 'Selected policy tradeoff.' }, { name: 'signal', description: 'Optional cancellation before the intent commit.' }],
+        returns: 'Fulfillment after the Auto intent is appended; no model call is made.',
+      },
+      {
+        signature: 'captureDelegation(parent: Agent): DelegationRoutingCapture | undefined',
+        description: 'Capture an ordinary parent\'s Auto intent or a child\'s creation-owned delegation preference.',
+        parameters: [{ name: 'parent', description: 'Exact live direct parent of the proposed delegation.' }],
+        returns: 'Detached policy and parent-local identity, or undefined when Auto is inapplicable.',
+      },
+      {
+        signature: 'resolveDelegation(request: ResolveDelegationRoutingRequest): Promise<ResolvedDelegationRouting>',
+        description: 'Resolve an isolated child proposal without changing the parent\'s conversation route. The native owner separately enforces authorization and child-creation admission.',
+        parameters: [{ name: 'request', description: 'Captured parent policy, authorized IDs and isolated child input.' }],
+        returns: 'A materialized model/effort proposal with classifier-audit attribution.',
+      },
+    ],
+  },
+  {
     key: 'permissionPresets',
     summary: 'Owns the deployment\'s configured permission presets, the fixed Auto integration hook, and their write path.',
     description: 'Owns the deployment\'s configured permission presets, the fixed Auto integration hook, and their write path. Requires a confining `ctx.shell` executor and `ctx.approval`; unmatched knob values are reported as CUSTOM_PRESET, not an error.',
@@ -1509,6 +1540,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Select one Session-local model after explicitly resuming the Session.',
         parameters: [{ name: 'request', description: 'Session identity and requested model selection.' }],
         returns: 'the normalized selection installed for the Session.',
+      },
+      {
+        signature: '@Remote(\'selectAutoModel\') selectAutoModel(request: SessionSelectAutoModelRequest, signal: AbortSignal): Promise<SessionSelectAutoModelValue>',
+        description: 'Select a Session-local Auto mode without changing the deployment\'s concrete default.',
+        parameters: [{ name: 'request', description: 'Ordinary Session identity and requested Auto tradeoff.' }, { name: 'signal', description: 'Caller cancellation before intent commitment.' }],
+        returns: 'The accepted mode; actual model use remains a durable request fact.',
       },
       {
         signature: '@Remote(\'modelCatalog\') modelCatalog(): Promise<ModelCatalog>',
@@ -3491,6 +3528,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'payload', description: '.owner - exact identity whose current selection is queried.' }, { name: 'next', description: 'delegate when this listener owns no current selection.' }],
   },
   {
+    name: 'model-selection/resolve',
+    mode: 'waterfall',
+    signature: '\'model-selection/resolve\'(this: Scoped<Agent>, payload: ModelSelectionResolution, next: () => Promise<ModelSelection | undefined>): Promise<ModelSelection | undefined>',
+    summary: 'Resolve the route for one scoped prompt assembly before its downstream assembly listeners run.',
+    description: 'Resolve the route for one scoped prompt assembly before its downstream assembly listeners run. The result supplies prompt variables, request routing, and switch notices without changing the configured selection. Scope-filtered dispatch uses payload.agent as the routing key. Diagnostic assemblies without an Agent do not dispatch this event.',
+    parameters: [{ name: 'payload', description: '.signal - cancellation for this assembly, when supplied.' }, { name: 'next', description: 'delegate to the captured selection or another resolver.' }],
+  },
+  {
     name: 'permission-presets/catalog-changed',
     mode: 'emit',
     signature: '\'permission-presets/catalog-changed\'(): void',
@@ -3799,6 +3844,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type AgentStatus = \'idle\' | \'running\';',
   },
   {
+    name: 'AllowedModelRoute',
+    declaration: 'export interface AllowedModelRoute {\n    readonly provider: string;\n    readonly model: string;\n}',
+  },
+  {
     name: 'ApiKeyRecord',
     declaration: 'export interface ApiKeyRecord {\n    readonly kind: \'api-key\';\n    readonly key?: string;\n    readonly env?: Readonly<Record<string, string>>;\n}',
   },
@@ -3947,6 +3996,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type AuthorizationStatus = \'authorized\' | \'cancelled\';',
   },
   {
+    name: 'AutoSelection',
+    declaration: 'export interface AutoSelection {\n    readonly mode: ModelRoutingMode;\n    readonly policy: ModelRoutingPolicy;\n    readonly classifier: RoutingClassifierConfig;\n}',
+  },
+  {
     name: 'BackendRegistry',
     declaration: 'export class BackendRegistry {\n    register(name: string, backend: StorageBackend): () => void;\n    get(name: string): StorageBackend;\n    names(): string[];\n}',
   },
@@ -3973,6 +4026,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'BrowserUseProviderName',
     declaration: 'export type BrowserUseProviderName = Branded<\'BrowserUseProviderName\'>;',
+  },
+  {
+    name: 'ChildModelSelection',
+    declaration: 'export interface ChildModelSelection {\n    readonly source: \'request\' | \'parent-rule\' | \'auto\' | \'inheritance\';\n    readonly provider?: string;\n    readonly model?: string;\n    readonly reasoningEffort?: ReasoningEffortId;\n    readonly candidateId?: string;\n    readonly parentClassifierCallId?: RoutingCallId;\n}',
   },
   {
     name: 'ClientArtifactBaseline',
@@ -4212,11 +4269,19 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'DeepSeekLlmApiExtensionRequest',
-    declaration: 'export interface DeepSeekLlmApiExtensionRequest {\n    readonly body: Readonly<Record<string, DeepSeekLlmApiJson>>;\n    readonly sessionId?: string;\n    readonly purpose?: \'compaction\' | \'session-title\';\n    readonly signal: AbortSignal;\n}',
+    declaration: 'export interface DeepSeekLlmApiExtensionRequest {\n    readonly body: Readonly<Record<string, DeepSeekLlmApiJson>>;\n    readonly sessionId?: string;\n    readonly purpose?: \'compaction\' | \'session-title\' | \'model-routing\';\n    readonly signal: AbortSignal;\n}',
   },
   {
     name: 'DeepSeekLlmApiJson',
     declaration: 'export type DeepSeekLlmApiJson = null | boolean | number | string | DeepSeekLlmApiJson[] | {\n    [key: string]: DeepSeekLlmApiJson;\n};',
+  },
+  {
+    name: 'DelegatedPolicyOverrides',
+    declaration: 'export interface DelegatedPolicyOverrides {\n    readonly permissionPreset: \'auto\' | \'danger-full-access\' | undefined;\n    readonly sandboxMode: SandboxMode | undefined;\n    readonly approvalPolicy: \'never\' | undefined;\n}',
+  },
+  {
+    name: 'DelegationRoutingCapture',
+    declaration: 'export interface DelegationRoutingCapture {\n    readonly parentSessionId: SessionId;\n    readonly intentSeq: SessionSeq;\n    readonly selection: AutoSelection;\n}',
   },
   {
     name: 'DiffCallView',
@@ -4432,7 +4497,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'GenerateOptions',
-    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: Message[];\n    system?: string;\n    tools?: ToolSchema[];\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\';\n}',
+    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: Message[];\n    system?: string;\n    tools?: ToolSchema[];\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\' | \'model-routing\';\n}',
   },
   {
     name: 'GenericCallView',
@@ -4848,7 +4913,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ModelCatalog',
-    declaration: 'export interface ModelCatalog {\n    readonly default: ModelSelection;\n    readonly routableProviders: readonly string[];\n    readonly groups: readonly ModelProviderGroup[];\n    readonly failures: readonly ModelCatalogFailure[];\n}',
+    declaration: 'export interface ModelCatalog {\n    readonly default: ModelSelection;\n    readonly routableProviders: readonly string[];\n    readonly groups: readonly ModelProviderGroup[];\n    readonly failures: readonly ModelCatalogFailure[];\n    readonly autoRouting?: {\n        readonly available: boolean;\n    };\n}',
   },
   {
     name: 'ModelCatalogFailure',
@@ -4883,8 +4948,28 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ModelReasoningEffort {\n    readonly id: string;\n    readonly name: string;\n    readonly description?: string;\n}',
   },
   {
+    name: 'ModelRoutingMode',
+    declaration: 'export type ModelRoutingMode = \'efficiency\' | \'balanced\' | \'intelligence\';',
+  },
+  {
+    name: 'ModelRoutingPolicy',
+    declaration: 'export interface ModelRoutingPolicy {\n    readonly candidates: readonly RoutingCandidate[];\n    readonly qualityFloors: Readonly<Record<ModelRoutingMode, Readonly<Record<TaskComplexity, ModelRoutingQuality>>>>;\n    readonly minConfidence: number;\n    readonly conservativeCandidateId: string;\n}',
+  },
+  {
+    name: 'ModelRoutingQuality',
+    declaration: 'export type ModelRoutingQuality = 1 | 2 | 3;',
+  },
+  {
     name: 'ModelSelectionQuery',
     declaration: 'export interface ModelSelectionQuery {\n    readonly owner: object;\n}',
+  },
+  {
+    name: 'ModelSelectionResolution',
+    declaration: 'export interface ModelSelectionResolution {\n    readonly agent: Agent;\n    readonly selection: ModelSelection | undefined;\n    readonly signal?: AbortSignal;\n}',
+  },
+  {
+    name: 'NativeChildModelSelection',
+    declaration: 'export interface NativeChildModelSelection {\n    readonly decision: ChildModelSelection;\n    readonly allowedModels?: readonly AllowedModelRoute[];\n    readonly delegationAuto?: AutoSelection;\n}',
   },
   {
     name: 'ObjectJsonSchema',
@@ -5115,6 +5200,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ResolvedCredential {\n    value: string;\n    source: string;\n}',
   },
   {
+    name: 'ResolvedDelegationRouting',
+    declaration: 'export interface ResolvedDelegationRouting {\n    readonly selection: ModelSelection;\n    readonly candidateId: string;\n    readonly reason: RoutingDecisionReason;\n    readonly classifierCallId?: RoutingCallId;\n}',
+  },
+  {
+    name: 'ResolveDelegationRoutingRequest',
+    declaration: 'export interface ResolveDelegationRoutingRequest {\n    readonly parent: Agent;\n    readonly capture: DelegationRoutingCapture;\n    readonly eligibleCandidateIds: readonly string[];\n    readonly prompt: readonly ContentBlock[];\n    readonly maxTokens?: number;\n    readonly signal: AbortSignal;\n}',
+  },
+  {
     name: 'ResolvedNormalRetryPolicy',
     declaration: 'export interface ResolvedNormalRetryPolicy extends ResolvedRetryBackoff {\n    readonly mode: \'normal\';\n    readonly maxRetries: number;\n    readonly retryableCodes: readonly string[];\n}',
   },
@@ -5128,7 +5221,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ResolvedSubagentStartRequest',
-    declaration: 'export interface ResolvedSubagentStartRequest extends SubagentStartRequest {\n    readonly descriptor: SubagentDescriptorData;\n}',
+    declaration: 'export interface ResolvedSubagentStartRequest extends SubagentStartRequest {\n    readonly descriptor: SubagentDescriptorData;\n    readonly resolvedAgentOptions?: AgentOptions;\n    readonly resolvedDelegatedPolicies?: DelegatedPolicyOverrides;\n    readonly resolvedModelSelection?: NativeChildModelSelection;\n    readonly resolvedCreationSignal?: AbortSignal;\n}',
   },
   {
     name: 'RestoredSessionOptions',
@@ -5137,6 +5230,22 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ResumeAgentOptions',
     declaration: 'export interface ResumeAgentOptions {\n    readonly resumeSessionId: SessionId;\n    readonly parentAgent?: Agent;\n    readonly agentOptions?: AgentOptions;\n    readonly signal?: AbortSignal;\n    readonly setup?: AgentSetup;\n}',
+  },
+  {
+    name: 'RoutingCallId',
+    declaration: 'export type RoutingCallId = Branded<\'RoutingCallId\'>;',
+  },
+  {
+    name: 'RoutingCandidate',
+    declaration: 'export interface RoutingCandidate {\n    readonly id: string;\n    readonly selection: Readonly<ModelSelection>;\n    readonly quality: ModelRoutingQuality;\n    readonly relativeCost: number;\n}',
+  },
+  {
+    name: 'RoutingClassifierConfig',
+    declaration: 'export interface RoutingClassifierConfig {\n    readonly selection: Readonly<ModelSelection>;\n    readonly maxInputBytes: number;\n    readonly maxOutputTokens: number;\n    readonly maxOutputBytes: number;\n    readonly timeoutMs: number;\n}',
+  },
+  {
+    name: 'RoutingDecisionReason',
+    declaration: 'export type RoutingDecisionReason = \'same-task\' | \'uncertain-current\' | \'conservative\' | \'quality-floor\' | \'cost-tie-current\';',
   },
   {
     name: 'RunnerFailureRule',
@@ -5611,6 +5720,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type SessionSeedEventState = \'detached\' | \'shared-frozen\';',
   },
   {
+    name: 'SessionSelectAutoModelRequest',
+    declaration: 'export interface SessionSelectAutoModelRequest {\n    readonly sessionId: SessionId;\n    readonly mode: ModelRoutingMode;\n}',
+  },
+  {
+    name: 'SessionSelectAutoModelValue',
+    declaration: 'export interface SessionSelectAutoModelValue {\n    readonly mode: ModelRoutingMode;\n}',
+  },
+  {
     name: 'SessionSelectModelRequest',
     declaration: 'export interface SessionSelectModelRequest extends ModelSelection {\n    readonly sessionId: SessionId;\n}',
   },
@@ -5948,7 +6065,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentProvider',
-    declaration: 'export interface SubagentProvider {\n    readonly name: string;\n    readonly capabilities: SubagentCapabilities;\n    readonly inheritsParentContext: boolean;\n    readonly agentRouteDefaults?: Readonly<{\n        provider: string;\n        model: string;\n    }>;\n    start(request: ResolvedSubagentStartRequest): Promise<SubagentRun>;\n    prepareContinuable?(request: ContinuableCreateRequest): Promise<ContinuableCreateSpec>;\n}',
+    declaration: 'export interface SubagentProvider {\n    readonly name: string;\n    readonly capabilities: SubagentCapabilities;\n    readonly inheritsParentContext: boolean;\n    readonly agentRouteDefaults?: Readonly<{\n        provider: string;\n        model: string;\n    }>;\n    readonly nativeModelSelection?: \'spawn\' | \'fork\';\n    start(request: ResolvedSubagentStartRequest): Promise<SubagentRun>;\n    prepareContinuable?(request: ContinuableCreateRequest): Promise<ContinuableCreateSpec>;\n}',
   },
   {
     name: 'SubagentResult',
@@ -5972,7 +6089,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentRuntime',
-    declaration: 'export class SubagentRuntime extends TypertRemoteService {\n    constructor(ctx: Context);\n    async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>;\n    async sendMessage(sender: Agent, targetId: SessionId, content: ContentBlock[], options: SubagentSendMessageOptions): Promise<MessageId>;\n    interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void;\n    async drainContinuableDescendants(parents: readonly Agent[]): Promise<void>;\n    async drainContinuableChildren(parent: Agent, childIds: readonly SessionId[]): Promise<void>;\n    listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentListEntry[]>;\n    listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>;\n    @Remote(\'list\')\n    async remoteExportList(parentSessionId: SessionId, signal: AbortSignal): Promise<SubagentCatalog>;\n    @Remote(\'prompt\')\n    async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>;\n    @Remote(\'interruptByParent\')\n    interruptByParent(childSessionId: SessionId, parentSessionId: SessionId, mode: \'continuable\'): SubagentInterruptReceipt;\n    registerProvider(provider: SubagentProvider): () => void;\n    getProvider(name: string): SubagentProvider | undefined;\n    list(): string[];\n    async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>;\n}',
+    declaration: 'export class SubagentRuntime extends TypertRemoteService {\n    static Config: z<Config>;\n    constructor(ctx: Context, config: Config = {});\n    async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>;\n    async sendMessage(sender: Agent, targetId: SessionId, content: ContentBlock[], options: SubagentSendMessageOptions): Promise<MessageId>;\n    interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void;\n    async drainContinuableDescendants(parents: readonly Agent[]): Promise<void>;\n    async drainContinuableChildren(parent: Agent, childIds: readonly SessionId[]): Promise<void>;\n    listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentListEntry[]>;\n    listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>;\n    @Remote(\'list\')\n    async remoteExportList(parentSessionId: SessionId, signal: AbortSignal): Promise<SubagentCatalog>;\n    @Remote(\'prompt\')\n    async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>;\n    @Remote(\'interruptByParent\')\n    interruptByParent(childSessionId: SessionId, parentSessionId: SessionId, mode: \'continuable\'): SubagentInterruptReceipt;\n    registerProvider(provider: SubagentProvider): () => void;\n    getProvider(name: string): SubagentProvider | undefined;\n    list(): string[];\n    async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>;\n}',
   },
   {
     name: 'SubagentSendMessageOptions',
@@ -5980,7 +6097,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentStartRequest',
-    declaration: 'export interface SubagentStartRequest {\n    readonly label?: string;\n    readonly prompt: ContentBlock[];\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n    readonly agentOptions?: AgentOptions;\n    readonly outputSchema?: ObjectJsonSchema;\n    readonly maxDepth?: number;\n    readonly toolFilter?: ToolRestriction;\n    readonly persona?: string;\n}',
+    declaration: 'export interface SubagentStartRequest {\n    readonly label?: string;\n    readonly prompt: ContentBlock[];\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n    readonly agentOptions?: AgentOptions;\n    readonly disableAutoModelSelection?: true;\n    readonly outputSchema?: ObjectJsonSchema;\n    readonly maxDepth?: number;\n    readonly toolFilter?: ToolRestriction;\n    readonly persona?: string;\n}',
   },
   {
     name: 'SubagentStopReason',
@@ -6085,6 +6202,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'TableValueOf',
     declaration: 'export type TableValueOf<S extends DomainSpec, N extends keyof S[\'tables\']> = S[\'tables\'][N] extends DomainTableSpec<string, infer V> ? V : never;',
+  },
+  {
+    name: 'TaskComplexity',
+    declaration: 'export type TaskComplexity = \'routine\' | \'standard\' | \'complex\';',
   },
   {
     name: 'TeamId',

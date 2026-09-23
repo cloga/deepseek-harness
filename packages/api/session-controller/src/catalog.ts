@@ -1,6 +1,7 @@
 /** Shared projection of the live LLM registry into the browser model catalog. */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-model-routing'
 import type {
   ModelCatalog,
   ModelReasoning,
@@ -59,6 +60,7 @@ export async function buildModelCatalog(
   }))
   return {
     default: { ...defaultSelection },
+    autoRouting: { available: ctx.get('modelRouting')?.isAvailable() ?? false },
     routableProviders: providers.map(provider => provider.id),
     groups: catalog.flatMap(item => item.kind === 'group' ? [item.group] : [])
       .filter(group => group.models.length > 0),

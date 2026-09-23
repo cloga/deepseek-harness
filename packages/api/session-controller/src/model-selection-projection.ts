@@ -41,6 +41,9 @@ function applyModelSelectionProjection(
       ? state
       : { lastUsed: state.lastUsed, pending: event.data }
   }
+  if (event.type === 'model/auto-selection') {
+    return state.pending === null ? state : { lastUsed: state.lastUsed, pending: null }
+  }
   if (event.type !== 'request/header') return state
   const lastUsed: ModelSelection = {
     provider: event.data.header.config.provider,
@@ -64,7 +67,7 @@ const modelSelectionProjection = {
     viewSchema: modelSelectionProjectionSchema,
     view: state => ({ lastUsed: state.lastUsed, next: state.pending ?? state.lastUsed }),
   },
-  stateVersion: 2,
+  stateVersion: 3,
 } satisfies ProjectionDefinition<'modelSelection', ModelSelectionProjectionState>
 
 function sameSelection(left: ModelSelection | null, right: ModelSelection | null): boolean {

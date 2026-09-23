@@ -8,11 +8,12 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`@deepseek-ai/dsh-api-session-controller` owns the Host `ctx.sessionController` service and the generated Client `session`, `skills`, and `fileReferences` Remote namespaces. It serves Session lifecycle and history, the Host-generation model catalog, workspace-path opening, user-invocable skill discovery, and Agent-scoped file references. Use it through API Gateway when a Client needs operations addressed by a Session.
+Use `@deepseek-ai/dsh-api-session-controller` through API Gateway to create or resume ordinary Sessions, submit prompts, follow durable history, and choose a manual model or Auto mode. Clients can also inspect the model catalog, discover user-invocable skills, resolve Agent-scoped file references, and open workspace paths. Each operation states whether it can activate a Session; model selection preserves subagent ownership and separates accepted intent from actual model use.
 
 ## Table of Contents
 
 - [Use this package](#use-this-package)
+- [Model selection](#model-selection)
 - [Session media references](#session-media-references)
 - [Configuration](#configuration)
 - [Model Experience](#model-experience)
@@ -38,6 +39,17 @@ The Session object also carries local submission echoes: `session.beginSubmissio
 The user-invocable `skills/list` metadata includes the winning provider’s optional instruction-file `path`. The composer can preview that file without loading every skill body or activating a cold Agent.
 
 Fork copies history through the selected completed turn, including its `turn/end`. Events after that point, including queued input and model-setting changes, are excluded. An omitted or past-end anchor selects the last completed turn; an anchor inside an unfinished turn is rejected.
+
+<a id="model-selection"></a>
+### Model selection
+
+`session.selectModel` validates a concrete provider/model/effort selection, records manual intent, and retains the existing concrete-default save behavior. `session.selectAutoModel({ sessionId, mode })` instead accepts the typed modes `efficiency`, `balanced`, or `intelligence`, validates routing readiness through the optional Host owner, and returns only the accepted `mode`. It records a captured Auto policy without choosing a fictitious model id, generating a model response, or writing the deployment's concrete default. The [model-routing package](../../llm/model-routing/README.md) owns task classification, candidate policy, and actual-dispatch decisions.
+
+Both operations resolve or resume the exact ordinary Session Agent and share its serialized model/image-admission path. Auto selection forwards caller cancellation before intent commitment. An absent or unready routing service, or an ordinary route-validation failure, produces `session/auto-model-unavailable` with the requested mode; cancellation produces `gateway/cancelled`. Existing typed Remote failures retain their code. A subagent-owned Session retains the `session/agent-busy` refusal rather than being independently resumed or configured through this endpoint.
+
+An explicit Auto event clears the superseded pending manual selection while retaining `modelSelection.lastUsed`; a later concrete selection clears Auto intent even when it names the same route. Live-cache retirement checks the exact Agent and current intent so an older event cannot consume a newer manual choice. `modelSelection.next` represents a pending manual choice or the last actual route, never a prediction of unresolved Auto work. The separate `modelRouting` projection carries mode and the last confirmed decision, including its concrete selection and reason; its cropped view omits raw task text and policy internals.
+
+`session.modelCatalog()` keeps provider/model groups separate from `autoRouting.available`. That flag reports configuration readiness for a new Auto selection, not provider reachability, a predicted route, or the validity of a policy already captured by a Session. Disabling future opt-ins does not silently revoke existing Auto intent. Catalog names and effort descriptions remain advisory display data; the Host validates the exact route when an operation requires it.
 
 <a id="session-media-references"></a>
 ## Session media references
