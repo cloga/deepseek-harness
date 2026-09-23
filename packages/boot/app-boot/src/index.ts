@@ -251,6 +251,45 @@ const bootstrapIncludes = new WeakMap<Context, Entry>()
 // reference `process.env`.
 const userPatchesSchema = entryListSchema
 
+/**
+ * Reconcile one complete profile patch generation and await Loader settlement.
+ * Existing unchanged optional failures remain diagnostics; new, changed, or
+ * explicitly required failures reject instead of reporting false success.
+ * @param ctx - Booted profile root owning the pinned Include entry.
+ * @param patches - Complete ordered profile patch generation.
+ * @param binName - Diagnostic prefix.
+ * @param requiredIds - Enablement targets whose existing failures are also fatal.
+ * @returns Diagnostics for unchanged inactive entries.
+ */
+export async function reconcileProfilePatches(
+  ctx: Context, patches: PatchOptions[], binName: string, requiredIds: readonly string[] = [],
+): Promise<string[]> {
+  const entry = bootstrapIncludes.get(ctx)
+  if (entry === undefined) throw new Error(`${binName}: profile reload requires the root Include entry`)
+  const previousFailures = (await inactiveEntries(ctx)).map(failure => ({
+    ...failure, fiber: failure.entry.fiber, options: JSON.stringify(failure.entry.options),
+  }))
+  const previousFibers = [...ctx.loader.entries()].flatMap(row => row.fiber === undefined ? [] : [{
+    fiber: row.fiber, failed: row.fiber.state === FIBER_FAILED || row.fiber.state === FIBER_DISPOSED,
+  }])
+  const { patches: _previous, ...includeConfig } = entry.options.config as Include.Config
+  await entry.update({ config: { ...includeConfig, patches } })
+  const results = await Promise.allSettled(previousFibers.map(({ fiber }) => fiber.await()))
+  await ctx.loader.await()
+  const failures = await inactiveEntries(ctx)
+  const introduced = failures.filter(failure => requiredIds.includes(failure.entry.options.id) || !previousFailures.some(previous =>
+    previous.entry === failure.entry && previous.fiber === failure.entry.fiber
+    && previous.options === JSON.stringify(failure.entry.options) && previous.diagnostic === failure.diagnostic))
+  if (introduced.length > 0) {
+    const noun = introduced.length === 1 ? 'entry' : 'entries'
+    throw new Error(`${binName}: profile reconciliation failed: ${String(introduced.length)} ${noun} did not activate\n${introduced.map(failure => failure.diagnostic).join('\n')}`)
+  }
+  for (const [index, result] of results.entries()) {
+    if (result.status === 'rejected' && !previousFibers[index]?.failed) throw result.reason
+  }
+  return failures.map(failure => failure.diagnostic)
+}
+
 /** Options for live user patch-layer reconciliation. */
 export interface UserPatchWatchOptions {
   /** Diagnostic prefix used by {@link loadOptionalPatches}. */
@@ -717,6 +756,7 @@ export function installFailLoud(
 const FIBER_PENDING = 0 as FiberState.PENDING
 const FIBER_ACTIVE = 2 as FiberState.ACTIVE
 const FIBER_FAILED = 3 as FiberState.FAILED
+const FIBER_DISPOSED = 4 as FiberState.DISPOSED
 
 /**
  * Entry ids whose presence defines a usable DSH application.
