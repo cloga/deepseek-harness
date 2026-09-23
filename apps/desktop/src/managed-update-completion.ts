@@ -131,8 +131,12 @@ function retainedHandoffIdentity(
       && !Array.isArray(historicalProvisioning)) {
       const retained = historicalProvisioning as Record<string, unknown>
       exactKeys(retained, ['capability', 'planSha256'], 'historical provisioning')
-      if (JSON.stringify(retained.capability) === JSON.stringify(LEGACY_DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY)
-        && retained.planSha256 === currentCapability.provisioning.planSha256) {
+      if (JSON.stringify(retained.capability) === JSON.stringify(LEGACY_DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY)) {
+        if (typeof retained.planSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(retained.planSha256)) {
+          throw new Error('desktop managed update: historical provisioning plan hash is invalid')
+        }
+        // A retained release has its own plan. Substitute parser-only current metadata;
+        // final completion still checks the installed plan and inventory against the current capability.
         historicalProvisioning = currentCapability.provisioning
       }
     }
