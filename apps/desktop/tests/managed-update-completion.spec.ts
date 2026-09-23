@@ -16,6 +16,7 @@ import {
 } from './managed-update-fixture.ts'
 import {
   DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+  LEGACY_DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
   desktopPluginProvisioningPlanSha256,
   parseDesktopPluginProvisioningPlan,
   type DesktopPluginProvisioningResult,
@@ -352,6 +353,74 @@ it.each(['cancelled', 'completed', 'pending'] as const)(
   },
 )
 
+it.each(['cancelled', 'completed', 'pending', 'blocked', 'interrupted'] as const)(
+  'reads %s retained schema3/legacy-provisioning handoff with its own prior plan hash', async (state) => {
+    const fixture = await completionFixture()
+    const operation = await fixture.operation('a', state === 'cancelled' ? 'legacy-pre-install'
+      : state === 'blocked' ? 'blocked' : state === 'interrupted' ? 'interrupted' : 'success')
+    if (state === 'completed') await expect(fixture.complete()).resolves.toMatchObject({ status: 'complete', sequence: 2 })
+    if (state === 'cancelled') {
+      await writeFile(join(operation, 'cancelled.json'), JSON.stringify({ schemaVersion: 1, token: 'a'.repeat(64) }))
+    }
+    const capability = historicalCapability(fixture.capability, true, 3)
+    capability.provisioning = { capability: LEGACY_DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+      planSha256: 'b'.repeat(64) }
+    await patchRecord(join(operation, 'handoff.json'), { capability })
+    const handoff = await readFile(join(operation, 'handoff.json'), 'utf8')
+    expect(() => parseDesktopManagedUpdateHandoff(JSON.parse(handoff))).toThrow(/unsupported plugin provisioning capability/u)
+    const completed = state === 'completed' ? await readFile(fixture.completionPath, 'utf8') : undefined
+    await expect(fixture.complete(state === 'completed' ? 2 : 0)).resolves.toMatchObject(
+      state === 'blocked' ? { status: 'recovery-required', message: 'installer-exit-1' }
+        : state === 'interrupted' ? { status: 'recovery-required', message: /interrupted/u }
+          : { status: state === 'pending' ? 'complete' : 'none' },
+    )
+    expect(await readFile(join(operation, 'handoff.json'), 'utf8')).toBe(handoff)
+    if (completed !== undefined) expect(await readFile(fixture.completionPath, 'utf8')).toBe(completed)
+    if (state === 'cancelled' || state === 'blocked' || state === 'interrupted') {
+      await expect(readFile(fixture.completionPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+  },
+)
+
+it.each(['plan', 'inventory'] as const)(
+  'does not use a prior handoff plan hash to bypass the current installed %s', async (damage) => {
+    const fixture = await completionFixture()
+    const operation = await fixture.operation('a', 'success')
+    const capability = historicalCapability(fixture.capability, false, 3)
+    capability.provisioning = { capability: LEGACY_DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+      planSha256: 'b'.repeat(64) }
+    await patchRecord(join(operation, 'handoff.json'), { capability })
+    if (damage === 'plan') await writeFile(fixture.planPath, JSON.stringify({ schemaVersion: 2, mode: 'exact', plugins: [] }))
+    if (damage === 'inventory') await rm(join(fixture.profile, 'desktop-plugin-provisioning-state.json'))
+    await expect(fixture.complete()).resolves.toMatchObject({ status: 'recovery-required' })
+    await expect(readFile(fixture.completionPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  },
+)
+
+it.each(['missing-hash', 'invalid-hash', 'unknown-capability', 'extra-field'] as const)(
+  'rejects malformed legacy provisioning in a retained handoff: %s', async (damage) => {
+    const fixture = await completionFixture()
+    const operation = await fixture.operation('a', 'legacy-pre-install')
+    const capability = historicalCapability(fixture.capability, false, 3)
+    const provisioning: Record<string, unknown> = {
+      capability: LEGACY_DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY, planSha256: 'b'.repeat(64),
+    }
+    if (damage === 'missing-hash') delete provisioning.planSha256
+    if (damage === 'invalid-hash') provisioning.planSha256 = 'not-a-digest'
+    if (damage === 'unknown-capability') provisioning.capability = {
+      ...LEGACY_DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY, schemaVersion: 99,
+    }
+    if (damage === 'extra-field') provisioning.extra = true
+    capability.provisioning = provisioning
+    await patchRecord(join(operation, 'handoff.json'), { capability })
+    await writeFile(join(operation, 'cancelled.json'), JSON.stringify({ schemaVersion: 1, token: 'a'.repeat(64) }))
+    const before = await readFile(join(operation, 'handoff.json'), 'utf8')
+    await expect(fixture.complete()).resolves.toMatchObject({ status: 'recovery-required' })
+    expect(await readFile(join(operation, 'handoff.json'), 'utf8')).toBe(before)
+    await expect(readFile(fixture.completionPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  },
+)
+
 it.each(['blocked', 'interrupted'] as const)(
   'preserves the installer failure for a %s schema3 commit-based migration handoff', async (state) => {
     const fixture = await completionFixture()
@@ -369,9 +438,10 @@ it('reports the current installer failure after reading completed schema3 commit
   const fixture = await completionFixture(18)
   const previous = managedManifest({ sequence: 11 })
   const operation = await fixture.operation('a', 'success', previous)
-  await patchRecord(join(operation, 'handoff.json'), {
-    capability: historicalCapability(managedCapability({ currentSequence: 6 }), true, 3),
-  })
+  const historical = historicalCapability(managedCapability({ currentSequence: 6 }), true, 3)
+  historical.provisioning = { capability: LEGACY_DESKTOP_NATIVE_PLUGIN_PROVISIONING_CAPABILITY,
+    planSha256: 'b'.repeat(64) }
+  await patchRecord(join(operation, 'handoff.json'), { capability: historical })
   const receipt = JSON.stringify({
     schemaVersion: 1, status: 'complete', sequence: 11, manifestSha256: previous.manifestSha256,
   })
