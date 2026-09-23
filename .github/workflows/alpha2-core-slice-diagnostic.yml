@@ -77,6 +77,8 @@ jobs:
             packages/skill/skill-office/tests/skill-office.spec.ts `
             apps/desktop-host/tests/package-transactions.spec.ts `
             apps/desktop-host/tests/desktop-plugin-command-ipc.spec.ts `
+            apps/desktop-host/tests/update-impact.spec.ts `
+            apps/desktop-host/tests/update-task-control.spec.ts `
             apps/cli/tests/resolved-profile-boot.spec.ts `
             apps/cli/tests/resolved-profile-disposal.spec.ts `
             apps/desktop/tests/project-manager.spec.ts `
@@ -85,5 +87,6 @@ jobs:
             apps/web/tests/desktop-boot.spec.ts `
             apps/web/tests/injection-order.spec.ts `
             packages/api/gateway/tests/gateway.client.spec.ts `
+            packages/client/connection/tests/node-half.host.spec.ts `
             --maxWorkers=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
