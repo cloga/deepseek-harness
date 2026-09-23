@@ -18,6 +18,7 @@ function startup(locale = 'en', status: Promise<DesktopBackendState> = Promise.r
   const unsubscribe = vi.fn(() => { listeners.clear() })
   const disablePlugins = vi.fn(async () => {})
   const resetConfiguration = vi.fn(async () => {})
+  const restorePlannedSource = vi.fn(async () => {})
   const restart = vi.fn(async () => {})
   const queried = Promise.withResolvers<undefined>()
   const api: DshDesktopStartupApi = {
@@ -27,7 +28,7 @@ function startup(locale = 'en', status: Promise<DesktopBackendState> = Promise.r
       status: () => { queried.resolve(undefined); return status },
       subscribe: (listener) => { listeners.add(listener); return unsubscribe },
     },
-    disablePlugins, resetConfiguration, restart,
+    disablePlugins, restorePlannedSource, resetConfiguration, restart,
   }
   Object.defineProperty(dom.window, 'dshDesktop', { value: api })
   runInContext(readFileSync(new URL('../renderer/startup.js', import.meta.url), 'utf8'), dom.getInternalVMContext())
@@ -50,7 +51,7 @@ function startup(locale = 'en', status: Promise<DesktopBackendState> = Promise.r
         : [element(selector).textContent]),
   ].join('\n')
   return { dom, document, element, button, publish, copy,
-    disablePlugins, resetConfiguration, restart, unsubscribe, queried: queried.promise }
+    disablePlugins, restorePlannedSource, resetConfiguration, restart, unsubscribe, queried: queried.promise }
 }
 
 it('shows English loading and recovery actions without a Host document', async () => {
@@ -104,6 +105,24 @@ it('shows Chinese loading and recovery copy', async () => {
     禁用全部第三方插件并重试
     重置 Desktop 并重试"
   `)
+})
+
+it('offers only the retained package-specific planned-source recovery', async () => {
+  const page = startup()
+  await expect.poll(() => page.element('#title').textContent).not.toBe('')
+  page.publish({ phase: 'error', profileRecovery: true, message: 'override failed', recovery: {
+    type: 'restore-planned-source', packageName: 'provider', requestedVersion: '1.0.0',
+  } })
+  expect(page.button('#restore-planned-source').hidden).toBe(false)
+  expect(page.button('#restore-planned-source').textContent).toContain('provider@1.0.0')
+  page.button('#restore-planned-source').click()
+  expect(page.restorePlannedSource).toHaveBeenCalledOnce()
+  page.publish({ phase: 'error', profileRecovery: true, message: 'other failure' })
+  expect(page.button('#restore-planned-source').hidden).toBe(true)
+  page.publish({ phase: 'error', profileRecovery: false, message: 'unavailable', recovery: {
+    type: 'restore-planned-source', packageName: 'provider', requestedVersion: '1.0.0',
+  } })
+  expect(page.button('#restore-planned-source').hidden).toBe(true)
 })
 
 it('renders diagnostic markup as text and exposes failures from recovery actions', async () => {
@@ -165,6 +184,18 @@ it('keeps emergency diagnostics inert without shell assets', () => {
   expect([...dom.window.document.querySelectorAll('form')].map(form => form.action)).toEqual([
     'dsh-recovery://restart', 'dsh-recovery://plugins', 'dsh-recovery://reset',
   ])
+  dom.window.close()
+})
+
+it('offers retained planned-source recovery in the emergency document', () => {
+  const html = startupFailureDocument(resolveDesktopLocale('en'), 'Override failed', true, {
+    type: 'restore-planned-source', packageName: 'provider', requestedVersion: '1.0.0',
+  })
+  const dom = new JSDOM(html)
+  expect([...dom.window.document.querySelectorAll('form')].map(form => form.action)).toEqual([
+    'dsh-recovery://restart', 'dsh-recovery://restore', 'dsh-recovery://plugins', 'dsh-recovery://reset',
+  ])
+  expect(dom.window.document.body.textContent).toContain('provider@1.0.0')
   dom.window.close()
 })
 

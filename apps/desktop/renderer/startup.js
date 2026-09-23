@@ -18,6 +18,10 @@ async function main() {
     document.querySelector('#error').hidden = !failed
     document.querySelector('#error').textContent = failed ? state.message : ''
     document.querySelector('#actions').hidden = !failed
+    const restore = document.querySelector('#restore-planned-source')
+    restore.hidden = !failed || !state.profileRecovery || state.recovery?.type !== 'restore-planned-source'
+    restore.textContent = restore.hidden ? '' : messages.restorePlannedPlugin
+      .replace('{name}', state.recovery.packageName).replace('{version}', state.recovery.requestedVersion)
     for (const button of document.querySelectorAll('#actions button')) button.disabled = !failed
     for (const selector of ['#disable-plugins', '#reset-configuration', '#reset-advice']) {
       document.querySelector(selector).hidden = !failed || !state.profileRecovery
@@ -37,6 +41,7 @@ async function main() {
       render(current?.phase === 'error' ? current : { phase: 'error', message: error instanceof Error ? error.message : String(error) })
     }
   }
+  document.querySelector('#restore-planned-source').addEventListener('click', () => { void recover(() => api.restorePlannedSource()) })
   document.querySelector('#disable-plugins').addEventListener('click', () => { void recover(() => api.disablePlugins()) })
   document.querySelector('#reset-configuration').addEventListener('click', () => { void recover(() => api.resetConfiguration()) })
   document.querySelector('#restart').addEventListener('click', () => { void recover(() => api.restart()) })

@@ -18,11 +18,11 @@ Profile 初始化在任何写入前拒绝已有包、运行时或保留的 Deskt
 
 显式安装和更新只能改变获取过程确定的目标包名；私有获取结果携带该名称，不改变公开 receipt 结果。目标在健康检查前准备好的身份和存在性被固定，目标名称例外不意味着允许丢掉该包。删除要求目标声明消失，不要求其损坏的产物字节可用。Toggle 只改变指定启用标记，disable-all 只改变启用标记。
 
-Release plan 不得自动接管冲突的手动安装。只有已启用、user-owned 且验证来源与计划完全相同的包才能自动重建。不同的来源、版本、commit、产物、安装类型或用户禁用状态需要显式用户操作。Optional 重建失败且会移除受保护包时，整次事务失败。
+Release plan 不得自动接管冲突的手动安装。Schema 1 和 strict-pin 条目只接受已启用、user-owned 且验证来源与计划完全相同的包。Schema 2 条目可以依据[兼容用户覆盖决策](2026-09-21-desktop-compatible-user-plugin-overrides.zh.md)显式允许不同的已验证用户来源；没有验证 receipt 的安装类型和用户禁用状态仍需显式恢复操作。Optional 重建失败且会移除受保护包时，整次事务失败。
 
 普通启动 IPC 和不依赖 preload 的应急重置入口都必须取得原生破坏性操作确认，默认选择取消，然后才停止 Host 或修改 profile 文件。取消会恢复恢复操作控件；退出应用或关闭所属窗口会使迟到的确认失效。在持有锁并停止 Host 后，重置会先验证配置和产物的私有副本，再执行首次破坏性写入。生成的 node_modules 不复制；配置链接会拒绝重置。复制失败会尝试重启原 Host，最终就绪或失败则写入独立的不可变结果。
 
-本决策部分取代[归属决策](2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md)和[验证事务决策](../architecture/2026-09-15-desktop-verified-release-plugin-transactions.zh.md)中的 desired 同名优先级及 optional 失败排除规则。其来源验证、归属迁移、锁文件规范化与常规激活回滚仍然适用。公开 IPC、插件 receipt、来源和 Session schema 保持不变；私有激活 journal 版本 2 增加恢复证据。
+本决策部分取代[归属决策](2026-09-17-desktop-plugin-retention-and-lockfiles.zh.md)和[验证事务决策](../architecture/2026-09-15-desktop-verified-release-plugin-transactions.zh.md)中的 desired 同名优先级及 optional 失败排除规则。其来源验证、归属迁移、锁文件规范化与常规激活回滚仍然适用。插件 receipt、来源和 Session schema 保持不变；私有激活 journal 版本 2 增加恢复证据。后续兼容覆盖决策增加一个限定单个包的启动恢复 IPC，但不改变这些 schema。
 
 ## Recovery evidence
 

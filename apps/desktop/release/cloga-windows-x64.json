@@ -1,8 +1,8 @@
 {
   "schemaVersion": 2,
   "channel": "cloga-windows-x64",
-  "version": "0.1.6-alpha.1.cloga.20",
-  "sequence": 33,
+  "version": "0.1.6-alpha.1.cloga.21",
+  "sequence": 34,
   "upstreamVersion": "0.1.6-alpha.1",
   "identity": {
     "appId": "io.github.cloga.deepseek-harness.desktop",
@@ -11,11 +11,12 @@
     "executableName": "cloga-deepseek-harness"
   },
   "desktopProvisioning": {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     "mode": "exact",
     "plugins": [
       {
         "required": true,
+        "sourcePolicy": "compatible-user-override",
         "source": {
           "schemaVersion": 1,
           "type": "githubRelease",

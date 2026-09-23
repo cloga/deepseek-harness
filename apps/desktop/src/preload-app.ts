@@ -23,6 +23,7 @@ const startup: DshDesktopStartupApi = {
     },
   },
   disablePlugins: () => ipcRenderer.invoke(DESKTOP_IPC.pluginsDisableAll) as Promise<void>,
+  restorePlannedSource: () => ipcRenderer.invoke(DESKTOP_IPC.provisioningRestore) as Promise<void>,
   restart: () => ipcRenderer.invoke(DESKTOP_IPC.applicationRestart) as Promise<void>,
   resetConfiguration: () => ipcRenderer.invoke(DESKTOP_IPC.configurationReset) as Promise<void>,
 }

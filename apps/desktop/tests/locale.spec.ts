@@ -10,9 +10,9 @@ describe('desktop locale dictionaries', () => {
     expect(resolveDesktopLocale('fr-FR')).toEqual({ id: 'en', messages: en })
   })
 
-  it('explains that a release conflict retains the user installation in both languages', () => {
-    expect(en.verifiedReleaseOwnership).toMatchInlineSnapshot('"Manual verified installs remain user-owned. A conflicting packaged baseline stops startup without replacing them; explicitly install or enable the requested source to resolve it."')
-    expect(zh.verifiedReleaseOwnership).toMatchInlineSnapshot('"手动验证安装仍归用户所有。发行版基线与其冲突时会停止启动，不会替换用户插件；请明确安装或启用要求的来源以解决冲突。"')
+  it('explains strict and compatible verified-source ownership in both languages', () => {
+    expect(en.verifiedReleaseOwnership).toMatchInlineSnapshot('"Manual verified installs remain user-owned. Strict packaged entries require their requested source; compatible entries retain another verified source only after staged Host health passes."')
+    expect(zh.verifiedReleaseOwnership).toMatchInlineSnapshot('"手动验证安装仍归用户所有。严格的打包条目要求其请求来源；兼容条目只有在暂存 Host 健康检查通过后才保留其他已验证来源。"')
   })
 
   it('formats named values without consuming unknown placeholders', () => {

@@ -27,7 +27,7 @@ import {
 import {
   DesktopHostProcess, type DesktopPluginCommandEvent, type DesktopPluginCommandRequest, type DesktopUpdateImpact,
 } from './host-process.ts'
-import { DesktopBackendController, type DesktopBackendState } from './backend-controller.ts'
+import { DesktopBackendController, type DesktopBackendRecovery, type DesktopBackendState } from './backend-controller.ts'
 import {
   DESKTOP_IPC,
   parseDesktopRendererUpdateImpact,
@@ -53,20 +53,20 @@ class DesktopOperationBusy extends Error {}
 let focusPrimaryWindow = (): void => {}
 let managedRecoveryRequested = process.argv.includes(MANAGED_UPDATE_RECOVERY_ARGUMENT)
 let requestManagedRecovery = (): void => { managedRecoveryRequested = true }
-type RecoveryAction = 'restart' | 'plugins' | 'reset'
+type RecoveryAction = 'restart' | 'plugins' | 'reset' | 'restore'
 let profileRecoveryAvailable = (): boolean => false
-const emergencyPages = new WeakMap<BrowserWindow, { url: string; message: string; busy: boolean }>()
-let recoverApplication = (action: RecoveryAction): Promise<void> => {
+const emergencyPages = new WeakMap<BrowserWindow, { url: string; message: string; recovery?: DesktopBackendRecovery; busy: boolean }>()
+let recoverApplication = (action: RecoveryAction, _recovery?: DesktopBackendRecovery): Promise<void> => {
   if (action !== 'restart') return Promise.reject(new Error('Desktop recovery could not initialize; reinstall the application'))
   app.relaunch()
   app.quit()
   return Promise.resolve()
 }
 
-async function showEmergencyDocument(window: BrowserWindow, message: string): Promise<void> {
-  const document = startupFailureDocument(resolveDesktopLocale(app.getLocale()), message, profileRecoveryAvailable())
+async function showEmergencyDocument(window: BrowserWindow, message: string, recovery?: DesktopBackendRecovery): Promise<void> {
+  const document = startupFailureDocument(resolveDesktopLocale(app.getLocale()), message, profileRecoveryAvailable(), recovery)
   const url = `data:text/html;charset=utf-8,${encodeURIComponent(document)}`
-  emergencyPages.set(window, { url, message, busy: false })
+  emergencyPages.set(window, { url, message, ...(recovery === undefined ? {} : { recovery }), busy: false })
   await window.loadURL(url)
 }
 
@@ -156,11 +156,14 @@ function createWindow(preload: string, show = false): BrowserWindow {
     recover: (action) => {
       const page = emergencyPages.get(window)
       if (page === undefined || page.busy || window.webContents.getURL() !== page.url) return
-      if (!['restart', 'plugins', 'reset'].includes(action.hostname)) return
+      if (!['restart', 'plugins', 'reset', 'restore'].includes(action.hostname)) return
       if (action.hostname !== 'restart' && !profileRecoveryAvailable()) return
       page.busy = true
-      void recoverApplication(action.hostname as RecoveryAction).catch(async (error: unknown) => {
-        if (!(error instanceof DesktopOperationBusy) && !window.isDestroyed()) await showEmergencyDocument(window, `${page.message}\n${desktopErrorState(error).message}`)
+      void recoverApplication(
+        action.hostname as RecoveryAction,
+        action.hostname === 'restore' ? page.recovery : undefined,
+      ).catch(async (error: unknown) => {
+        if (!(error instanceof DesktopOperationBusy) && !window.isDestroyed()) await showEmergencyDocument(window, `${page.message}\n${desktopErrorState(error).message}`, page.recovery)
       }).catch((error: unknown) => { console.error(error) }).finally(() => { page.busy = false })
     },
   })
@@ -254,9 +257,10 @@ async function main(): Promise<void> {
   const showEmergencyError = async (error: unknown): Promise<void> => {
     if (quitting || emergencyDocument) return
     emergencyDocument = true
-    const diagnostic = desktopErrorState(error).message
-    pageError = { phase: 'error', message: diagnostic }
-    if (mainWindow !== undefined) await showEmergencyDocument(mainWindow, diagnostic)
+    const state = desktopErrorState(error)
+    const diagnostic = state.message
+    pageError = state
+    if (mainWindow !== undefined) await showEmergencyDocument(mainWindow, diagnostic, state.recovery)
   }
 
   const navigateMain = (url: string): Promise<void> => {
@@ -356,7 +360,7 @@ async function main(): Promise<void> {
     recoveryPending = pending
     try { await pending } finally { if (recoveryPending === pending) recoveryPending = undefined }
   }
-  recoverApplication = (action): Promise<void> => runRecovery(async () => {
+  recoverApplication = (action, requestedRecovery): Promise<void> => runRecovery(async () => {
     await startup?.catch(() => undefined)
     if (action === 'reset') {
       if (!profileRecoveryAvailable()) throw new Error(messages.startupReinstallAdvice)
@@ -387,6 +391,17 @@ async function main(): Promise<void> {
         if (resetConfirmationAbort === cancellation) resetConfirmationAbort = undefined
       }
     }
+    let restoreName: string | undefined
+    if (action === 'restore') {
+      if (!profileRecoveryAvailable() || requestedRecovery?.type !== 'restore-planned-source' || provisioning === undefined) {
+        throw new Error(messages.startupReinstallAdvice)
+      }
+      const entry = provisioning.plugins.find(item => item.source.packageName === requestedRecovery.packageName)
+      if (entry === undefined || entry.source.version !== requestedRecovery.requestedVersion) {
+        throw new Error(messages.startupReinstallAdvice)
+      }
+      restoreName = requestedRecovery.packageName
+    }
     await backend.stop()
     if (action === 'restart') {
       app.relaunch()
@@ -395,16 +410,20 @@ async function main(): Promise<void> {
     }
     if (!profileRecoveryAvailable()) throw new Error(messages.startupReinstallAdvice)
     if (action === 'reset') await manager.resetConfiguration(hooks)
-    else await manager.mutate({ type: 'plugins-disable-all' }, hooks)
+    else if (action === 'restore') {
+      if (provisioning === undefined || restoreName === undefined) throw new Error(messages.startupReinstallAdvice)
+      await manager.restorePlannedSource(provisioning, restoreName, hooks)
+    } else await manager.mutate({ type: 'plugins-disable-all' }, hooks)
     emergencyDocument = false
     pageError = undefined
     navigation = undefined
     await navigateMain(applicationUrl)
   })
 
-  const showStartupError = async (error: unknown): Promise<void> => {
+  const showStartupError = async (error: unknown, retainedRecovery?: DesktopBackendRecovery): Promise<void> => {
     if (quitting) return
-    pageError = desktopErrorState(error)
+    const state = desktopErrorState(error)
+    pageError = retainedRecovery === undefined || state.recovery !== undefined ? state : { ...state, recovery: retainedRecovery }
     try { await navigateMain(startupUrl) }
     catch (navigationError) {
       await showEmergencyError(new AggregateError([error, navigationError], messages.startupFailed))
@@ -840,6 +859,15 @@ async function main(): Promise<void> {
       await recoverApplication('restart')
     } catch (error) {
       await showStartupError(error)
+    }
+  })
+  ipcMain.handle(DESKTOP_IPC.provisioningRestore, async (event) => {
+    assertDesktopSender(event, ['shell'])
+    assertRecoveryAvailable()
+    const retainedRecovery = pageError?.recovery
+    try { await recoverApplication('restore', retainedRecovery) } catch (error) {
+      await showStartupError(error, retainedRecovery)
+      throw error
     }
   })
   ipcMain.handle(DESKTOP_IPC.configurationReset, async (event) => {

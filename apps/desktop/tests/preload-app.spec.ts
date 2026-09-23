@@ -102,11 +102,13 @@ it('provides startup controls and a removable state subscription to shell docume
   await api.locale()
   await api.backend.status()
   await api.disablePlugins()
+  await api.restorePlannedSource()
   await api.resetConfiguration()
   await api.restart()
   expect(electron.ipcRenderer.invoke.mock.calls).toEqual([
     [DESKTOP_IPC.localeGet], [DESKTOP_IPC.backendStatus],
-    [DESKTOP_IPC.pluginsDisableAll], [DESKTOP_IPC.configurationReset], [DESKTOP_IPC.applicationRestart],
+    [DESKTOP_IPC.pluginsDisableAll], [DESKTOP_IPC.provisioningRestore],
+    [DESKTOP_IPC.configurationReset], [DESKTOP_IPC.applicationRestart],
   ])
   const listener = vi.fn()
   const dispose = api.backend.subscribe(listener)

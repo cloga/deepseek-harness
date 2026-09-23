@@ -20,6 +20,104 @@ concurrency:
 
 jobs:
 
+  desktop-rehearsal-plan:
+    name: desktop rehearsal / plan
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      required: ${{ steps.changes.outputs.required }}
+      version: ${{ steps.changes.outputs.version }}
+      source_sha: ${{ steps.changes.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+
+      - name: Select exact Desktop rehearsal source
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$BASE_SHA" =~ ^[a-f0-9]{40}$ || ! "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo '::error::Pull-request base and head SHAs must be exact lowercase SHA-1 values'
+            exit 1
+          fi
+          git cat-file -e "$BASE_SHA^{commit}"
+          git cat-file -e "$HEAD_SHA^{commit}"
+          is_desktop_path() {
+            case "$1" in
+              .github/workflows/ci.yml|.github/workflows/desktop-fork-build.yml|.github/workflows/desktop-fork-release.yml) return 0 ;;
+              apps/desktop/*|apps/desktop-host/*|native/system/*|packages/*|vendor/*) return 0 ;;
+              scripts/*|.github/actions/*) return 0 ;;
+              package.json|pnpm-lock.yaml|pnpm-workspace.yaml|.npmrc) return 0 ;;
+              vitest*.config.*|tsconfig*.json|tsdown.config.ts) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          required=false
+          version=not-applicable
+          if [[ "$GITHUB_REPOSITORY" == cloga/deepseek-harness ]]; then
+            changed_paths="$RUNNER_TEMP/desktop-rehearsal-paths-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            git diff --name-only -z "$BASE_SHA" "$HEAD_SHA" -- > "$changed_paths"
+            while IFS= read -r -d '' path; do
+              if is_desktop_path "$path"; then
+                required=true
+                break
+              fi
+            done < "$changed_paths"
+            version=$(git show "$HEAD_SHA:apps/desktop/release/cloga-windows-x64.json" |
+              node -e "let s=''; process.stdin.on('data', c => s += c).on('end', () => process.stdout.write(JSON.parse(s).version))")
+            if [[ ! "$version" =~ ^[0-9A-Za-z][0-9A-Za-z.-]{0,79}$ ]]; then
+              echo '::error::Desktop release plan version must be one bounded output-safe value'
+              exit 1
+            fi
+          fi
+          echo "required=$required" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+  desktop-rehearsal:
+    name: desktop rehearsal / packaged acceptance
+    needs: desktop-rehearsal-plan
+    if: needs.desktop-rehearsal-plan.outputs.required == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/desktop-fork-build.yml
+    with:
+      confirm_version: ${{ needs.desktop-rehearsal-plan.outputs.version }}
+      expected_source_sha: ${{ needs.desktop-rehearsal-plan.outputs.source_sha }}
+      rehearsal: true
+
+  desktop-rehearsal-verdict:
+    name: desktop rehearsal / required verdict
+    needs: [desktop-rehearsal-plan, desktop-rehearsal]
+    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require rehearsal exactly when selected
+        env:
+          PLAN_RESULT: ${{ needs.desktop-rehearsal-plan.result }}
+          REQUIRED: ${{ needs.desktop-rehearsal-plan.outputs.required }}
+          REHEARSAL_RESULT: ${{ needs.desktop-rehearsal.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$PLAN_RESULT" != success ]]; then
+            echo "::error::Desktop rehearsal plan failed: $PLAN_RESULT"
+            exit 1
+          fi
+          if [[ "$REQUIRED" == true && "$REHEARSAL_RESULT" != success ]]; then
+            echo "::error::Required Desktop rehearsal did not succeed: $REHEARSAL_RESULT"
+            exit 1
+          fi
+          if [[ "$REQUIRED" != true && "$REHEARSAL_RESULT" != skipped ]]; then
+            echo "::error::Unexpected Desktop rehearsal result for unchanged PR: $REHEARSAL_RESULT"
+            exit 1
+          fi
+
   # Three enterprise jobs isolate coverage, static analysis, and the
   # build-backed consumer tail. The consumer job owns the only Linux build so
   # all three jobs enter runner allocation independently.
@@ -739,7 +837,17 @@ jobs:
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
           || 'ubuntu-latest' }}
-    needs: [node-24, node-24-coverage, node-24-bench, node-24-consumers, node-compat, python-sdk, python-runtime, windows-build, windows-native-tests]
+    needs:
+      - desktop-rehearsal-verdict
+      - node-24
+      - node-24-coverage
+      - node-24-bench
+      - node-24-consumers
+      - node-compat
+      - python-sdk
+      - python-runtime
+      - windows-build
+      - windows-native-tests
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     steps:
       - name: Fail if any needed job did not succeed

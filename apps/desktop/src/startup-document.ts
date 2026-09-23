@@ -1,15 +1,22 @@
 /** Self-contained recovery document for an unavailable shell renderer or preload. */
 
-import type { DesktopLocale } from './locale.ts'
+import type { DesktopBackendRecovery } from './backend-controller.ts'
+import { formatDesktopMessage, type DesktopLocale } from './locale.ts'
 
 /**
  * Render escaped diagnostics without depending on application resource files.
  * @param locale - Shell-owned translations.
  * @param message - Failure details displayed as plain text.
  * @param profileRecovery - Whether the initialized application can repair its profile.
+ * @param recovery - Trusted package-specific recovery retained by main.
  * @returns An HTML document suitable for an isolated emergency window.
  */
-export function startupFailureDocument(locale: DesktopLocale, message: string, profileRecovery = false): string {
+export function startupFailureDocument(
+  locale: DesktopLocale,
+  message: string,
+  profileRecovery = false,
+  recovery?: DesktopBackendRecovery,
+): string {
   const escape = (value: string): string => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;')
   return `<!doctype html><html lang="${locale.id}"><meta charset="utf-8">
@@ -20,6 +27,7 @@ export function startupFailureDocument(locale: DesktopLocale, message: string, p
 ${profileRecovery ? `<p>${escape(locale.messages.startupConfigurationAdvice)}</p>` : ''}
 <pre role="alert">${escape(message)}</pre>
 <form action="dsh-recovery://restart"><button>${escape(locale.messages.restartApplication)}</button></form>
+${profileRecovery && recovery?.type === 'restore-planned-source' ? `<form action="dsh-recovery://restore"><button>${escape(formatDesktopMessage(locale.messages.restorePlannedPlugin, { name: recovery.packageName, version: recovery.requestedVersion }))}</button></form>` : ''}
 ${profileRecovery ? `<form action="dsh-recovery://plugins"><button>${escape(locale.messages.disableThirdPartyPlugins)}</button></form>
 <form action="dsh-recovery://reset"><button>${escape(locale.messages.resetConfiguration)}</button></form>` : ''}
 </main></html>`

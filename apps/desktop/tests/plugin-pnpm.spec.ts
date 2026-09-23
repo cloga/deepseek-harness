@@ -113,7 +113,9 @@ it.each(['activate', 'health-failure', 'activation-failure'] as const)(
       })
       if (outcome === 'activate') {
         const state = await pending
-        expect(state.plugins[0]?.receipt?.source).toEqual(source)
+        const active = state.plugins[0]
+        if (active?.status !== 'active') throw new Error('expected active provisioning result')
+        expect(active.receipt.source).toEqual(source)
         expect(manager.listPlugins()).toMatchObject([{ name, version: '1.0.0', enabled: true, source }])
         const manifest = JSON.parse(readFileSync(join(manager.paths.profile, 'package.json'), 'utf8')) as {
           dependencies: Record<string, string>
@@ -138,7 +140,9 @@ it.each(['activate', 'health-failure', 'activation-failure'] as const)(
           schemaVersion: 1, mode: 'exact', plugins: [{ required: true, source }],
         }, { beforeChange: async () => {}, healthCheck: async () => {}, afterChange: async () => {} })
         expect(sha256).not.toBe(previousSha256)
-        expect(replacement.plugins[0]?.receipt?.source).toEqual(source)
+        const replacementActive = replacement.plugins[0]
+        if (replacementActive?.status !== 'active') throw new Error('expected active replacement result')
+        expect(replacementActive.receipt.source).toEqual(source)
         expect(manager.listPlugins()).toMatchObject([{ name, version: '1.0.0', enabled: true, source }])
         verifyPrivateArtifact()
       } else {

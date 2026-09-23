@@ -17,11 +17,20 @@ function planValue(): unknown {
   return JSON.parse(readFileSync(planPath, 'utf8'))
 }
 
+type WorkflowInput = { required: boolean; type: string; default?: unknown }
 type ReleaseWorkflow = {
-  on: { workflow_dispatch: { inputs: Record<string, { required: boolean; type: string; default?: unknown }> } }
+  on: {
+    workflow_call: { inputs: Record<string, WorkflowInput>; outputs: Record<string, { value: string }> }
+    workflow_dispatch: { inputs: Record<string, WorkflowInput> }
+  }
   permissions: Record<string, string>
+  concurrency: { group: string; 'cancel-in-progress': boolean }
   env?: Record<string, string>
   jobs: Record<string, {
+    if?: string
+    uses?: string
+    with?: Record<string, unknown>
+    needs?: string | string[]
     permissions?: Record<string, string>
     env?: Record<string, string>
     steps: Array<{
@@ -37,21 +46,27 @@ type ReleaseWorkflow = {
 
 const metadataTokenEnv = 'DSH_DESKTOP_RELEASE_GITHUB_TOKEN'
 
-function readReleaseWorkflow(): ReleaseWorkflow {
-  return load(readFileSync(resolve(repositoryRoot, '.github', 'workflows', 'desktop-fork-release.yml'), 'utf8')) as ReleaseWorkflow
+function readWorkflow(name: 'desktop-fork-build.yml' | 'desktop-fork-release.yml'): ReleaseWorkflow {
+  return load(readFileSync(resolve(repositoryRoot, '.github', 'workflows', name), 'utf8')) as ReleaseWorkflow
 }
+function readBuildWorkflow(): ReleaseWorkflow { return readWorkflow('desktop-fork-build.yml') }
+function readReleaseWorkflow(): ReleaseWorkflow { return readWorkflow('desktop-fork-release.yml') }
 
 function assertPackagedPluginCommandAcceptance(workflow: ReleaseWorkflow): void {
   const steps = workflow.jobs.build!.steps
   const packaging = steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')
-  const command = steps.findIndex(step => step.name === 'Verify packaged plugin command and native cancellation')
+  const command = steps.findIndex(step => step.name === 'Verify packaged plugin override cold start and native cancellation')
   const finalize = steps.findIndex(step => step.name === 'Finalize release manifest and receipts')
   expect(command).toBeGreaterThan(packaging)
   expect(finalize).toBeGreaterThan(command)
   const step = steps[command]!
   expect(step).not.toHaveProperty('if')
   expect(step).not.toHaveProperty('continue-on-error')
-  expect(step).toMatchObject({ id: 'plugin_command_acceptance', 'timeout-minutes': 12 })
+  expect(step).toMatchObject({
+    id: 'plugin_command_acceptance',
+    'timeout-minutes': 20,
+    env: { DSH_DESKTOP_REVIEWED_SOURCE_SHA: '${{ steps.plan.outputs.source_sha }}' },
+  })
   expect(step.run).toContain('apps/desktop/tests/fixtures/desktop-plugin-command-smoke.ts')
   expect(step.run).toContain('--application apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/cloga-deepseek-harness.exe')
   expect(step.run).toContain('--output dist/desktop-plugin-command-acceptance')
@@ -63,12 +78,12 @@ function assertPackagedPluginCommandAcceptance(workflow: ReleaseWorkflow): void 
   })
 }
 
-function assertMetadataAuthScope(workflow: ReleaseWorkflow): void {
+function assertMetadataAuthScope(workflow: ReleaseWorkflow, expectedAuthenticatedSteps: readonly string[]): void {
   expect(workflow.env ?? {}).not.toHaveProperty(metadataTokenEnv)
   const authenticatedSteps: string[] = []
   for (const [jobName, job] of Object.entries(workflow.jobs)) {
     expect(job.env ?? {}).not.toHaveProperty(metadataTokenEnv)
-    for (const step of job.steps) {
+    for (const step of job.steps ?? []) {
       const metadataStep = (jobName === 'build' && step.name === 'Prepare reviewed managed capability')
         || (jobName === 'remote-check' && step.name === 'Run the shipped source discovery against GitHub')
       if (metadataStep) {
@@ -85,13 +100,21 @@ function assertMetadataAuthScope(workflow: ReleaseWorkflow): void {
       expect(step.run ?? '').not.toMatch(/DSH_DESKTOP_RELEASE_GITHUB_TOKEN|github\.token|GITHUB_ENV/u)
     }
   }
-  expect(authenticatedSteps).toEqual(['build', 'remote-check'])
+  expect(authenticatedSteps).toEqual(expectedAuthenticatedSteps)
 }
 
 function assertReviewedSourcePin(workflow: ReleaseWorkflow): string {
-  expect(workflow.on.workflow_dispatch.inputs.expected_source_sha).toMatchObject({ required: true, type: 'string' })
-  expect(workflow.on.workflow_dispatch.inputs.expected_source_sha).not.toHaveProperty('default')
+  const trigger = workflow.on.workflow_call
+  expect(trigger.inputs.expected_source_sha).toMatchObject({ required: true, type: 'string' })
+  expect(trigger.inputs.expected_source_sha).not.toHaveProperty('default')
+  expect(trigger.inputs.confirm_version).toMatchObject({ required: true, type: 'string' })
+  expect(trigger.inputs.rehearsal).toMatchObject({ required: true, type: 'boolean' })
   const steps = workflow.jobs.build!.steps
+  const checkout = steps.find(step => step.uses === 'actions/checkout@v6')
+  expect(checkout?.with).toMatchObject({
+    repository: '${{ github.event_name == \'pull_request\' && github.event.pull_request.head.repo.full_name || github.repository }}',
+    ref: '${{ inputs.expected_source_sha }}', 'fetch-depth': 0, 'persist-credentials': false, clean: true,
+  })
   const guardIndex = steps.findIndex(step => step.name === 'Require current reviewed ref and version')
   expect(guardIndex).toBeGreaterThanOrEqual(0)
   expect(steps.findIndex(step => step.name === 'Install from frozen lockfile')).toBeGreaterThan(guardIndex)
@@ -108,12 +131,20 @@ function assertReviewedSourcePin(workflow: ReleaseWorkflow): string {
   const formatCheck = "if ($env:EXPECTED_SOURCE_SHA -cnotmatch '\\A[0-9a-f]{40}\\z')"
   const exactCheck = 'if ($head -cne $env:EXPECTED_SOURCE_SHA)'
   const headRead = script.indexOf('$head = git rev-parse HEAD')
-  const branchCheck = script.indexOf("if ($env:REHEARSAL -eq 'true')")
+  const branchCheck = script.indexOf("if ($env:EVENT_NAME -eq 'pull_request')")
   expect(script).toContain(`${formatCheck} {\n  throw 'Expected source SHA must be exactly 40 lowercase hexadecimal characters'\n}`)
   expect(script).toContain(`${exactCheck} {\n  throw "Checkout does not match reviewed source: HEAD=$head expected=$($env:EXPECTED_SOURCE_SHA)"\n}`)
   expect(headRead).toBeGreaterThan(script.indexOf(formatCheck))
   expect(script.indexOf(exactCheck)).toBeGreaterThan(headRead)
   expect(branchCheck).toBeGreaterThan(script.indexOf(exactCheck))
+  expect(guard.env).toMatchObject({
+    EVENT_NAME: '${{ github.event_name }}',
+    PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+    PR_HEAD_REF: '${{ github.event.pull_request.head.ref }}',
+    PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
+  })
+  expect(script).toContain("if ($env:REHEARSAL -ne 'true') { throw 'Pull-request Desktop qualification must be a rehearsal' }")
+  expect(script).toContain('refs/heads/$($env:PR_HEAD_REF):$selectedRef')
   expect(script).toContain('if ($head -ne $selected)')
   expect(script).toContain('if ($head -ne $master)')
   expect(script).toContain('if ($env:CONFIRM_VERSION -ne $plan.version)')
@@ -186,17 +217,59 @@ function assertPublisherSelection(workflow: ReleaseWorkflow): void {
 
 describe('Desktop fork release plan', () => {
   it('requires independent packaged plugin command acceptance before release finalization', () => {
-    assertPackagedPluginCommandAcceptance(readReleaseWorkflow())
+    assertPackagedPluginCommandAcceptance(readBuildWorkflow())
   })
 
   it.each(['missing', 'optional', 'skipped'] as const)('rejects %s packaged command acceptance', (mode) => {
-    const workflow = readReleaseWorkflow()
+    const workflow = readBuildWorkflow()
     const steps = workflow.jobs.build!.steps
-    const index = steps.findIndex(step => step.name === 'Verify packaged plugin command and native cancellation')
+    const index = steps.findIndex(step => step.name === 'Verify packaged plugin override cold start and native cancellation')
     if (mode === 'missing') steps.splice(index, 1)
     else Object.assign(steps[index]!, mode === 'optional' ? { 'continue-on-error': true } : { if: 'false' })
     expect(() => { assertPackagedPluginCommandAcceptance(workflow) }).toThrow()
   })
+  it('keeps the shared build read-only while preserving the manual release wrapper', () => {
+    const build = readBuildWorkflow()
+    const release = readReleaseWorkflow()
+    expect(build.permissions).toEqual({ contents: 'read' })
+    expect(build.on.workflow_call.inputs.rehearsal).toEqual({
+      description: 'Build and retain reviewed artifacts without publishing a release',
+      required: true,
+      type: 'boolean',
+    })
+    expect(build.jobs).not.toHaveProperty('release')
+    expect(build.jobs).not.toHaveProperty('remote-check')
+    expect(build.on.workflow_call.outputs).toMatchObject({
+      version: { value: '${{ jobs.build.outputs.version }}' },
+      source_sha: { value: '${{ jobs.build.outputs.source_sha }}' },
+      asset_set_sha256: { value: '${{ jobs.build.outputs.asset_set_sha256 }}' },
+    })
+    expect(release.permissions).toEqual({ contents: 'read' })
+    expect(release.concurrency).toEqual({ group: 'desktop-fork-release', 'cancel-in-progress': false })
+    expect(release.on.workflow_dispatch.inputs.rehearsal).toMatchObject({
+      required: false, default: false, type: 'boolean',
+    })
+    expect(release.jobs.build).toMatchObject({
+      permissions: { contents: 'read' },
+      uses: './.github/workflows/desktop-fork-build.yml',
+      with: {
+        confirm_version: '${{ inputs.confirm_version }}',
+        expected_source_sha: '${{ inputs.expected_source_sha }}',
+        rehearsal: '${{ inputs.rehearsal }}',
+      },
+    })
+    expect(release.jobs.build).not.toHaveProperty('secrets')
+    const buildUpload = build.jobs.build!.steps.find(step => step.uses === 'actions/upload-artifact@v4'
+      && step.with?.path === '${{ env.RELEASE_ASSETS }}/*')
+    const releaseDownload = release.jobs.release!.steps.find(step => step.uses === 'actions/download-artifact@v4')
+    expect(buildUpload?.with?.name).toBe('desktop-fork-release-${{ steps.plan.outputs.version }}')
+    expect(releaseDownload?.with?.name).toBe('desktop-fork-release-${{ needs.build.outputs.version }}')
+    expect(release.jobs.release?.permissions).toEqual({ actions: 'read', contents: 'write' })
+    const publishCondition = "${{ github.event_name == 'workflow_dispatch' && !inputs.rehearsal && github.ref == 'refs/heads/master' }}"
+    expect(release.jobs.release?.if).toBe(publishCondition)
+    expect(release.jobs['remote-check']?.if).toBe(publishCondition)
+  })
+
   it('publishes through the exact-source checked publisher after asset-set verification', () => {
     assertPublisherSelection(readReleaseWorkflow())
   })
@@ -218,11 +291,11 @@ describe('Desktop fork release plan', () => {
   )
 
   it('requires native and restricted hidden-window checks before packaging', () => {
-    assertHiddenWindowSelection(readReleaseWorkflow())
+    assertHiddenWindowSelection(readBuildWorkflow())
   })
 
   it.each(['omitted', 'control', 'native', 'sandbox', 'budget', 'late'] as const)('rejects a %s hidden-window validation selection', (damage) => {
-    const workflow = readReleaseWorkflow()
+    const workflow = readBuildWorkflow()
     const steps = workflow.jobs.build!.steps
     const index = steps.findIndex(step => step.name === 'Verify hidden Windows command paths')
     const step = steps[index]!
@@ -241,20 +314,20 @@ describe('Desktop fork release plan', () => {
   })
 
   it('requires a step-local exact reviewed source pin before dependencies and packaging in both modes', () => {
-    assertReviewedSourcePin(readReleaseWorkflow())
+    assertReviewedSourcePin(readBuildWorkflow())
   })
 
   it.each([
     'missing-input', 'optional-input', 'default-source', 'wrong-env', 'insensitive-format', 'insensitive-head',
     'loose-length', 'late-guard', 'missing-rejection', 'workflow-env', 'job-env',
   ])('rejects a %s source pin guard', (damage) => {
-    const workflow = readReleaseWorkflow()
+    const workflow = readBuildWorkflow()
     const build = workflow.jobs.build!
     const index = build.steps.findIndex(step => step.name === 'Require current reviewed ref and version')
     const guard = build.steps[index]!
-    if (damage === 'missing-input') delete workflow.on.workflow_dispatch.inputs.expected_source_sha
-    else if (damage === 'optional-input') workflow.on.workflow_dispatch.inputs.expected_source_sha!.required = false
-    else if (damage === 'default-source') workflow.on.workflow_dispatch.inputs.expected_source_sha!.default = '${{ github.sha }}'
+    if (damage === 'missing-input') delete workflow.on.workflow_call.inputs.expected_source_sha
+    else if (damage === 'optional-input') workflow.on.workflow_call.inputs.expected_source_sha!.required = false
+    else if (damage === 'default-source') workflow.on.workflow_call.inputs.expected_source_sha!.default = '${{ github.sha }}'
     else if (damage === 'wrong-env') guard.env!.EXPECTED_SOURCE_SHA = '${{ inputs.confirm_version }}'
     else if (damage === 'insensitive-format') guard.run = guard.run!.replace('-cnotmatch', '-notmatch')
     else if (damage === 'insensitive-head') guard.run = guard.run!.replace('-cne', '-ne')
@@ -278,7 +351,7 @@ describe('Desktop fork release plan', () => {
     { label: 'non-hex source', expected: 'g'.repeat(40), head: reviewedSha, accepted: false },
     { label: 'trailing newline', expected: `${reviewedSha}\n`, head: reviewedSha, accepted: false },
   ])('executes the Windows source pin guard: $label', { timeout: 15_000 }, ({ expected, head, accepted }) => {
-    const guard = assertReviewedSourcePin(readReleaseWorkflow())
+    const guard = assertReviewedSourcePin(readBuildWorkflow())
     const gitStub = `function git {
   if (($args -join ' ') -cne 'rev-parse HEAD') { throw 'Unexpected Git operation in source-pin fixture' }
   $global:LASTEXITCODE = 0
@@ -311,11 +384,11 @@ describe('Desktop fork release plan', () => {
     expect(() => { assertReleaseTestCollection([ordinary, transaction, 'thread-safe:missing'], [ordinary], [transaction]) }).toThrow()
   })
   it('runs every Desktop suite once while assigning only project transactions the Windows process budget', () => {
-    assertProjectFixtureSelection(readReleaseWorkflow())
+    assertProjectFixtureSelection(readBuildWorkflow())
   })
 
   it.each(['duplicate', 'omitted', 'test-budget', 'hook-budget'])('rejects a %s transaction test selection', (damage) => {
-    const workflow = readReleaseWorkflow()
+    const workflow = readBuildWorkflow()
     const ordinary = workflow.jobs.build!.steps.find(step => step.name === 'Verify Desktop release code')!
     const transactions = workflow.jobs.build!.steps.find(step => step.name === 'Verify Desktop project transactions')!
     if (damage === 'duplicate') ordinary.run = ordinary.run!.replace(' --config=vitest.desktop-release.config.ts', '')
@@ -329,8 +402,8 @@ describe('Desktop fork release plan', () => {
     expect(plan).toMatchObject({
       schemaVersion: 2,
       channel: 'cloga-windows-x64',
-      version: '0.1.6-alpha.1.cloga.20',
-      sequence: 33,
+      version: '0.1.6-alpha.1.cloga.21',
+      sequence: 34,
       upstreamVersion: '0.1.6-alpha.1',
       migration: {
         owner: 'cloga/dsh-windows-ops',
@@ -339,10 +412,11 @@ describe('Desktop fork release plan', () => {
       },
     })
     deepStrictEqual(plan.desktopProvisioning, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       mode: 'exact',
       plugins: [{
         required: true,
+        sourcePolicy: 'compatible-user-override',
         source: {
           schemaVersion: 1,
           type: 'githubRelease',
@@ -375,7 +449,7 @@ describe('Desktop fork release plan', () => {
       mode: 'github-release-managed',
       owner: 'cloga/deepseek-harness',
       tagPrefix: 'dsh-desktop-v',
-      currentSequence: 33,
+      currentSequence: 34,
       minimumSequence: 2,
       provisioning: {
         capability: { id: 'desktopNativePluginProvisioning' },
@@ -410,14 +484,15 @@ describe('Desktop fork release plan', () => {
   })
 
   it('opts into read-only metadata auth only in the two remote release-script steps', () => {
-    assertMetadataAuthScope(readReleaseWorkflow())
+    assertMetadataAuthScope(readBuildWorkflow(), ['build'])
+    assertMetadataAuthScope(readReleaseWorkflow(), ['remote-check'])
     const script = readFileSync(resolve(repositoryRoot, 'apps/desktop/scripts/fork-release.ts'), 'utf8')
     expect(script.match(/discoverDesktopReleaseForBuild\(capability, process\.env\.DSH_DESKTOP_RELEASE_GITHUB_TOKEN\)/gu)).toHaveLength(2)
     expect(script).not.toMatch(/process\.env\.(?:GH_TOKEN|GITHUB_TOKEN)/u)
   })
 
   it.each(['workflow', 'job', 'package', 'account', 'observer', 'helper'])('rejects metadata token propagation to %s scope', (scope) => {
-    const workflow = readReleaseWorkflow()
+    const workflow = readBuildWorkflow()
     const build = workflow.jobs.build!
     const env = { [metadataTokenEnv]: '${{ github.token }}' }
     if (scope === 'workflow') workflow.env = { ...workflow.env, ...env }
@@ -432,7 +507,7 @@ describe('Desktop fork release plan', () => {
       const step = build.steps.find(candidate => candidate.name === names[scope])!
       step.env = { ...step.env, ...env }
     }
-    expect(() => { assertMetadataAuthScope(workflow) }).toThrow()
+    expect(() => { assertMetadataAuthScope(workflow, ['build']) }).toThrow()
   })
 
   it('keeps write permission in the reviewed release job and pins build tools', () => {
@@ -453,7 +528,7 @@ describe('Desktop fork release plan', () => {
       NODE_VERSION: '24.13.0',
       PNPM_VERSION: '11.7.0',
     })
-    expect(workflow.jobs.build?.permissions).toBeUndefined()
+    expect(workflow.jobs.build?.permissions).toEqual({ contents: 'read' })
     expect(workflow.jobs.release).toMatchObject({
       environment: 'desktop-fork-release',
       permissions: {
@@ -462,7 +537,9 @@ describe('Desktop fork release plan', () => {
       },
     })
     expect(workflow.jobs['remote-check']?.permissions).toEqual({ contents: 'read' })
-    const steps = workflow.jobs.build?.steps ?? []
+    const buildWorkflow = readBuildWorkflow()
+    expect(buildWorkflow.permissions).toEqual({ contents: 'read' })
+    const steps = buildWorkflow.jobs.build!.steps
     const install = steps.findIndex(step => step.name === 'Install from frozen lockfile')
     const browser = steps.findIndex(step => step.name === 'Prepare browser for isolated Desktop acceptance')
     const packaging = steps.findIndex(step => step.name === 'Build unsigned interactive NSIS installer')

@@ -24,6 +24,7 @@ export const DESKTOP_IPC = {
   backendRetry: 'dsh-desktop:backend-retry',
   applicationRestart: 'dsh-desktop:application-restart',
   configurationReset: 'dsh-desktop:configuration-reset',
+  provisioningRestore: 'dsh-desktop:provisioning-restore',
   backendState: 'dsh-desktop:backend-state',
   updatesStatus: 'dsh-desktop:updates-status',
   updatesCheck: 'dsh-desktop:updates-check',
@@ -103,6 +104,7 @@ export interface DshDesktopApi {
 export interface DshDesktopStartupApi extends Pick<DshDesktopApi, 'protocolVersion' | 'locale'> {
   readonly backend: Omit<DshDesktopApi['backend'], 'retry'>
   disablePlugins(): Promise<void>
+  restorePlannedSource(): Promise<void>
   restart(): Promise<void>
   resetConfiguration(): Promise<void>
 }
