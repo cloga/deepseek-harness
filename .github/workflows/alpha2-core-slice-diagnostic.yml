@@ -70,6 +70,8 @@ jobs:
             packages/boot/app-boot/tests/profile.spec.ts `
             apps/desktop-host/tests/package-transactions.spec.ts `
             apps/desktop-host/tests/desktop-plugin-command-ipc.spec.ts `
+            apps/cli/tests/resolved-profile-boot.spec.ts `
+            apps/cli/tests/resolved-profile-disposal.spec.ts `
             apps/desktop/tests/project-manager.spec.ts `
             apps/desktop/tests/fork-release.spec.ts `
             apps/desktop/tests/web-document.spec.ts `
