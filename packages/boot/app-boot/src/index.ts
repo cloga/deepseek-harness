@@ -21,6 +21,7 @@ import type {} from '@deepseek-ai/cordis-plugin-hmr'
 import { watchConfig } from './watch-config.ts'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 
+export { sanitizeProfile } from './profile-sanitize.ts'
 export { ProfilePackageCancelledError } from './profile-package-cancellation.ts'
 export {
   profilePackageLeaseTarget, withProfilePackageLease, parseProfileTransactionId, parseProfilePreparedChange, parseProfilePendingChange,
