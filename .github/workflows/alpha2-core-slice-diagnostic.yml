@@ -203,6 +203,7 @@ jobs:
             packages/api/gateway/tests/gateway.client.spec.ts `
             packages/api/remotes/tests/remote-events.host.spec.ts `
             packages/client/connection/tests/node-half.host.spec.ts `
+            packages/client/modules/tests/node-half.client.spec.ts `
             --maxWorkers=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -217,14 +218,18 @@ jobs:
             throw 'Official Manager UI client export missing from source build'
           }
           $preview = 'packages/client/ui-sidebar-documentpreview/lib'
-          if (!(Test-Path (Join-Path $preview 'client.js')) -or
-            @(Get-ChildItem -LiteralPath $preview -Filter 'client.*.js').Count -eq 0) {
-            throw 'Official Office Preview client entry or lazy PDF/Office chunk is missing'
+          if (!(Test-Path (Join-Path $preview 'client.js')) -or !(Test-Path (Join-Path $preview 'client.pdf.js'))) {
+            throw 'Official Office Preview client entry or licensed PDF.js chunk is missing'
           }
 
       - name: Test official Browser, Manager UI, Office Preview and terminal components without Desktop startup
         run: |
           pnpm exec vitest run `
+            packages/client/modules/tests/entries.client.spec.ts `
+            packages/client/modules/tests/loader.client.spec.ts `
+            packages/client/web/tests/boot-client.client.spec.ts `
+            packages/client/hmr/tests/events.client.spec.ts `
+            packages/client/hmr/tests/node-half.client.spec.ts `
             packages/client/ui-sidebar-browser/tests/apply.client.spec.ts `
             packages/client/ui-sidebar-browser/tests/browser-body.client.spec.tsx `
             packages/client/ui-sidebar-browser/tests/browser-controller.client.spec.ts `

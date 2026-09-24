@@ -66,6 +66,20 @@ describe('bootClient', () => {
     await ctx.fiber.dispose()
   })
 
+  it('owns initial entries so a later unchanged Host graph sync retains their active Loader identity', async () => {
+    const graph = graphOf(['provider'])
+    const { modules, loaded } = modulesOf(graph, {
+      provider: { apply: (ctx: Context) => { ctx.reflect.provide('x', { marker: 'x' }) } },
+    })
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    await bootClient({ ctx, modules, manifest: modules.manifest })
+    await modules.entries.sync(graph)
+    expect([...ctx.loader.entries()].map(entry => entry.options.name)).toEqual(['provider'])
+    expect(modules.entries.state.getSnapshot().failures).toEqual([])
+    expect(loaded).toEqual([])
+  })
+
   it('reports a row waiting on a service the roster never provides', async () => {
     const graph = graphOf(['orphan'])
     const { modules } = modulesOf(graph, { orphan: { inject: ['nothing'], apply: () => {} } })
