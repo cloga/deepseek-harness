@@ -56,6 +56,19 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The PDF.js license test packs the built package with the pinned pnpm
+          # Node entry, not a shell-launched .cmd or an ambient PATH executable.
+          if ([string]::IsNullOrWhiteSpace($env:PNPM_HOME)) { throw 'Pinned pnpm action did not set PNPM_HOME' }
+          $packagePath = Join-Path (Split-Path -Parent $env:PNPM_HOME) 'pnpm/package.json'
+          if (!(Test-Path -LiteralPath $packagePath)) { throw 'Pinned pnpm package manifest is unavailable' }
+          $pnpmManifest = Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json
+          $bin = $pnpmManifest.bin.pnpm
+          if ($pnpmManifest.name -cne 'pnpm' -or $pnpmManifest.version -cne '11.7.0' -or $bin -cnotmatch '^bin/pnpm\.[cm]?js$') { throw 'Pinned pnpm Node entry metadata differs from this workflow' }
+          $nodeEntry = Join-Path (Split-Path -Parent $packagePath) $bin
+          if (!(Test-Path -LiteralPath $nodeEntry)) { throw 'Pinned pnpm Node entry is missing' }
+          $actual = & node $nodeEntry --version
+          if ($LASTEXITCODE -ne 0 -or ($actual -join '').Trim() -cne '11.7.0') { throw 'Pinned pnpm Node entry version differs' }
+          "DSH_PINNED_PNPM_ENTRY=$nodeEntry" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Generate Office license notices from the exact frozen Kit for source review
         env:
@@ -224,6 +237,10 @@ jobs:
 
       - name: Test official Browser, Manager UI, Office Preview and terminal components without Desktop startup
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:DSH_PINNED_PNPM_ENTRY) -or !(Test-Path -LiteralPath $env:DSH_PINNED_PNPM_ENTRY)) {
+            throw 'Approved pinned pnpm entry is unavailable to package-license tests'
+          }
+          $env:npm_execpath = $env:DSH_PINNED_PNPM_ENTRY
           pnpm exec vitest run `
             packages/client/modules/tests/entries.client.spec.ts `
             packages/client/modules/tests/loader.client.spec.ts `
