@@ -131,8 +131,7 @@ jobs:
           }
           $changed = @(git diff --name-only)
           $untracked = @(git ls-files --others --exclude-standard)
-          if ($untracked.Count -ne 0 -or $changed.Count -gt 1
-            -or ($changed.Count -eq 1 -and $changed[0] -cne 'THIRD_PARTY_NOTICES.md')) {
+          if ($untracked.Count -ne 0 -or $changed.Count -gt 1 -or ($changed.Count -eq 1 -and $changed[0] -cne 'THIRD_PARTY_NOTICES.md')) {
             throw 'Source packs modified the checkout outside the owned notices artifact'
           }
           $expectedHash = (Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'alpha2-office-notices.sha256') -Raw).Trim()
