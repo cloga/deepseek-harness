@@ -36,6 +36,7 @@ External packages installed for runtime use or distributed inside the prebuilt b
 | [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript) | MIT |
 | [`@babel/code-frame`](https://github.com/babel/babel) | MIT |
 | [`@browserbasehq/stagehand`](https://github.com/browserbase/stagehand) | MIT |
+| [`@deepseek-ai/libreoffice-kit`](https://www.npmjs.com/package/@deepseek-ai/libreoffice-kit/v/0.0.1) | MPL-2.0 |
 | [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi) | MIT |
 | [`@joplin/turndown-plugin-gfm`](https://github.com/laurent22/joplin-turndown-plugin-gfm) | MIT |
 | [`@jridgewell/gen-mapping`](https://github.com/jridgewell/sourcemaps) | MIT |
@@ -77,6 +78,7 @@ External packages installed for runtime use or distributed inside the prebuilt b
 | [`diff`](https://github.com/kpdecker/jsdiff) | BSD-3-Clause |
 | [`electron-updater`](https://github.com/electron-userland/electron-builder) | MIT |
 | [`eventsource-parser`](https://github.com/rexxars/eventsource-parser) | MIT |
+| [`execa`](https://github.com/sindresorhus/execa) | MIT |
 | [`fflate`](https://github.com/101arrowz/fflate) | MIT |
 | [`immer`](https://github.com/immerjs/immer) | MIT |
 | [`ipaddr.js`](https://github.com/whitequark/ipaddr.js) | MIT |
@@ -144,6 +146,13 @@ The installed SDK 0.3.263 declares the following optional platform packages. Eac
 | [`@anthropic-ai/claude-agent-sdk-win32-x64`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-win32-x64) | 0.3.263 | SEE LICENSE IN LICENSE.md |
 
 
+## Independently published LibreOffice kit
+
+`@deepseek-ai/libreoffice-kit`, `@deepseek-ai/libreoffice-kit-wasm`, `@deepseek-ai/libreoffice-kit-darwin-arm64`, `@deepseek-ai/libreoffice-kit-darwin-x64`, `@deepseek-ai/libreoffice-kit-win32-arm64`, `@deepseek-ai/libreoffice-kit-win32-x64` declare MPL-2.0, which remains outside the permissive-license allowlist. This exception permits only these exact identities at exactly those terms; it does not reclassify MPL-2.0. Retain the target engine's license and third-party notices in the installer, along with the Node API NOTICE.
+
+The [versioned 0.0.1 kit package](https://www.npmjs.com/package/@deepseek-ai/libreoffice-kit/v/0.0.1) identifies its publisher and corresponding source repository. Before Desktop publication, verify recipients can obtain the matching LibreOffice source pin, modifications, build instructions, and notices. A missing declared native engine must fail packaging; do not substitute system LibreOffice or fetch an engine at runtime.
+
+
 ## Development-only npm dependencies
 
 External packages **directly declared** for development, tests, types, or tooling, without a runtime installation or browser-build relationship. A package here may still be pulled in transitively by a runtime dependency — `pnpm-lock.yaml` is the authority on that full closure.
@@ -193,7 +202,6 @@ External packages **directly declared** for development, tests, types, or toolin
 | [`electron-builder`](https://github.com/electron-userland/electron-builder) | MIT |
 | [`esbuild`](https://github.com/evanw/esbuild) | MIT |
 | [`eslint-plugin-sonarjs`](https://github.com/SonarSource/SonarJS) | LGPL-3.0-only |
-| [`execa`](https://github.com/sindresorhus/execa) | MIT |
 | [`extract-zip`](https://github.com/maxogden/extract-zip) | BSD-2-Clause |
 | [`fast-check`](https://github.com/dubzzz/fast-check) | MIT |
 | [`http-server`](https://github.com/http-party/http-server) | MIT |

@@ -66,10 +66,15 @@ jobs:
           pnpm exec tsx scripts/gen-third-party-notices.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $changed = @(git diff --name-only)
-          if ($changed.Count -ne 1 -or $changed[0] -cne 'THIRD_PARTY_NOTICES.md') {
+          if ($changed.Count -gt 1 -or ($changed.Count -eq 1 -and $changed[0] -cne 'THIRD_PARTY_NOTICES.md')) {
             throw 'Notice generation changed files outside its owned artifact'
           }
+          $notices = Get-Content -LiteralPath THIRD_PARTY_NOTICES.md -Raw
+          if (!$notices.Contains('## Independently published LibreOffice kit')) {
+            throw 'Declared Office Kit MPL source obligations missing from generated notices'
+          }
           $hash = (Get-FileHash THIRD_PARTY_NOTICES.md -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'alpha2-office-notices.sha256') -Value $hash -NoNewline
           Write-Output "source=$env:EXPECTED_SOURCE officeNoticesSha256=$hash"
 
       - uses: actions/upload-artifact@v4
@@ -124,7 +129,16 @@ jobs:
             'package/register-module-resolution-policy.mjs', 'package/package.json')) {
             if ($hostMembers -notcontains $member) { throw "Host source package lacks $member" }
           }
-          if (@(git status --porcelain).Count -ne 0) { throw 'Source packs modified the checkout' }
+          $changed = @(git diff --name-only)
+          $untracked = @(git ls-files --others --exclude-standard)
+          if ($untracked.Count -ne 0 -or $changed.Count -gt 1
+            -or ($changed.Count -eq 1 -and $changed[0] -cne 'THIRD_PARTY_NOTICES.md')) {
+            throw 'Source packs modified the checkout outside the owned notices artifact'
+          }
+          $expectedHash = (Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'alpha2-office-notices.sha256') -Raw).Trim()
+          if ((Get-FileHash THIRD_PARTY_NOTICES.md -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedHash) {
+            throw 'Source packs modified the frozen Office notices artifact'
+          }
 
       - name: Test only the reviewed source contracts, never package or publish
         run: |
