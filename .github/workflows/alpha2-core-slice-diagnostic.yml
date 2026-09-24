@@ -223,6 +223,13 @@ jobs:
             --maxWorkers=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # Run the protected native owner before the separate Recorder integration worker:
+      # both remain required, but unrelated Windows Git fixture timing cannot mask this suite.
+      - name: Test the same maintained Desktop project-manager suite in its own bounded worker
+        run: |
+          pnpm exec vitest run apps/desktop/tests/project-manager.spec.ts --maxWorkers=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build Client face with official Browser, Manager and lazy Office Preview exports
         run: |
           pnpm run build:lib:client
@@ -304,9 +311,4 @@ jobs:
       - name: Test all official workspace recorder integration cases in one fresh worker
         run: |
           pnpm exec vitest run packages/deliverables/workspace-changes/tests/plugin.spec.ts --maxWorkers=1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Test the same maintained Desktop project-manager suite in its own bounded worker
-        run: |
-          pnpm exec vitest run apps/desktop/tests/project-manager.spec.ts --maxWorkers=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

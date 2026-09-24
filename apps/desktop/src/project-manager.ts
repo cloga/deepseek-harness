@@ -2050,8 +2050,13 @@ export class DesktopProjectManager {
     fsyncSync(descriptor)
   }
 
-  private async withLock<T>(operation: () => T | Promise<T>): Promise<T> {
-    mkdirSync(this.paths.profile, { recursive: true, mode: 0o700 })
+  private async withLock<T>(operation: () => T | Promise<T>, stageOnly = false): Promise<T> {
+    if (stageOnly) {
+      const active = lstatSync(this.paths.profile, { throwIfNoEntry: false })
+      if (active === undefined || !active.isDirectory() || active.isSymbolicLink()) {
+        throw new Error('desktop project: private stage requires an existing real active profile')
+      }
+    } else mkdirSync(this.paths.profile, { recursive: true, mode: 0o700 })
     mkdirSync(dirname(this.paths.lock), { recursive: true, mode: 0o700 })
     if (lstatSync(this.paths.profile).isSymbolicLink()) throw new Error('desktop project: profile directory must not be a link')
     let descriptor: number
@@ -2083,7 +2088,9 @@ export class DesktopProjectManager {
     try {
       this.lockDescriptor = descriptor
       this.writeLockOwner(process.pid)
-      this.recoverActivation()
+      // Stage preparers cannot silently repair/replace the active tree before
+      // native consent. Retained direct mutations keep their recovery contract.
+      if (!stageOnly) this.recoverActivation()
       return await operation()
     } finally {
       this.lockDescriptor = undefined

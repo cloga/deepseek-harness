@@ -1648,6 +1648,26 @@ describe('desktop external plugin profile', () => {
     await expect(manager.applyRelease()).resolves.toBe(false)
   })
 
+  it('takes the same native package lock for preparation without creating or recovering the active profile', async () => {
+    const { manager } = setup()
+    const internal = manager as unknown as { withLock<T>(operation: () => T | Promise<T>, stageOnly?: boolean): Promise<T> }
+    await expect(internal.withLock(() => 'not staged', true)).rejects.toThrow('requires an existing real active profile')
+    expect(existsSync(manager.paths.profile)).toBe(false)
+    await manager.applyRelease()
+    const activeManifest = join(manager.paths.profile, 'package.json')
+    const before = readFileSync(activeManifest, 'utf8')
+    const journal = join(manager.paths.root, 'profile-activation.json')
+    const malformed = '{"schemaVersion":1,"transaction":"private-user-sentinel","phase":"activating"}\n'
+    writeFileSync(journal, malformed)
+    await expect(internal.withLock(() => {
+      expect(readFileSync(manager.paths.lock, 'utf8').trim()).toBe(String(process.pid))
+      return 'candidate-only'
+    }, true)).resolves.toBe('candidate-only')
+    expect(readFileSync(journal, 'utf8')).toBe(malformed)
+    expect(readFileSync(activeManifest, 'utf8')).toBe(before)
+    expect(existsSync(manager.paths.lock)).toBe(false)
+  })
+
   it('retains a verified recovery copy before resetting the profile and shared data stays untouched', async () => {
     const { root, manager } = setup()
     await manager.applyRelease()
