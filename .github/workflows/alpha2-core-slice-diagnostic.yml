@@ -57,13 +57,37 @@ jobs:
           pnpm install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Generate Office license notices from the exact frozen Kit for source review
+        env:
+          EXPECTED_SOURCE: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (git status --porcelain=v1 --untracked-files=all) { throw 'Frozen install modified the reviewed checkout' }
+          pnpm exec tsx scripts/gen-third-party-notices.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $changed = @(git diff --name-only)
+          if ($changed.Count -ne 1 -or $changed[0] -cne 'THIRD_PARTY_NOTICES.md') {
+            throw 'Notice generation changed files outside its owned artifact'
+          }
+          $hash = (Get-FileHash THIRD_PARTY_NOTICES.md -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Output "source=$env:EXPECTED_SOURCE officeNoticesSha256=$hash"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: alpha2-office-notices-${{ github.sha }}
+          path: THIRD_PARTY_NOTICES.md
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Build dormant Host entry and inspect nonpublishing CLI/Host tars, never an installer
         run: |
           pnpm run build:lib:host
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           foreach ($file in @('apps/cli/lib/bin.js', 'apps/cli/lib/profile-boot.js',
             'apps/cli/lib/types/profile-boot.d.ts', 'apps/desktop-host/lib/index.js',
-            'apps/desktop-host/lib/alpha2-entry.js')) {
+            'apps/desktop-host/lib/alpha2-entry.js',
+            'packages/document/office-to-pdf/lib/index.js',
+            'packages/document/office-to-pdf/lib/typert.remote-client.js')) {
             if (!(Test-Path $file)) { throw "Missing exact-source entry: $file" }
           }
           Push-Location apps/desktop-host
@@ -131,13 +155,11 @@ jobs:
             packages/util/lazy-require/tests/index.spec.ts `
             packages/bundle/web-app/tests/web-app.spec.ts `
             packages/bundle/web-app/tests/official-browser-roster.spec.ts `
-            packages/deliverables/workspace-changes/tests/capture.spec.ts `
-            packages/deliverables/workspace-changes/tests/compare.spec.ts `
-            packages/deliverables/workspace-changes/tests/git.spec.ts `
-            packages/deliverables/workspace-changes/tests/git-truncation.spec.ts `
-            packages/deliverables/workspace-changes/tests/loader-composition.spec.ts `
-            packages/deliverables/workspace-changes/tests/numstat.spec.ts `
-            packages/deliverables/workspace-changes/tests/paths.spec.ts `
+            packages/bundle/web-app/tests/official-office-roster.spec.ts `
+            packages/document/office-to-pdf/tests/output.spec.ts `
+            packages/document/office-to-pdf/tests/provider.spec.ts `
+            packages/document/office-to-pdf/tests/queue.spec.ts `
+            packages/document/office-to-pdf/tests/remote.spec.ts `
             apps/desktop-host/tests/package-transactions.spec.ts `
             apps/desktop-host/tests/alpha2-admission.spec.ts `
             apps/desktop-host/tests/alpha2-parent-stop.spec.ts `
@@ -157,9 +179,13 @@ jobs:
             apps/cli/tests/profile-hmr.spec.ts `
             apps/desktop/tests/fork-release.spec.ts `
             apps/desktop/tests/web-document.spec.ts `
+            apps/desktop/tests/runtime-file-policy.spec.ts `
             apps/web/tests/desktop-boot.spec.ts `
             apps/web/tests/injection-order.spec.ts `
             scripts/build-exe-for-python-sdk.spec.ts `
+            scripts/libreoffice-engine.spec.ts `
+            scripts/official-office-kit-lock.spec.ts `
+            scripts/gen-third-party-notices.spec.ts `
             scripts/project-reference-faces.spec.ts `
             packages/api/gateway/tests/gateway.client.spec.ts `
             packages/api/remotes/tests/remote-events.host.spec.ts `
@@ -167,7 +193,7 @@ jobs:
             --maxWorkers=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build Client face and verify official browser and Manager UI exports, never an installer
+      - name: Build Client face with official Browser, Manager and lazy Office Preview exports
         run: |
           pnpm run build:lib:client
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -177,8 +203,13 @@ jobs:
           if (!(Test-Path packages/client/ui-plugin-manager/lib/client.js)) {
             throw 'Official Manager UI client export missing from source build'
           }
+          $preview = 'packages/client/ui-sidebar-documentpreview/lib'
+          if (!(Test-Path (Join-Path $preview 'client.js')) -or
+            @(Get-ChildItem -LiteralPath $preview -Filter 'client.*.js').Count -eq 0) {
+            throw 'Official Office Preview client entry or lazy PDF/Office chunk is missing'
+          }
 
-      - name: Test official browser, Manager UI and terminal components without mounting Desktop
+      - name: Test official Browser, Manager UI, Office Preview and terminal components without Desktop startup
         run: |
           pnpm exec vitest run `
             packages/client/ui-sidebar-browser/tests/apply.client.spec.ts `
@@ -193,6 +224,14 @@ jobs:
             packages/client/ui-plugin-manager/tests/components.client.spec.tsx `
             packages/client/ui-plugin-manager/tests/config-ledger.client.spec.ts `
             packages/client/ui-plugin-manager/tests/manager-store.client.spec.ts `
+            packages/client/ui-sidebar-documentpreview/tests/office-cache.client.spec.ts `
+            packages/client/ui-sidebar-documentpreview/tests/office-registration.client.spec.ts `
+            packages/client/ui-sidebar-documentpreview/tests/office-font-notice.client.spec.tsx `
+            packages/client/ui-sidebar-documentpreview/tests/renderer-loading.client.spec.tsx `
+            packages/client/ui-sidebar-documentpreview/tests/document-toolbar.client.spec.tsx `
+            packages/client/ui-sidebar-documentpreview/tests/pdf-body.client.spec.tsx `
+            packages/client/ui-sidebar-documentpreview/tests/pdf-document.client.spec.ts `
+            packages/client/ui-sidebar-documentpreview/tests/pdf-license-bundle.client.spec.ts `
             packages/client/ui-primitives/tests/ansi.client.spec.ts `
             packages/client/ui-primitives/tests/terminal-block.client.spec.tsx `
             packages/client/ui-tool/tests/terminal-card.client.spec.tsx `
@@ -202,6 +241,26 @@ jobs:
       - name: Test all official named-profile Manager cases and staged no-write refusal
         run: |
           pnpm exec vitest run packages/boot/plugin-manager/tests/manager.spec.ts --maxWorkers=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Convert a real Office fixture with the declared Windows kit, no runtime download
+        run: |
+          $env:DSH_E2E_MAX_WORKERS = '1'
+          pnpm exec vitest run packages/bundle/web-app/tests/document-conversion.e2e.ts `
+            --config vitest.e2e.config.ts --retry 0 --maxWorkers=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test official workspace recorder contracts in a separate Windows worker
+        run: |
+          pnpm exec vitest run `
+            packages/deliverables/workspace-changes/tests/capture.spec.ts `
+            packages/deliverables/workspace-changes/tests/compare.spec.ts `
+            packages/deliverables/workspace-changes/tests/git.spec.ts `
+            packages/deliverables/workspace-changes/tests/git-truncation.spec.ts `
+            packages/deliverables/workspace-changes/tests/loader-composition.spec.ts `
+            packages/deliverables/workspace-changes/tests/numstat.spec.ts `
+            packages/deliverables/workspace-changes/tests/paths.spec.ts `
+            --maxWorkers=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test all official workspace recorder integration cases in one fresh worker

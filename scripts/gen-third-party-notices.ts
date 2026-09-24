@@ -52,6 +52,16 @@ const FIRST_PARTY = new Set([
 export const CLAUDE_AGENT_SDK_PACKAGE = '@anthropic-ai/claude-agent-sdk'
 const CLAUDE_PLATFORM_PACKAGE_PREFIX = `${CLAUDE_AGENT_SDK_PACKAGE}-`
 const CLAUDE_PLATFORM_DECLARED_LICENSE = 'SEE LICENSE IN LICENSE.md'
+/** Independently released Office kit identities: MPL-2.0 is disclosed, never reclassified as permissive. */
+const LIBREOFFICE_KIT_PACKAGE = '@deepseek-ai/libreoffice-kit'
+const LIBREOFFICE_PACKAGES = new Set([
+  LIBREOFFICE_KIT_PACKAGE,
+  '@deepseek-ai/libreoffice-kit-wasm',
+  '@deepseek-ai/libreoffice-kit-darwin-arm64',
+  '@deepseek-ai/libreoffice-kit-darwin-x64',
+  '@deepseek-ai/libreoffice-kit-win32-arm64',
+  '@deepseek-ai/libreoffice-kit-win32-x64',
+])
 
 /**
  * Whether a non-permissive runtime declaration has an identity-scoped owner
@@ -64,8 +74,9 @@ export function isOwnerAuthorizedRuntime(name: string): boolean {
 }
 
 /**
- * Metadata overrides where the installed manifest is wrong or unreachable.
- * Each entry documents why the store cannot answer.
+ * Metadata overrides where the installed manifest is wrong, unreachable, or its
+ * repository field is prohibited by the fork's public-link policy.
+ * License terms remain from installed metadata unless an exception is documented.
  */
 const OVERRIDES: Record<string, { license?: string; repo?: string }> = {
   // Rust workspaces publishing npm bins without `license` in package.json.
@@ -77,6 +88,9 @@ const OVERRIDES: Record<string, { license?: string; repo?: string }> = {
   '@modelcontextprotocol/server-filesystem': { license: 'MIT / Apache-2.0', repo: 'https://github.com/modelcontextprotocol/servers' },
   // No repository field in the published manifest.
   'node-addon-require-builtin': { repo: 'https://www.npmjs.com/package/node-addon-require-builtin' },
+  // The kit manifest's organization URL is not an approved maintained link. Cite
+  // its exact published 0.0.1 package; never override its installed MPL-2.0 terms.
+  [LIBREOFFICE_KIT_PACKAGE]: { repo: 'https://www.npmjs.com/package/@deepseek-ai/libreoffice-kit/v/0.0.1' },
   // No `license` field in the published manifest; the tarball's LICENSE.txt is the MIT text.
 }
 
@@ -636,10 +650,12 @@ export function isPermissive(license: string): boolean {
 /**
  * Reject unapproved non-permissive licenses on installed or browser-bundled code.
  * @param dependencies - Disclosed runtime package identities and declared licenses.
- * @throws When a runtime package has no permissive license or exact owner authorization.
+ * @throws When a runtime package has no permissive license or exact disclosed exception.
  */
 export function assertRuntimeLicenses(dependencies: readonly { name: string; license: string }[]): void {
-  const rejected = dependencies.filter(dep => !isPermissive(dep.license) && !isOwnerAuthorizedRuntime(dep.name))
+  const rejected = dependencies.filter(dep => !isPermissive(dep.license)
+    && !isOwnerAuthorizedRuntime(dep.name)
+    && !(LIBREOFFICE_PACKAGES.has(dep.name) && dep.license === 'MPL-2.0'))
   if (rejected.length > 0) {
     throw new Error(`gen-third-party-notices: runtime ${rejected.map(dep => `${dep.name} (${dep.license})`).join(', ')} is not a permissive license; review the distribution terms and record the decision before regenerating.`)
   }
@@ -706,6 +722,7 @@ export async function render(): Promise<string> {
   )
     ? collectClaudeDistribution(manifests)
     : undefined
+  const kitRuntime = runtimeDeps.some(dep => dep.name === LIBREOFFICE_KIT_PACKAGE)
   const nonPermissiveDev = devDeps.filter(dep => !isPermissive(dep.license))
   assertRuntimeLicenses(runtimeDeps)
   const patchedLines = patched.map(({ spec, patch }) => `- \`${spec}\` — [\`${patch}\`](${patch})`)
@@ -739,6 +756,13 @@ pnpm applies local patches to the following packages at install time, so shipped
 
 ${patchedLines.join('\n')}
 ${renderClaudeDistribution(claudeDistribution)}
+${kitRuntime ? `
+## Independently published LibreOffice kit
+
+${[...LIBREOFFICE_PACKAGES].map(name => `\`${name}\``).join(', ')} declare MPL-2.0, which remains outside the permissive-license allowlist. This exception permits only these exact identities at exactly those terms; it does not reclassify MPL-2.0. Retain the target engine's license and third-party notices in the installer, along with the Node API NOTICE.
+
+The [versioned 0.0.1 kit package](https://www.npmjs.com/package/@deepseek-ai/libreoffice-kit/v/0.0.1) identifies its publisher and corresponding source repository. Before Desktop publication, verify recipients can obtain the matching LibreOffice source pin, modifications, build instructions, and notices. A missing declared native engine must fail packaging; do not substitute system LibreOffice or fetch an engine at runtime.
+` : ''}
 
 ## Development-only npm dependencies
 

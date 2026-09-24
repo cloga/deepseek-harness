@@ -60,6 +60,19 @@ describe('tierExternalDeps', () => {
       .not.toThrow()
   })
 
+  it('discloses only the six exact published Office kit identities under unchanged MPL-2.0 terms', () => {
+    const kit = '@deepseek-ai/libreoffice-kit'
+    const exact = [kit, `${kit}-wasm`, `${kit}-darwin-arm64`, `${kit}-darwin-x64`, `${kit}-win32-arm64`, `${kit}-win32-x64`]
+    expect(() => assertRuntimeLicenses(exact.map(name => ({ name, license: 'MPL-2.0' })))).not.toThrow()
+    expect(isPermissive('MPL-2.0')).toBe(false)
+    for (const name of [`${kit}-unlisted`, '@deepseek-ai/other-libreoffice-kit']) {
+      expect(() => assertRuntimeLicenses([{ name, license: 'MPL-2.0' }])).toThrow(name)
+    }
+    for (const license of ['GPL-3.0-only', 'SEE LICENSE', 'MPL-2.0 OR GPL-3.0-only']) {
+      expect(() => assertRuntimeLicenses([{ name: kit, license }])).toThrow(kit)
+    }
+  })
+
   it('keeps browser-bundled development dependencies in runtime disclosures', () => {
     const { manifests, names } = workspace({
       'packages/client/ui/package.json': {

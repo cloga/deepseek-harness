@@ -27,6 +27,7 @@ import {
 } from './macos-runtime.ts'
 import { resolveDesktopBuildTarget, resolveDesktopTargetBuildPaths } from './desktop-build-paths.mjs'
 import { desktopRuntimeFileExclusion } from './runtime-file-policy.ts'
+import { selectOfficeEngine } from '../../../scripts/libreoffice-engine.ts'
 import { normalizeDesktopRuntimePackageMetadata } from './runtime-package-metadata.mjs'
 
 const APP_ROOT = resolve(import.meta.dirname, '..')
@@ -122,10 +123,18 @@ async function main(): Promise<void> {
     const targetName = resolveDesktopBuildTarget()
     const target = { platform: process.platform, arch: targetName.endsWith('arm64') ? 'arm64' : 'x64' }
     const modules = join(BUILD_ROOT, 'node_modules')
+    // The independently published kit declares the target engine. Never ask a
+    // user's system installation or fetch a native binary at runtime.
+    const officeManifest = JSON.parse(readFileSync(join(modules, '@deepseek-ai/libreoffice-kit/package.json'), 'utf8')) as {
+      optionalDependencies?: Record<string, string>
+    }
+    const officeEngine = selectOfficeEngine(officeManifest, target)
+    const enginePath = join('@deepseek-ai', `libreoffice-kit-${officeEngine}`, 'prebuilds.json')
+    if (!existsSync(join(modules, enginePath))) throw new Error(`desktop runtime: missing required LibreOffice engine ${officeEngine}`)
     mkdirSync(DSH_OUTPUT_ROOT, { recursive: true })
     cpSync(modules, join(DSH_OUTPUT_ROOT, 'node_modules'), {
       recursive: true, dereference: true,
-      filter: source => desktopRuntimeFileExclusion(relative(modules, source), target) === undefined,
+      filter: source => desktopRuntimeFileExclusion(relative(modules, source), target, officeEngine) === undefined,
     })
     writeFileSync(join(DSH_OUTPUT_ROOT, 'package.json'), `${JSON.stringify({
       name: '@deepseek-ai/dsh-desktop-runtime', private: true, version: release.version, type: 'module',
@@ -135,6 +144,9 @@ async function main(): Promise<void> {
       if (!existsSync(join(DSH_OUTPUT_ROOT, 'node_modules', DESKTOP_HOST_PACKAGE, file))) {
         throw new Error(`desktop runtime: missing private Host file ${file}`)
       }
+    }
+    if (!existsSync(join(DSH_OUTPUT_ROOT, 'node_modules', enginePath))) {
+      throw new Error(`desktop runtime: missing copied LibreOffice engine ${officeEngine}`)
     }
     await normalizeDesktopRuntimePackageMetadata(DSH_OUTPUT_ROOT, APP_ROOT)
     if (process.platform === 'darwin') {

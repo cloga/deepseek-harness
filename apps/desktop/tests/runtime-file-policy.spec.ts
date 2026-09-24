@@ -21,6 +21,9 @@ it('omits development artifacts while preserving executable modules, assets and 
     'node-pty/prebuilds/linux-x64/pty.node', 'node-pty/prebuilds/darwin-x64/pty.node',
     'node-pty/prebuilds/win32-x64/conpty.pdb',
     '@koromix/koffi-win32-x64/win32_x64/koffi.lib',
+    '@deepseek-ai/libreoffice-kit-win32-arm64/prebuilds.json',
+    '@deepseek-ai/libreoffice-kit-darwin-x64/prebuilds.json',
+    '@deepseek-ai/libreoffice-kit-wasm/prebuilds.json',
     '@mixmark-io/domino/test/entities.html',
     '.modules.yaml', '.pnpm-workspace-state-v1.json', '.bin/tool', '.pnpm/cache',
   ]
@@ -36,6 +39,11 @@ it('omits development artifacts while preserving executable modules, assets and 
     'node-pty/prebuilds/win32-x64/conpty/OpenConsole.exe',
     'node-pty/third_party/conpty/win10-x64/OpenConsole.exe',
     '@koromix/koffi-win32-x64/win32_x64/koffi.node',
+    '@deepseek-ai/libreoffice-kit/package.json',
+    '@deepseek-ai/libreoffice-kit-win32-x64/prebuilds.json',
+    '@deepseek-ai/libreoffice-kit-win32-x64/bin/soffice.exe',
+    '@deepseek-ai/libreoffice-kit-win32-x64/program/app.dll',
+    '@deepseek-ai/libreoffice-kit-win32-x64/LICENSE',
     '@mixmark-io/domino/lib/HTMLParser.js', '@mixmark-io/domino/lib/EntityParser.js',
     '@img/sharp-win32-x64/lib/libvips-42.dll',
   ]
@@ -48,7 +56,7 @@ it('omits development artifacts while preserving executable modules, assets and 
     }
     cpSync(modules, join(output, 'node_modules'), {
       recursive: true, dereference: true,
-      filter: path => desktopRuntimeFileExclusion(relative(modules, path), windows) === undefined,
+      filter: path => desktopRuntimeFileExclusion(relative(modules, path), windows, 'win32-x64') === undefined,
     })
     for (const path of removed) expect(existsSync(join(output, 'node_modules', path)), path).toBe(false)
     for (const path of retained) expect(readFileSync(join(output, 'node_modules', path), 'utf8'), path).toBe(`payload:${path}`)
@@ -61,14 +69,14 @@ it('omits development artifacts while preserving executable modules, assets and 
 })
 
 it('applies package-specific rules inside scoped and nested dependency containers', () => {
-  expect(desktopRuntimeFileExclusion('outer/node_modules/@mixmark-io/domino/test/data.html', windows)).toBeDefined()
-  expect(desktopRuntimeFileExclusion('outer\\node_modules\\node-pty\\prebuilds\\win32-arm64\\conpty.node', windows)).toBeDefined()
-  expect(desktopRuntimeFileExclusion('outer/node_modules/unrelated/test/data.html', windows)).toBeUndefined()
+  expect(desktopRuntimeFileExclusion('outer/node_modules/@mixmark-io/domino/test/data.html', windows, 'win32-x64')).toBeDefined()
+  expect(desktopRuntimeFileExclusion('outer\\node_modules\\node-pty\\prebuilds\\win32-arm64\\conpty.node', windows, 'win32-x64')).toBeDefined()
+  expect(desktopRuntimeFileExclusion('outer/node_modules/unrelated/test/data.html', windows, 'win32-x64')).toBeUndefined()
 })
 
 it('retains native prebuilds for the selected macOS architecture', () => {
   const mac = { platform: 'darwin' as const, arch: 'arm64' }
-  expect(desktopRuntimeFileExclusion('node-pty/prebuilds/darwin-arm64/pty.node', mac)).toBeUndefined()
-  expect(desktopRuntimeFileExclusion('node-pty/prebuilds/darwin-x64/pty.node', mac)).toBeDefined()
-  expect(desktopRuntimeFileExclusion('node-pty/prebuilds/win32-x64/conpty.node', mac)).toBeDefined()
+  expect(desktopRuntimeFileExclusion('node-pty/prebuilds/darwin-arm64/pty.node', mac, 'darwin-arm64')).toBeUndefined()
+  expect(desktopRuntimeFileExclusion('node-pty/prebuilds/darwin-x64/pty.node', mac, 'darwin-arm64')).toBeDefined()
+  expect(desktopRuntimeFileExclusion('node-pty/prebuilds/win32-x64/conpty.node', mac, 'darwin-arm64')).toBeDefined()
 })
