@@ -45,8 +45,6 @@ describe('Markdown implementation registration', () => {
     locale.setLocale('en')
     const sessionId = SessionId('markdown-registration')
     await runtime.sessions.add({ id: sessionId })
-    const reference = runtime.sessions.retainFor(runtime.ctx, sessionId)
-    await reference.ready
     const feature = await runtime.mount({ inject: ['slots', 'locale', 'documentPreviews'], apply })
     expect(previews.getSnapshot().map(definition => definition.id)).toEqual([MARKDOWN_BODY_ID])
     const useTabInfo = vi.fn<UseSidebarRightTabInfo>(() => { throw new Error('Markdown rendering does not need tab actions') })
@@ -55,7 +53,7 @@ describe('Markdown implementation registration', () => {
         kind: 'keyed', scope: 'session', inject: { hooks: { tabInfo: documentTabInfoFactory } },
       },
     }, ({ renderSlot, SessionProvider }) => (
-      <SessionProvider session={reference}>
+      <SessionProvider>
         {renderSlot('sidebar.right.tab.document', {
           resourceAddress: 'dsh-resource://file/session/markdown-registration/notes.md',
           content: { kind: 'text', text: '# Notes\n\n```ts\nconst value = 1\n```', pages: [], eof: true },

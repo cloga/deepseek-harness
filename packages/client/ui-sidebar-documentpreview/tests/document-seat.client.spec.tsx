@@ -2,7 +2,7 @@
 /** Document extension registration and dispatch through the production Sidebar and Slot renderer. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, screen, waitFor } from '@testing-library/react'
-import { SlotTestRuntime } from '@deepseek-ai/dsh-client-test-runtime'
+import { SlotTestRuntime, TestRemote } from '@deepseek-ai/dsh-client-test-runtime'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
@@ -45,7 +45,6 @@ async function boot() {
     'conversation.session.header.corner': { kind: 'single', scope: 'session' },
   })
   await rt.sessions.add({ id: SESSION })
-  await rt.sessions.retainFor(rt.ctx, SESSION, { source: 'mainView' }).ready
   await rt.mount({ inject: [...resourcesInject], apply: resourcesApply })
   const read = vi.fn<ClientRemote['workspaceFiles']['read']>().mockImplementation(async (_sessionId, _path, range) => ({
     ok: true,
@@ -55,7 +54,7 @@ async function boot() {
     ok: true, value: { absolutePath: '/host/notes', version: 'v1', offset: 0, data: btoa('all'), bytes: 3, eof: true },
   })
   const workspaceFiles = { read, readAll: bytes }
-  rt.remote.provideNamespaces({ workspaceFiles })
+  new TestRemote(rt.ctx, { workspaceFiles })
   rt.ctx.effect(() => rt.ctx.resources.register({
     protocol: 'file',
     open: async function* (_address, { signal }) {
