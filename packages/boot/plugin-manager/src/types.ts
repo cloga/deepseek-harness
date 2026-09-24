@@ -1,5 +1,6 @@
 /** Public plugin management records shared with clients. */
 import type { Branded } from '@deepseek-ai/dsh-brand'
+import type { ProfilePreparedPackageChange } from '@deepseek-ai/dsh-app-boot/types'
 import type { PluginInventoryEntry } from '@deepseek-ai/dsh-host-plugin-inventory/types'
 export type { PluginEntryId } from '@deepseek-ai/dsh-host-plugin-inventory/types'
 import type { PluginEntryId } from '@deepseek-ai/dsh-host-plugin-inventory/types'
@@ -76,7 +77,9 @@ export interface PackageResult {
 export interface ChangeResult {
   changed: boolean
   /** `cancelled` is an installation the caller stopped, its files restored. */
-  application: 'applied' | 'restart-required' | 'overridden' | 'failed' | 'cancelled'
+  application: 'applied' | 'restart-required' | 'prepared' | 'overridden' | 'failed' | 'cancelled'
+  /** Shell-owned graph identity, NOT proof of active profile or release receipt. */
+  prepared?: ProfilePreparedPackageChange
   /** Last attempted step; successful installation can proceed to enablement. */
   stage: 'install' | 'enable' | 'remove'
   target: string

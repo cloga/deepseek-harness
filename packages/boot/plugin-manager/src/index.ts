@@ -11,7 +11,9 @@ import z from '@deepseek-ai/schemastery'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import { pluginEntryId, readPluginInventory } from '@deepseek-ai/dsh-host-plugin-inventory'
 import {
+  ProfilePackageCancelledError, parseProfilePendingChange, parseProfilePreparedChange, parseProfileTransactionId,
   readProfileManifest, resolveBundleDir, loadOverlayPatches, composeEntries, reconcileProfilePatches, readProfilePatches,
+  type ProfilePackageMutation, type ProfilePendingPackageChange,
 } from '@deepseek-ai/dsh-app-boot'
 import type {} from '@deepseek-ai/dsh-hmr'
 import type { ProfileContext, ProfileManifest } from '@deepseek-ai/dsh-app-boot'
@@ -70,6 +72,12 @@ function messageOf(error: unknown): string { return error instanceof Error ? err
 /** An expected refusal keeps its code; anything else becomes an operation error carrying its exact diagnostic. */
 function managementError(error: unknown): ManagementError {
   return error instanceof ManagementFailure ? { code: error.code } : { code: 'operation-error', diagnostic: messageOf(error) }
+}
+
+/** A staged Source/Backend failure may contain a signed URL: never echo its raw diagnostic to Clients. */
+function stagedManagementError(error: unknown): ManagementError {
+  return error instanceof ManagementFailure ? { code: error.code }
+    : { code: 'operation-error', diagnostic: 'Desktop package staging failed' }
 }
 
 /** The caller stopped an installation; its files are restored before this is thrown. */
@@ -351,7 +359,12 @@ export class PluginManager extends TypertRemoteService {
    */
   @Remote
   installBundle(spec: string, options?: InstallBundleOptions): Promise<ChangeResult> {
-    if (this.profile.stagedPackageTransactions === true) return this.refuseUnownedStage('install', 'launcher-owned', options?.enabled)
+    if (this.profile.stagedPackageTransactions === true) {
+      if (this.ownerContext.get('profilePackageTransactions')?.protocolVersion !== 1) {
+        return this.refuseUnownedStage('install', 'launcher-owned', options?.enabled)
+      }
+      return this.installStagedBundle(spec, options)
+    }
     const requestId = options?.requestId
     if (requestId !== undefined && this.installs.has(requestId)) return Promise.resolve({
       stage: 'install', target: 'request-in-progress', changed: false, application: 'failed',
@@ -449,7 +462,16 @@ export class PluginManager extends TypertRemoteService {
    */
   @Remote
   removeBundle(name: string): Promise<ChangeResult> {
-    if (this.profile.stagedPackageTransactions === true) return this.refuseUnownedStage('remove', name)
+    if (this.profile.stagedPackageTransactions === true) {
+      if (this.ownerContext.get('profilePackageTransactions')?.protocolVersion !== 1) {
+        return this.refuseUnownedStage('remove', name)
+      }
+      return this.stagePackage(randomUUID(), { kind: 'remove', name }, { stage: 'remove', target: 'launcher-owned' },
+        undefined, async () => {
+          const bundle = (await this.listBundles()).find(item => item.name === name)
+          if (bundle === undefined || !bundle.removable) throw new ManagementFailure('not-removable')
+        })
+    }
     return this.change(async (result) => {
       await this.configure(async () => {
         const bundle = (await this.listBundles()).find(item => item.name === name)
@@ -472,6 +494,108 @@ export class PluginManager extends TypertRemoteService {
       result.packageResult = await this.runPnpm(['remove', name])
       if (result.packageResult.exitCode !== 0) throw new Error(result.packageResult.output)
     }, { stage: 'remove', target: name }, 'remove')
+  }
+
+  /** Inspect a prepared graph through its launcher, not through live package state. */
+  @Remote
+  async pendingPackageChange(transactionId: string): Promise<ProfilePendingPackageChange | undefined> {
+    const service = this.ownerContext.get('profilePackageTransactions')
+    if (this.profile.stagedPackageTransactions !== true || service?.protocolVersion !== 1) {
+      throw new Error('Launcher package staging is unavailable')
+    }
+    const id = parseProfileTransactionId(transactionId)
+    try {
+      const result = await service.status(id)
+      if (result === undefined) return undefined
+      const parsed = parseProfilePendingChange(result)
+      if (parsed.transactionId !== id) throw new Error('Launcher returned another package transaction')
+      return parsed
+    } catch {
+      throw new Error('Launcher package status is unavailable')
+    }
+  }
+
+  /** Discard one prepared graph by UUID; no active dependency is removed here. */
+  @Remote
+  async cancelPendingPackageChange(transactionId: string): Promise<void> {
+    const service = this.ownerContext.get('profilePackageTransactions')
+    if (this.profile.stagedPackageTransactions !== true || service?.protocolVersion !== 1) {
+      throw new Error('Launcher package staging is unavailable')
+    }
+    const id = parseProfileTransactionId(transactionId)
+    try { await service.cancel(id) }
+    catch { throw new Error('Launcher package cancellation is unavailable') }
+  }
+
+  /** Pending candidates are not proof of active runtime, receipt or approved installation. */
+  @Remote
+  async listPendingPackageChanges(): Promise<readonly ProfilePendingPackageChange[]> {
+    if (this.profile.stagedPackageTransactions !== true) return []
+    const service = this.ownerContext.get('profilePackageTransactions')
+    if (service?.protocolVersion !== 1) throw new Error('Launcher package staging is unavailable')
+    try {
+      const pending = await service.listPending()
+      if (!Array.isArray(pending) || pending.length > 100) throw new Error('Invalid pending list')
+      return pending.map(parseProfilePendingChange)
+    } catch { throw new Error('Launcher package list is unavailable') }
+  }
+
+  /** Stage via the native owner without invoking stock pnpm or echoing source into Remote results. */
+  private installStagedBundle(spec: string, options?: InstallBundleOptions): Promise<ChangeResult> {
+    const requestId = (options?.requestId ?? randomUUID()) as PluginInstallRequestId
+    if (this.installs.has(requestId)) {
+      return Promise.resolve({ stage: 'install', target: 'launcher-owned', changed: false, application: 'failed',
+        error: { code: 'operation-error', diagnostic: 'An installation with this request id is already running' } })
+    }
+    const settlement = Promise.withResolvers<InstallSettlement>()
+    const control: InstallControl = { abort: new AbortController(), phase: 'installing', settled: settlement.promise }
+    this.installs.set(requestId, control)
+    this.ownerContext.emit('plugin-manager/install-state', { requestId, phase: 'installing' })
+    const result = this.stagePackage(requestId, {
+      kind: 'install', source: { schemaVersion: 1, type: 'packageSpec', spec },
+      ...(options?.enabled === undefined ? {} : { enabled: options.enabled }),
+      ...(options?.approvedBuilds === undefined ? {} : { approvedBuilds: [...options.approvedBuilds] }),
+    }, { stage: 'install', target: 'launcher-owned' }, control)
+    void result.then((outcome) => { settlement.resolve({ status: 'outcome', outcome }) }, () => {
+      settlement.resolve({ status: 'failure', error: new Error('Desktop package staging failed') })
+    })
+    return result.finally(() => { if (this.installs.get(requestId) === control) this.installs.delete(requestId) })
+  }
+
+  /** A staged result is a candidate only; Shell consent, health, activation and receipts happen later. */
+  private stagePackage(
+    requestId: string,
+    mutation: ProfilePackageMutation,
+    request: Pick<ChangeResult, 'stage' | 'target'>,
+    control?: InstallControl,
+    validate?: () => Promise<void>,
+  ): Promise<ChangeResult> {
+    const task = (async (): Promise<ChangeResult> => {
+      const result: ChangeResult = { ...request, changed: false, application: 'failed' }
+      const signal = control === undefined ? this.abort.signal : AbortSignal.any([this.abort.signal, control.abort.signal])
+      try {
+        if (signal.aborted) throw new ProfilePackageCancelledError()
+        const service = this.ownerContext.get('profilePackageTransactions')
+        if (service?.protocolVersion !== 1) throw new Error('Launcher package staging is unavailable')
+        parseProfileTransactionId(requestId)
+        await validate?.()
+        if (signal.aborted) throw new ProfilePackageCancelledError()
+        const prepared = parseProfilePreparedChange(await service.stage(requestId, mutation, signal))
+        if (prepared.transactionId !== requestId || (mutation.kind === 'remove' && prepared.packageName !== mutation.name)) {
+          throw new Error('Launcher returned another package transaction')
+        }
+        if (control !== undefined) control.phase = 'applying'
+        result.application = 'prepared'
+        result.prepared = prepared
+        result.target = prepared.packageName
+      } catch (error) {
+        if (signal.aborted && error instanceof ProfilePackageCancelledError) result.application = 'cancelled'
+        else result.error = stagedManagementError(error)
+      }
+      return result
+    })()
+    this.packageOperations.add(task)
+    return task.finally(() => { this.packageOperations.delete(task) })
   }
 
   /** The rows a bundle's patch inserts and the existing rows it changes; an unreadable patch throws. */

@@ -7,8 +7,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { expect, it, onTestFinished, vi } from 'vitest'
 import {
-  boot, composeEntries, initProfile, readProfilePatches, readProfileManifest, reconcileProfilePatches,
-  type ProfileContext,
+  ProfilePackageCancelledError, boot, composeEntries, initProfile, readProfilePatches, readProfileManifest, reconcileProfilePatches,
+  type ProfileContext, type ProfilePackageTransactions, type ProfilePreparedPackageChange,
 } from '@deepseek-ai/dsh-app-boot'
 import PluginManager, { type Config, type PluginChange, type PluginInstallLogChunk, type PluginInstallProgress, type PluginInstallRequestId } from '../src/index.ts'
 import Hmr from '@deepseek-ai/dsh-hmr'
@@ -122,6 +122,105 @@ it.each(['startup', 'live'] as const)(
     expect(content(lockPath)).toBe(lock)
   },
 )
+
+const stagedRequestId = '11111111-1111-4111-8111-111111111111' as PluginInstallRequestId
+const stagedPrepared: ProfilePreparedPackageChange = {
+  transactionId: stagedRequestId, state: 'prepared', packageName: '@cloga/addon',
+  baseFingerprint: 'a'.repeat(64), health: 'pending',
+}
+function stagedService() {
+  return {
+    protocolVersion: 1 as const,
+    stage: vi.fn<ProfilePackageTransactions['stage']>().mockResolvedValue(stagedPrepared),
+    status: vi.fn<ProfilePackageTransactions['status']>().mockResolvedValue(stagedPrepared),
+    listPending: vi.fn<ProfilePackageTransactions['listPending']>().mockResolvedValue([stagedPrepared]),
+    cancel: vi.fn<ProfilePackageTransactions['cancel']>().mockResolvedValue(undefined),
+  }
+}
+
+it('delegates staged install/remove and pending views to the native owner without mutating the active profile', async () => {
+  const service = stagedService()
+  const { ctx, dir, manager, profile } = await fixture('startup', false,
+    (root) => { root.provide('profilePackageTransactions', service) }, {}, undefined, true)
+  const beforeManifest = readFileSync(join(dir, 'package.json'), 'utf8')
+  const beforePatch = readFileSync(profile.patchPath, 'utf8')
+  const pnpm = vi.spyOn(operations, 'runProfilePnpm').mockImplementation(async () => {
+    throw new Error('staged Manager used stock live pnpm')
+  })
+  onTestFinished(() => { pnpm.mockRestore() })
+  const installed = await manager.installBundle('@cloga/addon@1.2.3', { requestId: stagedRequestId, enabled: false })
+  expect(installed).toMatchObject({ stage: 'install', target: '@cloga/addon', application: 'prepared',
+    changed: false, prepared: stagedPrepared })
+  expect(service.stage).toHaveBeenCalledExactlyOnceWith(stagedRequestId, {
+    kind: 'install', source: { schemaVersion: 1, type: 'packageSpec', spec: '@cloga/addon@1.2.3' }, enabled: false,
+  }, expect.any(AbortSignal))
+  expect(await manager.pendingPackageChange(stagedRequestId)).toEqual(stagedPrepared)
+  expect(await manager.listPendingPackageChanges()).toEqual([stagedPrepared])
+  service.cancel.mockImplementation(async () => { service.status.mockResolvedValue(undefined) })
+  await manager.cancelPendingPackageChange(stagedRequestId)
+  expect(await manager.pendingPackageChange(stagedRequestId)).toBeUndefined()
+  service.stage.mockImplementation(async id => ({ ...stagedPrepared, transactionId: id, packageName: 'extra' }))
+  expect(await manager.removeBundle('extra')).toMatchObject({ stage: 'remove', target: 'extra',
+    application: 'prepared', changed: false, prepared: { packageName: 'extra', health: 'pending' } })
+  expect(pnpm).not.toHaveBeenCalled()
+  expect(ctx.get('hmr')).toBeUndefined()
+  expect(readFileSync(join(dir, 'package.json'), 'utf8')).toBe(beforeManifest)
+  expect(readFileSync(profile.patchPath, 'utf8')).toBe(beforePatch)
+})
+
+it('never exposes signed source or backend output in a staged Remote result or install-log event', async () => {
+  const service = stagedService()
+  service.stage.mockRejectedValue(new Error('pnpm output https://private.invalid/file?sig=private-sentinel'))
+  const { ctx, manager } = await fixture('startup', false,
+    (root) => { root.provide('profilePackageTransactions', service) }, {}, undefined, true)
+  const logs: PluginInstallLogChunk[] = []
+  ctx.on('plugin-manager/install-log', (chunk) => { logs.push(chunk) })
+  const result = await manager.installBundle('https://private.invalid/file?sig=private-sentinel', { requestId: stagedRequestId })
+  expect(result).toMatchObject({ stage: 'install', target: 'launcher-owned', application: 'failed', changed: false,
+    error: { code: 'operation-error', diagnostic: 'Desktop package staging failed' } })
+  expect(JSON.stringify(result)).not.toContain('private-sentinel')
+  expect(logs).toEqual([])
+})
+
+it('refuses a mismatched native prepared identity and never calls staged toggles as live writes', async () => {
+  const service = stagedService()
+  const { manager, profile, dir } = await fixture('startup', false,
+    (root) => { root.provide('profilePackageTransactions', service) }, {}, undefined, true)
+  const before = readFileSync(profile.patchPath, 'utf8')
+  service.stage.mockResolvedValue({ ...stagedPrepared, transactionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' })
+  expect(await manager.installBundle('addon', { requestId: stagedRequestId })).toMatchObject({
+    application: 'failed', changed: false, error: { code: 'operation-error', diagnostic: 'Desktop package staging failed' },
+  })
+  service.stage.mockImplementation(async id => ({ ...stagedPrepared, transactionId: id, packageName: 'foreign' }))
+  expect(await manager.removeBundle('extra')).toMatchObject({
+    application: 'failed', changed: false, error: { code: 'operation-error', diagnostic: 'Desktop package staging failed' },
+  })
+  const plugin = (await manager.listPlugins()).find(row => row.patchId === 'managed')!
+  expect(await manager.setPluginEnabled(plugin.entryId, false)).toMatchObject({ application: 'failed', changed: false })
+  expect(await manager.setBundleEnabled('extra', false)).toMatchObject({ application: 'failed', changed: false })
+  expect(readFileSync(profile.patchPath, 'utf8')).toBe(before)
+  expect(readProfileManifest('test', dir).dependencies).toEqual({ extra: '1.0.0' })
+})
+
+it('acknowledges an in-flight staged cancellation only after the owner confirms cleanup', async () => {
+  const service = stagedService()
+  const entered = Promise.withResolvers<AbortSignal>()
+  const ready = Promise.withResolvers<ProfilePreparedPackageChange>()
+  service.stage.mockImplementation((_id, _request, signal) => { entered.resolve(signal); return ready.promise })
+  const { manager } = await fixture('startup', false,
+    (root) => { root.provide('profilePackageTransactions', service) }, {}, undefined, true)
+  const installing = manager.installBundle('addon', { requestId: stagedRequestId })
+  const signal = await entered.promise
+  const stopping = manager.cancelInstall(stagedRequestId)
+  expect(signal.aborted).toBe(true)
+  let settled = false
+  void stopping.then(() => { settled = true })
+  await Promise.resolve()
+  expect(settled).toBe(false)
+  ready.reject(new ProfilePackageCancelledError())
+  expect(await installing).toMatchObject({ application: 'cancelled', changed: false })
+  expect(await stopping).toEqual({ status: 'cancelled' })
+})
 
 it('describes a bundle by its manifest and patch: one-liner, rows without a live entry, and the built-in rows it changes', async () => {
   const { manager, dir, bundle } = await fixture()
