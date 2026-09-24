@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { ProfilePackageCancelledError } from '@deepseek-ai/dsh-app-boot'
 import * as fs from 'node:fs'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -2405,6 +2406,44 @@ describe('desktop external plugin profile', () => {
     } finally {
       writeFileSync(release, 'continue')
       await pending
+    }
+    expect(existsSync(manager.paths.lock)).toBe(false)
+  })
+
+  it('does not acknowledge a private candidate abort before the owned pnpm child closes', async ({ task, signal: testSignal }) => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const ready = join(root, 'abort-ready')
+    const release = join(root, 'abort-release')
+    const blocker = join(root, 'abort-blocker.mjs')
+    writeFileSync(blocker, `import {existsSync, writeFileSync} from 'node:fs'; import {setTimeout as sleep} from 'node:timers/promises'; writeFileSync(${JSON.stringify(ready)}, String(process.pid)); while (!existsSync(${JSON.stringify(release)})) await sleep(10);`)
+    const worker = trackedProjectManager(manager.paths, { ...manager.runtime, pnpm: blocker })
+    await worker.applyRelease()
+    const staging = join(root, 'abort-stage')
+    mkdirSync(staging)
+    const abort = new AbortController()
+    const internal = worker as unknown as {
+      withLock<T>(operation: () => Promise<T>): Promise<T>
+      runPnpmAttempt(project: string, args: readonly string[], registry: string, markPending: boolean, signal?: AbortSignal): Promise<void>
+    }
+    const pending = internal.withLock(() => internal.runPnpmAttempt(staging, ['install'], 'https://registry.npmjs.org/', true, abort.signal))
+    const observed = pending.then(() => undefined, (error: unknown) => error)
+    releaseWorkers.push(async () => { writeFileSync(release, 'continue'); await observed })
+    try {
+      await expect.poll(() => {
+        testSignal.throwIfAborted()
+        return existsSync(ready)
+      }, { timeout: task.timeout }).toBe(true)
+      expect(readFileSync(manager.paths.lock, 'utf8').trim()).toBe(readFileSync(ready, 'utf8'))
+      abort.abort()
+      let settled = false
+      void observed.then(() => { settled = true })
+      await Promise.resolve()
+      expect(settled).toBe(false)
+      expect(readFileSync(manager.paths.lock, 'utf8').trim()).toBe(readFileSync(ready, 'utf8'))
+    } finally {
+      writeFileSync(release, 'continue')
+      expect(await observed).toBeInstanceOf(ProfilePackageCancelledError)
     }
     expect(existsSync(manager.paths.lock)).toBe(false)
   })

@@ -1,6 +1,7 @@
 /** Transactional owner of the reserved desktop profile and its private pnpm state. */
 
 import { valid } from 'semver'
+import { ProfilePackageCancelledError } from '@deepseek-ai/dsh-app-boot'
 import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import {
@@ -1911,20 +1912,27 @@ export class DesktopProjectManager {
     registry = DESKTOP_REGISTRY,
     retries = 0,
     markPending = true,
+    signal?: AbortSignal,
   ): Promise<void> {
     let failure: unknown
     for (let attempt = 0; attempt <= retries; attempt++) {
+      if (signal?.aborted) throw new ProfilePackageCancelledError()
       try {
-        await this.runPnpmAttempt(projectDir, args, registry, markPending)
+        await this.runPnpmAttempt(projectDir, args, registry, markPending, signal)
         return
       } catch (error) {
+        // A native stage may cancel only AFTER pnpm's close event. Never retry
+        // private acquisition after an explicit post-exit cancellation.
+        if (error instanceof ProfilePackageCancelledError) throw error
         failure = error
       }
     }
     throw errorOf(failure, 'desktop project: pnpm failed')
   }
 
-  private async runPnpmAttempt(projectDir: string, args: readonly string[], registry: string, markPending: boolean): Promise<void> {
+  private async runPnpmAttempt(projectDir: string, args: readonly string[], registry: string, markPending: boolean,
+    signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new ProfilePackageCancelledError()
     if (resolve(projectDir) === resolve(this.paths.profile)) {
       throw new Error('desktop project: package operations require a private staging profile')
     }
@@ -1946,8 +1954,10 @@ export class DesktopProjectManager {
       name !== 'NODE_OPTIONS' && name !== 'NODE_PATH' && !/^DSH_DESKTOP_/u.test(name)
       && !/^(?:npm|pnpm|corepack)_/iu.test(name) && !/(?:AUTH|KEY|SECRET|TOKEN|PASSWORD)/iu.test(name)
     )))
+    if (signal?.aborted) throw new ProfilePackageCancelledError()
     if (markPending) writeFileSync(this.pendingPackages(projectDir), '')
     await new Promise<void>((settle, reject) => {
+      if (signal?.aborted) { reject(new ProfilePackageCancelledError()); return }
       const child = spawn(this.runtime.node, [
         this.runtime.pnpm,
         ...(markPending ? [] : ['pm']),
@@ -2006,15 +2016,18 @@ export class DesktopProjectManager {
         settleChild()
       }
       child.once('error', (error) => { failure = error })
-      child.once('close', (code, signal) => {
+      child.once('close', (code, exitSignal) => {
         complete(() => {
           if (failure !== undefined) { reject(failure); return }
           if (code === 0) {
-            settle()
+            // A requested abort settles only AFTER the owned child and its
+            // captured stdio close, never while pnpm still writes the stage.
+            if (signal?.aborted) reject(new ProfilePackageCancelledError())
+            else settle()
             return
           }
           reject(new Error(
-            `desktop project: pnpm exited with ${String(code ?? signal)}${diagnostics.trim() === '' ? '' : `: ${diagnostics.trim()}`}`,
+            `desktop project: pnpm exited with ${String(code ?? exitSignal)}${diagnostics.trim() === '' ? '' : `: ${diagnostics.trim()}`}`,
           ))
         })
       })

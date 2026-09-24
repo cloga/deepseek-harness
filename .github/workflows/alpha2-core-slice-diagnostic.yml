@@ -207,6 +207,7 @@ jobs:
             apps/desktop/tests/web-document.spec.ts `
             apps/desktop/tests/runtime-file-policy.spec.ts `
             apps/desktop/tests/alpha2-profile-root.spec.ts `
+            apps/desktop/tests/profile-package-snapshot.spec.ts `
             apps/desktop/tests/package-transaction-ipc.spec.ts `
             apps/web/tests/desktop-boot.spec.ts `
             apps/web/tests/injection-order.spec.ts `
