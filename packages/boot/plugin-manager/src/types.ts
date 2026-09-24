@@ -1,6 +1,6 @@
 /** Public plugin management records shared with clients. */
 import type { Branded } from '@deepseek-ai/dsh-brand'
-import type { ProfilePreparedPackageChange } from '@deepseek-ai/dsh-app-boot/types'
+import type { ProfilePreparedPackageChange } from '@deepseek-ai/dsh-app-boot'
 import type { PluginInventoryEntry } from '@deepseek-ai/dsh-host-plugin-inventory/types'
 export type { PluginEntryId } from '@deepseek-ai/dsh-host-plugin-inventory/types'
 import type { PluginEntryId } from '@deepseek-ai/dsh-host-plugin-inventory/types'
