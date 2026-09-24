@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { collectProjectReferenceFaceViolations } from './project-reference-faces.ts'
 
@@ -96,5 +96,18 @@ describe('Project Reference compiler faces', () => {
       'packages/core/client-consumer/tsconfig.json: Project Reference "../../api/split/tsconfig.host.json" enters split project packages/api/split from a Client config; reference "packages/api/split/tsconfig.client.json" instead',
       'packages/core/host-consumer/tsconfig.json: Project Reference "../../api/split/tsconfig.client.json" enters split project packages/api/split from a Host config; reference "packages/api/split/tsconfig.host.json" instead',
     ])
+  })
+
+  it('keeps the real Chat consumer on the composite official Document Preview Client leaf', () => {
+    const root = resolve(import.meta.dirname, '..')
+    const chat = JSON.parse(readFileSync(join(root, 'packages/client/ui-chat/tsconfig.json'), 'utf8')) as {
+      references: { path: string }[]
+    }
+    const preview = JSON.parse(readFileSync(join(root, 'packages/client/ui-sidebar-documentpreview/tsconfig.client.json'), 'utf8')) as {
+      extends: string
+    }
+    expect(chat.references.map(row => row.path)).toContain('../ui-sidebar-documentpreview/tsconfig.client.json')
+    expect(chat.references.map(row => row.path)).not.toContain('../ui-sidebar-documentpreview')
+    expect(preview.extends).toBe('../../../tsconfig.base.client.json')
   })
 })
