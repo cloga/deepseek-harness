@@ -93,11 +93,11 @@ export interface InstallInputError {
 /** One pnpm run of an install, as the dialog's terminal draws it. */
 export interface InstallRun {
   readonly jobId: string
-  /** The command line the Host ran, space-joined. */
+  /** Redacted Host command display; no source arguments are forwarded. */
   readonly command: string
-  /** The directory the Host ran pnpm in: the profile directory. */
+  /** Redacted profile location display. */
   readonly cwd: string
-  /** stdout and stderr interleaved as they arrived, pnpm's colour escapes included. */
+  /** Bounded generic progress; raw stdout/stderr remain private to the initiating Host operation. */
   readonly output: string
   /** pnpm's exit code once the run settled, null when it ended by a signal or never started; absent while it runs. */
   readonly exitCode?: number | null

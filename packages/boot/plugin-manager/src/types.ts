@@ -154,17 +154,18 @@ export interface PluginInstallCancellation {
   readonly status: 'cancelled' | 'too-late' | 'not-running'
 }
 
-/** One chunk of a pnpm run's output, as the run produces it. */
+/** Globally forwarded, bounded/redacted install progress; never a raw pnpm transcript or source URL. */
 export interface PluginInstallLogChunk {
   /** The installation the run belongs to, when its caller supplied a request id. */
   readonly requestId?: PluginInstallRequestId
   /** The run the chunk belongs to. */
   readonly jobId: string
-  /** The command line the run executes: pnpm's command name, then its arguments. */
+  /** Fixed safe command display; the private executable arguments never cross Client streams. */
   readonly argv: readonly string[]
-  /** The directory the run executes in: the profile directory. */
+  /** Fixed safe location display; never the real profile directory. */
   readonly cwd: string
   readonly stream: 'stdout' | 'stderr'
+  /** Fixed progress or failure text, never stdout/stderr from pnpm. */
   readonly text: string
   /** Present on the run's last chunk: pnpm's exit code, null when it ended without one. */
   readonly exitCode?: number | null

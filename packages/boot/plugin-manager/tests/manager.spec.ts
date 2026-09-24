@@ -123,6 +123,24 @@ it.each(['startup', 'live'] as const)(
   },
 )
 
+it.each([false, true])('rejects a token-shaped request ID before any public event or pnpm (staged=%s)', async (staged) => {
+  const { ctx, manager } = await fixture('startup', false, undefined, {}, undefined, staged)
+  const logs: PluginInstallLogChunk[] = []
+  const phases: PluginInstallProgress[] = []
+  ctx.on('plugin-manager/install-log', (chunk) => { logs.push(chunk) })
+  ctx.on('plugin-manager/install-state', (event) => { phases.push(event) })
+  const pnpm = vi.spyOn(operations, 'runProfilePnpm').mockImplementation(async () => { throw new Error('invalid request ID reached pnpm') })
+  onTestFinished(() => { pnpm.mockRestore() })
+  const id = 'https://private.invalid/request?sig=private-sentinel' as PluginInstallRequestId
+  const refused = await manager.installBundle('addon', { requestId: id })
+  expect(refused).toMatchObject({ application: 'failed', changed: false, target: 'launcher-owned',
+    error: { code: 'operation-error', diagnostic: 'Invalid install request id' } })
+  expect(JSON.stringify(refused)).not.toContain('private-sentinel')
+  expect(logs).toEqual([])
+  expect(phases).toEqual([])
+  expect(pnpm).not.toHaveBeenCalled()
+})
+
 const stagedRequestId = '11111111-1111-4111-8111-111111111111' as PluginInstallRequestId
 const stagedPrepared: ProfilePreparedPackageChange = {
   transactionId: stagedRequestId, state: 'prepared', packageName: '@cloga/addon',
@@ -385,12 +403,20 @@ it('runs a real pnpm dependency script only after approval and retry', async () 
   expect(readFileSync(built, 'utf8')).toBe('built')
 })
 
-it.each(['[', 'allowBuilds: false\n'])('preserves pnpm diagnostics when pending approvals cannot be read: %s', async (policy) => {
-  const { manager, dir } = await fixture()
+it.each([
+  '[',
+  'allowBuilds: false\n',
+  'https://private.invalid/plugin?sig=private-sentinel\n[',
+])('preserves caller diagnostics without logging private YAML input when pending approvals cannot be read: %s', async (policy) => {
+  const { ctx, manager, dir } = await fixture()
+  const warnings: unknown[][] = []
+  const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation((...args) => { warnings.push(args) })
   writeFileSync(join(dir, 'pnpm-workspace.yaml'), policy)
   const run = vi.spyOn(operations, 'runProfilePnpm').mockResolvedValue({ exitCode: 1, output: 'original pnpm failure', truncated: false, logPath: '/log' })
-  onTestFinished(() => { run.mockRestore() })
+  onTestFinished(() => { run.mockRestore(); warn.mockRestore() })
   expect(await manager.installBundle('addon')).toMatchObject({ application: 'failed', error: { diagnostic: 'original pnpm failure' } })
+  expect(warnings).toEqual([['Could not read pending build approvals after pnpm failed']])
+  expect(JSON.stringify(warnings)).not.toContain('private-sentinel')
 })
 
 it('unloads before removing packages and retries inactive dependencies whose files are missing', async () => {
@@ -617,7 +643,7 @@ it('reports repeated installs as requiring restart and ambiguous package changes
   expect(readProfileManifest('test', dir).dependencies).toEqual({ extra: '1.0.0' })
 })
 
-it('streams pnpm output, reports the installation phases, and names the installed bundle', async () => {
+it('forwards only redacted pnpm progress, real phases and exit status while preserving the installed bundle', async () => {
   const { ctx, manager, dir, bundle } = await fixture()
   const chunks: PluginInstallLogChunk[] = []
   const phases: PluginInstallProgress[] = []
@@ -627,7 +653,9 @@ it('streams pnpm output, reports the installation phases, and names the installe
   ctx.on('plugin-manager/changed', (change) => { changes.push(change) })
   const install = vi.spyOn(operations, 'runProfilePnpm').mockImplementation(async (_context, args, options) => {
     options.onOutput?.('Progress: resolved 1\n', 'stdout')
+    options.onOutput?.('https://private.invalid/plugin?sig=private-sentinel\n', 'stdout')
     options.onOutput?.('warning\n', 'stderr')
+    options.onOutput?.('private-sentinel: failed diagnostics\n', 'stderr')
     const name = String(args[1])
     bundle(name, [{ id: name, name: './plugin.mjs', config: { service: name } }])
     const manifest = readProfileManifest('test', dir)
@@ -642,17 +670,41 @@ it('streams pnpm output, reports the installation phases, and names the installe
     expect.objectContaining({ command: 'pnpm', execution: 'service' }))
   const jobId = chunks[0]?.jobId
   expect(chunks).toEqual([
-    { requestId, jobId, argv: ['pnpm', 'add', 'streamed'], cwd: dir, stream: 'stdout', text: 'Progress: resolved 1\n' },
-    { requestId, jobId, argv: ['pnpm', 'add', 'streamed'], cwd: dir, stream: 'stderr', text: 'warning\n' },
-    { requestId, jobId, argv: ['pnpm', 'add', 'streamed'], cwd: dir, stream: 'stdout', text: '', exitCode: 0 },
+    { requestId, jobId, argv: ['pnpm', '[package operation]'], cwd: '[private profile]', stream: 'stdout', text: '[output redacted]' },
+    { requestId, jobId, argv: ['pnpm', '[package operation]'], cwd: '[private profile]', stream: 'stderr', text: '[output redacted]' },
+    { requestId, jobId, argv: ['pnpm', '[package operation]'], cwd: '[private profile]', stream: 'stdout', text: '', exitCode: 0 },
   ])
+  expect(JSON.stringify(chunks)).not.toContain('private-sentinel')
+  expect(JSON.stringify(chunks)).not.toContain(dir)
+  expect(JSON.stringify(chunks)).not.toContain('streamed')
   expect(phases).toEqual([{ requestId, phase: 'installing' }, { requestId, phase: 'applying' }])
   expect(changes).toEqual([{ reason: 'install' }])
   // A run without a request id streams too, unidentified.
   await manager.removeBundle('streamed')
-  expect(chunks.at(-1)).toMatchObject({ argv: ['pnpm', 'remove', 'streamed'], stream: 'stdout', exitCode: 0 })
+  expect(chunks.at(-1)).toMatchObject({ argv: ['pnpm', '[package operation]'], cwd: '[private profile]', stream: 'stdout', exitCode: 0 })
   expect(chunks.at(-1)).not.toHaveProperty('requestId')
   expect(changes).toEqual([{ reason: 'install' }, { reason: 'remove' }])
+})
+
+it('never emits a pnpm failure diagnostic or requested spec to either global listener', async () => {
+  const { ctx, manager } = await fixture('startup')
+  const first: PluginInstallLogChunk[] = []
+  const second: PluginInstallLogChunk[] = []
+  ctx.on('plugin-manager/install-log', (chunk) => { first.push(chunk) })
+  ctx.on('plugin-manager/install-log', (chunk) => { second.push(chunk) })
+  const run = vi.spyOn(operations, 'runProfilePnpm').mockImplementation(async (_ctx, _args, options) => {
+    options.onOutput?.('private-sentinel: signed source in stderr', 'stderr')
+    throw new Error('pnpm failed: private-sentinel')
+  })
+  onTestFinished(() => { run.mockRestore() })
+  const requestId = 'f2340b6d-40bb-46b7-8b94-217bdf5010bd' as PluginInstallRequestId
+  expect(await manager.installBundle('private-sentinel', { requestId })).toMatchObject({ application: 'failed', changed: false })
+  expect(first).toEqual(second)
+  expect(first).toHaveLength(2)
+  expect(first[0]).toMatchObject({ requestId, argv: ['pnpm', '[package operation]'], cwd: '[private profile]',
+    stream: 'stderr', text: '[output redacted]' })
+  expect(first[1]).toMatchObject({ requestId, stream: 'stderr', text: '[operation failed]', exitCode: null })
+  expect(JSON.stringify(first)).not.toContain('private-sentinel')
 })
 
 it('stops a run on request, restores the files, and answers not-running or too-late otherwise', async () => {

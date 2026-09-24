@@ -359,6 +359,16 @@ export class PluginManager extends TypertRemoteService {
    */
   @Remote
   installBundle(spec: string, options?: InstallBundleOptions): Promise<ChangeResult> {
+    // The request ID is broadcast as progress and log correlation. A branded
+    // TypeScript string is NOT trusted at the Remote boundary: reject token or
+    // path-shaped values before any event can echo them to another Client.
+    if (options?.requestId !== undefined) {
+      try { parseProfileTransactionId(options.requestId) }
+      catch {
+        return Promise.resolve({ stage: 'install', target: 'launcher-owned', changed: false, application: 'failed',
+          error: { code: 'operation-error', diagnostic: 'Invalid install request id' } })
+      }
+    }
     if (this.profile.stagedPackageTransactions === true) {
       if (this.ownerContext.get('profilePackageTransactions')?.protocolVersion !== 1) {
         return this.refuseUnownedStage('install', 'launcher-owned', options?.enabled)
@@ -394,8 +404,9 @@ export class PluginManager extends TypertRemoteService {
         if (result.packageResult.exitCode !== 0) {
           // pnpm-workspace.yaml is not restored, so the names pnpm left undecided there can be offered for approval.
           try { result.pendingBuilds = await readPendingBuilds(this.profile.dir) }
-          catch (error) {
-            this.ownerContext.logger.warn('Could not read pending build approvals after pnpm failed', error)
+          catch {
+            // The YAML parse error can quote user source URLs and private file paths.
+            this.ownerContext.logger.warn('Could not read pending build approvals after pnpm failed')
           }
           throw new Error(result.packageResult.output)
         }
@@ -628,26 +639,37 @@ export class PluginManager extends TypertRemoteService {
     args: readonly string[], signal?: AbortSignal, requestId?: PluginInstallRequestId,
   ): Promise<PackageResult> {
     const jobId = randomUUID()
-    const argv = ['pnpm', ...args]
-    const cwd = this.profile.dir
+    // Host argv, cwd and pnpm output can carry PR117 signed source URLs and
+    // private profile paths. The forwarded event is broadcast to EVERY Client,
+    // not just the caller: emit only fixed display leaves and real exit facts.
+    const publicArgv = ['pnpm', '[package operation]']
+    const publicCwd = '[private profile]'
+    const announced = new Set<'stdout' | 'stderr'>()
     const identity = requestId === undefined ? {} : { requestId }
     const task = runProfilePnpm({ ...this.profile, profile: this.profile.name }, args, {
       execution: 'service', ...this.profile.packageManager ?? { command: this.pnpmCommand },
       signal: signal === undefined ? this.abort.signal : AbortSignal.any([this.abort.signal, signal]),
       outputBytes: this.outputBytes, activateNewBundles: false,
-      onOutput: (text, stream) => {
-        this.ownerContext.emit('plugin-manager/install-log', { ...identity, jobId, argv, cwd, stream, text })
+      onOutput: (_text, stream) => {
+        if (announced.has(stream)) return
+        announced.add(stream)
+        this.ownerContext.emit('plugin-manager/install-log', {
+          ...identity, jobId, argv: publicArgv, cwd: publicCwd, stream, text: '[output redacted]',
+        })
       },
     })
     this.packageOperations.add(task)
     try {
       const result = await task
       this.ownerContext.emit('plugin-manager/install-log', {
-        ...identity, jobId, argv, cwd, stream: 'stdout', text: '', exitCode: signal?.aborted === true ? null : result.exitCode,
+        ...identity, jobId, argv: publicArgv, cwd: publicCwd, stream: 'stdout', text: '',
+        exitCode: signal?.aborted === true ? null : result.exitCode,
       })
       return result.exitCode === 0 ? result : { ...result, kind: classifyInstallFailure({ log: result.output }) }
     } catch (error) {
-      this.ownerContext.emit('plugin-manager/install-log', { ...identity, jobId, argv, cwd, stream: 'stderr', text: messageOf(error), exitCode: null })
+      this.ownerContext.emit('plugin-manager/install-log', {
+        ...identity, jobId, argv: publicArgv, cwd: publicCwd, stream: 'stderr', text: '[operation failed]', exitCode: null,
+      })
       throw error
     } finally {
       this.packageOperations.delete(task)
