@@ -126,8 +126,10 @@ export interface InstallState {
   readonly runs: readonly InstallRun[]
   /** Whether the run's command and output are unfolded. */
   readonly detailsOpen: boolean
-  /** The bundle the finished run added, left off until enabled from the installed screen. */
+  /** The bundle the finished run actually added; never set for a private candidate. */
   readonly installed: string | null
+  /** A Shell-owned private candidate: not an active dependency, receipt or health acceptance. */
+  readonly prepared?: ChangeResult['prepared']
   /** Whether the finished run's bundle waits for the next start to load. */
   readonly restartRequired: boolean
   /**
@@ -246,6 +248,17 @@ function failureOf(
     ...kind === undefined ? {} : { kind },
     ...pendingBuilds === undefined || pendingBuilds.length === 0 ? {} : { pendingBuilds },
   }
+}
+
+/** Browser-side refusal of a malformed prepared DTO before it reaches visible UI copy. */
+function isPreparedChange(value: ChangeResult['prepared']): value is NonNullable<ChangeResult['prepared']> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length === 5
+    && value.state === 'prepared' && typeof value.transactionId === 'string'
+    && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(value.transactionId)
+    && typeof value.packageName === 'string'
+    && /^(?:@[a-z0-9._~-]+\/)?[a-z0-9][a-z0-9._~-]*$/u.test(value.packageName)
+    && typeof value.baseFingerprint === 'string' && /^[a-f0-9]{64}$/u.test(value.baseFingerprint)
+    && (value.health === 'pending' || value.health === 'passed')
 }
 
 /** The notice a thrown failure becomes: a refusal keeps its code, anything else its words. */
@@ -553,7 +566,7 @@ export class PluginManagerController {
   private async startInstall(subject: InstallSubject, approvedBuilds?: readonly string[]): Promise<void> {
     const { spec } = subject
     const requestId = randomUUID() as PluginInstallRequestId
-    this.patchInstall({ phase: 'starting', requestId, subject, runs: [], failure: null, installed: null, approvedBuilds: [] })
+    this.patchInstall({ phase: 'starting', requestId, subject, runs: [], failure: null, installed: null, prepared: undefined, approvedBuilds: [] })
     // The Host announces `plugin-manager/changed` while the run is still on
     // the wire, and every such event reads again; those reads must not cancel
     // the run's settlement.
@@ -574,11 +587,22 @@ export class PluginManagerController {
         runs: settledRuns(runs, packages?.exitCode ?? null),
         failure: failureOf(result.value.error, packages?.kind, result.value.pendingBuilds),
       })
+    } else if (result.value.application === 'prepared') {
+      // A private candidate is NOT a completed installation. Never show the
+      // installed/enabled screen or echo an unchecked transaction identifier.
+      if (!isPreparedChange(result.value.prepared)) {
+        this.patchInstall({ phase: 'failed', runs: settledRuns(runs, null),
+          failure: { reason: '', code: 'operation-error' } })
+      } else {
+        this.patchInstall({ phase: 'done', runs: settledRuns(runs, null), installed: null,
+          prepared: result.value.prepared, restartRequired: false, approvedBuilds: [] })
+      }
     } else {
       this.patchInstall({
         phase: 'done',
         runs: settledRuns(runs, 0),
         installed: result.value.bundle ?? null,
+        prepared: undefined,
         restartRequired: result.value.application === 'restart-required',
         approvedBuilds: result.value.approvedBuilds ?? [],
       })
@@ -649,7 +673,7 @@ export class PluginManagerController {
    */
   private async enableInstalled(): Promise<void> {
     const install = this.getSnapshot().install
-    if (install.phase !== 'done' || install.enabling) return
+    if (install.phase !== 'done' || install.enabling || install.prepared !== undefined) return
     const name = install.installed
     this.patchInstall({ enabling: true })
     if (name !== null) {

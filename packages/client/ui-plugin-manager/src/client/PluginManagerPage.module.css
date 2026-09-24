@@ -649,7 +649,8 @@
   color: var(--dsw-alias-state-success-primary);
 }
 
-.wizardIcon[data-tone='failed'] {
+.wizardIcon[data-tone='failed'],
+.wizardIcon[data-tone='prepared'] {
   color: var(--dsw-alias-state-warning-primary, var(--dsw-alias-state-business-primary));
 }
 

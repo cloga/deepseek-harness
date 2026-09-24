@@ -700,7 +700,7 @@ function InstallDialog({
       </Modal>
     )
   }
-  const heading = t(SCREEN_TITLE_KEYS[phase])
+  const heading = t(phase === 'done' && install.prepared !== undefined ? 'preparedTitle' : SCREEN_TITLE_KEYS[phase])
   const pending = isInstallPending(phase)
   // Only a run the Host acknowledged can be stopped; before that, and while it stops or applies, the controls wait.
   const stoppable = phase === 'running' || phase === 'failed'
@@ -732,10 +732,10 @@ function InstallDialog({
         </div>
         <div className={css.wizardScroll}>
           <div className={css.wizardHero}>
-            <span className={css.wizardIcon} data-tone={pending ? 'pending' : phase} aria-hidden="true">
+            <span className={css.wizardIcon} data-tone={pending ? 'pending' : phase === 'done' && install.prepared !== undefined ? 'prepared' : phase} aria-hidden="true">
               {pending
                 ? <span className={css.spinnerLarge} />
-                : phase === 'done' ? <IconCheckOutline16 size={28} /> : <IconWarningOutline16 size={28} />}
+                : phase === 'done' && install.prepared === undefined ? <IconCheckOutline16 size={28} /> : <IconWarningOutline16 size={28} />}
             </span>
             <h2 className={css.wizardTitle} role={phase === 'failed' ? 'alert' : 'status'}>{heading}</h2>
             {phase === 'failed' ? <p className={css.wizardSub}>{failureText(install.failure, t)}</p> : null}
@@ -756,7 +756,10 @@ function InstallDialog({
               </section>
             )
             : null}
-          {phase === 'done' && install.installed === null
+          {phase === 'done' && install.prepared !== undefined
+            ? <p className={css.resultWarn} role="status">{t('preparedNotice', { id: install.prepared.transactionId })}</p>
+            : null}
+          {phase === 'done' && install.installed === null && install.prepared === undefined
             ? <p className={css.result} role="status">{t('installDoneNothing')}</p>
             : null}
           {phase === 'done' && install.restartRequired
@@ -802,7 +805,7 @@ function InstallDialog({
             ? null
             : install.installed !== null
               ? <Button variant="primary" className={css.wide} disabled={install.enabling} aria-busy={install.enabling} onClick={onEnableNow}>{t('installEnableNow')}</Button>
-              : <Button variant="primary" className={css.wide} onClick={onClose}>{t('installClose')}</Button>}
+              : <Button variant="primary" className={css.wide} onClick={onClose}>{t(install.prepared === undefined ? 'installClose' : 'close')}</Button>}
         </div>
       </div>
     </Modal>

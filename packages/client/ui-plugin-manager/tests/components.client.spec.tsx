@@ -569,6 +569,21 @@ describe('PluginManagerPage', () => {
     expect(actions.closeInstall).toHaveBeenCalledTimes(1)
   })
 
+  it('renders a private prepared graph as pending consent rather than an active installed plugin', () => {
+    const transactionId = '11111111-1111-4111-8111-111111111111'
+    const prepared = { transactionId, state: 'prepared' as const, packageName: 'dsh-x',
+      baseFingerprint: 'a'.repeat(64), health: 'pending' as const }
+    renderTab({ install: { ...IDLE_INSTALL, open: true, spec: 'dsh-x', phase: 'done',
+      subject: { spec: 'dsh-x', status: 'accepted', kind: 'registry', name: 'dsh-x', bundle: true }, prepared } })
+    expect(screen.getByText(en.preparedTitle)).toBeTruthy()
+    expect(screen.getByText(en.preparedNotice.replace('{id}', transactionId))).toBeTruthy()
+    expect(document.querySelector('[data-tone="prepared"]')).toBeTruthy()
+    expect(screen.queryByText(en.installedTitle)).toBeNull()
+    expect(screen.queryByText(en.installDoneNothing)).toBeNull()
+    expect(screen.queryByRole('button', { name: en.installEnableNow })).toBeNull()
+    expect(screen.getAllByRole('button', { name: en.close })).toHaveLength(2)
+  })
+
   it('asks to allow the scripts a blocked install left pending, retries with them, and says what was allowed', () => {
     const subject = { spec: 'dsh-x', status: 'accepted', kind: 'registry', name: 'dsh-x', bundle: true } as const
     const { actions, set } = renderTab({

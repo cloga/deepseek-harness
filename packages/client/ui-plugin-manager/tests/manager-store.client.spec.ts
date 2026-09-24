@@ -328,6 +328,30 @@ describe('PluginManagerController', () => {
     expect(state().install.open).toBe(false)
   })
 
+  it('keeps a native prepared graph separate from installed state and rejects forged token-shaped receipts', async () => {
+    const prepared = { transactionId: '11111111-1111-4111-8111-111111111111', state: 'prepared' as const,
+      packageName: 'dsh-new', baseFingerprint: 'a'.repeat(64), health: 'pending' as const }
+    const answer: ChangeResult = { changed: false, application: 'prepared', stage: 'install', target: 'dsh-new', prepared }
+    const malformed: ChangeResult = { ...answer, prepared: { ...prepared, transactionId: 'https://private.invalid?sig=private-sentinel' } }
+    const { plugins, face, state, controller } = bench({ installBundle: vi.fn()
+      .mockResolvedValueOnce(ok(answer)).mockResolvedValueOnce(ok(malformed)) })
+    await controller.load()
+    face.openInstall()
+    face.editInstallSpec('dsh-new')
+    face.runInstall()
+    await vi.waitFor(() => { expect(state().install.phase).toBe('done') })
+    expect(state().install).toMatchObject({ installed: null, prepared, restartRequired: false, runs: [] })
+    face.enableInstalled()
+    expect(plugins.setBundleEnabled).not.toHaveBeenCalled()
+    expect(state().install.prepared).toEqual(prepared)
+    face.editInstallSpec('different')
+    face.runInstall()
+    await vi.waitFor(() => { expect(state().install.phase).toBe('failed') })
+    expect(state().install).toMatchObject({ installed: null, failure: { code: 'operation-error', reason: '' } })
+    expect(state().install.prepared).toBeUndefined()
+    expect(JSON.stringify(state().install)).not.toContain('private-sentinel')
+  })
+
   it('refuses a spec the list already shows without asking the Host, and words what the Host refused', async () => {
     const { plugins, face, state, controller } = bench({
       inspect: vi.fn()
